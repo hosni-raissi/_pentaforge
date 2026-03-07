@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.eggs/
+
+# Virtual environment
+venv/
+.venv/
+
+# Environment / secrets
+.env
+*.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data & cache (large, regenerated)
+server/db/knowledge/data/
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Node (future UI)
+node_modules/

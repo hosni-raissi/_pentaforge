@@ -1,0 +1,15 @@
+venv/
+.env
+*.pyc
+__pycache__/
+.git/
+.mypy_cache/
+.ruff_cache/
+server/db/knowledge/data/
+*.egg-info/
+node_modules/
+client/
+test/
+infra/k8s/
+infra/monitoring/
+infra/nginx/

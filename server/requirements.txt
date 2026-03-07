@@ -1,0 +1,28 @@
+# PentaForge RAG Knowledge Base — Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+pydantic>=2.5,<3.0
+pydantic-settings>=2.1,<3.0
+structlog>=23.1,<25.0
+
+# Async HTTP
+httpx>=0.25,<1.0
+
+# Embedding (local, no API key needed)
+sentence-transformers>=2.2,<4.0
+
+# Vector DB (Qdrant)
+qdrant-client>=1.9,<2.0
+
+# PostgreSQL (async — Neon serverless compatible)
+asyncpg>=0.29,<1.0
+
+# Cache (Redis)
+redis>=5.0,<6.0
+
+# HTML parsing (website/gitbook extractors)
+beautifulsoup4>=4.12,<5.0
+
+# Optional: OpenAI embeddings (if KNOWLEDGE_EMBEDDING_PROVIDER=openai)
+# openai>=1.6,<2.0
