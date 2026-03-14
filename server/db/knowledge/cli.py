@@ -11,7 +11,7 @@ Usage:
     # Ingest all enabled sources
     python -m server.db.knowledge.cli ingest --all
 
-    # Search the knowledge base (auto-includes vector_shared)
+    # Search the knowledge base (optionally filtered by domain)
     python -m server.db.knowledge.cli search "SQL injection bypass WAF" --domain web
 
     # On-demand CVE lookup
@@ -52,7 +52,9 @@ from server.db.knowledge.config.sources import (
     get_sources_by_domain,
     get_all_domains,
 )
+from server.db.knowledge.processing.chunker import MarkdownChunker
 from server.db.knowledge.orchestrator import KnowledgeOrchestrator
+from server.db.knowledge.storage.embedding import EmbeddingGenerator
 
 logger = structlog.get_logger(__name__)
 
@@ -101,6 +103,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of sources to ingest concurrently (default: 1)",
     )
+    ingest_p.add_argument(
+        "--fast",
+        action="store_true",
+        default=False,
+        help="Use faster ingest defaults (larger chunks, less overlap, larger embedding batch).",
+    )
+    ingest_p.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=None,
+        help="Override embedding batch size for this run only.",
+    )
+    ingest_p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="Override chunk size (approx tokens) for this run only.",
+    )
+    ingest_p.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=None,
+        help="Override chunk overlap (approx tokens) for this run only.",
+    )
+    ingest_p.add_argument(
+        "--min-chunk-words",
+        type=int,
+        default=None,
+        help="Override minimum words per chunk for this run only.",
+    )
 
     # ── search ────────────────────────────────────────────────────────
     search_p = sub.add_parser("search", help="Search the knowledge base")
@@ -110,7 +142,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Search within a domain (+ shared). Omit to search all.",
     )
     search_p.add_argument(
+        "--no-shared",
+        dest="no_shared",
+        action="store_true",
+        default=False,
+        help="Disable automatic inclusion of shared-domain results (strict domain-only search).",
+    )
+    search_p.add_argument(
         "--source", "-s", type=str, default=None, help="Filter by source name"
+    )
+    search_p.add_argument(
+        "--with-payloads",
+        dest="with_payloads",
+        action="store_true",
+        default=False,
+        help="Include exact payload text matches from PayloadStore.",
+    )
+    search_p.add_argument(
+        "--payload-results",
+        type=int,
+        default=10,
+        help="Maximum payload matches when --with-payloads is enabled (default: 10).",
     )
     search_p.add_argument(
         "-n", "--num-results", type=int, default=5, help="Number of results"
@@ -174,6 +226,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm destructive reset",
     )
 
+    # ── ingest-payloads ───────────────────────────────────────────────
+    payload_p = sub.add_parser(
+        "ingest-payloads",
+        help="Ingest raw payload files into JSON PayloadStore",
+    )
+    payload_p.add_argument(
+        "--domain", "-d", type=str, default=None,
+        help="Only ingest payloads for a specific domain (e.g. web)",
+    )
+
     return parser
 
 
@@ -182,7 +244,49 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def cmd_ingest(args: argparse.Namespace) -> int:
     """Handle 'ingest' command."""
-    orchestrator = KnowledgeOrchestrator()
+    fast_defaults = {
+        "embedding_batch_size": 256,
+        "chunk_size": 900,
+        "chunk_overlap": 80,
+        "min_chunk_words": 40,
+    }
+
+    embed_batch_size = args.embedding_batch_size
+    chunk_size = args.chunk_size
+    chunk_overlap = args.chunk_overlap
+    min_chunk_words = args.min_chunk_words
+
+    if args.fast:
+        embed_batch_size = embed_batch_size or fast_defaults["embedding_batch_size"]
+        chunk_size = chunk_size or fast_defaults["chunk_size"]
+        chunk_overlap = chunk_overlap or fast_defaults["chunk_overlap"]
+        min_chunk_words = min_chunk_words or fast_defaults["min_chunk_words"]
+
+    embedder = EmbeddingGenerator(batch_size=embed_batch_size) if embed_batch_size else None
+    chunker = (
+        MarkdownChunker(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            min_chunk_words=min_chunk_words,
+        )
+        if any(v is not None for v in [chunk_size, chunk_overlap, min_chunk_words])
+        else None
+    )
+
+    if args.fast or embedder or chunker:
+        logger.info(
+            "ingest_tuning",
+            fast=args.fast,
+            embedding_batch_size=embed_batch_size,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            min_chunk_words=min_chunk_words,
+        )
+
+    orchestrator = KnowledgeOrchestrator(
+        embedding_generator=embedder,
+        chunker=chunker,
+    )
     await orchestrator.initialize()
 
     try:
@@ -194,21 +298,30 @@ async def cmd_ingest(args: argparse.Namespace) -> int:
             result = await orchestrator.ingest_source(args.source)
             results = [result]
 
-        print("\n" + "=" * 80)
-        print(f"{'Source':<30} {'Domain':<12} {'Docs':>6} {'Chunks':>8} {'Skip':>6} {'Time':>8} {'Status'}")
-        print("-" * 80)
+        print("\n" + "=" * 90)
+        print(f"{'Source':<30} {'Domain':<12} {'Docs':>6} {'Chunks':>8} {'Skip':>6} {'Repl':>6} {'Time':>8} {'Status'}")
+        print("-" * 90)
 
         for r in results:
-            status = "OK" if r.success else ("WARN" if r.documents_extracted > 0 else "FAIL")
+            if r.success:
+                if r.chunks_created > 0:
+                    status = "OK"
+                elif r.skipped_existing > 0:
+                    status = "SKIP"
+                else:
+                    status = "OK"
+            else:
+                status = "WARN" if r.documents_extracted > 0 else "FAIL"
             print(
                 f"{r.source_name:<30} {r.domain:<12} {r.documents_extracted:>6} "
                 f"{r.chunks_created:>8} {r.skipped_existing:>6} "
+                f"{r.replaced_existing:>6} "
                 f"{r.duration_seconds:>7.1f}s {status}"
             )
             for err in r.errors:
                 print(f"  ERROR: {err}")
 
-        print("=" * 80)
+        print("=" * 90)
 
         failed = sum(1 for r in results if not r.success and r.documents_extracted == 0)
         return 1 if failed > 0 else 0
@@ -223,31 +336,69 @@ async def cmd_search(args: argparse.Namespace) -> int:
     await orchestrator.initialize()
 
     try:
-        results = await orchestrator.search(
-            query=args.query,
-            domain=args.domain,
-            source_name=args.source,
-            n_results=args.num_results,
-        )
+        if args.with_payloads:
+            hybrid = await orchestrator.search_hybrid(
+                query=args.query,
+                domain=args.domain,
+                source_name=args.source,
+                semantic_results=args.num_results,
+                payload_results=args.payload_results,
+                include_shared=not args.no_shared,
+            )
+            results = hybrid.get("semantic", [])
+            payload_matches = hybrid.get("payloads", [])
+        else:
+            results = await orchestrator.search(
+                query=args.query,
+                domain=args.domain,
+                source_name=args.source,
+                n_results=args.num_results,
+                include_shared=not args.no_shared,
+            )
+            payload_matches = []
 
-        if not results:
+        if not results and not payload_matches:
             print("No results found.")
             return 0
 
-        for i, hit in enumerate(results, 1):
-            meta = hit.get("metadata", {})
-            distance = hit.get("distance", "?")
-            print(f"\n{'─' * 60}")
-            print(f"  [{i}] Score: {1 - (distance or 0):.4f}  |  Source: {meta.get('source_name', '?')}")
-            print(f"  File: {meta.get('file_path', 'N/A')}")
-            print(f"  Domain: {meta.get('domain', '?')}  |  Tags: {meta.get('tags', '')}")
-            print(f"{'─' * 60}")
-            content = hit.get("content", "")
-            if len(content) > 500:
-                content = content[:500] + "..."
-            print(content)
+        if results:
+            print("\nSemantic Results")
+            for i, hit in enumerate(results, 1):
+                meta = hit.get("metadata", {})
+                score = hit.get("score", 0)
+                print(f"\n{'─' * 60}")
+                print(f"  [{i}] Score: {score:.4f}  |  Source: {meta.get('source_name', '?')}")
+                print(f"  File: {meta.get('file_path', 'N/A')}")
+                print(f"  Domain: {meta.get('domain', '?')}  |  Tags: {meta.get('tags', '')}")
+                print(f"{'─' * 60}")
+                content = hit.get("content", "")
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                print(content)
 
-        print(f"\n{len(results)} results returned.")
+        if payload_matches:
+            print("\nPayload Matches")
+            for i, item in enumerate(payload_matches, 1):
+                tags = ",".join(item.get("tags", []))
+                print(f"\n{'─' * 60}")
+                print(
+                    f"  [{i}] Source: {item.get('source', '?')}  |  "
+                    f"Domain: {item.get('domain', '?')}  |  Category: {item.get('category', '?')}"
+                )
+                print(f"  Tags: {tags}")
+                print(f"{'─' * 60}")
+                payload = item.get("payload", "")
+                if len(payload) > 500:
+                    payload = payload[:500] + "..."
+                print(payload)
+
+        if args.with_payloads:
+            print(
+                f"\n{len(results)} semantic results and "
+                f"{len(payload_matches)} payload matches returned."
+            )
+        else:
+            print(f"\n{len(results)} results returned.")
         return 0
 
     finally:
@@ -310,9 +461,6 @@ async def cmd_reset(args: argparse.Namespace) -> int:
 
     try:
         orchestrator.vector_store.reset()
-        # Delete all sources from PG
-        for cfg in ALL_SOURCES:
-            await orchestrator.pg_store.delete_by_source(cfg.name)
 
         print("Knowledge base reset complete.")
         return 0
@@ -384,6 +532,35 @@ async def cmd_cve(args: argparse.Namespace) -> int:
         await orchestrator.close()
 
 
+async def cmd_ingest_payloads(args: argparse.Namespace) -> int:
+    """Handle 'ingest-payloads' command — load raw payloads into PayloadStore."""
+    orchestrator = KnowledgeOrchestrator()
+    await orchestrator.initialize()
+
+    try:
+        domain = getattr(args, "domain", None)
+        results = await orchestrator.ingest_payloads(domain=domain)
+
+        print(f"\n{'Source':<30} {'Domain':<10} {'Category':<20} {'Added':>8} {'Status'}")
+        print("-" * 82)
+
+        for r in results:
+            status = "OK" if "error" not in r else "FAIL"
+            print(
+                f"{r['name']:<30} {r['domain']:<10} {r['category']:<20} "
+                f"{r['payloads_added']:>8} {status}"
+            )
+            if "error" in r:
+                print(f"  ERROR: {r['error']}")
+
+        total = sum(r["payloads_added"] for r in results)
+        print(f"\nTotal payloads added: {total}")
+        return 0
+
+    finally:
+        await orchestrator.close()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 
@@ -397,6 +574,7 @@ async def async_main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "ingest": cmd_ingest,
+        "ingest-payloads": cmd_ingest_payloads,
         "search": cmd_search,
         "stats": cmd_stats,
         "sources": cmd_sources,

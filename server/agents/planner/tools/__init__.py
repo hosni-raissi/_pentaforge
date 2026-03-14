@@ -8,7 +8,7 @@ from server.core.tool import Tool
 
 from .clone_repo import clone_repo
 from .get_page import get_page
-from .pentest_plan import get_pentest_plan, update_pentest_plan
+from .pentest_plan import get_pentest_plan, manage_target_types, update_pentest_plan
 from .search_kb import search_kb
 
 ALL_TOOLS: list[Tool] = [
@@ -17,6 +17,7 @@ ALL_TOOLS: list[Tool] = [
     search_kb,
     get_pentest_plan,
     update_pentest_plan,
+    manage_target_types,
 ]
 
 __all__ = ["ALL_TOOLS"]

@@ -12,10 +12,8 @@ to discover all pages, then extract content from each.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
 from collections.abc import AsyncIterator
-from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -30,6 +28,7 @@ from server.db.knowledge.models.document import (
 )
 from server.db.knowledge.sources.base import BaseExtractor
 from server.db.knowledge.sources.website_extractor import WebsiteExtractor
+from server.db.knowledge.storage.page_cache_store import PageCacheStore
 
 logger = structlog.get_logger(__name__)
 
@@ -42,11 +41,9 @@ class GitBookExtractor(BaseExtractor):
     def __init__(self, config: SourceConfig) -> None:
         super().__init__(config)
         self._visited: set[str] = set()
-        self._cache_dir = settings.cache_dir / self.config.name
+        self._page_cache = PageCacheStore()
 
     async def extract(self) -> AsyncIterator[KnowledgeDocument]:
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-
         async with httpx.AsyncClient(
             timeout=settings.request_timeout,
             follow_redirects=True,
@@ -146,16 +143,14 @@ class GitBookExtractor(BaseExtractor):
         return pages
 
     async def _fetch_cached(self, client: httpx.AsyncClient, url: str) -> str | None:
-        cache_key = hashlib.sha256(url.encode()).hexdigest()[:16]
-        cache_file = self._cache_dir / f"{cache_key}.html"
-
-        if cache_file.exists():
-            return cache_file.read_text(encoding="utf-8")
+        cached = self._page_cache.get(self.source_name, url)
+        if cached is not None:
+            return cached
 
         resp = await client.get(url)
         if resp.status_code != 200:
             return None
-        cache_file.write_text(resp.text, encoding="utf-8")
+        self._page_cache.set(self.source_name, url, resp.text)
         return resp.text
 
     @staticmethod
@@ -175,7 +170,7 @@ class GitBookExtractor(BaseExtractor):
         # Remove "Powered by GitBook" footers
         md = re.sub(r"Powered by GitBook.*$", "", md, flags=re.MULTILINE | re.IGNORECASE)
         # Remove navigation prompts
-        md = re.sub(r"Previous\s*\n.*?\n", "", md, flags=re.IGNORECASE)
-        md = re.sub(r"Next\s*\n.*?\n", "", md, flags=re.IGNORECASE)
+        md = re.sub(r"Previous\s*\n[^\n]*\n", "", md, flags=re.IGNORECASE)
+        md = re.sub(r"Next\s*\n[^\n]*\n", "", md, flags=re.IGNORECASE)
         md = re.sub(r"Last updated.*$", "", md, flags=re.MULTILINE | re.IGNORECASE)
         return md.strip()

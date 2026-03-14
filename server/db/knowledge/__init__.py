@@ -11,11 +11,9 @@
 # Architecture:
 #   sources/       → Extractors / scrapers per source type
 #   processing/    → Chunking, cleaning, metadata enrichment
-#   embeddings/    → Embedding generation & vector DB storage
 #   models/        → Domain models (KnowledgeDocument, Chunk, etc.)
-#   storage/       → Persistence adapters (Qdrant, PostgreSQL, Redis)
+#   storage/       → Persistence adapters (Qdrant, Redis, SQLite payload/cache)
 #   config/        → Settings, source registry
-#   migrations/    → DB schema migrations
 #
 """PentaForge RAG Knowledge Base."""
 

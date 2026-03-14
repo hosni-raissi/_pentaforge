@@ -97,6 +97,10 @@ class LLMClient:
 
         resp = await self._http.post("/chat/completions", json=payload)
 
+        # Log error body for non-2xx responses (except 429 which is retried)
+        if resp.status_code >= 400 and resp.status_code != 429:
+            logger.error("llm_api_error", status=resp.status_code, body=resp.text[:500])
+
         # Retry on rate-limit (429) with exponential backoff
         retries = 0
         max_retries = 3

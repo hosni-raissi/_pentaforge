@@ -139,34 +139,79 @@ class GitHubRepoExtractor(BaseExtractor):
         if repo_key in _ensured_repos:
             logger.debug("repo_already_ensured", source=self.source_name, path=repo_key)
             return
-        _ensured_repos.add(repo_key)
 
         if repo.exists() and (repo / ".git").exists():
+            # Recover from interrupted git operations that leave stale lock files.
+            self._clear_git_locks(repo)
             logger.info("pulling_repo", source=self.source_name, path=str(repo))
-            await self._run_git("git", "-C", str(repo), "pull", "--ff-only")
+            ok = await self._run_git("git", "-C", str(repo), "pull", "--ff-only")
+            if not ok or self._repo_needs_reclone(repo):
+                logger.warning("repo_reclone_required", source=self.source_name, path=str(repo))
+                self._safe_rmtree(repo)
+                ok = await self._clone_with_fallback(repo)
+            if ok:
+                _ensured_repos.add(repo_key)
         else:
             repo.parent.mkdir(parents=True, exist_ok=True)
             logger.info("cloning_repo", source=self.source_name, url=self.config.url)
+            ok = await self._clone_with_fallback(repo)
+            if ok:
+                _ensured_repos.add(repo_key)
+
+    async def _clone_with_fallback(self, repo: Path) -> bool:
+        """Clone with configured branch first, then fallback to main/master."""
+        success = await self._run_git(
+            "git", "clone",
+            "--depth", str(settings.git_depth),
+            "--branch", self.config.branch,
+            "--single-branch",
+            self.config.url,
+            str(repo),
+        )
+        # Fallback: try 'main' if configured branch (e.g. 'master') failed
+        if not success:
+            if repo.exists():
+                self._safe_rmtree(repo)
+            fallback = "main" if self.config.branch != "main" else "master"
+            logger.info("clone_fallback", source=self.source_name, fallback_branch=fallback)
             success = await self._run_git(
                 "git", "clone",
                 "--depth", str(settings.git_depth),
-                "--branch", self.config.branch,
+                "--branch", fallback,
                 "--single-branch",
                 self.config.url,
                 str(repo),
             )
-            # Fallback: try 'main' if configured branch (e.g. 'master') failed
-            if not success and not repo.exists():
-                fallback = "main" if self.config.branch != "main" else "master"
-                logger.info("clone_fallback", source=self.source_name, fallback_branch=fallback)
-                success = await self._run_git(
-                    "git", "clone",
-                    "--depth", str(settings.git_depth),
-                    "--branch", fallback,
-                    "--single-branch",
-                    self.config.url,
-                    str(repo),
-                )
+        return success
+
+    @staticmethod
+    def _clear_git_locks(repo: Path) -> None:
+        """Remove stale git lock files from interrupted operations."""
+        git_dir = repo / ".git"
+        if not git_dir.exists():
+            return
+        for lock_file in git_dir.rglob("*.lock"):
+            try:
+                lock_file.unlink(missing_ok=True)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _repo_needs_reclone(repo: Path) -> bool:
+        """Detect a broken checkout (e.g. only .git exists, no working tree files)."""
+        try:
+            # If there are no non-hidden entries except .git, checkout is unusable.
+            entries = [p for p in repo.iterdir() if p.name != ".git"]
+            return len(entries) == 0
+        except Exception:
+            return True
+
+    @staticmethod
+    def _safe_rmtree(path: Path) -> None:
+        """Best-effort recursive delete for corrupted clones."""
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=True)
 
     async def _run_git(self, *cmd: str) -> bool:
         """Run a git command. Returns True on success."""
@@ -187,7 +232,7 @@ class GitHubRepoExtractor(BaseExtractor):
             env=env,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
+            _, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=settings.git_clone_timeout
             )
         except asyncio.TimeoutError:

@@ -11,11 +11,9 @@ Handles:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
+import fnmatch
 import re
 from collections.abc import AsyncIterator
-from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -29,6 +27,7 @@ from server.db.knowledge.models.document import (
     SourceType,
 )
 from server.db.knowledge.sources.base import BaseExtractor
+from server.db.knowledge.storage.page_cache_store import PageCacheStore
 
 logger = structlog.get_logger(__name__)
 
@@ -47,11 +46,9 @@ class WebsiteExtractor(BaseExtractor):
     def __init__(self, config: SourceConfig) -> None:
         super().__init__(config)
         self._visited: set[str] = set()
-        self._cache_dir = settings.cache_dir / self.config.name
+        self._page_cache = PageCacheStore()
 
     async def extract(self) -> AsyncIterator[KnowledgeDocument]:
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-
         async with httpx.AsyncClient(
             timeout=settings.request_timeout,
             follow_redirects=True,
@@ -147,6 +144,10 @@ class WebsiteExtractor(BaseExtractor):
             ".xml", ".json", ".rss", ".atom", ".mp4", ".webm", ".mp3",
         }
         base_domain = urlparse(self.config.url).netloc
+
+        # Build URL glob patterns from include_patterns (those starting with http)
+        url_patterns = [p for p in self.config.include_patterns if p.startswith("http")]
+
         filtered: list[str] = []
         seen: set[str] = set()
         for url in pages:
@@ -156,6 +157,9 @@ class WebsiteExtractor(BaseExtractor):
             # Skip non-HTML resource URLs
             path_lower = parsed.path.lower()
             if any(path_lower.endswith(ext) for ext in _SKIP_EXTS):
+                continue
+            # Apply URL include_patterns filter
+            if url_patterns and not any(fnmatch.fnmatch(url, pat) for pat in url_patterns):
                 continue
             # Normalize
             normalized = url.rstrip("/")
@@ -168,18 +172,16 @@ class WebsiteExtractor(BaseExtractor):
 
     async def _fetch_page(self, client: httpx.AsyncClient, url: str) -> str | None:
         """Fetch page HTML, using cache if available."""
-        cache_key = hashlib.sha256(url.encode()).hexdigest()[:16]
-        cache_file = self._cache_dir / f"{cache_key}.html"
-
-        if cache_file.exists():
-            return cache_file.read_text(encoding="utf-8")
+        cached = self._page_cache.get(self.source_name, url)
+        if cached is not None:
+            return cached
 
         resp = await client.get(url)
         if resp.status_code != 200:
             return None
 
         html = resp.text
-        cache_file.write_text(html, encoding="utf-8")
+        self._page_cache.set(self.source_name, url, html)
         return html
 
     @staticmethod

@@ -1,3 +1,3 @@
 """
-Embedding, vector storage (Qdrant), document store (PostgreSQL), and cache (Redis) adapters.
+Embedding, vector storage (Qdrant), and cache (Redis) adapters.
 """

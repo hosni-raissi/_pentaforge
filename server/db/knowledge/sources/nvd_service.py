@@ -46,7 +46,6 @@ from server.db.knowledge.models.document import (
 from server.db.knowledge.processing.chunker import MarkdownChunker
 from server.db.knowledge.processing.cleaner import ContentCleaner
 from server.db.knowledge.storage.embedding import EmbeddingGenerator
-from server.db.knowledge.storage.pg_store import PgDocumentStore
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
 
 logger = structlog.get_logger(__name__)
@@ -109,29 +108,27 @@ class NVDService:
 
     Every CVE fetched from the API is:
       1. Cleaned & chunked
-      2. Embedded & stored in Qdrant
-      3. Metadata persisted in PostgreSQL
+      2. Embedded & stored in Qdrant (exploits collection)
+      3. Deduplicated via content_hash in Qdrant
     So the second lookup is instant (served from local vector store).
     """
 
     SOURCE_NAME = "NVD-CVE"
+    CONTENT_TYPE = "exploits"  # CVEs go to the exploits collection
 
     def __init__(
         self,
         embedder: EmbeddingGenerator | None = None,
         vector_store: QdrantVectorStore | None = None,
-        pg_store: PgDocumentStore | None = None,
         chunker: MarkdownChunker | None = None,
     ) -> None:
         self.embedder = embedder or EmbeddingGenerator()
         self.vector_store = vector_store or QdrantVectorStore()
-        self.pg_store = pg_store or PgDocumentStore()
         self.chunker = chunker or MarkdownChunker()
 
     async def initialize(self) -> None:
         """Ensure storage is ready."""
-        await self.pg_store.ensure_schema()
-        self.vector_store._get_client()
+        self.vector_store.ensure_all_collections()
 
     # ── On-Demand Lookups ─────────────────────────────────────────────────
 
@@ -293,10 +290,10 @@ class NVDService:
     ) -> list[KnowledgeDocument]:
         """Search the local vector store for cached CVE data."""
         try:
-            query_embedding = await self.embedder.embed_single(query)
+            query_embedding = await self.embedder.embed_single(query, is_query=True)
             hits = self.vector_store.search(
                 query_embedding=query_embedding,
-                domain="cve_exploit",
+                content_type=self.CONTENT_TYPE,
                 n_results=n_results,
                 where={"source_name": self.SOURCE_NAME},
             )
@@ -439,10 +436,10 @@ class NVDService:
         for doc in docs:
             doc.content = ContentCleaner.clean(doc.content, self.SOURCE_NAME)
 
-        # Deduplicate against existing
+        # Deduplicate against existing (via Qdrant content_hash)
         new_docs = []
         for doc in docs:
-            if not await self.pg_store.exists(self.SOURCE_NAME, doc.content_hash):
+            if not self.vector_store.exists_by_hash(doc.content_hash, self.CONTENT_TYPE):
                 new_docs.append(doc)
 
         if not new_docs:
@@ -457,13 +454,8 @@ class NVDService:
         texts = [c.content for c in all_chunks]
         embeddings = await self.embedder.embed_texts(texts)
 
-        # Store vectors
-        self.vector_store.upsert_chunks(all_chunks, embeddings, domain="cve_exploit")
-
-        # Persist metadata
-        for doc in new_docs:
-            doc_chunks = [c for c in all_chunks if c.document_id == doc.id]
-            await self.pg_store.upsert_document(doc, chunk_count=len(doc_chunks))
+        # Store vectors in the exploits collection
+        self.vector_store.upsert_chunks(all_chunks, embeddings, content_type=self.CONTENT_TYPE)
 
         logger.info(
             "nvd_docs_ingested",

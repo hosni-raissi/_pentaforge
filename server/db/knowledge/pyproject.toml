@@ -22,8 +22,6 @@ dependencies = [
     "openai>=1.6,<2.0",
     "qdrant-client>=1.9,<2.0",
 
-    # PostgreSQL
-    "asyncpg>=0.29,<1.0",
 
     # Cache
     "redis>=5.0,<6.0",

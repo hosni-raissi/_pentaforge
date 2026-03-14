@@ -58,6 +58,9 @@ class MarkdownChunker:
                 word_count = len(text.split())
                 if word_count < self.min_chunk_words:
                     continue
+                # Skip URL-heavy chunks (reference/link lists poison RAG quality)
+                if self._is_url_heavy(text):
+                    continue
 
                 chunk = KnowledgeChunk(
                     document_id=doc.id,
@@ -239,3 +242,11 @@ class MarkdownChunker:
         For precise counts, use tiktoken at embedding time.
         """
         return max(1, len(text) // 4)
+
+    _URL_RE = re.compile(r"https?://\S+")
+
+    @classmethod
+    def _is_url_heavy(cls, text: str, threshold: float = 0.4) -> bool:
+        """Return True if >threshold of the text (by char length) is URLs."""
+        url_chars = sum(len(m.group()) for m in cls._URL_RE.finditer(text))
+        return len(text) > 0 and url_chars / len(text) > threshold
