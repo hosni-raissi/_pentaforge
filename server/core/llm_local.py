@@ -45,14 +45,18 @@ class LocalLLMClient:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        use_config_max_tokens: bool = True,
     ) -> LLMResponse:
         """Send a chat completion request to the local Ollama instance."""
         payload: dict[str, Any] = {
             "model": self._config.model,
             "messages": [m.to_api() for m in messages],
             "temperature": temperature if temperature is not None else self._config.temperature,
-            "max_tokens": max_tokens if max_tokens is not None else self._config.max_tokens,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        elif use_config_max_tokens:
+            payload["max_tokens"] = self._config.max_tokens
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

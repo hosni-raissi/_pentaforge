@@ -18,7 +18,7 @@ qdrant-client>=1.9,<2.0
 
 # Cache (Redis)
 redis>=5.0,<6.0
-
+langgraph
 # HTML parsing (website/gitbook extractors)
 beautifulsoup4>=4.12,<5.0
 

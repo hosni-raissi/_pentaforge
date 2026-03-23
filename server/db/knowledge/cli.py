@@ -534,8 +534,7 @@ async def cmd_cve(args: argparse.Namespace) -> int:
 
 async def cmd_ingest_payloads(args: argparse.Namespace) -> int:
     """Handle 'ingest-payloads' command — load raw payloads into PayloadStore."""
-    orchestrator = KnowledgeOrchestrator()
-    await orchestrator.initialize()
+    orchestrator = KnowledgeOrchestrator(payload_only=True)
 
     try:
         domain = getattr(args, "domain", None)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints
 
@@ -72,14 +73,39 @@ def _build_parameters(fn: Callable[..., Any]) -> dict[str, Any]:
         if name == "self":
             continue
         hint = hints.get(name, str)
-        # Unwrap Optional
+        # Unwrap Optional and normalize generic origins (e.g., list[str] -> list)
         origin = getattr(hint, "__origin__", None)
         if origin is not None:
             args = getattr(hint, "__args__", ())
             if type(None) in args:
                 hint = next((a for a in args if a is not type(None)), str)
+                origin = getattr(hint, "__origin__", None)
+            if origin in (list, dict):
+                hint = origin
         json_type = _TYPE_MAP.get(hint, "string")
-        properties[name] = {"type": json_type}
+        if json_type == "integer":
+            properties[name] = {
+                "anyOf": [
+                    {"type": "integer"},
+                    {"type": "string", "pattern": r"^-?\d+$"},
+                ],
+            }
+        elif json_type == "number":
+            properties[name] = {
+                "anyOf": [
+                    {"type": "number"},
+                    {"type": "string", "pattern": r"^-?\d+(\.\d+)?$"},
+                ],
+            }
+        elif json_type == "boolean":
+            properties[name] = {
+                "anyOf": [
+                    {"type": "boolean"},
+                    {"type": "string", "enum": ["true", "false", "1", "0", "yes", "no"]},
+                ],
+            }
+        else:
+            properties[name] = {"type": json_type}
         if param.default is inspect.Parameter.empty:
             required.append(name)
 
@@ -90,6 +116,73 @@ def _build_parameters(fn: Callable[..., Any]) -> dict[str, Any]:
     if required:
         schema["required"] = required
     return schema
+
+
+def _target_json_type(schema: dict[str, Any]) -> str | None:
+    """Pick the most useful target type from a JSON schema property."""
+    t = schema.get("type")
+    if isinstance(t, str):
+        return t
+    if isinstance(t, list):
+        for candidate in ("integer", "number", "boolean", "array", "object", "string"):
+            if candidate in t:
+                return candidate
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list):
+        # Prefer non-string primitives so we coerce "5" -> 5 where useful.
+        for candidate in ("integer", "number", "boolean", "array", "object", "string"):
+            for item in any_of:
+                if isinstance(item, dict) and item.get("type") == candidate:
+                    return candidate
+    return None
+
+
+def coerce_args_from_schema(parameters: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    """Coerce incoming tool args to schema-compatible runtime types when safe."""
+    if not isinstance(args, dict):
+        return {}
+    props = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+    if not isinstance(props, dict):
+        return args
+
+    coerced: dict[str, Any] = {}
+    for key, value in args.items():
+        prop = props.get(key, {})
+        target = _target_json_type(prop if isinstance(prop, dict) else {})
+        if target is None:
+            coerced[key] = value
+            continue
+
+        if target == "integer" and isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+            coerced[key] = int(value.strip())
+            continue
+        if target == "number" and isinstance(value, str) and re.fullmatch(r"-?\d+(\.\d+)?", value.strip()):
+            coerced[key] = float(value.strip())
+            continue
+        if target == "boolean" and isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes"}:
+                coerced[key] = True
+                continue
+            if lowered in {"false", "0", "no"}:
+                coerced[key] = False
+                continue
+        if target in {"array", "object"} and isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    decoded = json.loads(stripped)
+                    if target == "array" and isinstance(decoded, list):
+                        coerced[key] = decoded
+                        continue
+                    if target == "object" and isinstance(decoded, dict):
+                        coerced[key] = decoded
+                        continue
+                except json.JSONDecodeError:
+                    pass
+        coerced[key] = value
+
+    return coerced
 
 
 def tool(name: str, description: str) -> Callable[[Callable[..., Any]], Tool]:

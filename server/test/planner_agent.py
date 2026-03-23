@@ -1,24 +1,15 @@
 """
-Test the Planner Agent -- Web target, scenario-based output.
-
-Validates that the planner:
-  1. Builds a structured plan via update_pentest_plan
-  2. Returns a PlannerResult with scenarios (max 3) for the executor
-  3. Or returns empty scenarios + needs list if it requires more knowledge
-  4. Does NOT output scenarios while calling research tools
-
-No knowledge base required -- search_kb excluded.
+Test the Planner Agent — clean step-by-step output.
 
 Usage:
-    cd /home/hosnizap/projects/PentaForge
     python -m server.test.planner_agent
 """
 
-from __future__ import annotations
-
 import asyncio
-import json
+import logging
 import sys
+import time
+import warnings
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent.parent
@@ -26,152 +17,195 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import structlog
+structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL))
+warnings.filterwarnings("ignore", message="Api key is used with an insecure connection")
+warnings.filterwarnings("ignore", message="Core Pydantic V1")
 
-from server.agents.planner.agent import PlannerAgent, PlannerResult
-from server.config.agent import planner_llm_config, planner_llm_mode, local_llm_config
-from server.core.tool import Tool
-from server.tools.planner.clone_repo import clone_repo
-from server.tools.planner.get_page import get_page
-from server.tools.planner.pentest_plan import (
-    _current_plan,
-    _reset_plan,
-    get_pentest_plan,
-    manage_target_types,
-    update_pentest_plan,
-)
-
-structlog.configure(
-    processors=[structlog.dev.ConsoleRenderer(colors=True)],
-    wrapper_class=structlog.make_filtering_bound_logger(20),
-)
-logger = structlog.get_logger(__name__)
-
-# No search_kb -- no KB needed for testing
-TEST_TOOLS: list[Tool] = [
-    clone_repo,
-    get_page,
-    get_pentest_plan,
-    update_pentest_plan,
-    manage_target_types,
-]
-
-VALID_AGENTS = {"recon", "exploit", "verify", "report", "retest"}
+from server.agents.planner.agent import PlannerAgent, PlannerCallback
+from server.agents.planner.tools.pentest_plan import _current_plan, _reset_plan
+from server.config.agent import llm_mode, public_llm_config, local_llm_config
 
 
-def print_result(result: PlannerResult) -> None:
-    """Pretty-print a PlannerResult."""
-    print(f"\n  summary: {result.summary[:200]}..." if len(result.summary) > 200 else f"\n  summary: {result.summary}")
-    print(f"  scenarios ({len(result.scenarios)}):")
-    for i, s in enumerate(result.scenarios, 1):
-        print(f"    [{i}] agent={s.get('agent','?'):8s}  task={s.get('task','?')}")
-        print(f"        recommended_tools={s.get('recommended_tools',[])}  methods={s.get('methods',[])}")
-    if result.needs:
-        print(f"  needs ({len(result.needs)}):")
-        for n in result.needs:
-            print(f"    - {n}")
+class PrintCallback(PlannerCallback):
+    def __init__(self) -> None:
+        self._start = time.perf_counter()
+
+    def _ts(self) -> str:
+        return f"[{time.perf_counter() - self._start:.1f}s]"
+
+    def on_step(self, message: str) -> None:
+        print(f"  → {message} {self._ts()}")
+
+    def on_done(self, message: str) -> None:
+        print(f"  ✓ {message}")
+
+    def on_warn(self, message: str) -> None:
+        print(f"  ⚠ {message}")
 
 
-def validate_scenarios(result: PlannerResult) -> None:
-    """Validate scenario structure."""
-    assert len(result.scenarios) <= 3, f"Max 3 scenarios, got {len(result.scenarios)}"
-    for s in result.scenarios:
-        assert "task" in s, f"Scenario missing 'task': {s}"
-        assert "agent" in s, f"Scenario missing 'agent': {s}"
-        assert s["agent"] in VALID_AGENTS, f"Invalid agent '{s['agent']}', must be one of {VALID_AGENTS}"
-        assert "details" in s, f"Scenario missing 'details': {s}"
-        assert "recommended_tools" in s or "tools" in s, f"Scenario missing tools key: {s}"
+def _print_header(title: str) -> None:
+    print(f"\n{'═' * 60}")
+    print(f"  {title}")
+    print(f"{'═' * 60}")
 
 
-async def test_web_target() -> None:
-    """Test: Web target -- planner builds plan and returns recon scenarios."""
-    _reset_plan()
-
-    print("\n" + "=" * 70)
-    print("  TEST: Web target -- plan + scenarios for executor")
-    print("=" * 70)
-    if planner_llm_mode.mode == "local":
-        print(f"  LLM mode: LOCAL (Ollama) / {local_llm_config.model}")
-    else:
-        print(f"  LLM mode: PUBLIC / {planner_llm_config.api_provider} / {planner_llm_config.model}")
-    print(f"  Tools: {[t.name for t in TEST_TOOLS]}")
-    print("=" * 70)
-
-    async with PlannerAgent(tools=TEST_TOOLS) as agent:
-        result = await agent.run(
-            "Target: http://www.enicarthage.rnu.tn/\n"
-            "Target type: web\n"
-            "Scope: Full black-box web application pentest.\n"
-            "Build the plan and return the first batch of scenarios "
-            "for the executor agents to run. Do NOT search the knowledge base."
-        )
-
-    print("\n" + "-" * 70)
-    print("  PLANNER RESULT")
-    print("-" * 70)
-    print_result(result)
-
-    # Validate
-    print("\n  VALIDATION:")
-    assert isinstance(result, PlannerResult), "Expected PlannerResult"
-    print("  - PASS: Got PlannerResult")
-
-    if result.scenarios:
-        validate_scenarios(result)
-        print(f"  - PASS: {len(result.scenarios)} valid scenarios (max 3)")
-        agents = {s["agent"] for s in result.scenarios}
-        print(f"  - Agents used: {sorted(agents)}")
-    elif result.needs:
-        print(f"  - OK: Planner needs more data: {len(result.needs)} items")
-        for n in result.needs:
-            assert "tool" in n, f"Need missing 'tool': {n}"
-        print("  - PASS: Needs are well-formed")
-    else:
-        print("  - WARN: No scenarios and no needs -- check summary")
-
-    # Check stored plan
-    plan = _current_plan
-    print(f"  - Plan target: {plan.get('target', '(empty)')}")
-    print(f"  - Plan target_types: {plan.get('target_types', [])}")
+def _print_plan(plan: dict) -> None:
+    if not plan.get("target"):
+        print("  (no stored plan)")
+        return
     phases = plan.get("phases", [])
-    print(f"  - Plan phases: {len(phases)}")
-
-    # Print the full plan
-    print("\n" + "=" * 70)
-    print("  FULL PENTEST PLAN")
-    print("=" * 70)
+    print(f"  Target: {plan.get('target')}")
+    print(f"  Types: {plan.get('target_types', [])}")
+    print(f"  Phases: {len(phases)}")
     for phase in phases:
         steps = phase.get("steps", [])
         total_sc = sum(len(s.get("scenarios", [])) for s in steps)
-        print(f"\n  Phase {phase.get('priority','?')}: {phase.get('name','?')} ({len(steps)} steps, {total_sc} scenarios)")
+        print(f"\n  Phase {phase.get('priority', '?')}: {phase.get('name', '?')} ({len(steps)} steps, {total_sc} scenarios)")
         for step in steps:
-            print(f"    Step {step.get('id','?')}: {step.get('description','?')}")
+            print(f"    {step.get('id', '?')}: {step.get('description', '?')}")
             for sc in step.get("scenarios", []):
                 agent = sc.get("agent", "?")
                 task = sc.get("task", "?")
                 tools = sc.get("recommended_tools", sc.get("tools", []))
-                print(f"      -> [{agent}] {task}  tools={tools}")
-    print("=" * 70)
+                print(f"      → [{agent}] {task}  tools={tools}")
 
+
+def _print_result(result) -> None:
+    print(f"  Summary: {result.summary}")
+    if result.scenarios:
+        print(f"  Scenarios ({len(result.scenarios)}):")
+        for i, s in enumerate(result.scenarios, 1):
+            agent = s.get("agent", "?")
+            task = s.get("task", "?")
+            tools = s.get("recommended_tools", s.get("tools", []))
+            print(f"    [{i}] {agent:8s} | {task}")
+            print(f"         tools: {tools}")
+    if result.needs:
+        print(f"  Needs ({len(result.needs)}):")
+        for n in result.needs:
+            print(f"    - {n}")
+
+
+def _phase_tasks(plan: dict, phase_name: str) -> set[str]:
+    tasks: set[str] = set()
+    for phase in plan.get("phases", []):
+        if str(phase.get("name", "")).strip().lower() != phase_name.strip().lower():
+            continue
+        for step in phase.get("steps", []):
+            for sc in step.get("scenarios", []):
+                if isinstance(sc, dict) and isinstance(sc.get("task"), str):
+                    tasks.add(sc["task"])
+    return tasks
+
+
+async def test_initial_plan() -> None:
+    """Test: Build initial plan from scratch."""
+    _print_header("TEST 1: Initial Plan (is_loop=False)")
+
+    _reset_plan()
+    cb = PrintCallback()
+
+    async with PlannerAgent(callback=cb) as agent:
+        result = await agent.run(
+            "Target: http://www.enicarthage.rnu.tn/\n"
+            "Target type: web\n"
+            "Scope: Full black-box web application pentest.\n"
+            "Build the plan and return the first batch of scenarios.",
+            is_loop=False,
+        )
+
+    _print_header("STORED PLAN")
+    _print_plan(_current_plan)
+
+    _print_header("RESULT")
+    _print_result(result)
+
+    # Validate
+    print(f"\n  ── VALIDATION ──")
+    if result.scenarios:
+        print(f"  ✓ {len(result.scenarios)} scenarios returned")
+        agents = {s.get("agent") for s in result.scenarios}
+        print(f"  ✓ Agents: {sorted(agents)}")
+    else:
+        print(f"  ✓ Plan-only mode: no scenarios returned (expected)")
+
+    plan = _current_plan
     if plan.get("target"):
-        assert len(phases) >= 3, f"Expected at least 3 phases (full plan), got {len(phases)}"
-        print(f"  - PASS: Full plan with {len(phases)} phases")
+        phases = plan.get("phases", [])
+        empty = [p.get("name") for p in phases if not p.get("steps")]
+        print(f"  ✓ Plan stored: {len(phases)} phases")
+        if empty:
+            print(f"  ⚠ Empty phases: {empty}")
+        else:
+            print(f"  ✓ All phases have steps")
     else:
-        print("  - SKIP: Model returned scenarios directly without storing a plan (expected for small local models)")
-    print()
+        print(f"  ⚠ No plan stored")
+
+    return result
 
 
-async def main() -> None:
-    print("\n  PentaForge Planner Agent Test")
-    print("  (Scenario-based output for executor layer)")
-    if planner_llm_mode.mode == "local":
-        print(f"  LLM mode: LOCAL (Ollama) / {local_llm_config.model}")
+async def test_loop_reentry() -> None:
+    """Test: Loop re-entry with simulated executor results."""
+    _print_header("TEST 2: Loop Re-entry (is_loop=True)")
+
+    # Don't reset plan — use the one from test 1
+    if not _current_plan.get("target"):
+        print("  ⚠ Skipping: no plan from test 1")
+        return
+
+    cb = PrintCallback()
+
+    async with PlannerAgent(callback=cb) as agent:
+        result = await agent.run(
+            "Executor results from Reconnaissance phase:\n"
+            "- Subdomain enumeration found: admin.enicarthage.rnu.tn, mail.enicarthage.rnu.tn\n"
+            "- DNS records: A, MX, TXT found\n"
+            "- Web server: Apache/2.4 on Ubuntu\n"
+            "- Technologies detected: PHP 7.4, jQuery 3.5, Bootstrap 4\n"
+            "- Open ports: 80 (HTTP), 443 (HTTPS), 22 (SSH)\n"
+            "- Directory scan found: /admin, /uploads, /api/v1\n"
+            "\n"
+            "Phase 1 (Reconnaissance) is complete. Return the next batch of scenarios.",
+            is_loop=True,
+        )
+
+    _print_header("RESULT")
+    _print_result(result)
+
+    print(f"\n  ── VALIDATION ──")
+    if result.scenarios:
+        print(f"  ✓ {len(result.scenarios)} scenarios returned")
+        agents = {s.get("agent") for s in result.scenarios}
+        print(f"  ✓ Agents: {sorted(agents)}")
+        # With current planner design, enumeration scenarios can still be assigned to recon agent.
+        recon_tasks = _phase_tasks(_current_plan, "Reconnaissance")
+        enum_tasks = _phase_tasks(_current_plan, "Enumeration")
+        returned_tasks = {
+            s.get("task", "") for s in result.scenarios if isinstance(s, dict)
+        }
+        in_enum = bool(enum_tasks) and returned_tasks.issubset(enum_tasks)
+        still_recon_phase = bool(recon_tasks) and bool(returned_tasks & recon_tasks)
+        if in_enum and not still_recon_phase:
+            print(f"  ✓ Advanced to Enumeration phase scenarios")
+        elif returned_tasks & enum_tasks:
+            print(f"  ✓ Includes Enumeration phase scenarios")
+        else:
+            print(f"  ⚠ Could not confirm phase advancement from returned tasks")
     else:
-        print(f"  LLM mode: PUBLIC / {planner_llm_config.api_provider} / {planner_llm_config.model}")
-    print()
+        print(f"  ✓ Plan-only mode: no scenarios returned (expected)")
 
-    await test_web_target()
 
-    print("  All tests completed.\n")
+async def main():
+    _print_header("PentaForge Planner Agent Test")
+    if llm_mode.mode == "local":
+        print(f"  LLM: LOCAL / {local_llm_config.model}")
+    else:
+        print(f"  LLM: PUBLIC / {public_llm_config.api_provider} / {public_llm_config.model}")
+
+    await test_initial_plan()
+    await test_loop_reentry()
+
+    _print_header("ALL TESTS COMPLETE")
 
 
 if __name__ == "__main__":

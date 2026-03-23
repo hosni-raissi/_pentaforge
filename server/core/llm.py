@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import structlog
 
-from server.config.agent import PlannerLLMConfig
+from server.config.agent import PublicLLMConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -57,14 +57,15 @@ class LLMResponse:
 class LLMClient:
     """Async client for OpenAI-compatible chat completion APIs."""
 
-    def __init__(self, config: PlannerLLMConfig) -> None:
+    def __init__(self, config: PublicLLMConfig) -> None:
         self._config = config
+        headers = {"Content-Type": "application/json"}
+        api_key = (config.api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         self._http = httpx.AsyncClient(
             base_url=config.api_url,
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             timeout=httpx.Timeout(120.0, connect=10.0),
         )
 
@@ -75,14 +76,18 @@ class LLMClient:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        use_config_max_tokens: bool = True,
     ) -> LLMResponse:
         """Send a chat completion request and return the parsed response."""
         payload: dict[str, Any] = {
             "model": self._config.model,
             "messages": [m.to_api() for m in messages],
             "temperature": temperature if temperature is not None else self._config.temperature,
-            "max_tokens": max_tokens if max_tokens is not None else self._config.max_tokens,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        elif use_config_max_tokens:
+            payload["max_tokens"] = self._config.max_tokens
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

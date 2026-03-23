@@ -85,19 +85,32 @@ class KnowledgeOrchestrator:
         vector_store: QdrantVectorStore | None = None,
         chunker: MarkdownChunker | None = None,
         cache: RedisCache | None = None,
+        payload_only: bool = False,
     ) -> None:
-        self.embedder = embedding_generator or EmbeddingGenerator()
-        self.vector_store = vector_store or QdrantVectorStore()
-        self.chunker = chunker or MarkdownChunker()
-        self.cache = cache
-        self.nvd = NVDService(
-            embedder=self.embedder,
-            vector_store=self.vector_store,
-            chunker=self.chunker,
-        )
+        self._payload_only = payload_only
+        if payload_only:
+            self.embedder = None
+            self.vector_store = None
+            self.chunker = None
+            self.cache = None
+            self.nvd = None
+        else:
+            self.embedder = embedding_generator or EmbeddingGenerator()
+            self.vector_store = vector_store or QdrantVectorStore()
+            self.chunker = chunker or MarkdownChunker()
+            self.cache = cache
+            self.nvd = NVDService(
+                embedder=self.embedder,
+                vector_store=self.vector_store,
+                chunker=self.chunker,
+            )
 
     async def initialize(self) -> None:
         """Ensure storage backends are ready."""
+        if self._payload_only:
+            logger.info("orchestrator_initialized", mode="payload_only")
+            return
+
         # Pre-create all 5 content-type collections
         self.vector_store.ensure_all_collections()
 

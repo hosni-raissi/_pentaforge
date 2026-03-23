@@ -1,8 +1,4 @@
-"""
-get_page — Fetch a web page and return its text content.
-
-Used by the planner to read documentation, target pages, or online references.
-"""
+"""get_page — Fetch a web page and return its text content."""
 
 from __future__ import annotations
 
@@ -14,15 +10,12 @@ from server.core.tool import tool
 
 logger = structlog.get_logger(__name__)
 
-_USER_AGENT = "PentaForge-Planner/0.1 (+https://github.com/pentaforge)"
+_USER_AGENT = "PentaForge-Planner/0.1"
 
 
 @tool(
     name="get_page",
-    description=(
-        "Fetch a web page by URL and return its text content (HTML stripped). "
-        "Use this to read documentation, blog posts, or gather target information."
-    ),
+    description="Fetch a URL and return its text content (HTML stripped).",
 )
 async def get_page(url: str, css_selector: str = "") -> str:
     """Fetch a URL and return cleaned text content.
@@ -43,8 +36,6 @@ async def get_page(url: str, css_selector: str = "") -> str:
         return f"Error fetching {url}: {exc}"
 
     soup = BeautifulSoup(resp.text, "html.parser")
-
-    # Remove script/style elements
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
 
@@ -58,8 +49,7 @@ async def get_page(url: str, css_selector: str = "") -> str:
     else:
         text = soup.get_text(separator="\n", strip=True)
 
-    # Truncate very large pages
-    if len(text) > 15_000:
-        text = text[:15_000] + "\n\n... [truncated]"
+    if len(text) > 2_500:
+        text = text[:2_500] + "\n\n... [truncated]"
 
     return text

@@ -2,10 +2,10 @@
 
 from .agent import (
     LocalLLMConfig,
-    PlannerLLMConfig,
-    PlannerLLMMode,
+    PublicLLMConfig,
+    LLMMode,
     local_llm_config,
-    planner_llm_config,
-    planner_llm_mode,
+    public_llm_config,
+    llm_mode,
 )
 from .database import DatabaseConfig, db_config
