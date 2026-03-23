@@ -12,7 +12,6 @@ PLANNER_MAX_TOKENS_PER_REQUEST: int = 4096
 MAX_TOOL_RESULT_CHARS: int = 1200
 
 _DISCOVERY_TOOLS = frozenset({"get_page", "search_kb", "search_web"})
-
 _TRANSIENT_EXCEPTIONS = (
     asyncio.TimeoutError,
     TimeoutError,
@@ -23,4 +22,3 @@ _TRANSIENT_EXCEPTIONS = (
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 2.0
 _RETRY_JITTER_MAX = 1.5
-

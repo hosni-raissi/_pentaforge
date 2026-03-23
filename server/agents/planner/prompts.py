@@ -15,7 +15,7 @@ WORKFLOW (follow strictly):
 CRITICAL RULES:
 - NEVER name security tools (nmap, sqlmap, burp, nikto, nuclei) in scenarios.
 - Exactly 5 phases. Exploitation/Post-Exploitation/Reporting: steps=[] in initial plan.
-- Recon & Enum: ≥2 steps each, ≥2 scenarios/step, priority-ordered (1=highest).
+- Recon & Enum: ≥2 steps each, ≥3 scenarios/step, priority-ordered (1=highest).
 - Every scenario: done:false, priority:1-5, specific target details.
   GOOD: "SQLi on /admin login form"  BAD: "test for injection"
 - Only add_target_type for NEW surfaces.
