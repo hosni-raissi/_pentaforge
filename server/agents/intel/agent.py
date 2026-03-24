@@ -24,7 +24,6 @@ from server.config.agent import (
     llm_mode,
 )
 from server.core.llm import ChatMessage, LLMClient
-from server.core.llm_local import LocalLLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 
 from .tools import ALL_INTEL_TOOLS, IntelContext, set_context
@@ -383,11 +382,11 @@ class IntelAgent:
 
         if self._mode == "local":
             self._local_config = local_config or local_llm_config
-            self._llm = LocalLLMClient(self._local_config)
+            self._llm = LLMClient(self._local_config, mode="local")
             self._model_name = self._local_config.model
         else:
             self._config = config or public_llm_config
-            self._llm = LLMClient(self._config)
+            self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
 
         logger.info("intel_initialized", mode=self._mode, model=self._model_name)
@@ -535,7 +534,13 @@ class IntelAgent:
                 # Report hits count
                 try:
                     parsed = json.loads(result_str)
-                    hits = len(parsed.get("hits", [])) if isinstance(parsed, dict) else 0
+                    if isinstance(parsed, dict):
+                        hit_rows = parsed.get("hits")
+                        if not isinstance(hit_rows, list):
+                            hit_rows = parsed.get("results", [])
+                        hits = len(hit_rows) if isinstance(hit_rows, list) else 0
+                    else:
+                        hits = 0
                     self._cb.on_done(f"  → {hits} hits returned")
                 except (json.JSONDecodeError, TypeError):
                     self._cb.on_done(f"  → {len(result_str)} chars returned")
@@ -718,10 +723,6 @@ class IntelAgent:
         techniques_n = _safe_hits_count(rag_prefetch.get("techniques", {}))
         vulns_n = _safe_hits_count(rag_prefetch.get("vulnerabilities", {}))
         web_fallback: dict[str, Any] = {"used": False, "query": "", "results": []}
-        if techniques_n == 0 or vulns_n == 0:
-            fallback_query = f"site:attack.mitre.org {target_type} ATT&CK techniques vulnerabilities OWASP"
-            web_result = await self._call_tool_json("search_web", query=fallback_query, max_results=8)
-            web_fallback = {"used": True, "query": fallback_query, "results": web_result.get("results", []) if isinstance(web_result, dict) else []}
         return {"rag_prefetch": rag_prefetch, "coverage_counts": {"methods": methods_n, "techniques": techniques_n, "vulnerabilities": vulns_n}, "web_fallback": web_fallback}
 
     # ── Tool Execution ─────────────────────────────────────────────────

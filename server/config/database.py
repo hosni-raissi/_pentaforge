@@ -1,18 +1,3 @@
-"""
-Database & Storage Configuration — Qdrant, Redis.
-
-┌─────────────────────────────────────────┐
-│            RAG Storage Layer            │
-├──────────────────┬──────────────────────┤
-│   Vector DB      │   Cache             │
-│   (Qdrant)       │   (Redis)           │
-│                  │                     │
-│ embeddings +     │ hot queries +       │
-│ metadata index   │ recent results      │
-└──────────────────┴──────────────────────┘
-
-All values are read from environment variables (no prefix).
-"""
 
 from __future__ import annotations
 

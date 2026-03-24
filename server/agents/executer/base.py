@@ -21,7 +21,6 @@ from server.config.agent import (
     public_llm_config,
 )
 from server.core.llm import ChatMessage, LLMClient
-from server.core.llm_local import LocalLLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 
 logger = structlog.get_logger(__name__)
@@ -175,11 +174,11 @@ class BaseExecuterAgent:
 
         if self._mode == "local":
             self._local_config = local_config or local_llm_config
-            self._llm = LocalLLMClient(self._local_config)
+            self._llm = LLMClient(self._local_config, mode="local")
             self._model_name = self._local_config.model
         else:
             self._config = config or public_llm_config
-            self._llm = LLMClient(self._config)
+            self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
 
         logger.info(

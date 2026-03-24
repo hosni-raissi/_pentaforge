@@ -31,7 +31,7 @@ FORMATTER_SYSTEM_PROMPT = (
     "Step 1: Read the provided RAG data.\n"
     "Step 2: Identify which methods, techniques, or vulnerability types are NOT covered.\n"
     "Step 3: Call search_rag with a specific query to find the missing entries.\n"
-    "Step 4: If search_rag still has gaps, call search_web for MITRE ATT&CK or OWASP references.\n"
+    "Step 4: If search_rag still has gaps, refine the query and call search_rag again.\n"
     "Step 5: Combine everything and return the final JSON.\n"
     "\n"
     "## Budget\n"
@@ -198,6 +198,6 @@ def build_user_message(
         f"## Steps\n"
         f"1. Read the RAG data above — note what categories are thin.\n"
         f"2. Call search_rag with one of the recommended queries above (REQUIRED).\n"
-        f"3. If coverage is still thin, call search_web for MITRE ATT&CK or OWASP.\n"
+        f"3. If coverage is still thin, refine your query and call search_rag again.\n"
         f"4. Combine ALL results into the final JSON.\n"
     )

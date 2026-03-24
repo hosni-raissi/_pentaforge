@@ -11,7 +11,7 @@ UPDATE_MAX_RESULTS: int = 25
 
 # ── Operational constants ──────────────────────────────────────────────
 
-FORMATTER_ALLOWED_TOOLS: frozenset[str] = frozenset({"search_rag", "search_web"})
+FORMATTER_ALLOWED_TOOLS: frozenset[str] = frozenset({"search_rag"})
 FORMATTER_TOOL_MAX_RETRIES: int = 2
 MAX_SOURCE_ERRORS: int = 10
 MAX_VERIFIED_COMPACT: int = 10

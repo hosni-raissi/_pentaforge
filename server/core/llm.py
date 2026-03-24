@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import structlog
 
-from server.config.agent import PublicLLMConfig
+from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -55,18 +55,29 @@ class LLMResponse:
 
 
 class LLMClient:
-    """Async client for OpenAI-compatible chat completion APIs."""
+    """Unified async client for public/local OpenAI-compatible chat APIs."""
 
-    def __init__(self, config: PublicLLMConfig) -> None:
+    def __init__(
+        self,
+        config: PublicLLMConfig | LocalLLMConfig,
+        *,
+        mode: str | None = None,
+    ) -> None:
         self._config = config
+        inferred_mode = "local" if isinstance(config, LocalLLMConfig) else "public"
+        self._mode = (mode or inferred_mode).strip().lower()
+        self._is_local = self._mode == "local"
         headers = {"Content-Type": "application/json"}
-        api_key = (config.api_key or "").strip()
-        if api_key:
+        api_key = (getattr(config, "api_key", "") or "").strip()
+        if api_key and not self._is_local:
             headers["Authorization"] = f"Bearer {api_key}"
         self._http = httpx.AsyncClient(
             base_url=config.api_url,
             headers=headers,
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(
+                180.0 if self._is_local else 120.0,
+                connect=10.0,
+            ),
         )
 
     async def chat(
@@ -79,6 +90,11 @@ class LLMClient:
         use_config_max_tokens: bool = True,
     ) -> LLMResponse:
         """Send a chat completion request and return the parsed response."""
+        provider = (
+            "ollama"
+            if self._is_local
+            else str(getattr(self._config, "api_provider", "") or "public")
+        )
         payload: dict[str, Any] = {
             "model": self._config.model,
             "messages": [m.to_api() for m in messages],
@@ -94,7 +110,8 @@ class LLMClient:
 
         logger.debug(
             "llm_request",
-            provider=self._config.api_provider,
+            mode=self._mode,
+            provider=provider,
             model=self._config.model,
             messages=len(messages),
             tools=len(tools) if tools else 0,
@@ -104,7 +121,13 @@ class LLMClient:
 
         # Log error body for non-2xx responses (except 429 which is retried)
         if resp.status_code >= 400 and resp.status_code != 429:
-            logger.error("llm_api_error", status=resp.status_code, body=resp.text[:500])
+            logger.error(
+                "llm_api_error",
+                mode=self._mode,
+                provider=provider,
+                status=resp.status_code,
+                body=resp.text[:500],
+            )
 
         # Retry on rate-limit (429) with exponential backoff
         retries = 0
@@ -121,9 +144,14 @@ class LLMClient:
 
         choice = data["choices"][0]
         msg = choice["message"]
+        content = msg.get("content") or ""
+        if self._is_local and not content.strip() and msg.get("reasoning"):
+            # Never promote hidden/internal reasoning to user-facing content.
+            logger.warning("local_llm_content_empty_reasoning_dropped")
+            content = ""
 
         return LLMResponse(
-            content=msg.get("content"),
+            content=content,
             tool_calls=msg.get("tool_calls", []),
             finish_reason=choice.get("finish_reason", "stop"),
             usage=data.get("usage", {}),

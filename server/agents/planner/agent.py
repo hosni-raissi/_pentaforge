@@ -31,7 +31,6 @@ from server.config.agent import (
     llm_mode,
 )
 from server.core.llm import ChatMessage, LLMClient
-from server.core.llm_local import LocalLLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 from .config import (
     MAX_TOOL_ROUNDS,
@@ -903,11 +902,11 @@ class PlannerAgent:
 
         if self._mode == "local":
             self._local_config = local_config or local_llm_config
-            self._llm = LocalLLMClient(self._local_config)
+            self._llm = LLMClient(self._local_config, mode="local")
             self._model_name = self._local_config.model
         else:
             self._config = config or public_llm_config
-            self._llm = LLMClient(self._config)
+            self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
 
         logger.info("planner_initialized", mode=self._mode, model=self._model_name)

@@ -7,7 +7,6 @@ from .exploits import fetch_exploits
 from .notify_planner import notify_planner
 from .payloads import _matches_category, fetch_payloads
 from .search_rag import search_rag
-from .search_web import search_web
 from .verify_source import _resolve_check_url, verify_source
 
 ALL_INTEL_TOOLS = [
@@ -18,7 +17,6 @@ ALL_INTEL_TOOLS = [
     verify_source,
     notify_planner,
     search_rag,
-    search_web,
 ]
 
 __all__ = [
@@ -32,7 +30,6 @@ __all__ = [
     "verify_source",
     "notify_planner",
     "search_rag",
-    "search_web",
     "_matches_category",
     "_parse_items_input",
     "_resolve_check_url",
