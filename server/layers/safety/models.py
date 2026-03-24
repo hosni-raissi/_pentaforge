@@ -12,8 +12,7 @@ class Verdict(Enum):
     """Result of a safety check."""
     ALLOW = "allow"
     DENY = "deny"
-    PENDING = "pending"  # Awaiting human approval.
-
+    PENDING = "pending"  
 
 @dataclass(frozen=True)
 class CheckResult:

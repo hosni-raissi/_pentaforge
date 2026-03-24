@@ -228,9 +228,6 @@ def _repair_truncated_json(raw: str) -> dict[str, Any] | None:
     if in_string:
         text += '"'
 
-    # Close structures in reverse nesting order (innermost first).
-    # Scan from end to determine proper closing order.
-    # Simple heuristic: close all brackets then all braces.
     text += "]" * max(0, open_brackets) + "}" * max(0, open_braces)
 
     try:
@@ -490,195 +487,6 @@ def _extract_initial_target_scope(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# HELPERS — Fallback plan builder
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-def _build_timeout_fallback_plan(target: str, scope: str) -> dict[str, Any]:
-    """Build a validator-compliant baseline plan for timeout/error recovery."""
-    if not target:
-        target = "unknown-target"
-    if not scope:
-        scope = "Black-box web application assessment."
-
-    def sc(
-        task: str, details: str, methods: list[str], prio: int
-    ) -> dict[str, Any]:
-        return {
-            "task": task,
-            "agent": "recon",
-            "priority": prio,
-            "details": details,
-            "methods": methods,
-            "done": False,
-        }
-
-    recon_steps = [
-        {
-            "id": "recon-01",
-            "description": "Map application entry points and attack surface.",
-            "scenarios": [
-                sc(
-                    "Map all reachable paths and endpoints",
-                    "Identify visible and hidden paths, route patterns, endpoint groups.",
-                    ["route mapping", "content discovery"],
-                    1,
-                ),
-                sc(
-                    "Identify request parameters and input vectors",
-                    "Enumerate query, body, form, and header inputs per endpoint.",
-                    ["input discovery", "request analysis"],
-                    2,
-                ),
-                sc(
-                    "Profile response behavior and error signatures",
-                    "Capture status/redirect/error patterns that reveal risky handlers.",
-                    ["response profiling", "error behavior mapping"],
-                    3,
-                ),
-            ],
-        },
-        {
-            "id": "recon-02",
-            "description": "Fingerprint technology and infrastructure.",
-            "scenarios": [
-                sc(
-                    "Fingerprint web stack and framework",
-                    "Detect server and framework markers and likely versions.",
-                    ["header analysis", "asset fingerprinting"],
-                    1,
-                ),
-                sc(
-                    "Catalog security-relevant headers and cookie attributes",
-                    "Assess header and cookie hardening posture for weak defaults.",
-                    ["header posture review", "cookie attribute audit"],
-                    2,
-                ),
-                sc(
-                    "Identify authentication and session entry points",
-                    "Locate login, reset, registration, and token workflows.",
-                    ["auth flow mapping", "session discovery"],
-                    3,
-                ),
-            ],
-        },
-        {
-            "id": "recon-03",
-            "description": "Prioritize high-risk features for deep enumeration.",
-            "scenarios": [
-                sc(
-                    "Identify upload and file-processing functionality",
-                    "Locate endpoints handling uploads, downloads, and file transforms.",
-                    ["feature mapping", "file workflow discovery"],
-                    1,
-                ),
-                sc(
-                    "Identify API-like and asynchronous interaction patterns",
-                    "Map JSON/XHR-driven routes and non-HTML service behavior.",
-                    ["traffic pattern analysis", "endpoint behavior mapping"],
-                    2,
-                ),
-                sc(
-                    "Map privileged and administrative routes",
-                    "Locate admin and privilege-sensitive paths for access-control checks.",
-                    ["privileged route discovery", "role-surface mapping"],
-                    3,
-                ),
-            ],
-        },
-    ]
-
-    enum_steps = [
-        {
-            "id": "enum-01",
-            "description": "Enumerate injection and input-validation weaknesses.",
-            "scenarios": [
-                sc(
-                    "Enumerate SQL injection candidate parameters",
-                    "Prioritize dynamic query paths and high-impact data handlers.",
-                    ["parameter triage", "data-flow inference"],
-                    1,
-                ),
-                sc(
-                    "Enumerate cross-site scripting reflection points",
-                    "Classify reflected and stored rendering contexts.",
-                    ["reflection mapping", "context classification"],
-                    2,
-                ),
-                sc(
-                    "Enumerate command and template injection candidates",
-                    "Identify server-side render and command-proxy behavior.",
-                    ["template sink mapping", "execution path analysis"],
-                    3,
-                ),
-            ],
-        },
-        {
-            "id": "enum-02",
-            "description": "Enumerate access-control and session weaknesses.",
-            "scenarios": [
-                sc(
-                    "Enumerate object and function authorization boundaries",
-                    "Map horizontal and vertical privilege transitions across routes.",
-                    ["authorization mapping", "endpoint-role correlation"],
-                    1,
-                ),
-                sc(
-                    "Enumerate session lifecycle weaknesses",
-                    "Assess fixation, timeout, rotation, and invalidation behavior.",
-                    ["session analysis", "token behavior mapping"],
-                    2,
-                ),
-                sc(
-                    "Enumerate account recovery and reset abuse vectors",
-                    "Assess reset and recovery flows for enumeration and takeover risk.",
-                    ["recovery flow mapping", "identity edge-case analysis"],
-                    3,
-                ),
-            ],
-        },
-        {
-            "id": "enum-03",
-            "description": "Enumerate file/path and configuration abuse vectors.",
-            "scenarios": [
-                sc(
-                    "Enumerate path traversal and file inclusion candidates",
-                    "Map path-controlled inputs and file reference behaviors.",
-                    ["path input analysis", "file reference mapping"],
-                    1,
-                ),
-                sc(
-                    "Enumerate insecure upload handling conditions",
-                    "Assess file validation, storage, and serving workflow weaknesses.",
-                    ["upload workflow analysis", "content handling inspection"],
-                    2,
-                ),
-                sc(
-                    "Enumerate exposed administrative and debug artifacts",
-                    "Identify debug endpoints, metadata files, and sensitive artifacts.",
-                    ["artifact discovery", "configuration surface mapping"],
-                    3,
-                ),
-            ],
-        },
-    ]
-
-    return {
-        "target": target,
-        "scope": scope,
-        "target_types": ["web"],
-        "notes": "Auto-generated baseline plan (LLM timeout after discovery).",
-        "phases": [
-            {"name": "Reconnaissance", "priority": 1, "steps": recon_steps},
-            {"name": "Enumeration", "priority": 2, "steps": enum_steps},
-            {"name": "Exploitation", "priority": 3, "steps": []},
-            {"name": "Post-Exploitation", "priority": 4, "steps": []},
-            {"name": "Reporting", "priority": 5, "steps": []},
-        ],
-    }
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # HELPERS — Context compression for retry
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -910,6 +718,19 @@ def _format_tool_batch_results(tool_results: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
+def _build_loop_plan_context_message() -> str:
+    """Build a deterministic loop-context message with the current plan JSON."""
+    plan = _current_plan if isinstance(_current_plan, dict) else {}
+    if not plan:
+        return (
+            "Current plan context (JSON):\n"
+            "{\"target\":\"\",\"scope\":\"\",\"target_types\":[],\"phases\":[],\"notes\":\"\"}"
+        )
+    return "Current plan context (JSON):\n" + json.dumps(
+        plan, ensure_ascii=True
+    )
+
+
 def _parse_planner_output(raw: str) -> PlannerResult:
     text = raw.strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -1044,7 +865,7 @@ def _has_successful_plan_update(messages: list[dict[str, Any]]) -> bool:
         if msg.get("name") != "update_pentest_plan":
             continue
         content = str(msg.get("content", "")).strip().lower()
-        if content.startswith("plan updated") or "auto-fallback: plan updated" in content:
+        if content.startswith("plan updated"):
             return True
     return False
 
@@ -1098,7 +919,8 @@ class PlannerAgent:
         return [
             schema
             for schema in self._tool_schemas
-            if schema.get("function", {}).get("name") != "remove_target_type"
+            if schema.get("function", {}).get("name")
+            not in {"remove_target_type", "get_pentest_plan"}
         ]
 
     # ── Graph ──────────────────────────────────────────────────────
@@ -1246,7 +1068,7 @@ class PlannerAgent:
             if recovered is not None:
                 return recovered
 
-        # ── All other HTTP errors: fallback if we have discovery data ──
+        # ── All other HTTP errors: surface as planner error ──
         return self._fallback_or_error(
             exc, state, round_count, f"HTTP {status} error"
         )
@@ -1320,12 +1142,12 @@ class PlannerAgent:
                     else:
                         self._cb.on_warn(
                             "Recovered plan from failed_generation but "
-                            "no scenarios found; falling back."
+                            "no scenarios found; continuing planning."
                         )
                 else:
                     self._cb.on_warn(
                         "Recovered tool call from failed_generation but "
-                        "phases empty/missing; falling back."
+                        "phases empty/missing; continuing planning."
                     )
                 # Recovery produced empty plan → fall through.
                 return None
@@ -1345,36 +1167,7 @@ class PlannerAgent:
         round_count: int,
         context: str,
     ) -> dict[str, Any]:
-        """Apply fallback plan if discovery exists, otherwise surface error."""
-        is_initial = not state.get("is_loop", False)
-        has_discovery = self._has_discovery_data(state)
-
-        if is_initial and has_discovery and not state.get("recovery_attempted"):
-            target, scope = _extract_initial_target_scope(
-                state.get("messages", [])
-            )
-            fallback_plan = _build_timeout_fallback_plan(target, scope)
-            self._cb.on_warn(
-                f"{context}; applying auto-fallback plan after discovery."
-            )
-            return {
-                "round_count": round_count,
-                "last_response": f"Auto-fallback: {context}.",
-                "last_tool_calls": [
-                    {
-                        "id": f"fallback_{uuid.uuid4().hex[:10]}",
-                        "type": "function",
-                        "function": {
-                            "name": "update_pentest_plan",
-                            "arguments": json.dumps(
-                                fallback_plan, ensure_ascii=True
-                            ),
-                        },
-                    },
-                ],
-                "recovery_attempted": True,
-            }
-
+        """Surface planner error without injecting static fallback plan data."""
         err_text = str(exc).strip() or repr(exc) or type(exc).__name__
         logger.error("planner_llm_error", error=repr(exc), context=context)
         return {
@@ -1430,7 +1223,7 @@ class PlannerAgent:
             }
         ]
 
-        update_attempted = False
+        update_succeeded = False
         has_prior_discovery = self._has_discovery_data(state)
 
         for idx, tc in enumerate(tool_calls):
@@ -1485,31 +1278,19 @@ class PlannerAgent:
                         has_prior_discovery = True
 
                     if tool_name == "update_pentest_plan":
-                        update_attempted = True
                         lowered = result_str.strip().lower()
-                        if lowered.startswith("rejected") and not state.get(
-                            "is_loop", False
-                        ):
+                        if lowered.startswith("rejected"):
                             self._cb.on_warn(
                                 "update_pentest_plan rejected; "
-                                "applying auto-fallback baseline."
+                                "planner will continue and try again."
                             )
-                            target, scope = _extract_initial_target_scope(
-                                state.get("messages", [])
+                        elif lowered.startswith("error"):
+                            self._cb.on_warn(
+                                "update_pentest_plan errored; "
+                                "planner will continue and try again."
                             )
-                            fallback_plan = _build_timeout_fallback_plan(
-                                target, scope
-                            )
-                            try:
-                                fallback_result = await tool.execute(**fallback_plan)
-                                fallback_result = _truncate_result(fallback_result)
-                                result_str = (
-                                    f"{result_str}\nAuto-fallback: {fallback_result}"
-                                )
-                            except Exception as fb_exc:
-                                result_str = (
-                                    f"{result_str}\nAuto-fallback error: {fb_exc}"
-                                )
+                        else:
+                            update_succeeded = True
                 except Exception as exc:
                     result_str = f"Error executing {tool_name}: {exc}"
                     self._cb.on_warn(f"  Tool error: {exc}")
@@ -1551,7 +1332,7 @@ class PlannerAgent:
             "last_tool_calls": [],
             "last_tool_results": batch_results,
             "stop_after_tools": (
-                update_attempted or state["round_count"] >= MAX_TOOL_ROUNDS
+                update_succeeded or state["round_count"] >= MAX_TOOL_ROUNDS
             ),
         }
 
@@ -1563,23 +1344,6 @@ class PlannerAgent:
         rounds = state["round_count"]
 
         if state.get("error"):
-            # Check if fallback plan was saved despite the error.
-            if _current_plan and _current_plan.get("phases"):
-                self._cb.on_warn(
-                    f"Error occurred but fallback plan is stored "
-                    f"({len(_current_plan.get('phases', []))} phases)."
-                )
-                return {
-                    "plan_result": {
-                        "scenarios": [],
-                        "needs": [],
-                        "summary": (
-                            f"Plan saved via fallback after error: "
-                            f"{state['error']}"
-                        ),
-                        "tool_results": state.get("last_tool_results", []),
-                    }
-                }
             self._cb.on_warn(f"Planning failed: {state['error']}")
             return {
                 "plan_result": {
@@ -1795,6 +1559,48 @@ class PlannerAgent:
                     )
                 except Exception:
                     fixed["plan_json"] = str(fixed["plan_json"])
+            elif isinstance(fixed.get("plan_json"), str):
+                raw_plan_json = fixed["plan_json"].strip()
+                candidate = raw_plan_json
+                if candidate.startswith("```"):
+                    candidate = re.sub(
+                        r"^```(?:json)?\s*",
+                        "",
+                        candidate,
+                        flags=re.IGNORECASE,
+                    )
+                    candidate = re.sub(r"\s*```$", "", candidate).strip()
+
+                recovered: dict[str, Any] | None = None
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        recovered = parsed
+                except json.JSONDecodeError:
+                    obj_start = candidate.find("{")
+                    extracted: str | None = None
+                    if obj_start >= 0:
+                        extracted = _extract_json_object_at(
+                            candidate, obj_start
+                        )
+                    if extracted:
+                        try:
+                            parsed = json.loads(extracted)
+                            if isinstance(parsed, dict):
+                                recovered = parsed
+                        except json.JSONDecodeError:
+                            recovered = _repair_truncated_json(extracted)
+                    else:
+                        recovered = _repair_truncated_json(candidate)
+
+                if recovered is not None:
+                    fixed["plan_json"] = json.dumps(recovered, ensure_ascii=True)
+                elif any(
+                    key in fixed
+                    for key in ("target", "scope", "target_types", "phases", "notes")
+                ):
+                    # Avoid hard failure in tool: rely on direct fields when available.
+                    fixed.pop("plan_json", None)
 
         return fixed
 
@@ -1813,6 +1619,16 @@ class PlannerAgent:
         initial_state: PlannerState = {
             "messages": [
                 {"role": "system", "content": system_content},
+                *(
+                    [
+                        {
+                            "role": "user",
+                            "content": _build_loop_plan_context_message(),
+                        }
+                    ]
+                    if is_loop
+                    else []
+                ),
                 {"role": "user", "content": user_message},
             ],
             "tool_schemas": self._tool_schemas_for_mode(is_loop),

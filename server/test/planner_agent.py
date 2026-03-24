@@ -66,8 +66,9 @@ def _print_plan(plan: dict) -> None:
             for sc in step.get("scenarios", []):
                 agent = sc.get("agent", "?")
                 task = sc.get("task", "?")
+                priority = sc.get("priority", "?")
                 tools = sc.get("recommended_tools", sc.get("tools", []))
-                print(f"      → [{agent}] {task}  tools={tools}")
+                print(f"      → [p{priority}][{agent}] {task}  tools={tools}")
 
 
 def _print_result(result) -> None:
@@ -77,8 +78,9 @@ def _print_result(result) -> None:
         for i, s in enumerate(result.scenarios, 1):
             agent = s.get("agent", "?")
             task = s.get("task", "?")
+            priority = s.get("priority", "?")
             tools = s.get("recommended_tools", s.get("tools", []))
-            print(f"    [{i}] {agent:8s} | {task}")
+            print(f"    [{i}] p{priority} {agent:8s} | {task}")
             print(f"         tools: {tools}")
     if result.needs:
         print(f"  Needs ({len(result.needs)}):")
@@ -168,6 +170,9 @@ async def test_loop_reentry() -> None:
             "Phase 1 (Reconnaissance) is complete. Return the next batch of scenarios.",
             is_loop=True,
         )
+
+    _print_header("STORED PLAN (AFTER LOOP)")
+    _print_plan(_current_plan)
 
     _print_header("RESULT")
     _print_result(result)

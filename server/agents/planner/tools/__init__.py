@@ -14,7 +14,8 @@ ALL_PLANNER_TOOLS: list[Tool] = [
     get_page,
     search_kb,
     search_web,
-    get_pentest_plan,
+    # Keep get_pentest_plan implemented/exported for reuse by other agents,
+    # but do not expose it to PlannerAgent runtime tool list.
     update_pentest_plan,
     get_target_types,
     add_target_type,
