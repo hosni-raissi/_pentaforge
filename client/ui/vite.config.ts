@@ -1,14 +1,36 @@
-import path from "path"
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import electron from 'vite-plugin-electron/simple';
 
-// https://vite.dev/config/
+const isElectron = process.env.ELECTRON === 'true';
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    ...(isElectron
+      ? [
+          electron({
+            main: {
+              entry: 'electron/main.ts',
+            },
+            preload: {
+              input: 'electron/preload.ts',
+            },
+          }),
+        ]
+      : []),
+  ],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      '@': path.resolve(__dirname, './src'),
     },
   },
-})
+  server: {
+    port: 5173,
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: true,
+  },
+});

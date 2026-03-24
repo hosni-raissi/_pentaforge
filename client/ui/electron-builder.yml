@@ -1,0 +1,17 @@
+appId: com.pentaforge.desktop
+productName: PentaForge Desktop
+directories:
+  output: release
+  buildResources: public
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+mac:
+  category: public.app-category.developer-tools
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage

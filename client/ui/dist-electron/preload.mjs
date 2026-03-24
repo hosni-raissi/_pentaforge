@@ -1,0 +1,1 @@
+let e=require(`electron`);e.contextBridge.exposeInMainWorld(`desktop`,{window:{minimize:()=>e.ipcRenderer.invoke(`window:minimize`),maximize:()=>e.ipcRenderer.invoke(`window:maximize`),close:()=>e.ipcRenderer.invoke(`window:close`)}});
