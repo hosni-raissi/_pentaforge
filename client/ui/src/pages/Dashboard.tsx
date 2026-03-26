@@ -1,6 +1,8 @@
 import { useNavigate } from "react-router-dom";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, Repeat2, X } from "lucide-react";
 
+import { AIPromptPanel } from "@/components/dashboard/AIPromptPanel";
+import { AgentStatePath } from "@/components/dashboard/AgentStatePath";
 import { AgentStatus } from "@/components/dashboard/AgentStatus";
 import { FindingsTable } from "@/components/dashboard/FindingsTable";
 import { PhaseTimeline } from "@/components/dashboard/PhaseTimeline";
@@ -12,6 +14,7 @@ import { useProjects } from "@/stores/projects";
 export default function Dashboard() {
   const navigate = useNavigate();
   const activeProject = useProjects((state) => state.getActive());
+  const setActive = useProjects((state) => state.setActive);
 
   if (!activeProject) {
     return (
@@ -26,7 +29,26 @@ export default function Dashboard() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-bold">{activeProject.name}</h1>
+        <div className="flex flex-wrap items-center gap-10">
+          <h1 className="text-2xl font-bold">{activeProject.name}</h1>
+          <div className="flex items-center gap-2">
+          <Button size="xs" variant="secondary" onClick={() => navigate("/projects")}>
+            <Repeat2 size={12} />
+            Change
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+              onClick={() => {
+                setActive(null);
+                navigate("/projects");
+              }}
+          >
+            <X size={12} />
+            Close
+          </Button>
+          </div>
+        </div>
         <p className="text-sm text-text-secondary">{activeProject.target}</p>
       </div>
 
@@ -37,6 +59,15 @@ export default function Dashboard() {
         <ScanProgress
           phases={activeProject.phases}
           progress={activeProject.scanProgress}
+        />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
+        <AgentStatePath agents={activeProject.agents} />
+        <AIPromptPanel
+          projectName={activeProject.name}
+          target={activeProject.target}
+          agents={activeProject.agents}
         />
       </div>
 

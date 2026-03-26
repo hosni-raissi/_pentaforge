@@ -8,10 +8,13 @@ import structlog
 
 from server.core.tool import tool
 from server.db.knowledge.config.sources import get_source_by_name
+from server.db.projects import ProjectsStore
 
 from .constants import TRUSTED_SOURCES
 
 logger = structlog.get_logger(__name__)
+_projects_store = ProjectsStore()
+_projects_store.init_schema()
 
 
 async def _check_url_reachability(check_url: str) -> tuple[int, list[dict[str, Any]]]:
@@ -35,13 +38,20 @@ async def _check_url_reachability(check_url: str) -> tuple[int, list[dict[str, A
     return score, checks
 
 
-def _resolve_check_url(url: str, trusted: dict | None, config: Any) -> str:
+def _resolve_check_url(
+    url: str,
+    trusted: dict | None,
+    config: Any,
+    custom: dict[str, Any] | None,
+) -> str:
     if url:
         return url
     if trusted:
         return trusted["url"]
     if config:
         return config.url
+    if custom and custom.get("url"):
+        return str(custom["url"])
     return ""
 
 
@@ -71,7 +81,26 @@ async def verify_source(source_name: str, url: str = "") -> str:
     else:
         checks.append({"check": "pentaforge_config", "passed": False, "detail": "Not in source config"})
 
-    check_url = _resolve_check_url(url, trusted, config)
+    custom = _projects_store.get_intel_resource_by_name(source_name, enabled_only=True)
+    if custom:
+        trust_score += 30
+        checks.append(
+            {
+                "check": "custom_registry",
+                "passed": True,
+                "detail": f"Target type: {custom.get('target_type', 'all')}",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "check": "custom_registry",
+                "passed": False,
+                "detail": "Not in custom sources",
+            }
+        )
+
+    check_url = _resolve_check_url(url, trusted, config, custom)
     if check_url:
         url_score, url_checks = await _check_url_reachability(check_url)
         trust_score += url_score

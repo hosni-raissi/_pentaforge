@@ -24,28 +24,33 @@ class IntelStateStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or (settings.data_dir / "intel_state.db")
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
-        self._conn.row_factory = sqlite3.Row
         self._ensure_schema()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
     def _ensure_schema(self) -> None:
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS intel_state (
-                target_type   TEXT PRIMARY KEY,
-                last_update   TEXT NOT NULL,
-                update_status TEXT NOT NULL DEFAULT 'unknown'
-            );
-            """
-        )
-        self._conn.commit()
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS intel_state (
+                    target_type   TEXT PRIMARY KEY,
+                    last_update   TEXT NOT NULL,
+                    update_status TEXT NOT NULL DEFAULT 'unknown'
+                );
+                """
+            )
+            conn.commit()
 
     def get_last_update(self, target_type: str) -> datetime | None:
         """Return the last update datetime (UTC) for target_type, or None if never set."""
-        row = self._conn.execute(
-            "SELECT last_update FROM intel_state WHERE target_type = ?",
-            (target_type,),
-        ).fetchone()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_update FROM intel_state WHERE target_type = ?",
+                (target_type,),
+            ).fetchone()
         if row is None:
             return None
         try:
@@ -63,18 +68,19 @@ class IntelStateStore:
         update_status: str = "updated",
     ) -> None:
         """Upsert the last_update timestamp for target_type."""
-        self._conn.execute(
-            """
-            INSERT INTO intel_state(target_type, last_update, update_status)
-            VALUES(?, ?, ?)
-            ON CONFLICT(target_type)
-            DO UPDATE SET
-                last_update   = excluded.last_update,
-                update_status = excluded.update_status
-            """,
-            (target_type, dt.replace(tzinfo=timezone.utc).isoformat(), update_status),
-        )
-        self._conn.commit()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO intel_state(target_type, last_update, update_status)
+                VALUES(?, ?, ?)
+                ON CONFLICT(target_type)
+                DO UPDATE SET
+                    last_update   = excluded.last_update,
+                    update_status = excluded.update_status
+                """,
+                (target_type, dt.replace(tzinfo=timezone.utc).isoformat(), update_status),
+            )
+            conn.commit()
         logger.info(
             "intel_state_saved",
             target_type=target_type,

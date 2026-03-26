@@ -27,10 +27,6 @@
 }
 
 /* ── Global ──────────────────────────────────────────────── */
-* {
-  -webkit-app-region: no-drag;
-}
-
 body {
   @apply bg-surface-0 text-text-primary font-sans antialiased;
   overflow: hidden;
@@ -51,12 +47,9 @@ body {
   @apply bg-pf-500/40;
 }
 
-/* Electron titlebar drag region */
-.titlebar-drag {
-  -webkit-app-region: drag;
-}
-.titlebar-no-drag {
-  -webkit-app-region: no-drag;
+/* Tauri drag region */
+[data-tauri-drag-region] {
+  cursor: default;
 }
 
 /* Focus ring */

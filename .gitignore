@@ -28,6 +28,7 @@ Thumbs.db
 
 # Data & cache (large, regenerated)
 server/db/knowledge/data/
+server/db/projects/projects.db
 
 # Type checking / linting
 .mypy_cache/

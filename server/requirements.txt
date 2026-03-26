@@ -21,7 +21,10 @@ redis>=5.0,<6.0
 langgraph
 # HTML parsing (website/gitbook extractors)
 beautifulsoup4>=4.12,<5.0
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
 
 # Optional: OpenAI embeddings (if KNOWLEDGE_EMBEDDING_PROVIDER=openai)
 # openai>=1.6,<2.0
-git+https://github.com/nomic-ai/megablocks.git
+# Optional: Nomic MegaBlocks acceleration (requires torch/toolchain)
+# git+https://github.com/nomic-ai/megablocks.git

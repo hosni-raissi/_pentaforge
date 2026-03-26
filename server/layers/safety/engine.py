@@ -21,7 +21,6 @@ from .kill_switch import KillSwitch
 from .models import ActionRequest, CheckResult, EngagementScope, Verdict
 from .prompt_guard import PromptInjectionGuard
 from .rate_limiter import RateLimiter
-from .target_validation import ScopeEnforcer
 
 logger = structlog.get_logger(__name__)
 
@@ -59,7 +58,6 @@ class ScopeAndSafetyEngine:
 
         # Initialize components.
         self.kill_switch = KillSwitch(redis_client=redis_client)
-        self.scope_enforcer = ScopeEnforcer(self._scope_def)
         self.rate_limiter = RateLimiter()
         self.approval_gate = ApprovalGate(
             scope=self._scope_def,

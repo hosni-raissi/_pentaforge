@@ -1,16 +1,35 @@
-# React + Vite
+# PentaForge UI (Tauri 2)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Desktop UI built with React + Vite (frontend) and Tauri 2 (desktop shell).
 
-Currently, two official plugins are available:
+## Scripts
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- `npm run dev` -> run desktop app with Tauri dev mode.
+- `npm run build` -> build desktop app with Tauri.
+- `npm run web:dev` -> run only the web frontend (Vite).
+- `npm run web:build` -> build only the web frontend.
 
-## React Compiler
+## Notes
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Tauri config lives in `src-tauri/tauri.conf.json`.
+- Window controls are implemented via `@tauri-apps/api/window` in the React titlebar.
+- Projects are persisted through the server API (`/api/projects`) into local SQLite.
 
-## Expanding the ESLint configuration
+## Run Backend API
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+From repo root:
+
+```bash
+python -m pip install -r server/requirements-api.txt
+python -m uvicorn server.api.app:app --host 127.0.0.1 --port 8000
+```
+
+Projects data is persisted locally in:
+
+`server/db/projects/projects.db`
+
+Then run the desktop UI:
+
+```bash
+npm run dev
+```

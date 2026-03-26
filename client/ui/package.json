@@ -3,16 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "tauri dev",
+    "tauri": "tauri",
+    "web:dev": "vite",
+    "web:build": "tsc -b && vite build",
+    "build": "tauri build",
     "preview": "vite preview",
-    "lint": "eslint .",
-    "electron:dev": "ELECTRON=true vite",
-    "electron:build": "ELECTRON=true npm run build && electron-builder"
+    "lint": "eslint ."
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-tabs": "^1.1.13",
@@ -41,9 +42,8 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "@tauri-apps/cli": "^2.0.0",
     "autoprefixer": "^10.4.27",
-    "electron": "^41.0.3",
-    "electron-builder": "^26.8.1",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",
@@ -51,8 +51,6 @@
     "postcss": "^8.5.8",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.3",
-    "vite": "^8.0.1",
-    "vite-plugin-electron": "^0.29.1",
-    "vite-plugin-electron-renderer": "^0.14.6"
+    "vite": "^8.0.1"
   }
 }

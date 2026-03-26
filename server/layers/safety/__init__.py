@@ -25,11 +25,9 @@ from .kill_switch import KillSwitch
 from .models import ActionRequest, CheckResult, EngagementScope, Verdict
 from .prompt_guard import PromptInjectionGuard
 from .rate_limiter import RateLimiter
-from .target_validation import ScopeEnforcer
 
 __all__ = [
     "ScopeAndSafetyEngine",
-    "ScopeEnforcer",
     "ApprovalGate",
     "ApprovalRequest",
     "RateLimiter",

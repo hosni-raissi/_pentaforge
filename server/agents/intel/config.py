@@ -9,6 +9,28 @@ RAG_REFRESH_DAYS: int = 3
 UPDATE_DAYS_BACK: int = 14
 UPDATE_MAX_RESULTS: int = 25
 
+# ── Intel source registry (editable) ─────────────────────────────────
+# Update these lists whenever you want to change which sources
+# the Intel update pipeline verifies per target_type.
+VERIFY_SOURCES: dict[str, list[str]] = {
+    "web": ["OWASP-WSTG", "PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK"],
+    "api": ["OWASP-APISecurity", "PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK"],
+    "network": ["MITRE-ATTACK", "PayloadsAllTheThings", "HackTricks"],
+    "cloud": ["HackTricks", "MITRE-ATTACK", "PayloadsAllTheThings"],
+    "mobile": ["OWASP-MASTG", "HackTricks", "MITRE-ATTACK"],
+    "iot": ["OWASP-FSTM", "HackTricks", "PayloadsAllTheThings"],
+    "binary": ["PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK"],
+    "identity": ["HackTricks", "MITRE-ATTACK", "PayloadsAllTheThings"],
+    "supply_chain": ["MITRE-ATTACK", "PayloadsAllTheThings", "HackTricks"],
+    "web3": ["PayloadsAllTheThings", "HackTricks"],
+}
+
+DEFAULT_VERIFY_SOURCES: list[str] = [
+    "PayloadsAllTheThings",
+    "HackTricks",
+    "MITRE-ATTACK",
+]
+
 # ── Operational constants ──────────────────────────────────────────────
 
 FORMATTER_ALLOWED_TOOLS: frozenset[str] = frozenset({"search_rag"})

@@ -32,6 +32,8 @@ from server.agents.intel.config import (
     FORMATTER_CALL_TIMEOUT_SECONDS,
     FORMATTER_ALLOWED_TOOLS,
     FORMATTER_TOOL_MAX_RETRIES,
+    VERIFY_SOURCES,
+    DEFAULT_VERIFY_SOURCES,
     RAG_REFRESH_DAYS,
     UPDATE_DAYS_BACK,
     UPDATE_MAX_RESULTS,
@@ -42,6 +44,7 @@ from server.agents.intel.config import (
     COMPACT_SNIPPET_LENGTH,
 )
 from server.db.knowledge.storage.intel_state_store import IntelStateStore
+from server.db.projects import ProjectsStore
 from .prompts import FORMATTER_SYSTEM_PROMPT, build_user_message
 
 logger = structlog.get_logger(__name__)
@@ -64,28 +67,6 @@ class _NoOpCallback:
     def on_step(self, message: str) -> None: pass
     def on_done(self, message: str) -> None: pass
     def on_warn(self, message: str) -> None: pass
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# UPDATE CONFIGURATION
-# ═════════════════════════════════════════════════════════════════════════════
-
-VERIFY_SOURCES: dict[str, list[str]] = {
-    "web": ["OWASP-WSTG", "PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK"],
-    "api": ["OWASP-APISecurity", "PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK"],
-    "network": ["MITRE-ATTACK", "PayloadsAllTheThings", "HackTricks"],
-    "cloud": ["HackTricks", "MITRE-ATTACK", "PayloadsAllTheThings"],
-    "mobile": ["OWASP-MASTG", "HackTricks", "MITRE-ATTACK"],
-    "iot": ["OWASP-FSTM", "HackTricks", "PayloadsAllTheThings"],
-    "binary": ["PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK"],
-    "identity": ["HackTricks", "MITRE-ATTACK", "PayloadsAllTheThings"],
-    "supply_chain": ["MITRE-ATTACK", "PayloadsAllTheThings", "HackTricks"],
-    "web3": ["PayloadsAllTheThings", "HackTricks"],
-}
-
-DEFAULT_VERIFY_SOURCES: list[str] = [
-    "PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK",
-]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -373,6 +354,11 @@ class IntelAgent:
         set_context(self._context)
 
         self._state_store = IntelStateStore()
+        self._projects_store = ProjectsStore()
+        try:
+            self._projects_store.init_schema()
+        except Exception as exc:
+            logger.warning("intel_projects_store_init_failed", error=str(exc))
         self._background_tasks: set[asyncio.Task] = set()
 
         tool_list = tools or ALL_INTEL_TOOLS
@@ -562,14 +548,59 @@ class IntelAgent:
 
     # ── Update Pipeline ────────────────────────────────────────────────
 
+    def _collect_source_entries(self, target_type: str) -> list[dict[str, str]]:
+        configured_names = VERIFY_SOURCES.get(target_type, DEFAULT_VERIFY_SOURCES)
+        source_entries: list[dict[str, str]] = [
+            {"name": source_name, "url": ""}
+            for source_name in configured_names
+        ]
+
+        try:
+            custom_sources = self._projects_store.list_intel_resources(enabled_only=True)
+        except Exception as exc:
+            logger.warning("intel_custom_source_read_failed", error=str(exc))
+            custom_sources = []
+
+        for row in custom_sources:
+            row_target = str(row.get("target_type", "all")).strip().lower() or "all"
+            if target_type == "all":
+                pass
+            elif row_target not in {"all", target_type}:
+                continue
+            source_entries.append(
+                {
+                    "name": str(row.get("name", "")).strip(),
+                    "url": str(row.get("url", "")).strip(),
+                }
+            )
+
+        deduped: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in source_entries:
+            source_name = str(entry.get("name", "")).strip()
+            source_url = str(entry.get("url", "")).strip()
+            if not source_name:
+                continue
+            key = (source_name.lower(), source_url.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append({"name": source_name, "url": source_url})
+
+        return deduped
+
     async def _run_update_pipeline(self, target_type: str, info: str) -> dict[str, Any]:
         domain = target_type if target_type != "all" else "shared"
         self._cb.on_step(f"Update: Verifying sources for '{target_type}'")
 
-        source_list = VERIFY_SOURCES.get(target_type, DEFAULT_VERIFY_SOURCES)
+        source_list = self._collect_source_entries(target_type)
         verified: list[dict[str, Any]] = []
-        for source_name in source_list:
-            res = await self._call_tool_json("verify_source", source_name=source_name)
+        for source_entry in source_list:
+            res = await self._call_tool_json(
+                "verify_source",
+                source_name=source_entry["name"],
+                url=source_entry["url"],
+            )
             verified.append(res)
         trusted = [v for v in verified if isinstance(v, dict) and v.get("verified")]
         self._cb.on_done(f"Update: {len(trusted)}/{len(source_list)} sources verified")

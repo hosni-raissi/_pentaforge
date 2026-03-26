@@ -1,282 +1,160 @@
-"""Target Validation / Scope Enforcer for Safety layer.
-
-Responsibilities:
-1. Validate and normalize target strings (especially URL targets).
-2. Enforce engagement scope allow/exclude rules.
-3. Normalize frontend scan request target fields before orchestration.
-"""
+"""URL Normalizer — probe a URL and return host, port, and reachability."""
 
 from __future__ import annotations
 
+import asyncio
+from urllib.parse import urlsplit
+from .config import DEFAULT_CLIENT, DEFAULT_TIMEOUT_SECONDS
+import httpx
 import ipaddress
-from dataclasses import asdict
-from fnmatch import fnmatch
-from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
-from .config import MAX_TARGET_URL_LENGTH
-from .models import ActionRequest, CheckResult, EngagementScope, Verdict
+class UrlNormalizer:
+    """
+    Give it a URL (with or without scheme), it probes it and returns:
+        {"host": str, "port": int, "valid": bool}
 
+    Rules:
+    - Has https://  → probe https only,  port 443
+    - Has http://   → probe http only,   port 80
+    - No scheme     → probe both concurrently:
+                        · only one works  → return that one
+                        · both work       → prefer https
+                        · neither works   → valid: False
+    """
 
-def _is_ip(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        return False
+    def __init__(self, url: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+        self.raw = (url or "").strip()
+        self.timeout = timeout
 
+    async def normalize(self) -> dict:
+        if not self.raw:
+            return {"host": "", "port": 0, "valid": False}
 
-def _is_cidr(value: str) -> bool:
-    try:
-        ipaddress.ip_network(value, strict=False)
-        return True
-    except ValueError:
-        return False
+        raw = self.raw
 
+        # ── explicit scheme ──────────────────────────────────────────────
+        if raw.startswith("https://"):
+            host = self._extract_host(raw)
+            valid = await self._probe(raw)
+            return {"host": host, "port": 443, "valid": valid}
 
-def _normalize_url(url: str) -> tuple[str, bool, str]:
-    """Normalize URL and return (normalized, changed, error)."""
-    raw = (url or "").strip()
-    if not raw:
-        return "", False, "empty target URL"
-    if len(raw) > MAX_TARGET_URL_LENGTH:
-        return "", False, f"target URL exceeds max length ({MAX_TARGET_URL_LENGTH})"
+        if raw.startswith("http://"):
+            host = self._extract_host(raw)
+            valid = await self._probe(raw)
+            return {"host": host, "port": 80, "valid": valid}
 
-    candidate = raw
-    if "://" not in candidate:
-        candidate = f"http://{candidate}"
+        # ── no scheme: try both ──────────────────────────────────────────
+        https_url = f"https://{raw}"
+        http_url  = f"http://{raw}"
+        host      = self._extract_host(https_url)
 
-    try:
-        parsed = urlsplit(candidate)
-    except ValueError:
-        return "", False, "invalid URL format"
-
-    if parsed.scheme not in {"http", "https"}:
-        return "", False, "unsupported URL scheme (allowed: http, https)"
-    if not parsed.netloc:
-        return "", False, "URL must include host"
-
-    host = (parsed.hostname or "").strip().lower()
-    if not host:
-        return "", False, "URL host is missing"
-
-    if " " in host:
-        return "", False, "URL host contains spaces"
-
-    port = parsed.port
-    netloc = host
-    if port and not (
-        (parsed.scheme == "http" and port == 80)
-        or (parsed.scheme == "https" and port == 443)
-    ):
-        netloc = f"{host}:{port}"
-
-    path = parsed.path or "/"
-    normalized = urlunsplit(
-        (
-            parsed.scheme.lower(),
-            netloc,
-            path,
-            parsed.query or "",
-            "",  # drop fragment
+        https_ok, http_ok = await asyncio.gather(
+            self._probe(https_url),
+            self._probe(http_url),
         )
-    )
-    return normalized, normalized != raw, ""
 
+        if https_ok and DEFAULT_CLIENT == "https":                         
+            return {"host": host, "port": 443, "valid": True}
+        if http_ok and DEFAULT_CLIENT == "http":
+            return {"host": host, "port": 80,  "valid": True}
 
-def _extract_host_from_target(target: str) -> str:
-    raw = (target or "").strip()
-    if not raw:
-        return ""
-    if "://" in raw:
+        return {"host": host, "port": 0, "valid": False}
+
+    # ── helpers ──────────────────────────────────────────────────────────
+
+    async def _probe(self, url: str) -> bool:
+        """HEAD request — True if anything responds (even 4xx)."""
         try:
-            return (urlsplit(raw).hostname or "").strip().lower()
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                follow_redirects=True,
+                verify=False,
+            ) as client:
+                resp = await client.head(url)
+                return resp.status_code < 500
+        except Exception:
+            return False
+
+    @staticmethod
+    def _extract_host(url: str) -> str:
+        try:
+            return (urlsplit(url).hostname or "").strip().lower()
         except ValueError:
             return ""
-    return raw.strip().lower()
+#----------------------------------------------------------------------------------------
+#                     ip validation
+#----------------------------------------------------------------------------------------
+class IPValidator:
+    """Validate an IP address, CIDR range, or hostname."""
 
+    def __init__(self, ip: str) -> None:
+        self.raw = (ip or "").strip()
 
-def _matches_domain(host: str, pattern: str) -> bool:
-    host = host.strip().lower()
-    patt = pattern.strip().lower()
-    if not host or not patt:
-        return False
-    if patt.startswith("*."):
-        suffix = patt[2:]
-        return host == suffix or host.endswith(f".{suffix}")
-    return host == patt or fnmatch(host, patt)
+    def validate(self) -> dict:
+        if not self.raw:
+            return self._out(error="empty input")
 
+        # ── CIDR ──────────────────────────────────
+        if "/" in self.raw:
+            try:
+                net = ipaddress.ip_network(self.raw, strict=False)
+            except ValueError:
+                return self._out(error="invalid CIDR")
 
-class ScopeEnforcer:
-    """Validates targets and enforces engagement scope boundaries."""
-
-    def __init__(self, scope: EngagementScope | None = None) -> None:
-        self._scope = scope or EngagementScope()
-
-    def check(self, action: ActionRequest) -> CheckResult:
-        """Validate + normalize target, then enforce allow/exclude scope."""
-        target = (action.target or "").strip()
-        if not target:
-            return CheckResult(
-                verdict=Verdict.DENY,
-                component="target_validation",
-                reason="Target is empty.",
+            is_v4 = isinstance(net, ipaddress.IPv4Network)
+            hosts = (
+                max(0, net.num_addresses - 2)
+                if is_v4 and net.prefixlen < 31
+                else net.num_addresses
+            )
+            return self._out(
+                valid=True,
+                ip_type="cidr_v4" if is_v4 else "cidr_v6",
+                ip=str(net.network_address),
+                is_private=net.is_private,
+                is_loopback=net.is_loopback,
+                hosts=hosts,
             )
 
-        normalized_target = target
-        corrected = False
+        # ── Single IP ─────────────────────────────
+        try:
+            addr = ipaddress.ip_address(self.raw)
+        except ValueError:
+            return self._out(error="not a valid IP or CIDR")
 
-        # URL normalization when action target is URL-like.
-        if "://" in target or "/" in target or target.startswith("www."):
-            normalized_target, changed, error = _normalize_url(target)
-            if error:
-                return CheckResult(
-                    verdict=Verdict.DENY,
-                    component="target_validation",
-                    reason=f"Invalid target URL: {error}.",
-                    metadata={"target": target},
-                )
-            corrected = changed
-
-        host = _extract_host_from_target(normalized_target)
-
-        # Exclusions first.
-        if host and any(
-            _matches_domain(host, d) for d in self._scope.excluded_domains
-        ):
-            return CheckResult(
-                verdict=Verdict.DENY,
-                component="target_validation",
-                reason=f"Target '{normalized_target}' is explicitly excluded from scope.",
-                metadata={"normalized_target": normalized_target},
-            )
-
-        if _is_ip(host or normalized_target):
-            ip_value = ipaddress.ip_address(host or normalized_target)
-            if any(
-                ip_value in ipaddress.ip_network(c, strict=False)
-                for c in self._scope.excluded_cidrs
-            ):
-                return CheckResult(
-                    verdict=Verdict.DENY,
-                    component="target_validation",
-                    reason=f"Target '{normalized_target}' is explicitly excluded from scope.",
-                    metadata={"normalized_target": normalized_target},
-                )
-
-        # Allow rules.
-        has_allow_rules = bool(
-            self._scope.allowed_domains
-            or self._scope.allowed_urls
-            or self._scope.allowed_cidrs
-        )
-        if has_allow_rules:
-            allowed = False
-
-            if normalized_target in self._scope.allowed_urls:
-                allowed = True
-
-            if host and self._scope.allowed_domains and not allowed:
-                allowed = any(
-                    _matches_domain(host, d) for d in self._scope.allowed_domains
-                )
-
-            if self._scope.allowed_cidrs and not allowed:
-                ip_candidate = host or normalized_target
-                if _is_ip(ip_candidate):
-                    ip_value = ipaddress.ip_address(ip_candidate)
-                    allowed = any(
-                        ip_value in ipaddress.ip_network(c, strict=False)
-                        for c in self._scope.allowed_cidrs
-                    )
-
-            if not allowed:
-                return CheckResult(
-                    verdict=Verdict.DENY,
-                    component="target_validation",
-                    reason=(
-                        f"Target '{normalized_target}' is outside engagement scope."
-                    ),
-                    metadata={"normalized_target": normalized_target},
-                )
-
-        metadata: dict[str, Any] = {"normalized_target": normalized_target}
-        if corrected:
-            metadata["corrected"] = True
-            metadata["original_target"] = target
-
-        return CheckResult(
-            verdict=Verdict.ALLOW,
-            component="target_validation",
-            reason="Target is valid and in scope.",
-            metadata=metadata,
+        return self._out(
+            valid=True,
+            ip_type=(
+                "ipv4"
+                if isinstance(addr, ipaddress.IPv4Address)
+                else "ipv6"
+            ),
+            ip=str(addr),
+            is_private=addr.is_private,
+            is_loopback=addr.is_loopback,
         )
 
-    def normalize_scan_request_target(
-        self, scan_request: dict[str, Any]
-    ) -> tuple[dict[str, Any], CheckResult]:
-        """Normalize target fields coming from frontend scan request.
+    def is_valid(self) -> bool:
+        return self.validate()["valid"]
 
-        Supports URL-bearing target types (web_app/api/mobile/repository/desktop).
-        Returns (possibly-corrected payload, check result).
-        """
-        if not isinstance(scan_request, dict):
-            return scan_request, CheckResult(
-                verdict=Verdict.DENY,
-                component="target_validation",
-                reason="Scan request payload must be an object.",
-            )
+    def _out(
+        self,
+        valid: bool = False,
+        ip_type: str = "invalid",
+        ip: str = "",
+        is_private: bool = False,
+        is_loopback: bool = False,
+        hosts: int | None = None,
+        error: str = "",
+    ) -> dict:
+        return {
+            "input": self.raw,
+            "valid": valid,
+            "type": ip_type,
+            "ip": ip,
+            "is_private": is_private,
+            "is_loopback": is_loopback,
+            "hosts": hosts,
+            "error": error,
+        }
 
-        corrected_payload = dict(scan_request)
-        config = corrected_payload.get("config", {})
-        if hasattr(config, "model_dump"):
-            config = config.model_dump()  # pydantic model
-        elif hasattr(config, "__dict__"):
-            config = asdict(config) if hasattr(config, "__dataclass_fields__") else dict(config.__dict__)
-        if not isinstance(config, dict):
-            config = {}
-        corrected_payload["config"] = config
-
-        target_type = str(corrected_payload.get("target_type", "")).strip().lower()
-        field_candidates = {
-            "web_app": ["url"],
-            "api": ["base_url", "spec_url"],
-            "mobile": ["app_url"],
-            "repository": ["repo_url"],
-            "desktop": ["api_backend_url"],
-        }.get(target_type, [])
-
-        corrected_fields: list[dict[str, str]] = []
-        for field_name in field_candidates:
-            raw = config.get(field_name)
-            if not isinstance(raw, str) or not raw.strip():
-                continue
-            normalized, changed, error = _normalize_url(raw)
-            if error:
-                return corrected_payload, CheckResult(
-                    verdict=Verdict.DENY,
-                    component="target_validation",
-                    reason=f"Invalid '{field_name}' URL: {error}.",
-                    metadata={"field": field_name, "value": raw},
-                )
-            if changed:
-                config[field_name] = normalized
-                corrected_fields.append(
-                    {
-                        "field": f"config.{field_name}",
-                        "from": raw,
-                        "to": normalized,
-                    }
-                )
-
-        metadata: dict[str, Any] = {}
-        if corrected_fields:
-            metadata["corrected_fields"] = corrected_fields
-            metadata["corrected"] = True
-
-        return corrected_payload, CheckResult(
-            verdict=Verdict.ALLOW,
-            component="target_validation",
-            reason="Scan request target fields are valid.",
-            metadata=metadata,
-        )
