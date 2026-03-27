@@ -15,15 +15,16 @@ from server.db.knowledge.config.settings import settings
 from .constants import GITHUB_API
 
 logger = structlog.get_logger(__name__)
+_GITHUB_AUTH_ALLOWED = True
 
 
-def _github_headers() -> dict[str, str]:
+def _github_headers(*, include_auth: bool = True) -> dict[str, str]:
     headers = {
         "User-Agent": settings.user_agent,
         "Accept": "application/vnd.github+json",
     }
     token = settings.github_token or os.getenv("GITHUB_TOKEN", "")
-    if token:
+    if include_auth and _GITHUB_AUTH_ALLOWED and token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
@@ -42,6 +43,10 @@ def _is_rate_limited(exc: Exception) -> bool:
             if "rate limit" in str(msg).lower():
                 return True
     return False
+
+
+def _is_auth_failed(exc: Exception) -> bool:
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401
 
 
 def _matches_category(path: str, category: str) -> bool:
@@ -68,10 +73,14 @@ async def _fetch_commit_detail(
     client: httpx.AsyncClient,
     repo: dict[str, str],
     sha: str,
+    headers: dict[str, str],
     diagnostics: dict[str, Any],
 ) -> dict | None:
     try:
-        resp = await client.get(f"{GITHUB_API}/repos/{repo['owner']}/{repo['repo']}/commits/{sha}")
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{repo['owner']}/{repo['repo']}/commits/{sha}",
+            headers=headers,
+        )
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:
@@ -109,6 +118,7 @@ async def _scan_commit_files(
     commits: list[dict],
     category: str,
     limit: int,
+    headers: dict[str, str],
     diagnostics: dict[str, Any],
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
@@ -118,7 +128,7 @@ async def _scan_commit_files(
         sha = commit.get("sha", "")
         if not sha:
             continue
-        detail = await _fetch_commit_detail(client, repo, sha, diagnostics)
+        detail = await _fetch_commit_detail(client, repo, sha, headers, diagnostics)
         if not detail:
             continue
         collected = _collect_md_files(detail, commit, repo, category, seen_paths, limit, len(results))
@@ -151,20 +161,43 @@ async def fetch_payloads(
     rate_limited = False
     errors: list[dict[str, str]] = []
 
-    async with httpx.AsyncClient(timeout=30, headers=_github_headers()) as client:
+    global _GITHUB_AUTH_ALLOWED
+    use_auth = _GITHUB_AUTH_ALLOWED and bool(settings.github_token or os.getenv("GITHUB_TOKEN", ""))
+    active_headers = _github_headers(include_auth=use_auth)
+    async with httpx.AsyncClient(timeout=30) as client:
         for r in repos:
             url = f"{GITHUB_API}/repos/{r['owner']}/{r['repo']}/commits"
             params: dict[str, str] = {"since": since, "per_page": "30", "sha": r["branch"]}
             try:
-                resp = await client.get(url, params=params)
+                resp = await client.get(url, params=params, headers=active_headers)
                 resp.raise_for_status()
                 commits = resp.json()
             except Exception as exc:
-                logger.warning("fetch_payloads_commits_error", repo=r["repo"], error=str(exc))
-                if _is_rate_limited(exc):
-                    rate_limited = True
-                errors.append({"repo": r["repo"], "error": str(exc)})
-                continue
+                if use_auth and _is_auth_failed(exc):
+                    logger.warning(
+                        "github_auth_failed_fallback_anonymous",
+                        repo=r["repo"],
+                        message="GitHub token rejected; retrying without Authorization header.",
+                    )
+                    _GITHUB_AUTH_ALLOWED = False
+                    use_auth = False
+                    active_headers = _github_headers(include_auth=False)
+                    try:
+                        resp = await client.get(url, params=params, headers=active_headers)
+                        resp.raise_for_status()
+                        commits = resp.json()
+                    except Exception as retry_exc:
+                        logger.warning("fetch_payloads_commits_error", repo=r["repo"], error=str(retry_exc))
+                        if _is_rate_limited(retry_exc):
+                            rate_limited = True
+                        errors.append({"repo": r["repo"], "error": str(retry_exc)})
+                        continue
+                else:
+                    logger.warning("fetch_payloads_commits_error", repo=r["repo"], error=str(exc))
+                    if _is_rate_limited(exc):
+                        rate_limited = True
+                    errors.append({"repo": r["repo"], "error": str(exc)})
+                    continue
 
             diagnostics = {"rate_limited": False, "errors": []}
             changed = await _scan_commit_files(
@@ -173,6 +206,7 @@ async def fetch_payloads(
                 commits,
                 category,
                 max_results - len(results),
+                active_headers,
                 diagnostics,
             )
             results.extend(changed)

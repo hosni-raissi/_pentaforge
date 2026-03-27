@@ -81,6 +81,10 @@ export interface IntelResource {
   description: string;
   category: string;
   content_type: string;
+  update_mode: string;
+  intel_last_update: string | null;
+  intel_next_update: string | null;
+  intel_refresh_days: number;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -94,6 +98,17 @@ export interface IntelResourceCreatePayload {
   name: string;
   url: string;
   target_type: string;
+  content_type: string;
+  update_mode: "every_3_days" | "static";
+  enabled?: boolean;
+}
+
+export interface IntelResourceUpdatePayload {
+  name?: string;
+  url?: string;
+  target_type?: string;
+  content_type?: string;
+  update_mode?: "every_3_days" | "static";
   enabled?: boolean;
 }
 
@@ -102,6 +117,7 @@ export interface IntelUpdateStatusRow {
   last_update: string | null;
   next_update: string | null;
   due_now: boolean;
+  refresh_days: number;
   seconds_until_next_update: number;
   uses_default_sources: boolean;
   sources: IntelResource[];
@@ -119,6 +135,27 @@ export interface IntelUpdateStatusPayload {
   update_max_results: number;
   pipeline_outputs: string[];
   statuses: IntelUpdateStatusRow[];
+}
+
+export interface IntelUpdateScheduleRequest {
+  target_type: string;
+  refresh_days: number;
+}
+
+export interface IntelForceUpdateRequest {
+  target_type: string;
+  info?: string;
+}
+
+export interface IntelForceUpdateStatus {
+  target_type: string;
+  status: "idle" | "running" | "cancelling" | "cancelled" | "completed" | "error" | string;
+  progress: number;
+  message: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+  error: string;
 }
 
 export interface AIAssistRequest {
@@ -509,6 +546,10 @@ function toIntelResource(value: unknown): IntelResource | null {
     description: typeof value.description === "string" ? value.description : "",
     category: typeof value.category === "string" ? value.category : "",
     content_type: typeof value.content_type === "string" ? value.content_type : "",
+    update_mode: typeof value.update_mode === "string" ? value.update_mode : "every_3_days",
+    intel_last_update: typeof value.intel_last_update === "string" ? value.intel_last_update : null,
+    intel_next_update: typeof value.intel_next_update === "string" ? value.intel_next_update : null,
+    intel_refresh_days: typeof value.intel_refresh_days === "number" ? value.intel_refresh_days : 3,
     created_at: typeof value.created_at === "string" ? value.created_at : null,
     updated_at: typeof value.updated_at === "string" ? value.updated_at : null,
   };
@@ -571,6 +612,36 @@ export async function addIntelResourceFromDesktop(
   return resource;
 }
 
+export async function updateIntelResourceFromDesktop(
+  resourceId: string,
+  payload: IntelResourceUpdatePayload,
+): Promise<IntelResource> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  const response = await requestJson<{ resource?: unknown }>(
+    `/api/intel/resources/${encodeURIComponent(resourceId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+  const resource = toIntelResource(response.resource);
+  if (!resource) {
+    throw new Error("Invalid resource response");
+  }
+  return resource;
+}
+
+export async function deleteIntelResourceFromDesktop(resourceId: string): Promise<void> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  await requestJson(`/api/intel/resources/${encodeURIComponent(resourceId)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function listIntelUpdateStatusFromDesktop(
   targetType?: string,
 ): Promise<IntelUpdateStatusPayload> {
@@ -608,6 +679,7 @@ export async function listIntelUpdateStatusFromDesktop(
         && (typeof row.last_update === "string" || row.last_update === null)
         && (typeof row.next_update === "string" || row.next_update === null)
         && typeof row.due_now === "boolean"
+        && typeof row.refresh_days === "number"
         && typeof row.seconds_until_next_update === "number"
         && typeof row.uses_default_sources === "boolean"
         && Array.isArray(row.sources)
@@ -661,4 +733,69 @@ export async function askAIAssistFromDesktop(
       context: request.context ?? "",
     }),
   });
+}
+
+export async function setIntelUpdateScheduleFromDesktop(
+  request: IntelUpdateScheduleRequest,
+): Promise<{ ok: boolean; schedule: { target_type: string; refresh_days: number } }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson("/api/intel/update-schedule", {
+    method: "POST",
+    body: JSON.stringify({
+      target_type: request.target_type,
+      refresh_days: request.refresh_days,
+    }),
+  });
+}
+
+export async function forceIntelUpdateFromDesktop(
+  request: IntelForceUpdateRequest,
+): Promise<{ ok: boolean; started: boolean; target_type: string; reason?: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson("/api/intel/force-update", {
+    method: "POST",
+    body: JSON.stringify({
+      target_type: request.target_type,
+      info: request.info ?? "",
+    }),
+  });
+}
+
+export async function cancelForceIntelUpdateFromDesktop(
+  targetType: string,
+): Promise<{ ok: boolean; cancelled: boolean; target_type: string; reason?: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson("/api/intel/force-update/cancel", {
+    method: "POST",
+    body: JSON.stringify({
+      target_type: targetType,
+    }),
+  });
+}
+
+export async function getForceIntelUpdateStatusFromDesktop(
+  targetType: string,
+): Promise<IntelForceUpdateStatus> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  const payload = await requestJson<Partial<IntelForceUpdateStatus>>(
+    `/api/intel/force-update-status?target_type=${encodeURIComponent(targetType)}`,
+  );
+  return {
+    target_type: typeof payload.target_type === "string" ? payload.target_type : targetType,
+    status: typeof payload.status === "string" ? payload.status : "idle",
+    progress: typeof payload.progress === "number" ? payload.progress : 0,
+    message: typeof payload.message === "string" ? payload.message : "",
+    started_at: typeof payload.started_at === "string" ? payload.started_at : null,
+    finished_at: typeof payload.finished_at === "string" ? payload.finished_at : null,
+    updated_at: typeof payload.updated_at === "string" ? payload.updated_at : null,
+    error: typeof payload.error === "string" ? payload.error : "",
+  };
 }

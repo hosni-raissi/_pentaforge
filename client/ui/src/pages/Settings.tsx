@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, Clock3, Cpu, Palette, Plus, RefreshCcw, Server } from "lucide-react";
+import { Bot, Clock3, Cpu, Palette, Pencil, Plus, RefreshCcw, Server, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -9,8 +9,15 @@ import { Tabs } from "@/components/ui/Tabs";
 import { Toggle } from "@/components/ui/Toggle";
 import {
   addIntelResourceFromDesktop,
+  cancelForceIntelUpdateFromDesktop,
+  deleteIntelResourceFromDesktop,
+  forceIntelUpdateFromDesktop,
+  getForceIntelUpdateStatusFromDesktop,
   listIntelResourcesFromDesktop,
   listIntelUpdateStatusFromDesktop,
+  setIntelUpdateScheduleFromDesktop,
+  updateIntelResourceFromDesktop,
+  type IntelForceUpdateStatus,
   type IntelResource,
   type IntelTargetTypeOption,
   type IntelUpdateStatusPayload,
@@ -36,6 +43,53 @@ function formatTargetTypeLabel(value: string): string {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+const RESOURCE_TYPE_OPTIONS = [
+  { value: "strategies", label: "Strategies" },
+  { value: "exploits", label: "Exploits" },
+  { value: "tools", label: "Tools" },
+  { value: "standards", label: "Standards" },
+  { value: "attack_types", label: "Attack Types" },
+  { value: "payload", label: "Payload" },
+];
+
+function buildUpdateModeOptions(refreshDays: number) {
+  const safeDays = Math.max(1, Number(refreshDays || 3));
+  return [
+    { value: "every_3_days", label: `Managed by schedule (currently every ${safeDays} day(s))` },
+    { value: "static", label: "Static Data" },
+  ];
+}
+
+function formatResourceCadence(resource: IntelResource): string {
+  if (resource.update_mode === "static") {
+    return "static (no intel refresh)";
+  }
+  const days = Number(resource.intel_refresh_days || 3);
+  return `updated by intel every ${Math.max(1, days)} day(s)`;
+}
+
+function isBuiltinResource(resource: IntelResource): boolean {
+  return resource.id.startsWith("builtin::");
+}
+
+function resourceSourceFilterValue(resource: IntelResource): "user_custom" | "builtin_custom" | "builtin_fixed" {
+  if (resource.source_kind === "custom") {
+    return isBuiltinResource(resource) ? "builtin_custom" : "user_custom";
+  }
+  return "builtin_fixed";
+}
+
+function resourceSourceLabel(resource: IntelResource): string {
+  const kind = resourceSourceFilterValue(resource);
+  if (kind === "user_custom") {
+    return "user custom";
+  }
+  if (kind === "builtin_custom") {
+    return "builtin custom";
+  }
+  return "builtin fixed";
+}
+
 export default function Settings() {
   const config = useConfig();
   const { isDark, setDark } = useTheme();
@@ -58,11 +112,28 @@ export default function Settings() {
   const [intelError, setIntelError] = useState("");
   const [resourceName, setResourceName] = useState("");
   const [resourceUrl, setResourceUrl] = useState("");
+  const [resourceContentType, setResourceContentType] = useState("strategies");
+  const [resourceUpdateMode, setResourceUpdateMode] = useState<"every_3_days" | "static">("every_3_days");
   const [resourceTargetType, setResourceTargetType] = useState("all");
   const [resourceSaveLoading, setResourceSaveLoading] = useState(false);
   const [resourceSaveError, setResourceSaveError] = useState("");
   const [resourceSaveSuccess, setResourceSaveSuccess] = useState("");
   const [resourceSearch, setResourceSearch] = useState("");
+  const [resourceTypeFilter, setResourceTypeFilter] = useState("all");
+  const [resourceTargetFilter, setResourceTargetFilter] = useState("all");
+  const [resourceUpdateFilter, setResourceUpdateFilter] = useState("all");
+  const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
+  const [scheduleTargetType, setScheduleTargetType] = useState("all");
+  const [scheduleRefreshDays, setScheduleRefreshDays] = useState("3");
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleSaveError, setScheduleSaveError] = useState("");
+  const [scheduleSaveSuccess, setScheduleSaveSuccess] = useState("");
+  const [forceUpdateLoading, setForceUpdateLoading] = useState(false);
+  const [forceUpdateCancelLoading, setForceUpdateCancelLoading] = useState(false);
+  const [forceUpdateError, setForceUpdateError] = useState("");
+  const [forceUpdateSuccess, setForceUpdateSuccess] = useState("");
+  const [forceUpdateStatus, setForceUpdateStatus] = useState<IntelForceUpdateStatus | null>(null);
+  const [showForceUpdatePanel, setShowForceUpdatePanel] = useState(false);
 
   const loadIntelData = useCallback(async () => {
     setIntelLoading(true);
@@ -78,6 +149,10 @@ export default function Settings() {
         : [{ value: "all", label: "All Targets" }];
       setIntelTargetOptions(options);
       setResourceTargetType((current) => {
+        const hasCurrent = options.some((item) => item.value === current);
+        return hasCurrent ? current : options[0].value;
+      });
+      setScheduleTargetType((current) => {
         const hasCurrent = options.some((item) => item.value === current);
         return hasCurrent ? current : options[0].value;
       });
@@ -99,21 +174,189 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
+    const selected = intelStatuses.find((status) => status.target_type === scheduleTargetType)
+      ?? intelStatuses.find((status) => status.target_type === "all")
+      ?? null;
+    if (!selected) {
+      setScheduleRefreshDays(String(intelMeta.refresh_days || 3));
+      return;
+    }
+    setScheduleRefreshDays(String(selected.refresh_days));
+  }, [intelStatuses, scheduleTargetType, intelMeta.refresh_days]);
+
+  useEffect(() => {
     void loadIntelData();
   }, [loadIntelData]);
 
+  const loadForceUpdateStatus = useCallback(async () => {
+    try {
+      const status = await getForceIntelUpdateStatusFromDesktop(scheduleTargetType);
+      setForceUpdateStatus(status);
+    } catch {
+      // Keep UI usable even when status endpoint is temporarily unavailable.
+    }
+  }, [scheduleTargetType]);
+
+  useEffect(() => {
+    if (!showForceUpdatePanel) {
+      return;
+    }
+    void loadForceUpdateStatus();
+  }, [showForceUpdatePanel, loadForceUpdateStatus]);
+
+  useEffect(() => {
+    const isActive = forceUpdateStatus?.status === "running" || forceUpdateStatus?.status === "cancelling";
+    if (!showForceUpdatePanel || !forceUpdateStatus || !isActive) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadForceUpdateStatus();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [showForceUpdatePanel, forceUpdateStatus, loadForceUpdateStatus]);
+
+  const typeFilterOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const resource of intelResources) {
+      const contentType = String(resource.content_type || "").trim();
+      if (contentType) {
+        values.add(contentType);
+      }
+    }
+    return [
+      { value: "all", label: "All Types" },
+      ...Array.from(values).sort((a, b) => a.localeCompare(b)).map((value) => ({
+        value,
+        label: formatTargetTypeLabel(value),
+      })),
+    ];
+  }, [intelResources]);
+
+  const targetFilterOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const resource of intelResources) {
+      const targetType = String(resource.target_type || "").trim();
+      if (targetType) {
+        values.add(targetType);
+      }
+    }
+    return [
+      { value: "all", label: "All Targets" },
+      ...Array.from(values).sort((a, b) => a.localeCompare(b)).map((value) => ({
+        value,
+        label: formatTargetTypeLabel(value),
+      })),
+    ];
+  }, [intelResources]);
+
+  const updateFilterOptions = useMemo(
+    () => [
+      { value: "all", label: "All Updates" },
+      { value: "every_3_days", label: "Intel Managed" },
+      { value: "static", label: "Static" },
+    ],
+    [],
+  );
+
   const filteredIntelResources = useMemo(() => {
     const needle = resourceSearch.trim().toLowerCase();
-    if (!needle) {
-      return intelResources;
-    }
     return intelResources.filter((resource) => {
-      const text = `${resource.name} ${resource.url} ${resource.target_type} ${resource.source_kind}`.toLowerCase();
+      const contentType = String(resource.content_type || "").trim().toLowerCase();
+      const targetType = String(resource.target_type || "").trim().toLowerCase();
+      const updateMode = String(resource.update_mode || "").trim().toLowerCase();
+      const typeFilter = resourceTypeFilter.trim().toLowerCase();
+      const targetFilter = resourceTargetFilter.trim().toLowerCase();
+      const updateFilter = resourceUpdateFilter.trim().toLowerCase();
+
+      if (typeFilter !== "all" && contentType !== typeFilter) {
+        return false;
+      }
+      if (targetFilter !== "all" && targetType !== targetFilter) {
+        return false;
+      }
+      if (updateFilter !== "all" && updateMode !== updateFilter) {
+        return false;
+      }
+      if (!needle) {
+        return true;
+      }
+      const text = `${resource.name} ${resource.url} ${resource.target_type} ${resourceSourceLabel(resource)} ${resource.content_type} ${resource.update_mode}`.toLowerCase();
       return text.includes(needle);
     });
-  }, [intelResources, resourceSearch]);
+  }, [
+    intelResources,
+    resourceSearch,
+    resourceTypeFilter,
+    resourceTargetFilter,
+    resourceUpdateFilter,
+  ]);
 
-  async function handleAddResource() {
+  useEffect(() => {
+    const validTypes = new Set(typeFilterOptions.map((item) => item.value));
+    if (!validTypes.has(resourceTypeFilter)) {
+      setResourceTypeFilter("all");
+    }
+  }, [typeFilterOptions, resourceTypeFilter]);
+
+  useEffect(() => {
+    const validTargets = new Set(targetFilterOptions.map((item) => item.value));
+    if (!validTargets.has(resourceTargetFilter)) {
+      setResourceTargetFilter("all");
+    }
+  }, [targetFilterOptions, resourceTargetFilter]);
+
+  const refreshDaysByTarget = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const status of intelStatuses) {
+      const days = Number(status.refresh_days || 0);
+      if (!Number.isFinite(days) || days < 1) {
+        continue;
+      }
+      map.set(status.target_type, Math.floor(days));
+    }
+    if (!map.has("all")) {
+      const fallback = Number(intelMeta.refresh_days || 3);
+      map.set("all", Number.isFinite(fallback) && fallback > 0 ? Math.floor(fallback) : 3);
+    }
+    return map;
+  }, [intelStatuses, intelMeta.refresh_days]);
+
+  const currentResourceRefreshDays = useMemo(() => {
+    const direct = refreshDaysByTarget.get(resourceTargetType);
+    if (direct && direct > 0) {
+      return direct;
+    }
+    const shared = refreshDaysByTarget.get("all");
+    return shared && shared > 0 ? shared : 3;
+  }, [refreshDaysByTarget, resourceTargetType]);
+
+  const updateModeOptions = useMemo(
+    () => buildUpdateModeOptions(currentResourceRefreshDays),
+    [currentResourceRefreshDays],
+  );
+
+  function resetResourceForm() {
+    setEditingResourceId(null);
+    setResourceName("");
+    setResourceUrl("");
+    setResourceTargetType("all");
+    setResourceContentType("strategies");
+    setResourceUpdateMode("every_3_days");
+  }
+
+  function startEditResource(resource: IntelResource) {
+    if (resource.source_kind !== "custom") {
+      return;
+    }
+    setEditingResourceId(resource.id);
+    setResourceName(resource.name);
+    setResourceUrl(resource.url);
+    setResourceTargetType(resource.target_type || "all");
+    setResourceContentType(resource.content_type || "strategies");
+    setResourceUpdateMode(resource.update_mode === "static" ? "static" : "every_3_days");
+  }
+
+  async function handleSaveResource() {
     const cleanName = resourceName.trim();
     const cleanUrl = resourceUrl.trim();
     if (!cleanName || !cleanUrl) {
@@ -125,21 +368,133 @@ export default function Settings() {
     setResourceSaveError("");
     setResourceSaveSuccess("");
     try {
-      await addIntelResourceFromDesktop({
-        name: cleanName,
-        url: cleanUrl,
-        target_type: resourceTargetType,
-        enabled: true,
-      });
-      setResourceName("");
-      setResourceUrl("");
-      setResourceSaveSuccess("Resource saved and will be included in Intel source planning.");
+      if (editingResourceId) {
+        await updateIntelResourceFromDesktop(editingResourceId, {
+          name: cleanName,
+          url: cleanUrl,
+          target_type: resourceTargetType,
+          content_type: resourceContentType,
+          update_mode: resourceUpdateMode,
+        });
+        setResourceSaveSuccess("Resource updated successfully.");
+      } else {
+        await addIntelResourceFromDesktop({
+          name: cleanName,
+          url: cleanUrl,
+          target_type: resourceTargetType,
+          content_type: resourceContentType,
+          update_mode: resourceUpdateMode,
+          enabled: true,
+        });
+        setResourceSaveSuccess("Resource saved and will be included in Intel source planning.");
+      }
+      resetResourceForm();
       await loadIntelData();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to add resource";
       setResourceSaveError(message);
     } finally {
       setResourceSaveLoading(false);
+    }
+  }
+
+  async function handleRemoveResource(resource: IntelResource) {
+    if (resource.source_kind !== "custom") {
+      return;
+    }
+    const confirmDelete = window.confirm(`Delete resource "${resource.name}"?`);
+    if (!confirmDelete) {
+      return;
+    }
+    setResourceSaveLoading(true);
+    setResourceSaveError("");
+    setResourceSaveSuccess("");
+    try {
+      await deleteIntelResourceFromDesktop(resource.id);
+      if (editingResourceId === resource.id) {
+        resetResourceForm();
+      }
+      setResourceSaveSuccess("Resource removed.");
+      await loadIntelData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to remove resource";
+      setResourceSaveError(message);
+    } finally {
+      setResourceSaveLoading(false);
+    }
+  }
+
+  async function handleSaveSchedule() {
+    const value = Number(scheduleRefreshDays);
+    if (!Number.isFinite(value) || value < 1 || value > 3650) {
+      setScheduleSaveError("Refresh days must be between 1 and 3650.");
+      setScheduleSaveSuccess("");
+      return;
+    }
+    setScheduleSaving(true);
+    setScheduleSaveError("");
+    setScheduleSaveSuccess("");
+    try {
+      await setIntelUpdateScheduleFromDesktop({
+        target_type: scheduleTargetType,
+        refresh_days: Math.floor(value),
+      });
+      setScheduleSaveSuccess("Intel update schedule saved.");
+      await loadIntelData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to save schedule";
+      setScheduleSaveError(message);
+    } finally {
+      setScheduleSaving(false);
+    }
+  }
+
+  async function handleForceUpdateNow() {
+    setForceUpdateLoading(true);
+    setForceUpdateError("");
+    setForceUpdateSuccess("");
+    setShowForceUpdatePanel(true);
+    try {
+      const response = await forceIntelUpdateFromDesktop({
+        target_type: scheduleTargetType,
+        info: "Manual force update from Settings",
+      });
+      if (!response.started) {
+        setForceUpdateSuccess("Force update already running for this target.");
+      } else {
+        setForceUpdateSuccess("Force update started in background.");
+      }
+      await loadForceUpdateStatus();
+      await loadIntelData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to force update";
+      setForceUpdateError(message);
+    } finally {
+      setForceUpdateLoading(false);
+    }
+  }
+
+  async function handleCancelForceUpdate() {
+    setForceUpdateCancelLoading(true);
+    setForceUpdateError("");
+    setForceUpdateSuccess("");
+    try {
+      const response = await cancelForceIntelUpdateFromDesktop(scheduleTargetType);
+      if (response.cancelled) {
+        setForceUpdateSuccess("Force update cancellation requested.");
+      } else {
+        setForceUpdateSuccess(
+          response.reason
+            ? `Cannot cancel now: ${response.reason}.`
+            : "No running force update to cancel.",
+        );
+      }
+      await loadForceUpdateStatus();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to cancel force update";
+      setForceUpdateError(message);
+    } finally {
+      setForceUpdateCancelLoading(false);
     }
   }
 
@@ -270,7 +625,7 @@ export default function Settings() {
                     </CardTitle>
                   </CardHeader>
                   <div className="space-y-3">
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
                       <Input
                         label="Resource Name"
                         placeholder="My Security Notes"
@@ -284,6 +639,21 @@ export default function Settings() {
                         onChange={(event) => setResourceUrl(event.target.value)}
                       />
                       <Select
+                        label="Resource Type"
+                        value={resourceContentType}
+                        onChange={(event) => setResourceContentType(event.target.value)}
+                        options={RESOURCE_TYPE_OPTIONS}
+                      />
+                      <Select
+                        label="Intel Update"
+                        value={resourceUpdateMode}
+                        onChange={(event) => {
+                          const nextMode = event.target.value === "static" ? "static" : "every_3_days";
+                          setResourceUpdateMode(nextMode);
+                        }}
+                        options={updateModeOptions}
+                      />
+                      <Select
                         label="Target Type"
                         value={resourceTargetType}
                         onChange={(event) => setResourceTargetType(event.target.value)}
@@ -291,10 +661,20 @@ export default function Settings() {
                       />
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Button size="sm" onClick={handleAddResource} loading={resourceSaveLoading}>
+                      <Button size="sm" onClick={handleSaveResource} loading={resourceSaveLoading}>
                         <Plus size={12} />
-                        Add Resource
+                        {editingResourceId ? "Save Changes" : "Add Resource"}
                       </Button>
+                      {editingResourceId && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={resetResourceForm}
+                          disabled={resourceSaveLoading}
+                        >
+                          Cancel Edit
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         variant="ghost"
@@ -318,18 +698,74 @@ export default function Settings() {
                       </p>
                     )}
 
-                    <Input
-                      label="Search Resources"
-                      placeholder="Search by name, URL, type..."
-                      value={resourceSearch}
-                      onChange={(event) => setResourceSearch(event.target.value)}
-                    />
+                    <div className="grid grid-cols-1 gap-2 md:grid-cols-12">
+                      <div className="md:col-span-6">
+                        <Input
+                          label={`Search Resources (${intelResources.length} loaded)`}
+                          placeholder="Search by name, URL, type..."
+                          value={resourceSearch}
+                          onChange={(event) => setResourceSearch(event.target.value)}
+                        />
+                      </div>
+                      <div className="md:col-span-2">
+                      <Select
+                        label="Filter Type"
+                        value={resourceTypeFilter}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setResourceTypeFilter(next);
+                          // Avoid accidental empty results when switching type
+                          // while another narrow filter remains active.
+                          if (next === "payload") {
+                            setResourceUpdateFilter("all");
+                          }
+                        }}
+                        options={typeFilterOptions}
+                      />
+                      </div>
+                      <div className="md:col-span-2">
+                      <Select
+                        label="Filter Target"
+                        value={resourceTargetFilter}
+                        onChange={(event) => setResourceTargetFilter(event.target.value)}
+                        options={targetFilterOptions}
+                      />
+                      </div>
+                      <div className="md:col-span-2">
+                      <Select
+                        label="Filter Update"
+                        value={resourceUpdateFilter}
+                        onChange={(event) => setResourceUpdateFilter(event.target.value)}
+                        options={updateFilterOptions}
+                      />
+                      </div>
+                    </div>
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setResourceSearch("");
+                          setResourceTypeFilter("all");
+                          setResourceTargetFilter("all");
+                          setResourceUpdateFilter("all");
+                        }}
+                      >
+                        Reset Filters
+                      </Button>
+                    </div>
 
                     <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
                       {filteredIntelResources.length === 0 ? (
                         <p className="text-xs text-text-muted">No resources found.</p>
                       ) : (
                         filteredIntelResources.map((resource) => (
+                          (() => {
+                            const canModify = resource.source_kind === "custom";
+                            const changeDisabled = !canModify || resourceSaveLoading;
+                            const removeDisabled = !canModify || resourceSaveLoading;
+                            const disabledTitle = "Built-in resource is managed by config and cannot be changed here.";
+                            return (
                           <div
                             key={`${resource.source_kind}-${resource.id}`}
                             className="rounded-md border border-border bg-surface-0/35 p-2"
@@ -342,17 +778,45 @@ export default function Settings() {
                                   {" • "}
                                   {resource.content_type || "unknown"}
                                   {" • "}
-                                  {resource.updatable ? "updatable" : "read-only"}
+                                  {formatResourceCadence(resource)}
+                                  {" • "}
+                                  Last update: {formatTimestamp(resource.intel_last_update)}
                                 </p>
                               </div>
-                              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
-                                {resource.source_kind}
-                              </span>
+                              <div className="flex items-center gap-1">
+                                <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
+                                  {resourceSourceLabel(resource)}
+                                </span>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  title={canModify ? "Edit resource" : disabledTitle}
+                                  onClick={() => startEditResource(resource)}
+                                  disabled={changeDisabled}
+                                >
+                                  <Pencil size={12} />
+                                  Change
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  title={canModify ? "Remove resource from registry and RAG data" : disabledTitle}
+                                  onClick={() => {
+                                    void handleRemoveResource(resource);
+                                  }}
+                                  disabled={removeDisabled}
+                                >
+                                  <Trash2 size={12} />
+                                  Remove
+                                </Button>
+                              </div>
                             </div>
                             <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">
                               {resource.url || "No URL"}
                             </p>
                           </div>
+                            );
+                          })()
                         ))
                       )}
                     </div>
@@ -366,92 +830,105 @@ export default function Settings() {
                       Intel Update Schedule
                     </CardTitle>
                   </CardHeader>
-                  <div className="space-y-2 text-xs text-text-secondary">
-                    <p>
-                      Intel checks cooldown every run and refreshes every
-                      {" "}
-                      <span className="font-semibold text-text-primary">{intelMeta.refresh_days}</span>
-                      {" "}
-                      day(s).
-                    </p>
-                    <p>
-                      Update window:
-                      {" "}
-                      <span className="font-semibold text-text-primary">last {intelMeta.update_days_back} days</span>
-                      {" "}
-                      • max
-                      {" "}
-                      <span className="font-semibold text-text-primary">{intelMeta.update_max_results}</span>
-                      {" "}
-                      result(s) per fetch
-                    </p>
-                    <p>
-                      Pipeline writes:
-                      {" "}
-                      <span className="font-semibold text-text-primary">
-                        {intelMeta.pipeline_outputs.join(", ")}
-                      </span>
-                    </p>
-                    <p>
-                      Last checked:
-                      {" "}
-                      <span className="font-semibold text-text-primary">
-                        {formatTimestamp(intelMeta.checked_at || null)}
-                      </span>
-                    </p>
+                  <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-4">
+                    <Select
+                      label="RAG Target Type"
+                      value={scheduleTargetType}
+                      onChange={(event) => setScheduleTargetType(event.target.value)}
+                      options={intelTargetOptions}
+                    />
+                    <Input
+                      label="Refresh Every (Days)"
+                      type="number"
+                      min={1}
+                      max={3650}
+                      value={scheduleRefreshDays}
+                      onChange={(event) => setScheduleRefreshDays(event.target.value)}
+                    />
+                    <div className="flex items-end">
+                      <Button
+                        size="sm"
+                        onClick={handleSaveSchedule}
+                        loading={scheduleSaving}
+                        className="w-full"
+                      >
+                        Save Schedule
+                      </Button>
+                    </div>
+                    <div className="flex items-end">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleForceUpdateNow}
+                        loading={forceUpdateLoading}
+                        className="w-full"
+                      >
+                        Force Update Now
+                      </Button>
+                    </div>
                   </div>
-
-                  <div className="mt-3 max-h-80 space-y-2 overflow-y-auto pr-1">
-                    {intelStatuses.length === 0 ? (
-                      <p className="text-xs text-text-muted">No Intel update records yet.</p>
-                    ) : (
-                      intelStatuses.map((status) => {
-                        const hoursRemaining = Math.ceil(status.seconds_until_next_update / 3600);
-                        const sourcePreview = status.will_update.verify_sources.slice(0, 8);
-                        return (
-                          <div
-                            key={status.target_type}
-                            className="rounded-md border border-border bg-surface-0/35 p-2"
+                  {(scheduleSaveError || scheduleSaveSuccess || forceUpdateError || forceUpdateSuccess) && (
+                    <div className="mb-3 space-y-1 text-xs">
+                      {scheduleSaveError && (
+                        <p className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-red-300">
+                          {scheduleSaveError}
+                        </p>
+                      )}
+                      {scheduleSaveSuccess && (
+                        <p className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-emerald-300">
+                          {scheduleSaveSuccess}
+                        </p>
+                      )}
+                      {forceUpdateError && (
+                        <p className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-red-300">
+                          {forceUpdateError}
+                        </p>
+                      )}
+                      {forceUpdateSuccess && (
+                        <p className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-emerald-300">
+                          {forceUpdateSuccess}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {showForceUpdatePanel && forceUpdateStatus && (
+                    <div className="mt-2 rounded-md border border-border bg-surface-0/35 p-2">
+                      <p className="text-xs font-semibold text-text-primary">
+                        Force Update Status • {formatTargetTypeLabel(forceUpdateStatus.target_type)}
+                      </p>
+                      <p className="mt-1 text-[11px] text-text-secondary">
+                        {forceUpdateStatus.status.toUpperCase()} • {Math.max(0, Math.min(100, forceUpdateStatus.progress))}%
+                      </p>
+                      <div className="mt-2 h-2 w-full overflow-hidden rounded bg-surface-0">
+                        <div
+                          className={`h-full transition-all ${
+                            forceUpdateStatus.status === "error"
+                              ? "bg-red-500/70"
+                              : forceUpdateStatus.status === "completed"
+                                ? "bg-emerald-500/70"
+                                : "bg-blue-500/70"
+                          }`}
+                          style={{ width: `${Math.max(0, Math.min(100, forceUpdateStatus.progress))}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-[11px] text-text-muted">
+                        {forceUpdateStatus.message || "Waiting..."}
+                      </p>
+                      {(forceUpdateStatus.status === "running" || forceUpdateStatus.status === "cancelling") && (
+                        <div className="mt-2 flex justify-end">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={handleCancelForceUpdate}
+                            loading={forceUpdateCancelLoading}
+                            disabled={forceUpdateStatus.status === "cancelling"}
                           >
-                            <div className="flex items-start justify-between gap-2">
-                              <div>
-                                <p className="text-sm font-semibold text-text-primary">
-                                  {formatTargetTypeLabel(status.target_type)}
-                                </p>
-                                <p className="text-[11px] text-text-muted">
-                                  Last: {formatTimestamp(status.last_update)}
-                                  {" • "}
-                                  Next: {formatTimestamp(status.next_update)}
-                                </p>
-                              </div>
-                              <span
-                                className={`rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
-                                  status.due_now
-                                    ? "border-amber-500/50 text-amber-300"
-                                    : "border-emerald-500/50 text-emerald-300"
-                                }`}
-                              >
-                                {status.due_now ? "Due Now" : `In ${hoursRemaining}h`}
-                              </span>
-                            </div>
-                            <p className="mt-1 text-[11px] text-text-secondary">
-                              Will update:
-                              {" "}
-                              {status.will_update.fetch_streams.join(", ")}
-                              {" → "}
-                              {status.will_update.embed_content_types.join(", ")}
-                            </p>
-                            <p className="mt-1 text-[11px] text-text-muted">
-                              Sources ({status.sources.length}):
-                              {" "}
-                              {sourcePreview.join(", ")}
-                              {status.will_update.verify_sources.length > sourcePreview.length ? " ..." : ""}
-                            </p>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
+                            {forceUpdateStatus.status === "cancelling" ? "Cancelling..." : "Cancel Force Update"}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </Card>
 
                 {(intelLoading || intelError) && (

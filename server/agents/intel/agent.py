@@ -76,6 +76,7 @@ class _NoOpCallback:
 def _default_stats() -> dict[str, Any]:
     return {
         "new_payloads": 0, "new_exploits": 0, "total_embedded": 0,
+        "payload_store_added": 0,
         "content_types_updated": [], "domains_updated": [],
         "update_status": "no_new_data", "rate_limited": False, "source_errors": [],
     }
@@ -110,7 +111,7 @@ def _build_deterministic_summary(pipeline_report: dict[str, Any]) -> str:
         f"Static pipeline complete for {target_type}. "
         f"update_status={stats['update_status']}. "
         f"new_payloads={stats['new_payloads']}, new_exploits={stats['new_exploits']}, "
-        f"total_embedded={stats['total_embedded']}. "
+        f"total_embedded={stats['total_embedded']}, payload_store_added={stats.get('payload_store_added', 0)}. "
         f"RAG snapshot: methods={methods}, techniques={techniques}, vulnerabilities={vulns}."
     )
 
@@ -379,15 +380,70 @@ class IntelAgent:
 
     # ── Public API ─────────────────────────────────────────────────────
 
-    async def run(self, target_type: str = "all", info: str = "") -> IntelResult:
+    async def run(
+        self,
+        target_type: str = "all",
+        info: str = "",
+        *,
+        force_update: bool = False,
+        refresh_days_override: int | None = None,
+        update_only: bool = False,
+    ) -> IntelResult:
         self._cb.on_step(f"Intel Agent starting for target_type='{target_type}'")
         await self._context.ensure_ready()
 
         # Check cooldown
         now = datetime.now(timezone.utc)
         last_update = self._state_store.get_last_update(target_type)
-        refresh_seconds = RAG_REFRESH_DAYS * 86400
-        if last_update is None or (now - last_update).total_seconds() >= refresh_seconds:
+        refresh_days = RAG_REFRESH_DAYS
+        if refresh_days_override is not None and int(refresh_days_override) > 0:
+            refresh_days = int(refresh_days_override)
+        elif self._projects_store is not None:
+            try:
+                custom_days = self._projects_store.get_intel_refresh_days(target_type)
+                if custom_days and custom_days > 0:
+                    refresh_days = custom_days
+            except Exception as exc:
+                logger.warning("intel_refresh_days_read_failed", target_type=target_type, error=str(exc))
+
+        refresh_seconds = refresh_days * 86400
+        needs_update = (
+            force_update
+            or last_update is None
+            or (now - last_update).total_seconds() >= refresh_seconds
+        )
+        if update_only:
+            if not needs_update and last_update is not None:
+                days_ago = (now - last_update).total_seconds() / 86400
+                self._cb.on_done(
+                    f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
+                )
+                return IntelResult(
+                    status="complete",
+                    summary=(
+                        f"Update-only run skipped for {target_type}; "
+                        f"data is fresh ({days_ago:.1f} days ago, interval={refresh_days}d)."
+                    ),
+                    stats=_default_stats(),
+                )
+            if force_update:
+                self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
+            self._cb.on_step("Update-only mode: running Intel update pipeline")
+            pipeline_report = await self._run_update_pipeline(target_type=target_type, info=info)
+            stats = _normalize_stats(pipeline_report.get("stats"))
+            summary = str(pipeline_report.get("summary", "")).strip()
+            if not summary:
+                summary = (
+                    f"Update-only run complete for {target_type}. "
+                    f"update_status={stats.get('update_status', 'unknown')}, "
+                    f"total_embedded={stats.get('total_embedded', 0)}."
+                )
+            self._cb.on_done("Update-only run complete")
+            return IntelResult(status="complete", summary=summary, stats=stats)
+
+        if needs_update:
+            if force_update:
+                self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
             self._cb.on_step("RAG update needed — starting background pipeline")
             task = asyncio.create_task(
                 self._run_update_pipeline(target_type=target_type, info=info),
@@ -397,7 +453,9 @@ class IntelAgent:
             task.add_done_callback(self._on_background_update_done)
         else:
             days_ago = (now - last_update).total_seconds() / 86400
-            self._cb.on_done(f"RAG is fresh (updated {days_ago:.1f} days ago) — skipping update")
+            self._cb.on_done(
+                f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
+            )
 
         # Foreground: snapshot → prefetch → format
         self._cb.on_step("Collecting RAG snapshot")
@@ -606,6 +664,12 @@ class IntelAgent:
         self._cb.on_done(f"Update: {len(trusted)}/{len(source_list)} sources verified")
 
         categories = await self._discover_categories(target_type, domain)
+        max_categories = 8
+        if len(categories) > max_categories:
+            self._cb.on_warn(
+                f"Update: limiting payload categories from {len(categories)} to {max_categories}"
+            )
+            categories = categories[:max_categories]
         self._cb.on_done(f"Update: {len(categories)} categories discovered")
 
         stats = _default_stats()
@@ -613,8 +677,17 @@ class IntelAgent:
         source_errors: list[str] = []
         stats["domains_updated"] = [domain]
         content_types_updated: set[str] = set()
+        payload_store_added = 0
         payload_candidates: list[dict[str, Any]] = []
         exploit_candidates: list[dict[str, Any]] = []
+
+        self._cb.on_step(f"Update: Syncing payload store for '{target_type}'")
+        payload_sync = await self._sync_payload_store(target_type=target_type, domain=domain)
+        payload_store_added = int(payload_sync.get("added", 0) or 0)
+        sync_errors = payload_sync.get("errors", [])
+        if isinstance(sync_errors, list):
+            source_errors.extend(str(e) for e in sync_errors if e)
+        self._cb.on_done(f"Update: payload store synced (+{payload_store_added})")
 
         if trusted:
             self._cb.on_step(f"Update: Fetching payloads ({len(categories)} categories) + exploits")
@@ -676,23 +749,70 @@ class IntelAgent:
         stats.update({
             "new_payloads": len(payload_new), "new_exploits": len(exploit_new),
             "total_embedded": payload_upserted + exploit_upserted,
+            "payload_store_added": payload_store_added,
             "content_types_updated": sorted(content_types_updated),
             "rate_limited": rate_limited, "source_errors": source_errors[:MAX_SOURCE_ERRORS],
         })
-        if stats["total_embedded"] > 0:
+        if stats["total_embedded"] > 0 or payload_store_added > 0:
             stats["update_status"] = "updated"
         elif rate_limited:
             stats["update_status"] = "rate_limited"
         elif not trusted:
             stats["update_status"] = "source_unavailable"
 
-        self._cb.on_done(f"Update: embedded={stats['total_embedded']}, status={stats['update_status']}")
+        self._cb.on_done(
+            "Update: embedded="
+            f"{stats['total_embedded']}, payload_store_added={payload_store_added}, "
+            f"status={stats['update_status']}"
+        )
 
-        summary = f"Static pipeline complete for {target_type}: update_status={stats['update_status']}, new_payloads={stats['new_payloads']}, new_exploits={stats['new_exploits']}, total_embedded={stats['total_embedded']}."
+        summary = (
+            f"Static pipeline complete for {target_type}: "
+            f"update_status={stats['update_status']}, "
+            f"new_payloads={stats['new_payloads']}, "
+            f"new_exploits={stats['new_exploits']}, "
+            f"total_embedded={stats['total_embedded']}, "
+            f"payload_store_added={payload_store_added}."
+        )
         await self._call_tool_json("notify_planner", summary=summary, updated_domains=",".join(stats["domains_updated"]), new_payload_count=stats["new_payloads"], new_exploit_count=stats["new_exploits"])
         self._state_store.set_last_update(target_type, datetime.now(timezone.utc))
 
         return {"target_type": target_type, "info": info, "verified_sources": verified, "stats": stats, "summary": summary, "domains_considered": [domain]}
+
+    async def _sync_payload_store(self, *, target_type: str, domain: str) -> dict[str, Any]:
+        from server.db.knowledge.orchestrator import KnowledgeOrchestrator
+
+        # When a specific domain is updated, also refresh shared payload sources.
+        ingest_domains: list[str | None]
+        if target_type == "all":
+            ingest_domains = [None]
+        elif domain == "shared":
+            ingest_domains = ["shared"]
+        else:
+            ingest_domains = [domain, "shared"]
+
+        added_total = 0
+        errors: list[str] = []
+        orchestrator = KnowledgeOrchestrator(payload_only=True)
+        try:
+            for ingest_domain in ingest_domains:
+                try:
+                    rows = await orchestrator.ingest_payloads(domain=ingest_domain)
+                except Exception as exc:
+                    errors.append(
+                        f"payload_store_sync({ingest_domain or 'all'}): {exc}"
+                    )
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    added_total += int(row.get("payloads_added", 0) or 0)
+                    if row.get("error"):
+                        errors.append(str(row["error"]))
+        finally:
+            await orchestrator.close()
+
+        return {"added": added_total, "errors": errors}
 
     # ── Category Discovery ─────────────────────────────────────────────
 

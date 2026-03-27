@@ -116,6 +116,30 @@ class ProjectsStore:
                 ON intel_resources (enabled);
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS intel_update_prefs (
+                    target_type TEXT PRIMARY KEY,
+                    refresh_days INTEGER NOT NULL DEFAULT 3,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_projects_intel_update_prefs_refresh_days
+                ON intel_update_prefs (refresh_days);
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS intel_hidden_builtin_resources (
+                    name TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
             cur.execute("PRAGMA table_info(intel_resources);")
             intel_columns = {str(row[1]) for row in cur.fetchall()}
             if "content_type" not in intel_columns:
@@ -152,6 +176,40 @@ class ProjectsStore:
                 CREATE INDEX IF NOT EXISTS idx_projects_scan_event_cache_project_id_id
                 ON scan_event_cache (project_id, id DESC);
                 """
+            )
+            conn.commit()
+
+    def list_hidden_builtin_intel_resources(self) -> set[str]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT name
+                FROM intel_hidden_builtin_resources;
+                """
+            )
+            rows = cur.fetchall()
+        hidden: set[str] = set()
+        for row in rows:
+            name = str(row["name"] or "").strip()
+            if name:
+                hidden.add(name.lower())
+        return hidden
+
+    def hide_builtin_intel_resource(self, name: str) -> None:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("resource name is required")
+        if len(clean_name) > 160:
+            raise ValueError("resource name is too long (max 160)")
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO intel_hidden_builtin_resources (name, created_at)
+                VALUES (?, CURRENT_TIMESTAMP);
+                """,
+                (clean_name,),
             )
             conn.commit()
 
@@ -571,6 +629,121 @@ class ProjectsStore:
             )
         return resources
 
+    def get_intel_resource(self, resource_id: str) -> dict[str, Any] | None:
+        clean_id = resource_id.strip()
+        if not clean_id:
+            return None
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, name, url, target_type, content_type, update_mode, enabled, created_at, updated_at
+                FROM intel_resources
+                WHERE id = ?
+                LIMIT 1;
+                """,
+                (clean_id,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "url": str(row["url"]),
+            "target_type": str(row["target_type"]),
+            "content_type": str(row["content_type"] or "strategies"),
+            "update_mode": str(row["update_mode"] or "every_3_days"),
+            "enabled": bool(int(row["enabled"] or 0)),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def get_intel_refresh_days(self, target_type: str) -> int | None:
+        clean_target = target_type.strip().lower()
+        if not clean_target:
+            return None
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT refresh_days
+                FROM intel_update_prefs
+                WHERE target_type = ?
+                LIMIT 1;
+                """,
+                (clean_target,),
+            )
+            row = cur.fetchone()
+            if row is None and clean_target != "all":
+                cur.execute(
+                    """
+                    SELECT refresh_days
+                    FROM intel_update_prefs
+                    WHERE target_type = 'all'
+                    LIMIT 1;
+                    """
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+        try:
+            value = int(row["refresh_days"])
+        except (TypeError, ValueError):
+            return None
+        if value < 1:
+            return None
+        return value
+
+    def set_intel_refresh_days(self, *, target_type: str, refresh_days: int) -> dict[str, Any]:
+        clean_target = target_type.strip().lower()
+        if not clean_target:
+            raise ValueError("target_type is required")
+        if len(clean_target) > 64:
+            raise ValueError("target_type is too long (max 64)")
+        if refresh_days < 1 or refresh_days > 3650:
+            raise ValueError("refresh_days must be between 1 and 3650")
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO intel_update_prefs (
+                    target_type, refresh_days, created_at, updated_at
+                )
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(target_type)
+                DO UPDATE SET
+                    refresh_days = excluded.refresh_days,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (clean_target, int(refresh_days)),
+            )
+            cur.execute(
+                """
+                SELECT target_type, refresh_days, created_at, updated_at
+                FROM intel_update_prefs
+                WHERE target_type = ?
+                LIMIT 1;
+                """,
+                (clean_target,),
+            )
+            row = cur.fetchone()
+            conn.commit()
+
+        if row is None:
+            raise ValueError("failed to save intel update preference")
+        return {
+            "target_type": str(row["target_type"]),
+            "refresh_days": int(row["refresh_days"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
     def add_intel_resource(
         self,
         *,
@@ -663,6 +836,137 @@ class ProjectsStore:
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
+
+    def update_intel_resource(
+        self,
+        resource_id: str,
+        *,
+        name: str | None = None,
+        url: str | None = None,
+        target_type: str | None = None,
+        content_type: str | None = None,
+        update_mode: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        clean_id = resource_id.strip()
+        if not clean_id:
+            raise ValueError("resource id is required")
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, name, url, target_type, content_type, update_mode, enabled
+                FROM intel_resources
+                WHERE id = ?
+                LIMIT 1;
+                """,
+                (clean_id,),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                raise LookupError("resource not found")
+
+            next_name = (name if name is not None else str(existing["name"])).strip()
+            next_url = (url if url is not None else str(existing["url"])).strip()
+            next_target_type = (target_type if target_type is not None else str(existing["target_type"])).strip().lower()
+            next_content_type = (content_type if content_type is not None else str(existing["content_type"] or "strategies")).strip().lower()
+            next_update_mode = (update_mode if update_mode is not None else str(existing["update_mode"] or "every_3_days")).strip().lower()
+            next_enabled = int(1 if (enabled if enabled is not None else bool(int(existing["enabled"] or 0))) else 0)
+
+            if not next_name:
+                raise ValueError("resource name is required")
+            if len(next_name) > 120:
+                raise ValueError("resource name is too long (max 120)")
+            if not next_target_type:
+                raise ValueError("target_type is required")
+            if len(next_target_type) > 64:
+                raise ValueError("target_type is too long (max 64)")
+            if next_content_type not in _INTEL_RESOURCE_CONTENT_TYPES:
+                raise ValueError(
+                    "content_type must be one of: "
+                    + ", ".join(sorted(_INTEL_RESOURCE_CONTENT_TYPES))
+                )
+            if next_update_mode not in _INTEL_RESOURCE_UPDATE_MODES:
+                raise ValueError(
+                    "update_mode must be one of: "
+                    + ", ".join(sorted(_INTEL_RESOURCE_UPDATE_MODES))
+                )
+
+            parsed = urlsplit(next_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("resource URL must be a valid http(s) URL")
+
+            try:
+                cur.execute(
+                    """
+                    UPDATE intel_resources
+                    SET
+                        name = ?,
+                        url = ?,
+                        target_type = ?,
+                        content_type = ?,
+                        update_mode = ?,
+                        enabled = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                    """,
+                    (
+                        next_name,
+                        next_url,
+                        next_target_type,
+                        next_content_type,
+                        next_update_mode,
+                        next_enabled,
+                        clean_id,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("a resource with the same name and target type already exists") from exc
+
+            cur.execute(
+                """
+                SELECT id, name, url, target_type, content_type, update_mode, enabled, created_at, updated_at
+                FROM intel_resources
+                WHERE id = ?
+                LIMIT 1;
+                """,
+                (clean_id,),
+            )
+            row = cur.fetchone()
+            conn.commit()
+
+        if row is None:
+            raise LookupError("resource not found")
+
+        return {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "url": str(row["url"]),
+            "target_type": str(row["target_type"]),
+            "content_type": str(row["content_type"] or "strategies"),
+            "update_mode": str(row["update_mode"] or "every_3_days"),
+            "enabled": bool(int(row["enabled"] or 0)),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def delete_intel_resource(self, resource_id: str) -> bool:
+        clean_id = resource_id.strip()
+        if not clean_id:
+            return False
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM intel_resources
+                WHERE id = ?;
+                """,
+                (clean_id,),
+            )
+            deleted = cur.rowcount > 0
+            conn.commit()
+        return deleted
 
     def get_intel_resource_by_name(
         self,

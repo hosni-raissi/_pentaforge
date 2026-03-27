@@ -606,50 +606,53 @@ class KnowledgeOrchestrator:
         from server.db.knowledge.storage.payload_store import PayloadStore
 
         store = PayloadStore()
-        sources = PAYLOAD_SOURCES
-        if domain:
-            sources = [s for s in sources if s.domain == domain]
+        try:
+            sources = PAYLOAD_SOURCES
+            if domain:
+                sources = [s for s in sources if s.domain == domain]
 
-        if not sources:
-            configured_domains = sorted({s.domain for s in PAYLOAD_SOURCES})
-            logger.warning(
-                "no_payload_sources",
-                domain=domain,
-                configured_domains=configured_domains,
-            )
-            return [{
-                "name": "[no-payload-sources]",
-                "domain": domain or "all",
-                "category": "-",
-                "payloads_added": 0,
-                "error": (
-                    f"No payload sources configured for domain '{domain}'. "
-                    f"Configured payload domains: {', '.join(configured_domains) or 'none'}."
-                ),
-            }]
+            if not sources:
+                configured_domains = sorted({s.domain for s in PAYLOAD_SOURCES})
+                logger.warning(
+                    "no_payload_sources",
+                    domain=domain,
+                    configured_domains=configured_domains,
+                )
+                return [{
+                    "name": "[no-payload-sources]",
+                    "domain": domain or "all",
+                    "category": "-",
+                    "payloads_added": 0,
+                    "error": (
+                        f"No payload sources configured for domain '{domain}'. "
+                        f"Configured payload domains: {', '.join(configured_domains) or 'none'}."
+                    ),
+                }]
 
-        # Pre-clone shared repos
-        await self._pre_clone_payload_repos(sources)
+            # Pre-clone shared repos
+            await self._pre_clone_payload_repos(sources)
 
-        results: list[dict[str, Any]] = []
-        for src in sources:
-            try:
-                count = await self._ingest_single_payload(src, store)
-                results.append({
-                    "name": src.name, "domain": src.domain,
-                    "category": src.category, "payloads_added": count,
-                })
-            except Exception as exc:
-                logger.error("payload_ingest_error", source=src.name, error=str(exc))
-                results.append({
-                    "name": src.name, "domain": src.domain,
-                    "category": src.category, "payloads_added": 0,
-                    "error": str(exc),
-                })
+            results: list[dict[str, Any]] = []
+            for src in sources:
+                try:
+                    count = await self._ingest_single_payload(src, store)
+                    results.append({
+                        "name": src.name, "domain": src.domain,
+                        "category": src.category, "payloads_added": count,
+                    })
+                except Exception as exc:
+                    logger.error("payload_ingest_error", source=src.name, error=str(exc))
+                    results.append({
+                        "name": src.name, "domain": src.domain,
+                        "category": src.category, "payloads_added": 0,
+                        "error": str(exc),
+                    })
 
-        total = sum(r["payloads_added"] for r in results)
-        logger.info("payload_ingestion_complete", sources=len(results), total_payloads=total)
-        return results
+            total = sum(r["payloads_added"] for r in results)
+            logger.info("payload_ingestion_complete", sources=len(results), total_payloads=total)
+            return results
+        finally:
+            store.close()
 
     async def _pre_clone_payload_repos(
         self, sources: list[PayloadSourceConfig]

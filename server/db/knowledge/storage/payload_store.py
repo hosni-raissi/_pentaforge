@@ -32,8 +32,10 @@ class PayloadStore:
         self._base = base_dir or (settings.data_dir / "payloads")
         self._base.mkdir(parents=True, exist_ok=True)
         self._db_path = self._base / "payloads.db"
-        self._conn = sqlite3.connect(self._db_path)
+        self._conn = sqlite3.connect(self._db_path, timeout=30)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA busy_timeout=30000;")
         self._ensure_schema()
         self._migrate_json_payloads()
 
@@ -158,8 +160,8 @@ class PayloadStore:
             )
             added += cur.rowcount
 
+        self._conn.commit()
         if added:
-            self._conn.commit()
             logger.info("payloads_added", domain=domain, category=category, count=added)
         return added
 
@@ -225,6 +227,24 @@ class PayloadStore:
             stats.setdefault(domain, {})[category] = count
             total += count
         return {"payloads": stats, "total": total, "db_path": str(self._db_path)}
+
+    def delete_by_source(self, source_name: str) -> int:
+        """Delete payload rows by source name. Returns deleted row count."""
+        clean_source = str(source_name or "").strip()
+        if not clean_source:
+            return 0
+        cur = self._conn.execute(
+            """
+            DELETE FROM payloads
+            WHERE source = ?;
+            """,
+            (clean_source,),
+        )
+        deleted = int(cur.rowcount or 0)
+        self._conn.commit()
+        if deleted > 0:
+            logger.info("payloads_deleted_by_source", source=clean_source, count=deleted)
+        return deleted
 
     def close(self) -> None:
         """Close the SQLite connection explicitly when needed."""
