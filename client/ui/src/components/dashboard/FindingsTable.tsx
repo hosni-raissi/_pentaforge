@@ -9,6 +9,14 @@ interface FindingsTableProps {
 }
 
 export function FindingsTable({ findings, limit = 10 }: FindingsTableProps) {
+  function formatFindingTime(value: string): string {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return '--:--';
+    }
+    return format(parsed, 'HH:mm');
+  }
+
   const sorted = [...findings].sort((a, b) => {
     const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
     return (order[a.severity] ?? 5) - (order[b.severity] ?? 5);
@@ -40,7 +48,7 @@ export function FindingsTable({ findings, limit = 10 }: FindingsTableProps) {
                 <td className="px-4 py-2 text-text-primary font-medium max-w-[200px] truncate">{f.title}</td>
                 <td className="px-4 py-2 text-text-muted font-mono">{f.target}</td>
                 <td className="px-4 py-2"><Badge variant={f.status === 'verified' ? 'completed' : 'default'}>{f.status}</Badge></td>
-                <td className="px-4 py-2 text-text-muted">{format(new Date(f.timestamp), 'HH:mm')}</td>
+                <td className="px-4 py-2 text-text-muted">{formatFindingTime(f.timestamp)}</td>
               </tr>
             ))}
             {displayed.length === 0 && (

@@ -3,8 +3,7 @@ import { clsx } from "clsx";
 import {
   LayoutDashboard,
   FolderOpen,
-  Radar,
-  Bug,
+  Share2,
   FileText,
   Settings,
   Shield
@@ -16,8 +15,7 @@ import { Badge } from "../ui/Badge";
 const navItems = [
   { to: "/projects", icon: FolderOpen, label: "Projects" },
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/scan", icon: Radar, label: "Scan" },
-  { to: "/findings", icon: Bug, label: "Findings" },
+  { to: "/client-share", icon: Share2, label: "Client Share" },
   { to: "/reports", icon: FileText, label: "Reports" },
   { to: "/settings", icon: Settings, label: "Settings" }
 ];

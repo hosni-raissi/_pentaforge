@@ -9,11 +9,9 @@ export function Titlebar() {
   const location = useLocation();
   const normalizedPath = location.pathname.replace(/\/+$/, '') || '/';
   const routeLabel = `pentaforge${normalizedPath}`;
-  const appWindow = getCurrentWindow();
-
   const handleMinimize = async () => {
     try {
-      await appWindow.minimize();
+      await getCurrentWindow().minimize();
     } catch {
       // no-op outside Tauri runtime
     }
@@ -21,6 +19,7 @@ export function Titlebar() {
 
   const handleToggleMaximize = async () => {
     try {
+      const appWindow = getCurrentWindow();
       const isMaximized = await appWindow.isMaximized();
       if (isMaximized) {
         await appWindow.unmaximize();
@@ -34,7 +33,7 @@ export function Titlebar() {
 
   const handleClose = async () => {
     try {
-      await appWindow.close();
+      await getCurrentWindow().close();
     } catch {
       // no-op outside Tauri runtime
     }

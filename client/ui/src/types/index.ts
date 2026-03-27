@@ -20,6 +20,24 @@ export interface Project {
   agents: AgentInfo[];
   phases: PhaseInfo[];
   scanProgress: number;
+  lastScan?: {
+    scanId?: string;
+    status?: string;
+    startedAt?: string;
+    finishedAt?: string;
+    error?: string;
+    result?: {
+      target?: string;
+      targetType?: string;
+      intel?: {
+        status?: string;
+        summary?: string;
+        stats?: Record<string, unknown>;
+      };
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
 }
 
 export interface Finding {

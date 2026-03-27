@@ -28,6 +28,43 @@ export interface ProjectShareLinkResponse {
   password_protected: boolean;
 }
 
+export interface StartScanResponse {
+  ok: boolean;
+  scan_id: string;
+  project_id: string;
+  status: "running" | "completed" | "error" | string;
+  started_at: string | null;
+  updated_at: string | null;
+  finished_at: string | null;
+  error: string;
+  already_running: boolean;
+}
+
+export interface StartScanRequest {
+  projectId: string;
+  target?: string;
+  targetConfig?: Record<string, string>;
+  scope?: string;
+  info?: string;
+  resume?: boolean;
+  force?: boolean;
+}
+
+export interface StopScanRequest {
+  projectId: string;
+  mode: "pause" | "cancel";
+}
+
+export interface ScanEventPayload {
+  event: string;
+  project_id: string;
+  scan_id: string;
+  level: "info" | "success" | "warn" | "error";
+  message: string;
+  timestamp: string;
+  data: Record<string, unknown>;
+}
+
 export interface IntelTargetTypeOption {
   value: string;
   label: string;
@@ -84,9 +121,85 @@ export interface IntelUpdateStatusPayload {
   statuses: IntelUpdateStatusRow[];
 }
 
+export interface AIAssistRequest {
+  prompt: string;
+  projectId?: string;
+  target?: string;
+  targetType?: string;
+  context?: string;
+}
+
+export interface AIAssistResponse {
+  ok: boolean;
+  blocked: boolean;
+  route: "planner" | "reporting" | "blocked";
+  reply: string;
+  classification: {
+    reason: string;
+    confidence: number;
+    classifier: string;
+    detections: string[];
+  };
+}
+
 export function supportsDesktopProjectBridge(): boolean {
   const { serverUrl } = useConfig.getState();
   return serverUrl.trim().length > 0;
+}
+
+function toValidTimestamp(value: unknown, fallback: string): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return fallback;
+  }
+  return value;
+}
+
+function normalizeProjectRow(value: unknown): Project | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const row = value as Record<string, unknown>;
+  if (typeof row.id !== "string" || typeof row.name !== "string") {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const createdAt = toValidTimestamp(row.createdAt, now);
+  const updatedAt = toValidTimestamp(row.updatedAt, createdAt);
+  const status = (
+    row.status === "idle"
+    || row.status === "running"
+    || row.status === "paused"
+    || row.status === "completed"
+    || row.status === "error"
+  ) ? row.status : "idle";
+
+  return {
+    id: row.id,
+    name: row.name,
+    target: typeof row.target === "string" ? row.target : "",
+    targetType: typeof row.targetType === "string" ? row.targetType : "web_app",
+    targetConfig: (
+      typeof row.targetConfig === "object" && row.targetConfig !== null
+    ) ? (row.targetConfig as Record<string, string>) : undefined,
+    status,
+    createdAt,
+    updatedAt,
+    description: typeof row.description === "string" ? row.description : undefined,
+    findings: Array.isArray(row.findings) ? (row.findings as Project["findings"]) : [],
+    agents: Array.isArray(row.agents) ? (row.agents as Project["agents"]) : [],
+    phases: Array.isArray(row.phases) ? (row.phases as Project["phases"]) : [],
+    scanProgress: (
+      typeof row.scanProgress === "number" && Number.isFinite(row.scanProgress)
+    ) ? row.scanProgress : 0,
+    lastScan: (
+      typeof row.lastScan === "object" && row.lastScan !== null
+    ) ? (row.lastScan as Project["lastScan"]) : undefined,
+  };
 }
 
 function apiBaseUrl(): string {
@@ -107,12 +220,16 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 8000);
   try {
+    const headers = new Headers(init?.headers ?? undefined);
+    const hasBody = init?.body !== undefined && init?.body !== null;
+    if (hasBody && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+
     const response = await fetch(`${apiBaseUrl()}${path}`, {
       ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(init?.headers ?? {}),
-      },
+      credentials: "include",
+      headers,
       signal: controller.signal,
     });
 
@@ -137,13 +254,9 @@ export async function listProjectsFromDesktop(): Promise<Project[]> {
     return [];
   }
 
-  return rows.filter((row): row is Project => {
-    if (typeof row !== "object" || row === null) {
-      return false;
-    }
-    const candidate = row as Record<string, unknown>;
-    return typeof candidate.id === "string" && typeof candidate.name === "string";
-  });
+  return rows
+    .map((row) => normalizeProjectRow(row))
+    .filter((row): row is Project => row !== null);
 }
 
 export async function saveProjectToDesktop(project: Project): Promise<void> {
@@ -163,6 +276,137 @@ export async function deleteProjectFromDesktop(projectId: string): Promise<void>
   await requestJson(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
   });
+}
+
+export async function startProjectScanFromDesktop(
+  request: StartScanRequest,
+): Promise<StartScanResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<StartScanResponse>("/api/scans/start", {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: request.projectId,
+      target: request.target ?? "",
+      target_config: request.targetConfig ?? {},
+      scope: request.scope ?? "",
+      info: request.info ?? "",
+      resume: request.resume ?? false,
+      force: request.force ?? false,
+    }),
+  });
+}
+
+export async function stopProjectScanFromDesktop(
+  request: StopScanRequest,
+): Promise<{ ok: boolean; status?: string; project_id?: string; scan_id?: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson("/api/scans/stop", {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: request.projectId,
+      mode: request.mode,
+    }),
+  });
+}
+
+export async function clearProjectScanEventsCacheFromDesktop(projectId: string): Promise<void> {
+  if (!supportsDesktopProjectBridge()) {
+    return;
+  }
+  await requestJson(`/api/scans/${encodeURIComponent(projectId)}/events/clear`, {
+    method: "POST",
+  });
+}
+
+function parseScanEventPayload(value: unknown): ScanEventPayload | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.event !== "string"
+    || typeof value.project_id !== "string"
+    || typeof value.scan_id !== "string"
+    || typeof value.message !== "string"
+    || typeof value.timestamp !== "string"
+    || !isRecord(value.data)
+  ) {
+    return null;
+  }
+  const level = value.level;
+  if (level !== "info" && level !== "success" && level !== "warn" && level !== "error") {
+    return null;
+  }
+  return {
+    event: value.event,
+    project_id: value.project_id,
+    scan_id: value.scan_id,
+    level,
+    message: value.message,
+    timestamp: value.timestamp,
+    data: value.data,
+  };
+}
+
+export function streamProjectScanEvents(
+  projectId: string,
+  handlers: {
+    onEvent: (event: ScanEventPayload) => void;
+    onError?: (error: Error) => void;
+  },
+): () => void {
+  if (!supportsDesktopProjectBridge() || typeof window === "undefined") {
+    return () => {};
+  }
+
+  const url = `${apiBaseUrl()}/api/scans/${encodeURIComponent(projectId)}/events`;
+  const source = new EventSource(url, { withCredentials: true });
+
+  const onEventMessage = (raw: MessageEvent<string>) => {
+    try {
+      const parsed = JSON.parse(raw.data);
+      const payload = parseScanEventPayload(parsed);
+      if (payload) {
+        handlers.onEvent(payload);
+      }
+    } catch {
+      // Ignore malformed stream events.
+    }
+  };
+
+  const onError = () => {
+    handlers.onError?.(new Error("Scan event stream disconnected"));
+  };
+
+  source.addEventListener("scan_event", onEventMessage as EventListener);
+  source.onerror = onError;
+
+  return () => {
+    source.removeEventListener("scan_event", onEventMessage as EventListener);
+    source.onerror = null;
+    source.close();
+  };
+}
+
+export async function listProjectScanEventsFromDesktop(
+  projectId: string,
+  limit: number = 180,
+): Promise<ScanEventPayload[]> {
+  if (!supportsDesktopProjectBridge()) {
+    return [];
+  }
+
+  const safeLimit = Math.max(1, Math.min(2000, Math.floor(limit)));
+  const payload = await requestJson<{ events?: unknown[] }>(
+    `/api/scans/${encodeURIComponent(projectId)}/events/recent?limit=${safeLimit}`,
+  );
+  const rows = Array.isArray(payload.events) ? payload.events : [];
+  return rows
+    .map((row) => parseScanEventPayload(row))
+    .filter((row): row is ScanEventPayload => row !== null);
 }
 
 export async function listProjectTargetTypesFromDesktop(): Promise<ProjectTargetTypeOption[]> {
@@ -398,4 +642,23 @@ export async function listIntelUpdateStatusFromDesktop(
       : ["attack_types", "exploits"],
     statuses,
   };
+}
+
+export async function askAIAssistFromDesktop(
+  request: AIAssistRequest,
+): Promise<AIAssistResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+
+  return await requestJson<AIAssistResponse>("/api/ai/assist", {
+    method: "POST",
+    body: JSON.stringify({
+      prompt: request.prompt,
+      project_id: request.projectId ?? "",
+      target: request.target ?? "",
+      target_type: request.targetType ?? "",
+      context: request.context ?? "",
+    }),
+  });
 }

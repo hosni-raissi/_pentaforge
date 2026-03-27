@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Play, Square, FolderOpen, Share2, Copy } from 'lucide-react';
+import { Plus, Trash2, Play, Square, FolderOpen, Share2, RefreshCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -8,17 +8,14 @@ import { Badge } from '../components/ui/Badge';
 import { Dialog } from '../components/ui/Dialog';
 import { Input } from '../components/ui/Input';
 import { Select } from '../components/ui/Select';
-import { Toggle } from '../components/ui/Toggle';
 import { useProjects } from '../stores/projects';
 import { format } from 'date-fns';
 import type { Project } from '../types';
 import {
-  createProjectShareLinkFromDesktop,
   listProjectTargetFieldsFromDesktop,
   listProjectTargetTypesFromDesktop,
   type ProjectTargetField,
   type ProjectTargetTypeOption,
-  type ProjectShareLinkResponse,
 } from '../lib/projectBridge';
 
 const FALLBACK_TARGET_TYPES: ProjectTargetTypeOption[] = [
@@ -56,7 +53,17 @@ const PRIMARY_TARGET_KEYS = [
 
 export default function Projects() {
   const navigate = useNavigate();
-  const { projects, addProject, removeProject, setActive, setRunning, runningProjectId } = useProjects();
+  const {
+    projects,
+    addProject,
+    removeProject,
+    setActive,
+    setRunning,
+    runningProjectId,
+    startingProjectId,
+    stopScan,
+    hydrateFromDatabase,
+  } = useProjects();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState({ name: '', targetType: '', description: '' });
   const [targetTypes, setTargetTypes] = useState<ProjectTargetTypeOption[]>([]);
@@ -67,15 +74,17 @@ export default function Projects() {
   const [typesError, setTypesError] = useState<string>('');
   const [fieldsError, setFieldsError] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState('');
-  const [shareDialogOpen, setShareDialogOpen] = useState(false);
-  const [shareProject, setShareProject] = useState<Project | null>(null);
-  const [shareExpiresHours, setShareExpiresHours] = useState('24');
-  const [sharePassword, setSharePassword] = useState('');
-  const [shareOneTime, setShareOneTime] = useState(false);
-  const [shareResult, setShareResult] = useState<ProjectShareLinkResponse | null>(null);
-  const [shareError, setShareError] = useState('');
-  const [shareBusy, setShareBusy] = useState(false);
-  const [copyDone, setCopyDone] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
+  const [stopProjectId, setStopProjectId] = useState<string | null>(null);
+
+  function formatShortDate(value: string): string {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return '--';
+    }
+    return format(parsed, 'MMM d');
+  }
 
   useEffect(() => {
     if (!dialogOpen) {
@@ -188,6 +197,11 @@ export default function Projects() {
   }, [projects, searchTerm]);
 
   function handleCreate() {
+    if (creatingProject) {
+      return;
+    }
+    setCreatingProject(true);
+
     const cleanedTargetInfo = Object.fromEntries(
       Object.entries(targetInfo).filter(([, value]) => value.trim().length > 0),
     );
@@ -195,7 +209,7 @@ export default function Projects() {
     const primaryTarget =
       PRIMARY_TARGET_KEYS.map((key) => cleanedTargetInfo[key]).find((value) => typeof value === 'string' && value.length > 0)
       || targetFields.map((field) => cleanedTargetInfo[field.key]).find((value) => typeof value === 'string' && value.length > 0)
-      || form.targetType;
+      || '';
 
     const project: Project = {
       id: crypto.randomUUID(),
@@ -234,6 +248,7 @@ export default function Projects() {
     });
     setTargetInfo({});
     navigate('/dashboard');
+    setCreatingProject(false);
   }
 
   function openProject(id: string) {
@@ -241,67 +256,9 @@ export default function Projects() {
     navigate('/dashboard');
   }
 
-  function openShareDialog(project: Project) {
-    setShareProject(project);
-    setShareDialogOpen(true);
-    setShareExpiresHours('24');
-    setSharePassword('');
-    setShareOneTime(false);
-    setShareResult(null);
-    setShareError('');
-    setCopyDone(false);
-  }
-
-  function closeShareDialog() {
-    setShareDialogOpen(false);
-    setShareProject(null);
-    setShareResult(null);
-    setShareError('');
-    setShareBusy(false);
-    setCopyDone(false);
-  }
-
-  async function generateShareLink() {
-    if (!shareProject) {
-      return;
-    }
-
-    const expiresHours = Number(shareExpiresHours);
-    if (!Number.isFinite(expiresHours) || expiresHours < 1 || expiresHours > 168) {
-      setShareError('Expiry must be between 1 and 168 hours.');
-      return;
-    }
-
-    const password = sharePassword.trim();
-    if (password && password.length < 6) {
-      setShareError('Password must be at least 6 characters.');
-      return;
-    }
-
-    setShareBusy(true);
-    setShareError('');
-    setCopyDone(false);
-    try {
-      const result = await createProjectShareLinkFromDesktop(shareProject.id, {
-        expires_hours: expiresHours,
-        password: password || undefined,
-        one_time: shareOneTime,
-      });
-      setShareResult(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to generate share link.';
-      setShareError(message);
-    } finally {
-      setShareBusy(false);
-    }
-  }
-
-  async function copyShareLink() {
-    if (!shareResult) {
-      return;
-    }
-    await navigator.clipboard.writeText(shareResult.access_url);
-    setCopyDone(true);
+  function openClientShare(projectId: string) {
+    setActive(projectId);
+    navigate('/client-share');
   }
 
   return (
@@ -320,9 +277,20 @@ export default function Projects() {
             engagement{projects.length !== 1 ? 's' : ''}
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} size="sm">
-          <Plus size={14} /> New Project
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => hydrateFromDatabase()}
+            title="Reload projects from server"
+          >
+            <RefreshCcw size={14} />
+            Reload
+          </Button>
+          <Button onClick={() => setDialogOpen(true)} size="sm">
+            <Plus size={14} /> New Project
+          </Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-2">
@@ -382,29 +350,71 @@ export default function Projects() {
 
                   <div className="flex items-center gap-2 shrink-0 ml-4">
                     <Badge variant={project.status} dot>{project.status}</Badge>
+                    {startingProjectId === project.id && (
+                      <span className="text-[10px] text-text-muted">starting...</span>
+                    )}
                     <span className="text-[10px] text-text-muted w-16 text-right">
-                      {format(new Date(project.updatedAt), 'MMM d')}
+                      {formatShortDate(project.updatedAt)}
                     </span>
                     <div className="flex items-center gap-1 ml-2" onClick={(e) => e.stopPropagation()}>
-                      {project.status !== 'running' && (
-                        <Button
-                          variant="ghost" size="sm"
-                          onClick={() => setRunning(project.id)}
-                          disabled={!!runningProjectId && runningProjectId !== project.id}
-                          title="Start scan"
-                        >
-                          <Play size={12} />
-                        </Button>
-                      )}
-                      {project.status === 'running' && (
-                        <Button variant="ghost" size="sm" onClick={() => setRunning(null)} title="Stop scan">
-                          <Square size={12} />
-                        </Button>
-                      )}
+                      {(() => {
+                        const isStartingThisProject = startingProjectId === project.id;
+                        const anotherProjectBusy = (
+                          (!!runningProjectId && runningProjectId !== project.id)
+                          || (!!startingProjectId && startingProjectId !== project.id)
+                        );
+                        const canStartProject = !anotherProjectBusy && !isStartingThisProject;
+
+                        return (
+                          <>
+                            {project.status !== 'running' && (
+                              <Button
+                                variant="ghost" size="sm"
+                                onClick={() => {
+                                  if (project.status === 'completed') {
+                                    const confirmed = window.confirm('This scan already completed. Start a new scan and clear previous results?');
+                                    if (!confirmed) {
+                                      return;
+                                    }
+                                    setRunning(project.id, { triggerScan: true, force: true });
+                                    return;
+                                  }
+                                  if (project.status === 'paused') {
+                                    const confirmed = window.confirm('Resume will start a new scan and keep previous history visible. Continue?');
+                                    if (!confirmed) {
+                                      return;
+                                    }
+                                    setRunning(project.id, { triggerScan: true, resume: true });
+                                    return;
+                                  }
+                                  setRunning(project.id, { triggerScan: true });
+                                }}
+                                disabled={!canStartProject}
+                                title={!canStartProject ? 'Another scan is already running' : 'Start scan'}
+                              >
+                                <Play size={12} />
+                              </Button>
+                            )}
+                            {project.status === 'running' && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setStopProjectId(project.id);
+                                  setStopDialogOpen(true);
+                                }}
+                                title="Stop scan"
+                              >
+                                <Square size={12} />
+                              </Button>
+                            )}
+                          </>
+                        );
+                      })()}
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => openShareDialog(project)}
+                        onClick={() => openClientShare(project.id)}
                         title="Share scan result"
                       >
                         <Share2 size={12} />
@@ -421,78 +431,16 @@ export default function Projects() {
         )}
       </AnimatePresence>
 
-      <Dialog
-        open={shareDialogOpen}
-        onClose={closeShareDialog}
-        title={shareProject ? `Share ${shareProject.name}` : 'Share Project'}
-        description="Create a secure expiring link for your client."
-        width="max-w-xl"
-      >
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Input
-              label="Expires In (hours)"
-              type="number"
-              min={1}
-              max={168}
-              value={shareExpiresHours}
-              onChange={(event) => setShareExpiresHours(event.target.value)}
-            />
-            <Input
-              label="Password (optional)"
-              type="password"
-              value={sharePassword}
-              onChange={(event) => setSharePassword(event.target.value)}
-              placeholder="Minimum 6 characters"
-            />
-          </div>
-          <Toggle
-            checked={shareOneTime}
-            onChange={setShareOneTime}
-            label="One-time link (revokes after first successful view)"
-          />
-          <p className="text-[11px] text-text-muted">
-            Shared payload excludes raw target credentials/config fields.
-          </p>
-
-          {shareError && (
-            <p className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
-              {shareError}
-            </p>
-          )}
-
-          {shareResult && (
-            <div className="space-y-2 rounded-md border border-border bg-surface-0/35 p-3">
-              <Input label="Share Link" value={shareResult.access_url} readOnly />
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
-                <span>Expires: {new Date(shareResult.expires_at).toLocaleString()}</span>
-                <span>•</span>
-                <span>{shareResult.password_protected ? 'Password protected' : 'No password'}</span>
-                <span>•</span>
-                <span>{shareResult.one_time ? 'One-time' : 'Multi-use'}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button size="sm" variant="secondary" onClick={copyShareLink}>
-                  <Copy size={12} /> Copy Link
-                </Button>
-                {copyDone && <span className="text-[11px] text-emerald-400">Copied</span>}
-              </div>
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" size="sm" onClick={closeShareDialog}>
-              Close
-            </Button>
-            <Button size="sm" onClick={generateShareLink} loading={shareBusy} disabled={!shareProject}>
-              Generate Secure Link
-            </Button>
-          </div>
-        </div>
-      </Dialog>
-
       {/* New Project Dialog */}
-      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} title="New Project" width="max-w-3xl">
+      <Dialog
+        open={dialogOpen}
+        onClose={() => {
+          setDialogOpen(false);
+          setCreatingProject(false);
+        }}
+        title="New Project"
+        width="max-w-3xl"
+      >
         <div className="space-y-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <Input
@@ -609,13 +557,83 @@ export default function Projects() {
             onChange={(e) => setForm({ ...form, description: e.target.value })}
           />
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" size="sm" onClick={() => setDialogOpen(false)}>Cancel</Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setDialogOpen(false);
+                setCreatingProject(false);
+              }}
+            >
+              Cancel
+            </Button>
             <Button
               size="sm"
-              onClick={handleCreate}
-              disabled={!form.name.trim() || !form.targetType || missingRequiredField || typesLoading || fieldsLoading}
+              loading={creatingProject}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                handleCreate();
+              }}
+              disabled={
+                creatingProject
+                || !form.name.trim()
+                || !form.targetType
+                || missingRequiredField
+                || typesLoading
+                || fieldsLoading
+              }
             >
               Create
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={stopDialogOpen}
+        onClose={() => setStopDialogOpen(false)}
+        title="Stop Scan"
+        description="Choose whether to pause or cancel the current scan."
+      >
+        <div className="space-y-3 text-xs text-text-secondary">
+          <p>
+            Pause will keep current logs and results so you can review them. Cancel will clear logs,
+            agent results, and reset status to idle.
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setStopDialogOpen(false)}
+            >
+              Back
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                if (!stopProjectId) {
+                  return;
+                }
+                setStopDialogOpen(false);
+                void stopScan(stopProjectId, 'pause');
+              }}
+            >
+              Pause Scan
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => {
+                if (!stopProjectId) {
+                  return;
+                }
+                setStopDialogOpen(false);
+                void stopScan(stopProjectId, 'cancel');
+              }}
+            >
+              Cancel Scan
             </Button>
           </div>
         </div>

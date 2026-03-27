@@ -1,13 +1,16 @@
 import { useMemo, useState } from 'react';
 import { Bot, SendHorizontal, Sparkles } from 'lucide-react';
 
+import { askAIAssistFromDesktop } from '@/lib/projectBridge';
 import type { AgentInfo } from '../../types';
 import { Button } from '../ui/Button';
 import { Card, CardHeader, CardTitle } from '../ui/Card';
 
 interface AIPromptPanelProps {
+  projectId: string;
   projectName: string;
   target: string;
+  targetType: string;
   agents: AgentInfo[];
 }
 
@@ -23,7 +26,13 @@ const quickPrompts = [
   'Show highest risk findings',
 ];
 
-export function AIPromptPanel({ projectName, target, agents }: AIPromptPanelProps) {
+export function AIPromptPanel({
+  projectId,
+  projectName,
+  target,
+  targetType,
+  agents,
+}: AIPromptPanelProps) {
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -33,20 +42,21 @@ export function AIPromptPanel({ projectName, target, agents }: AIPromptPanelProp
       text: `AI Copilot online for ${projectName}. Ask anything about ${target}.`,
     },
   ]);
+  const hasConversationStarted = messages.some((message) => message.role === 'user');
 
   const runningAgent = useMemo(
     () => agents.find((agent) => agent.state === 'running'),
     [agents]
   );
 
-  const buildReply = () => {
+  const buildFallbackReply = () => {
     if (runningAgent) {
       return `Current active agent is ${runningAgent.name}. Task: ${runningAgent.currentTask ?? 'in progress'}.`;
     }
-    return 'No agent is actively running right now. You can start scan flow from Scan Control.';
+    return 'No agent is actively running right now. You can start a scan from the dashboard header.';
   };
 
-  const sendPrompt = (text: string) => {
+  const sendPrompt = async (text: string) => {
     const clean = text.trim();
     if (!clean || sending) return;
 
@@ -59,25 +69,47 @@ export function AIPromptPanel({ projectName, target, agents }: AIPromptPanelProp
     setPrompt('');
     setSending(true);
 
-    window.setTimeout(() => {
+    try {
+      const context = agents
+        .map((agent) => `${agent.name}:${agent.state}:${agent.currentTask ?? ''}`)
+        .join(' | ');
+      const response = await askAIAssistFromDesktop({
+        prompt: clean,
+        projectId,
+        target,
+        targetType,
+        context,
+      });
+      const routeLabel =
+        response.route === 'planner'
+          ? 'Planner'
+          : response.route === 'reporting'
+            ? 'Reporting'
+            : 'Guard';
+      const decisionLine = `[${routeLabel}] confidence ${Math.round((response.classification.confidence ?? 0) * 100)}%`;
       const aiMessage: ChatMessage = {
         id: `a-${Date.now()}`,
         role: 'assistant',
-        text: buildReply(),
+        text: `${decisionLine}\n${response.reply}`,
       };
       setMessages((prev) => [...prev, aiMessage]);
+    } catch {
+      const aiMessage: ChatMessage = {
+        id: `a-${Date.now()}`,
+        role: 'assistant',
+        text: `${buildFallbackReply()}\n(backend AI assist unavailable, fallback mode)`,
+      };
+      setMessages((prev) => [...prev, aiMessage]);
+    } finally {
       setSending(false);
-    }, 450);
+    }
   };
 
   return (
-    <Card className="flex h-[340px] flex-col">
+    <Card className="flex h-[420px] flex-col">
       <CardHeader className="mb-2">
         <div>
           <CardTitle>Interact with AI</CardTitle>
-          <p className="mt-1 text-xs text-text-secondary">
-            Prompt the copilot for next steps, summaries, and actions.
-          </p>
         </div>
         <Sparkles size={14} className="text-pf-400" />
       </CardHeader>
@@ -103,20 +135,22 @@ export function AIPromptPanel({ projectName, target, agents }: AIPromptPanelProp
         ))}
       </div>
 
-      <div className="mb-2 flex flex-wrap gap-1.5">
-        {quickPrompts.map((quick) => (
-          <Button
-            key={quick}
-            variant="secondary"
-            size="xs"
-            type="button"
-            onClick={() => sendPrompt(quick)}
-            disabled={sending}
-          >
-            {quick}
-          </Button>
-        ))}
-      </div>
+      {!hasConversationStarted && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {quickPrompts.map((quick) => (
+            <Button
+              key={quick}
+              variant="secondary"
+              size="xs"
+              type="button"
+              onClick={() => void sendPrompt(quick)}
+              disabled={sending}
+            >
+              {quick}
+            </Button>
+          ))}
+        </div>
+      )}
 
       <div className="flex items-end gap-2">
         <textarea
@@ -128,7 +162,7 @@ export function AIPromptPanel({ projectName, target, agents }: AIPromptPanelProp
         />
         <Button
           type="button"
-          onClick={() => sendPrompt(prompt)}
+          onClick={() => void sendPrompt(prompt)}
           disabled={sending || !prompt.trim()}
           loading={sending}
           size="sm"

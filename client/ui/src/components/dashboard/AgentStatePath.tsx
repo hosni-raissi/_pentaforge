@@ -1,13 +1,11 @@
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState } from 'react';
 import ReactFlow, {
   Background,
-  Controls,
   EdgeLabelRenderer,
   BaseEdge,
   Handle,
   Position,
   useReactFlow,
-  useStore,
   type Edge,
   type EdgeProps,
   type Node,
@@ -23,6 +21,7 @@ import {
   FileText,
   RotateCcw,
   Search,
+  X,
 } from 'lucide-react';
 
 import 'reactflow/dist/style.css';
@@ -35,13 +34,33 @@ import { Card, CardHeader, CardTitle } from '../ui/Card';
 
 interface AgentStatePathProps {
   agents: AgentInfo[];
+  showHeader?: boolean;
+  className?: string;
+  graphHeightClassName?: string;
+  subtitle?: string;
+  agentInsights?: Partial<Record<AgentGraphRole, AgentInsightPanelData>>;
 }
 
 type AgentName = AgentInfo['name'];
 type AgentState = AgentInfo['state'];
+export type AgentGraphRole = AgentName | 'intel' | 'perceptor';
+
+export interface AgentHistoryEntry {
+  id: string;
+  at: string;
+  level: 'info' | 'success' | 'warn' | 'error';
+  message: string;
+  event?: string;
+}
+
+export interface AgentInsightPanelData {
+  result?: string;
+  resultLabel?: string;
+  history: AgentHistoryEntry[];
+}
 
 interface AgentNodeData {
-  role: AgentName | 'intel' | 'perceptor';
+  role: AgentGraphRole;
   label: string;
   state: AgentState;
   currentTask?: string;
@@ -63,6 +82,7 @@ interface FeedbackEdgeData {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const EXECUTOR_AGENTS: AgentName[] = ['recon', 'exploit', 'verify', 'report', 'retest'];
+const AGENT_ROLES: AgentGraphRole[] = ['intel', 'planner', 'recon', 'exploit', 'verify', 'report', 'retest', 'perceptor'];
 
 const AGENT_ICONS = {
   intel:     Activity,
@@ -257,11 +277,47 @@ const edgeTypes: EdgeTypes = {
   feedbackLoop: FeedbackLoopEdge,
 };
 
+function formatNodeTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return '--:--:--';
+  }
+  return parsed.toLocaleTimeString();
+}
+
+function levelClass(level: AgentHistoryEntry['level']): string {
+  if (level === 'error' || level === 'warn') {
+    return 'text-red-300';
+  }
+  if (level === 'success') {
+    return 'text-emerald-300';
+  }
+  return 'text-text-secondary';
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function AgentStatePath({ agents }: AgentStatePathProps) {
+export function AgentStatePath({
+  agents,
+  showHeader = true,
+  className,
+  graphHeightClassName = 'h-[480px]',
+  subtitle = 'Intel → Planner → Executor Layer (parallel) → Perceptor → Planner (feedback loop)',
+  agentInsights,
+}: AgentStatePathProps) {
   const { nodes, edges } = useMemo(() => {
     const byName = new Map(agents.map((a) => [a.name, a]));
+    const intelHistory = agentInsights?.intel?.history ?? [];
+    const latestIntelEntry = intelHistory.length > 0
+      ? intelHistory[intelHistory.length - 1]
+      : undefined;
+    const hasIntelError = intelHistory.some(
+      (entry) => entry.level === 'error' || entry.event === 'intel_crashed',
+    );
+    const hasIntelComplete = intelHistory.some(
+      (entry) => entry.event === 'intel_complete',
+    );
+    const hasIntelActivity = intelHistory.length > 0;
 
     // ── Derived states ─────────────────────────────────────────────────────
 
@@ -269,8 +325,12 @@ export function AgentStatePath({ agents }: AgentStatePathProps) {
     const plannerState = planner?.state ?? 'waiting';
 
     const intelState: AgentState =
-      plannerState === 'error'                                    ? 'error'
-      : plannerState === 'running' || plannerState === 'success'  ? 'success'
+      hasIntelError                               ? 'error'
+      : hasIntelComplete                          ? 'success'
+      : hasIntelActivity                          ? 'running'
+      : plannerState === 'error'                 ? 'error'
+      : plannerState === 'running'               ? 'running'
+      : plannerState === 'success'               ? 'success'
       : 'waiting';
 
     const executorStates  = EXECUTOR_AGENTS.map((n) => byName.get(n)?.state ?? 'waiting');
@@ -306,7 +366,12 @@ export function AgentStatePath({ agents }: AgentStatePathProps) {
         id:       'intel',
         type:     'agent',
         position: { x: 40, y: 273 },
-        data: { role: 'intel', label: 'Intel', state: intelState, currentTask: 'Context → Planner' } satisfies AgentNodeData,
+        data: {
+          role: 'intel',
+          label: 'Intel',
+          state: intelState,
+          currentTask: latestIntelEntry?.message || 'Context → Planner',
+        } satisfies AgentNodeData,
       },
       {
         id:       'planner',
@@ -392,12 +457,29 @@ export function AgentStatePath({ agents }: AgentStatePathProps) {
     ];
 
     return { nodes: graphNodes, edges: graphEdges };
-  }, [agents]);
+  }, [agents, agentInsights]);
 
   const [locked, setLocked] = useState(true);
+  const [selectedRole, setSelectedRole] = useState<AgentGraphRole | null>(null);
+
+  const selectedNodeData = useMemo(() => {
+    if (!selectedRole) {
+      return null;
+    }
+    const matching = nodes.find((node) => node.type === 'agent' && node.id === selectedRole);
+    if (!matching) {
+      return null;
+    }
+    return matching.data as AgentNodeData;
+  }, [nodes, selectedRole]);
+
+  const selectedInsight = selectedRole ? agentInsights?.[selectedRole] : undefined;
+  const selectedHistory = selectedInsight?.history ?? [];
+  const selectedResult = selectedInsight?.result?.trim() ?? '';
+  const selectedResultLabel = selectedInsight?.resultLabel ?? 'Latest Result';
 
   return (
-    <Card className="overflow-hidden p-0">
+    <Card className={cn('overflow-hidden p-0', className)}>
       <style>{`
         @keyframes dashmove { to { stroke-dashoffset: -20; } }
         .pf-controls button {
@@ -419,36 +501,123 @@ export function AgentStatePath({ agents }: AgentStatePathProps) {
         .pf-controls button svg.filled { fill: #fff; stroke: none; }
       `}</style>
 
-      <CardHeader className="border-b border-border px-4 py-3">
-        <CardTitle>Agent State Path</CardTitle>
-        <p className="mt-1 text-xs text-text-secondary">
-          Intel → Planner → Executor Layer (parallel) → Perceptor → Planner (feedback loop)
-        </p>
-      </CardHeader>
+      {showHeader && (
+        <CardHeader className="border-b border-border px-4 py-3">
+          <CardTitle>Agent State Path</CardTitle>
+          <p className="mt-1 text-xs text-text-secondary">{subtitle}</p>
+        </CardHeader>
+      )}
 
-      <div className="relative h-[480px] bg-surface-0/60">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          edgeTypes={edgeTypes}
-          fitView
-          fitViewOptions={{ padding: 0.15 }}
-          defaultViewport={{ x: 0, y: 0, zoom: 0.7 }}
-          minZoom={0.25}
-          maxZoom={1.6}
-          nodesDraggable={!locked}
-          panOnDrag={!locked}
-          zoomOnScroll={!locked}
-          zoomOnPinch={!locked}
-          zoomOnDoubleClick={!locked}
-          preventScrolling={!locked}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background color="var(--border)" gap={28} size={1} />
-          <CustomControls locked={locked} onToggleLock={() => setLocked(l => !l)} />
-        </ReactFlow>
-      </div>
+      {selectedRole && selectedNodeData ? (
+        <div className={cn('flex flex-col gap-3 bg-surface-0/60 p-3', graphHeightClassName)}>
+          <div className="flex items-start justify-between rounded-md border border-border bg-surface-1/80 px-3 py-2">
+            <div>
+              <p className="text-sm font-semibold text-text-primary">{selectedNodeData.label} Agent Details</p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <Badge variant={selectedNodeData.state} dot className="text-[10px]">
+                  {selectedNodeData.state}
+                </Badge>
+                {typeof selectedNodeData.progress === 'number' && (
+                  <span className="text-[11px] font-mono text-text-muted">
+                    Progress: {selectedNodeData.progress}%
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-text-secondary">
+                {selectedNodeData.currentTask?.trim() || 'No active task for this agent.'}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setSelectedRole(null)}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+              title="Back to graph"
+            >
+              <X size={12} />
+              Back
+            </button>
+          </div>
+
+          <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[1.15fr_0.85fr]">
+            <div className="min-h-0 rounded-md border border-border bg-surface-1/70 p-3">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                {selectedResultLabel}
+              </p>
+              <div className="h-full max-h-full overflow-y-auto rounded-md border border-border/70 bg-surface-0/40 p-2">
+                <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-text-primary">
+                  {selectedResult || 'No returned result recorded for this agent yet.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="min-h-0 rounded-md border border-border bg-surface-1/70 p-3">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                Full History
+              </p>
+              {selectedHistory.length === 0 ? (
+                <div className="rounded-md border border-border/70 bg-surface-0/40 p-2">
+                  <p className="text-xs text-text-muted">No historical logs for this agent yet.</p>
+                </div>
+              ) : (
+                <div className="h-full max-h-full space-y-1.5 overflow-y-auto rounded-md border border-border/70 bg-surface-0/40 p-2">
+                  {selectedHistory.map((entry) => (
+                    <div key={entry.id} className="rounded-md border border-border/70 bg-surface-1/40 p-1.5">
+                      <div className="flex items-center justify-between text-[10px] text-text-muted">
+                        <span className={cn('font-semibold uppercase tracking-wide', levelClass(entry.level))}>
+                          {entry.level}
+                        </span>
+                        <span className="font-mono">{formatNodeTime(entry.at)}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-text-primary">{entry.message}</p>
+                      {entry.event && (
+                        <p className="mt-0.5 text-[10px] text-text-muted">event: {entry.event}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className={cn('relative bg-surface-0/60', graphHeightClassName)}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
+            onNodeClick={(_, node) => {
+              if (node.type !== 'agent') {
+                return;
+              }
+              if (!AGENT_ROLES.includes(node.id as AgentGraphRole)) {
+                return;
+              }
+              setSelectedRole(node.id as AgentGraphRole);
+            }}
+            fitView
+            fitViewOptions={{ padding: 0.15 }}
+            defaultViewport={{ x: 0, y: 0, zoom: 0.7 }}
+            minZoom={0.25}
+            maxZoom={1.6}
+            nodesDraggable={!locked}
+            panOnDrag={!locked}
+            zoomOnScroll={!locked}
+            zoomOnPinch={!locked}
+            zoomOnDoubleClick={!locked}
+            preventScrolling={!locked}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background color="var(--border)" gap={28} size={1} />
+            <CustomControls locked={locked} onToggleLock={() => setLocked(l => !l)} />
+          </ReactFlow>
+
+          <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-md border border-border bg-surface-1/90 px-2.5 py-1.5 text-[11px] text-text-secondary shadow">
+            Click any agent node to inspect logs, result, and history
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

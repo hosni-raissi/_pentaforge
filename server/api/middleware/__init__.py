@@ -1,6 +1,5 @@
 """API middleware components."""
 
-from .rate_limiter import APIRateLimitMiddleware
+from .safety import APIRateLimitMiddleware, APISafetyMiddleware
 
-__all__ = ["APIRateLimitMiddleware"]
-
+__all__ = ["APISafetyMiddleware", "APIRateLimitMiddleware"]

@@ -10,6 +10,23 @@ export function AppShell() {
 
   useEffect(() => {
     void hydrateFromDatabase();
+
+    const handleFocus = () => {
+      void hydrateFromDatabase();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void hydrateFromDatabase();
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [hydrateFromDatabase]);
 
   return (

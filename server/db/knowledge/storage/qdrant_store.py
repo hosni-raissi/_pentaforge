@@ -24,7 +24,9 @@ Supports:
 
 from __future__ import annotations
 
+import os
 import uuid
+import warnings
 from typing import Any
 
 import structlog
@@ -71,7 +73,21 @@ class QdrantVectorStore:
             kwargs: dict[str, Any] = {"url": self._url}
             if self._api_key:
                 kwargs["api_key"] = self._api_key
-            self._client = QdrantClient(**kwargs)
+            suppress_insecure_warning = os.getenv("QDRANT_SUPPRESS_INSECURE_WARNING", "1").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if suppress_insecure_warning and self._api_key:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="Api key is used with an insecure connection.",
+                    )
+                    self._client = QdrantClient(**kwargs)
+            else:
+                self._client = QdrantClient(**kwargs)
             logger.info("qdrant_initialized", url=self._url)
         return self._client
 

@@ -15,6 +15,19 @@ from urllib.parse import urlsplit
 
 from .config import projects_db_config
 
+_INTEL_RESOURCE_CONTENT_TYPES = {
+    "strategies",
+    "exploits",
+    "tools",
+    "standards",
+    "attack_types",
+    "payload",
+}
+_INTEL_RESOURCE_UPDATE_MODES = {
+    "every_3_days",
+    "static",
+}
+
 
 class ProjectsStore:
     """CRUD operations for project payloads persisted as JSON."""
@@ -82,6 +95,8 @@ class ProjectsStore:
                     name TEXT NOT NULL,
                     url TEXT NOT NULL,
                     target_type TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'strategies',
+                    update_mode TEXT NOT NULL DEFAULT 'every_3_days',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -101,7 +116,104 @@ class ProjectsStore:
                 ON intel_resources (enabled);
                 """
             )
+            cur.execute("PRAGMA table_info(intel_resources);")
+            intel_columns = {str(row[1]) for row in cur.fetchall()}
+            if "content_type" not in intel_columns:
+                cur.execute(
+                    """
+                    ALTER TABLE intel_resources
+                    ADD COLUMN content_type TEXT NOT NULL DEFAULT 'strategies';
+                    """
+                )
+            if "update_mode" not in intel_columns:
+                cur.execute(
+                    """
+                    ALTER TABLE intel_resources
+                    ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'every_3_days';
+                    """
+                )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scan_event_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL,
+                    scan_id TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    data TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_projects_scan_event_cache_project_id_id
+                ON scan_event_cache (project_id, id DESC);
+                """
+            )
             conn.commit()
+
+    def recover_interrupted_scans(self) -> int:
+        """Mark stale `running` scans as interrupted after server restarts."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        recovered = 0
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, payload
+                FROM records;
+                """
+            )
+            rows = cur.fetchall()
+
+            for row in rows:
+                record_id = str(row["id"])
+                try:
+                    payload = json.loads(row["payload"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+
+                changed = False
+                status = str(payload.get("status", "")).strip().lower()
+                if status == "running":
+                    payload["status"] = "paused"
+                    changed = True
+
+                last_scan = payload.get("lastScan")
+                if isinstance(last_scan, dict):
+                    last_status = str(last_scan.get("status", "")).strip().lower()
+                    if last_status == "running":
+                        last_scan["status"] = "paused"
+                        if not str(last_scan.get("finishedAt", "")).strip():
+                            last_scan["finishedAt"] = now_iso
+                        if not str(last_scan.get("error", "")).strip():
+                            last_scan["error"] = "Scan interrupted because server restarted."
+                        payload["lastScan"] = last_scan
+                        changed = True
+
+                if not changed:
+                    continue
+
+                payload["updatedAt"] = now_iso
+                cur.execute(
+                    """
+                    UPDATE records
+                    SET payload = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                    """,
+                    (json.dumps(payload, ensure_ascii=True), record_id),
+                )
+                recovered += 1
+
+            conn.commit()
+
+        return recovered
 
     def list_projects(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -125,6 +237,129 @@ class ProjectsStore:
             if isinstance(parsed, dict):
                 projects.append(parsed)
         return projects
+
+    def append_scan_event_cache(
+        self,
+        project_id: str,
+        payload: dict[str, Any],
+        *,
+        max_per_project: int = 1000,
+    ) -> None:
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            return
+
+        scan_id = str(payload.get("scan_id", "") or "")
+        event = str(payload.get("event", "") or "")
+        level = str(payload.get("level", "info") or "info")
+        message = str(payload.get("message", "") or "")
+        timestamp = str(payload.get("timestamp", "") or datetime.now(timezone.utc).isoformat())
+        data = payload.get("data", {})
+        if not isinstance(data, dict):
+            data = {}
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO scan_event_cache (
+                    project_id, scan_id, event, level, message, timestamp, data
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    safe_project_id,
+                    scan_id,
+                    event,
+                    level,
+                    message,
+                    timestamp,
+                    json.dumps(data, ensure_ascii=True),
+                ),
+            )
+            cur.execute(
+                """
+                DELETE FROM scan_event_cache
+                WHERE project_id = ?
+                  AND id NOT IN (
+                    SELECT id
+                    FROM scan_event_cache
+                    WHERE project_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                  );
+                """,
+                (safe_project_id, safe_project_id, max_per_project),
+            )
+            conn.commit()
+
+    def list_scan_event_cache(
+        self,
+        project_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            return []
+        safe_limit = max(1, min(int(limit), 2000))
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT project_id, scan_id, event, level, message, timestamp, data
+                FROM (
+                    SELECT id, project_id, scan_id, event, level, message, timestamp, data
+                    FROM scan_event_cache
+                    WHERE project_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                ORDER BY id ASC;
+                """,
+                (safe_project_id, safe_limit),
+            )
+            rows = cur.fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                parsed_data = json.loads(row["data"])
+            except (TypeError, json.JSONDecodeError):
+                parsed_data = {}
+            if not isinstance(parsed_data, dict):
+                parsed_data = {}
+
+            out.append(
+                {
+                    "event": str(row["event"]),
+                    "project_id": str(row["project_id"]),
+                    "scan_id": str(row["scan_id"]),
+                    "level": str(row["level"]),
+                    "message": str(row["message"]),
+                    "timestamp": str(row["timestamp"]),
+                    "data": parsed_data,
+                }
+            )
+        return out
+
+    def clear_scan_event_cache(self, project_id: str) -> int:
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            return 0
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM scan_event_cache
+                WHERE project_id = ?;
+                """,
+                (safe_project_id,),
+            )
+            deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return deleted
 
     def upsert_project(self, project: dict[str, Any]) -> None:
         project_id = str(project.get("id", "")).strip()
@@ -151,6 +386,7 @@ class ProjectsStore:
             cur = conn.cursor()
             cur.execute("DELETE FROM records WHERE id = ?;", (project_id,))
             cur.execute("DELETE FROM share_links WHERE project_id = ?;", (project_id,))
+            cur.execute("DELETE FROM scan_event_cache WHERE project_id = ?;", (project_id,))
             conn.commit()
 
     def create_share_link(
@@ -309,7 +545,7 @@ class ProjectsStore:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT id, name, url, target_type, enabled, created_at, updated_at
+                SELECT id, name, url, target_type, content_type, update_mode, enabled, created_at, updated_at
                 FROM intel_resources
                 {where_clause}
                 ORDER BY target_type ASC, name COLLATE NOCASE ASC;
@@ -326,6 +562,8 @@ class ProjectsStore:
                     "name": str(row["name"]),
                     "url": str(row["url"]),
                     "target_type": str(row["target_type"]),
+                    "content_type": str(row["content_type"] or "strategies"),
+                    "update_mode": str(row["update_mode"] or "every_3_days"),
                     "enabled": bool(int(row["enabled"] or 0)),
                     "created_at": str(row["created_at"]),
                     "updated_at": str(row["updated_at"]),
@@ -339,11 +577,15 @@ class ProjectsStore:
         name: str,
         url: str,
         target_type: str,
+        content_type: str = "strategies",
+        update_mode: str = "every_3_days",
         enabled: bool = True,
     ) -> dict[str, Any]:
         clean_name = name.strip()
         clean_url = url.strip()
         clean_target_type = target_type.strip().lower()
+        clean_content_type = content_type.strip().lower()
+        clean_update_mode = update_mode.strip().lower()
 
         if not clean_name:
             raise ValueError("resource name is required")
@@ -353,6 +595,16 @@ class ProjectsStore:
             raise ValueError("target_type is required")
         if len(clean_target_type) > 64:
             raise ValueError("target_type is too long (max 64)")
+        if clean_content_type not in _INTEL_RESOURCE_CONTENT_TYPES:
+            raise ValueError(
+                "content_type must be one of: "
+                + ", ".join(sorted(_INTEL_RESOURCE_CONTENT_TYPES))
+            )
+        if clean_update_mode not in _INTEL_RESOURCE_UPDATE_MODES:
+            raise ValueError(
+                "update_mode must be one of: "
+                + ", ".join(sorted(_INTEL_RESOURCE_UPDATE_MODES))
+            )
 
         parsed = urlsplit(clean_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -364,20 +616,30 @@ class ProjectsStore:
             cur.execute(
                 """
                 INSERT INTO intel_resources (
-                    id, name, url, target_type, enabled, created_at, updated_at
+                    id, name, url, target_type, content_type, update_mode, enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(name, target_type)
                 DO UPDATE SET
                     url = excluded.url,
+                    content_type = excluded.content_type,
+                    update_mode = excluded.update_mode,
                     enabled = excluded.enabled,
                     updated_at = CURRENT_TIMESTAMP;
                 """,
-                (resource_id, clean_name, clean_url, clean_target_type, 1 if enabled else 0),
+                (
+                    resource_id,
+                    clean_name,
+                    clean_url,
+                    clean_target_type,
+                    clean_content_type,
+                    clean_update_mode,
+                    1 if enabled else 0,
+                ),
             )
             cur.execute(
                 """
-                SELECT id, name, url, target_type, enabled, created_at, updated_at
+                SELECT id, name, url, target_type, content_type, update_mode, enabled, created_at, updated_at
                 FROM intel_resources
                 WHERE name = ? AND target_type = ?
                 LIMIT 1;
@@ -395,6 +657,8 @@ class ProjectsStore:
             "name": str(row["name"]),
             "url": str(row["url"]),
             "target_type": str(row["target_type"]),
+            "content_type": str(row["content_type"] or "strategies"),
+            "update_mode": str(row["update_mode"] or "every_3_days"),
             "enabled": bool(int(row["enabled"] or 0)),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
@@ -425,7 +689,7 @@ class ProjectsStore:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT id, name, url, target_type, enabled, created_at, updated_at
+                SELECT id, name, url, target_type, content_type, update_mode, enabled, created_at, updated_at
                 FROM intel_resources
                 WHERE {where_clause}
                 ORDER BY
@@ -448,6 +712,8 @@ class ProjectsStore:
             "name": str(row["name"]),
             "url": str(row["url"]),
             "target_type": str(row["target_type"]),
+            "content_type": str(row["content_type"] or "strategies"),
+            "update_mode": str(row["update_mode"] or "every_3_days"),
             "enabled": bool(int(row["enabled"] or 0)),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),

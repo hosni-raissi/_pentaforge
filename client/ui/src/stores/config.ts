@@ -51,6 +51,35 @@ export const useConfig = create<ConfigStore>()(
 
       setActiveLLM: (id) => set({ activeLLM: id }),
     }),
-    { name: 'pf-config' }
+    {
+      name: 'pf-config',
+      merge: (persisted, current) => {
+        const state = (persisted ?? {}) as Partial<AppConfig>;
+        const llmConfigs = Array.isArray(state.llmConfigs)
+          ? state.llmConfigs.filter((item): item is LLMConfig => {
+            if (typeof item !== 'object' || item === null) {
+              return false;
+            }
+            return typeof item.id === 'string' && typeof item.name === 'string';
+          })
+          : current.llmConfigs;
+        const safeConfigs = llmConfigs.length > 0 ? llmConfigs : current.llmConfigs;
+        const requestedActive = typeof state.activeLLM === 'string' ? state.activeLLM : current.activeLLM;
+        const activeLLM = safeConfigs.some((item) => item.id === requestedActive)
+          ? requestedActive
+          : safeConfigs[0]?.id ?? current.activeLLM;
+
+        return {
+          ...current,
+          ...state,
+          llmConfigs: safeConfigs,
+          activeLLM,
+          serverUrl: typeof state.serverUrl === 'string' ? state.serverUrl : current.serverUrl,
+          serverPort: typeof state.serverPort === 'number' ? state.serverPort : current.serverPort,
+          autoApprove: typeof state.autoApprove === 'boolean' ? state.autoApprove : current.autoApprove,
+          stealthMode: typeof state.stealthMode === 'boolean' ? state.stealthMode : current.stealthMode,
+        };
+      },
+    }
   )
 );

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,7 @@ import structlog
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
 logger = structlog.get_logger(__name__)
+_LLM_DEBUG_LOGS = os.getenv("LLM_DEBUG_LOGS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -108,14 +110,15 @@ class LLMClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        logger.debug(
-            "llm_request",
-            mode=self._mode,
-            provider=provider,
-            model=self._config.model,
-            messages=len(messages),
-            tools=len(tools) if tools else 0,
-        )
+        if _LLM_DEBUG_LOGS:
+            logger.debug(
+                "llm_request",
+                mode=self._mode,
+                provider=provider,
+                model=self._config.model,
+                messages=len(messages),
+                tools=len(tools) if tools else 0,
+            )
 
         resp = await self._http.post("/chat/completions", json=payload)
 

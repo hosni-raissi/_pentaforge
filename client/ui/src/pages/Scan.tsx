@@ -4,11 +4,14 @@ import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Play, Square, RotateCcw } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { Dialog } from '../components/ui/Dialog';
+import { useState } from 'react';
 
 export default function Scan() {
   const project = useProjects((s) => s.getActive());
-  const { setRunning, runningProjectId } = useProjects();
+  const { setRunning, runningProjectId, startingProjectId, stopScan } = useProjects();
   const navigate = useNavigate();
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
 
   if (!project) {
     return (
@@ -19,7 +22,8 @@ export default function Scan() {
   }
 
   const isRunning = runningProjectId === project.id;
-  const canRun = !runningProjectId || runningProjectId === project.id;
+  const isStarting = startingProjectId === project.id;
+  const canRun = (!runningProjectId && !startingProjectId) || runningProjectId === project.id;
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
@@ -46,12 +50,34 @@ export default function Scan() {
           {/* Controls */}
           <div className="flex items-center gap-2 pt-2">
             {!isRunning ? (
-              <Button onClick={() => setRunning(project.id)} disabled={!canRun}>
+              <Button
+                onClick={() => {
+                  if (project.status === 'completed') {
+                    const confirmed = window.confirm('This scan already completed. Start a new scan and clear previous results?');
+                    if (!confirmed) {
+                      return;
+                    }
+                    setRunning(project.id, { triggerScan: true, force: true });
+                    return;
+                  }
+                  if (project.status === 'paused') {
+                    const confirmed = window.confirm('Resume will start a new scan and keep previous history visible. Continue?');
+                    if (!confirmed) {
+                      return;
+                    }
+                    setRunning(project.id, { triggerScan: true, resume: true });
+                    return;
+                  }
+                  setRunning(project.id, { triggerScan: true });
+                }}
+                disabled={!canRun || isStarting}
+                loading={isStarting}
+              >
                 <Play size={14} /> Start Scan
               </Button>
             ) : (
               <>
-                <Button variant="danger" onClick={() => setRunning(null)}>
+                <Button variant="danger" onClick={() => setStopDialogOpen(true)}>
                   <Square size={14} /> Stop Scan
                 </Button>
                 <Button variant="secondary">
@@ -66,8 +92,56 @@ export default function Scan() {
               Another project is currently running. Stop it first.
             </p>
           )}
+          {isStarting && (
+            <p className="text-[11px] text-text-muted">
+              Starting scan...
+            </p>
+          )}
         </div>
       </Card>
+
+      <Dialog
+        open={stopDialogOpen}
+        onClose={() => setStopDialogOpen(false)}
+        title="Stop Scan"
+        description="Choose whether to pause or cancel the current scan."
+      >
+        <div className="space-y-3 text-xs text-text-secondary">
+          <p>
+            Pause will keep current logs and results so you can review them. Cancel will clear logs,
+            agent results, and reset status to idle.
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setStopDialogOpen(false)}
+            >
+              Back
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setStopDialogOpen(false);
+                void stopScan(project.id, 'pause');
+              }}
+            >
+              Pause Scan
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => {
+                setStopDialogOpen(false);
+                void stopScan(project.id, 'cancel');
+              }}
+            >
+              Cancel Scan
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }
