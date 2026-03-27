@@ -8,6 +8,28 @@ from server.core.tool import tool
 from .context import get_context
 
 
+_DOMAIN_ALIASES: dict[str, str] = {
+    "web": "web_app",
+    "web3": "web_app",
+    "infrastructure": "linux_server",
+    "identity": "linux_server",
+    "binary": "desktop",
+    "supply_chain": "repository",
+    "recon": "shared",
+    "red_team": "shared",
+    "cve_exploit": "shared",
+    "container": "cloud",
+    "database": "linux_server",
+}
+
+
+def _normalize_domain(value: str) -> str:
+    clean = str(value or "").strip().lower().replace("-", "_")
+    if not clean:
+        return "shared"
+    return _DOMAIN_ALIASES.get(clean, clean)
+
+
 def _merge_hits(primary: list[dict[str, Any]], shared: list[dict[str, Any]], n_results: int) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
     merged: list[dict[str, Any]] = []
@@ -42,17 +64,18 @@ async def search_rag(
     await ctx.ensure_ready()
 
     n_results = max(1, min(25, int(n_results)))
+    normalized_domain = _normalize_domain(domain)
 
     query_embedding = await ctx.embedder.embed_single(query, is_query=True)
 
     primary = ctx.vector_store.search(
         query_embedding=query_embedding,
         content_type=content_type,
-        domain=domain,
+        domain=normalized_domain,
         n_results=n_results,
     )
 
-    if include_shared and domain != "shared":
+    if include_shared and normalized_domain != "shared":
         shared = ctx.vector_store.search(
             query_embedding=query_embedding,
             content_type=content_type,
@@ -85,7 +108,7 @@ async def search_rag(
     return json.dumps(
         {
             "query": query,
-            "domain": domain,
+            "domain": normalized_domain,
             "content_type": content_type,
             "total": len(compact),
             "hits": compact,

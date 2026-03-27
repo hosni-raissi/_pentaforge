@@ -23,8 +23,12 @@ FORMATTER_SYSTEM_PROMPT = (
     "3. VULNERABILITIES — Every vulnerability type and weakness class this target can have\n"
     "   (e.g., broken access control, insecure deserialization, misconfigured CORS)\n"
     "\n"
+    "4. CHECKLIST — A custom target-specific pentest checklist\n"
+    "   (actionable test items that planner/executors can run)\n"
+    "\n"
     "## Mandatory Tool Usage\n"
     "You MUST call search_rag at least once before producing your final output.\n"
+    "You SHOULD call get_checklists to build evidence-backed checklist items.\n"
     "The RAG data provided is only a snapshot — the knowledge base contains more.\n"
     "Search for what is MISSING from the provided data.\n"
     "\n"
@@ -32,7 +36,8 @@ FORMATTER_SYSTEM_PROMPT = (
     "Step 2: Identify which methods, techniques, or vulnerability types are NOT covered.\n"
     "Step 3: Call search_rag with a specific query to find the missing entries.\n"
     "Step 4: If search_rag still has gaps, refine the query and call search_rag again.\n"
-    "Step 5: Combine everything and return the final JSON.\n"
+    "Step 5: Build a custom checklist from retrieved evidence.\n"
+    "Step 6: Combine everything and return the final JSON.\n"
     "\n"
     "## Budget\n"
     f"You have {FORMATTER_ROUNDS} rounds total (1 round = 1 response from you).\n"
@@ -43,7 +48,7 @@ FORMATTER_SYSTEM_PROMPT = (
     "## Rules\n"
     "- Be EXHAUSTIVE. List everything relevant. Miss nothing.\n"
     f"- Maximum {FORMATTER_ROUNDS - 1} tool calls total (you need 1 round for the final answer).\n"
-    "- ONLY report real methods, techniques, and vulnerabilities. Never invent or guess.\n"
+    "- ONLY report real methods, techniques, vulnerabilities, and checklist items. Never invent or guess.\n"
     "- If a category has no data even after searching, say so in GAPS.\n"
     "\n"
     "## Output\n"
@@ -51,7 +56,7 @@ FORMATTER_SYSTEM_PROMPT = (
     "```json\n"
     "{\n"
     '  "status": "complete",\n'
-    '  "summary": "METHODS:\\n- ...\\n\\nTECHNIQUES:\\n- ...\\n\\nVULNERABILITIES:\\n- ...\\n\\nGAPS:\\n- ...",\n'
+    '  "summary": "METHODS:\\n- ...\\n\\nTECHNIQUES:\\n- ...\\n\\nVULNERABILITIES:\\n- ...\\n\\nCHECKLIST:\\n- ...\\n\\nGAPS:\\n- ...",\n'
     '  "stats": {\n'
     '    "new_payloads": 0,\n'
     '    "new_exploits": 0,\n'
@@ -110,6 +115,7 @@ def build_user_message(
     rag = formatter_payload.get("rag_snapshot", {})
     if not isinstance(rag, dict):
         rag = {}
+    rag_domain = str(rag.get("domain", target_type) or target_type)
     strategies = rag.get("strategies", [])
     attack_types = rag.get("attack_types", [])
     exploits = rag.get("exploits", [])
@@ -121,27 +127,30 @@ def build_user_message(
     if methods_n + len(strategies) < 5:
         search_suggestions.append(
             f'search_rag(query="{target_type} OWASP testing methodology PTES assessment", '
-            f'content_type="strategies", domain="{target_type}", n_results=10)'
+            f'content_type="strategies", domain="{rag_domain}", n_results=10)'
         )
     else:
         search_suggestions.append(
             f'search_rag(query="{target_type} advanced attack techniques bypass evasion", '
-            f'content_type="attack_types", domain="{target_type}", n_results=10)'
+            f'content_type="attack_types", domain="{rag_domain}", n_results=10)'
         )
 
     if techniques_n + len(attack_types) < 5:
         search_suggestions.append(
             f'search_rag(query="{target_type} injection XSS SSRF RCE exploit technique", '
-            f'content_type="attack_types", domain="{target_type}", n_results=10)'
+            f'content_type="attack_types", domain="{rag_domain}", n_results=10)'
         )
 
     if vulns_n + len(exploits) < 5:
         search_suggestions.append(
             f'search_rag(query="{target_type} vulnerability weakness misconfiguration", '
-            f'content_type="exploits", domain="{target_type}", n_results=10)'
+            f'content_type="exploits", domain="{rag_domain}", n_results=10)'
         )
+    search_suggestions.append(
+        f'get_checklists(target_type="{target_type}", info="{(info or "")[:120]}", n_items=24)'
+    )
 
-    suggestions_text = "\n".join(f"  → {s}" for s in search_suggestions[:3])
+    suggestions_text = "\n".join(f"  → {s}" for s in search_suggestions[:4])
 
     strategies_text = _format_entries(strategies, "methods/strategies")
     techniques_text = _format_entries(attack_types, "techniques")
@@ -171,7 +180,7 @@ def build_user_message(
         f"{budget_text}\n"
         f"\n"
         f"## Task\n"
-        f"Find ALL methods, techniques, and vulnerability types to attack a "
+        f"Find ALL methods, techniques, vulnerability types, and a custom checklist for "
         f"'{target_type}' target.\n"
         f"The data below is only a PARTIAL snapshot. You MUST search for more.\n"
         f"\n"
@@ -198,6 +207,7 @@ def build_user_message(
         f"## Steps\n"
         f"1. Read the RAG data above — note what categories are thin.\n"
         f"2. Call search_rag with one of the recommended queries above (REQUIRED).\n"
-        f"3. If coverage is still thin, refine your query and call search_rag again.\n"
-        f"4. Combine ALL results into the final JSON.\n"
+        f"3. Call get_checklists to generate a target checklist from OWASP/PTES/MITRE-aware sources.\n"
+        f"4. If coverage is still thin, refine your query and call search_rag again.\n"
+        f"5. Combine ALL results into the final JSON.\n"
     )

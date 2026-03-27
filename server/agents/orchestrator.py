@@ -269,7 +269,7 @@ class Orchestrator:
     async def run(
         self,
         target_url: str,
-        target_type: str = "web",
+        target_type: str = "web_app",
         scope: str = "",
         info: str = "",
     ) -> OrchestratorResult:
@@ -277,7 +277,7 @@ class Orchestrator:
 
         Args:
             target_url:  Target URL or IP address
-            target_type: Attack surface type (web, api, network, etc.)
+            target_type: Attack surface type (web_app, api, network, etc.)
             scope:       Scope description for the engagement
             info:        Additional context for the Intel Agent
 

@@ -19,10 +19,10 @@ from server.agents.intel.config import (
     VERIFY_SOURCES,
 )
 from server.api.dependencies import intel_state_store, projects_store
+from server.constants.target_types import get_target_type_options
 from server.db.knowledge.config.sources import (
     INTEL_UPDATABLE_SOURCES,
     PAYLOAD_SOURCES,
-    get_all_domains,
     get_enabled_sources,
     get_source_by_name,
 )
@@ -39,12 +39,34 @@ class _ForceUpdateCancelled(Exception):
     """Raised when a user cancels an in-progress force update."""
 
 _TARGET_TYPE_ALIASES: dict[str, str] = {
-    "web_app": "web",
-    "linux_server": "infrastructure",
-    "desktop": "binary",
-    "repository": "supply_chain",
-    "container": "cloud",
-    "database": "infrastructure",
+    "web": "web_app",
+    "web3": "web_app",
+    "infrastructure": "linux_server",
+    "binary": "desktop",
+    "identity": "linux_server",
+    "supply_chain": "repository",
+    "recon": "shared",
+    "red_team": "shared",
+    "cve_exploit": "shared",
+}
+
+_EXTRA_RESOURCE_TARGET_TYPES: tuple[dict[str, str], ...] = (
+    {"value": "shared", "label": "Shared"},
+)
+
+_PUBLIC_TO_INTERNAL_DOMAINS: dict[str, set[str]] = {
+    "web_app": {"web_app"},
+    "api": {"api"},
+    "mobile": {"mobile"},
+    "network": {"network"},
+    "iot": {"iot"},
+    "linux_server": {"linux_server"},
+    "desktop": {"desktop"},
+    "cloud": {"cloud"},
+    "container": {"container", "cloud"},
+    "database": {"database", "linux_server"},
+    "repository": {"repository"},
+    "shared": {"shared"},
 }
 
 _CONTENT_TYPE_ALIASES: dict[str, str] = {
@@ -118,15 +140,36 @@ def _normalize_target_type(value: str | None) -> str:
 
 
 def _target_type_options() -> list[dict[str, str]]:
-    values = set(get_all_domains())
-    values.update(VERIFY_SOURCES.keys())
-    values.update(_TARGET_TYPE_ALIASES.values())
-    values.discard("")
-    ordered = sorted(values)
-    return [{"value": "all", "label": _label_target_type("all")}] + [
-        {"value": value, "label": _label_target_type(value)}
-        for value in ordered
-    ]
+    seen: set[str] = {"all"}
+    options: list[dict[str, str]] = [{"value": "all", "label": _label_target_type("all")}]
+    for row in get_target_type_options():
+        value = str(row.get("value", "")).strip().lower()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        options.append({"value": value, "label": str(row.get("label", _label_target_type(value)))})
+    for row in _EXTRA_RESOURCE_TARGET_TYPES:
+        value = str(row.get("value", "")).strip().lower()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        options.append({"value": value, "label": str(row.get("label", _label_target_type(value)))})
+    return options
+
+
+def _to_public_target_type(value: str | None) -> str:
+    normalized = _normalize_target_type(value)
+    return normalized or "all"
+
+
+def _resource_domain_filters(target_type: str | None) -> set[str] | None:
+    clean = (target_type or "").strip().lower().replace("-", "_")
+    if not clean or clean == "all":
+        return None
+    mapped = _PUBLIC_TO_INTERNAL_DOMAINS.get(clean)
+    if mapped is not None:
+        return set(mapped)
+    return { _normalize_target_type(clean) }
 
 
 def _refresh_days_for_target(target_type: str) -> int:
@@ -192,6 +235,18 @@ def _update_progress_from_message(message: str) -> int:
         return 5
     if "force update requested" in lowered:
         return 10
+    if "ingesting rag resources" in lowered:
+        return 16
+    if "ingesting source" in lowered:
+        return 22
+    if "rag source ingestion complete" in lowered:
+        return 34
+    if "syncing payload store" in lowered:
+        return 40
+    if "payload source sync complete" in lowered:
+        return 48
+    if "starting intel enrichment" in lowered:
+        return 55
     if "rag update needed" in lowered:
         return 18
     if "update: verifying sources" in lowered:
@@ -215,6 +270,127 @@ def _update_progress_from_message(message: str) -> int:
     if "intel agent complete" in lowered:
         return 100
     return 40
+
+
+def _resolve_force_update_domains(target_type: str) -> set[str]:
+    """Resolve domains to ingest for force-update.
+
+    For a specific target, always include shared baseline knowledge.
+    """
+    enabled_domains = {
+        str(source.domain).strip().lower()
+        for source in get_enabled_sources()
+        if str(source.domain).strip()
+    }
+
+    normalized = _normalize_target_type(target_type)
+    if normalized == "all":
+        return enabled_domains
+
+    mapped = set(_PUBLIC_TO_INTERNAL_DOMAINS.get(normalized, {normalized}))
+    if normalized != "shared":
+        mapped.add("shared")
+    return {domain for domain in mapped if domain in enabled_domains}
+
+
+def _resolve_force_update_payload_domains(target_type: str) -> list[str | None]:
+    """Resolve payload domains to sync for force-update."""
+    normalized = _normalize_target_type(target_type)
+    if normalized == "all":
+        return [None]
+
+    configured_payload_domains = {
+        str(src.domain).strip().lower()
+        for src in PAYLOAD_SOURCES
+        if str(src.domain).strip()
+    }
+    domains = _resolve_force_update_domains(normalized)
+    ordered = sorted(domain for domain in domains if domain in configured_payload_domains)
+    return ordered
+
+
+async def _force_ingest_target_knowledge(
+    *,
+    target_type: str,
+    on_step: Any,
+    on_done: Any,
+    on_warn: Any,
+    cancel_requested: Any,
+) -> None:
+    """Run full source+payload ingestion for target force-update."""
+    from server.db.knowledge.orchestrator import KnowledgeOrchestrator
+
+    domains = sorted(_resolve_force_update_domains(target_type))
+    if not domains:
+        on_warn(f"No enabled RAG domains found for '{target_type}'.")
+        return
+
+    on_step(
+        f"Ingesting RAG resources for '{target_type}' ({', '.join(domains)})"
+    )
+    source_pool = [
+        source
+        for source in get_enabled_sources()
+        if str(source.domain).strip().lower() in domains
+    ]
+    total_sources = len(source_pool)
+    if total_sources == 0:
+        on_warn(f"No enabled sources found for '{target_type}'.")
+    else:
+        rag_orchestrator = KnowledgeOrchestrator()
+        try:
+            for idx, source in enumerate(source_pool, start=1):
+                if cancel_requested():
+                    raise _ForceUpdateCancelled("Force update cancelled by user.")
+                on_step(f"Ingesting source {idx}/{total_sources}: {source.name}")
+                result = await rag_orchestrator.ingest_source(source.name)
+                if result.errors:
+                    on_warn(
+                        f"Source {source.name}: {len(result.errors)} error(s) while ingesting."
+                    )
+                else:
+                    on_done(
+                        f"Ingested {source.name}: docs={result.documents_extracted}, chunks={result.chunks_created}"
+                    )
+        finally:
+            await rag_orchestrator.close()
+    on_done(f"RAG source ingestion complete: {total_sources} source(s) processed.")
+
+    payload_domains = _resolve_force_update_payload_domains(target_type)
+    if not payload_domains:
+        on_warn(f"No payload sources configured for '{target_type}'.")
+        return
+
+    label = (
+        "all domains"
+        if payload_domains == [None]
+        else ", ".join(str(domain) for domain in payload_domains if domain is not None)
+    )
+    on_step(f"Syncing payload store for '{target_type}' ({label})")
+    payload_orchestrator = KnowledgeOrchestrator(payload_only=True)
+    try:
+        for domain in payload_domains:
+            if cancel_requested():
+                raise _ForceUpdateCancelled("Force update cancelled by user.")
+            rows = await payload_orchestrator.ingest_payloads(domain=domain)
+            added = 0
+            errors = 0
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                added += int(row.get("payloads_added", 0) or 0)
+                if row.get("error"):
+                    errors += 1
+            target_label = domain or "all"
+            if errors:
+                on_warn(
+                    f"Payload sync for {target_label}: added={added}, errors={errors}"
+                )
+            else:
+                on_done(f"Payload sync for {target_label}: added={added}")
+    finally:
+        await payload_orchestrator.close()
+    on_done("Payload source sync complete.")
 
 
 def _normalize_content_type(value: str | None) -> str:
@@ -247,11 +423,12 @@ def _serialize_builtin_source(source: Any, *, target_type: str | None = None) ->
     source_name = str(source.name)
     updatable = source_name.lower() in _INTEL_UPDATABLE_SET
     source_kind = "custom" if _is_user_manageable_builtin_source(source) else "builtin"
+    resolved_target = target_type or str(source.domain or "shared")
     return {
         "id": f"builtin::{source_name}",
         "name": source_name,
         "url": str(source.url),
-        "target_type": str(source.domain or target_type or "shared"),
+        "target_type": _to_public_target_type(resolved_target),
         "enabled": bool(source.enabled),
         "source_kind": source_kind,
         "updatable": updatable,
@@ -272,7 +449,7 @@ def _serialize_custom_source(row: dict[str, Any]) -> dict[str, Any]:
         "id": str(row.get("id", "")),
         "name": source_name,
         "url": str(row.get("url", "")),
-        "target_type": str(row.get("target_type", "all")),
+        "target_type": _to_public_target_type(str(row.get("target_type", "all"))),
         "enabled": bool(row.get("enabled", False)),
         "source_kind": "custom",
         "updatable": update_mode == "every_3_days",
@@ -285,13 +462,14 @@ def _serialize_custom_source(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _serialize_builtin_payload_source(source: Any) -> dict[str, Any]:
+def _serialize_builtin_payload_source(source: Any, *, target_type: str | None = None) -> dict[str, Any]:
     source_name = str(getattr(source, "name", "") or "").strip()
+    resolved_target = target_type or str(getattr(source, "domain", "") or "shared")
     return {
         "id": f"builtin::{source_name}",
         "name": source_name,
         "url": str(getattr(source, "url", "") or ""),
-        "target_type": str(getattr(source, "domain", "") or "shared"),
+        "target_type": _to_public_target_type(resolved_target),
         "enabled": True,
         # Payload resources are intentionally user-manageable in settings.
         "source_kind": "custom",
@@ -350,28 +528,34 @@ def _extract_builtin_name(resource_id: str) -> str:
 
 
 def _list_combined_intel_resources(target_type: str | None = None) -> list[dict[str, Any]]:
-    normalized = _normalize_target_type(target_type) if target_type else ""
-    domain_filter = "" if normalized in {"", "all"} else normalized
+    domain_filters = _resource_domain_filters(target_type)
     hidden_builtin_names = projects_store.list_hidden_builtin_intel_resources()
+    selected_target = _normalize_target_type(target_type)
+    override_target = selected_target if selected_target in {"container", "database"} else None
 
     builtin_resources: list[dict[str, Any]] = []
     for source in get_enabled_sources():
-        if domain_filter and source.domain != domain_filter:
+        if domain_filters and source.domain not in domain_filters:
             continue
         if str(source.name).strip().lower() in hidden_builtin_names:
             continue
-        builtin_resources.append(_serialize_builtin_source(source))
+        builtin_resources.append(_serialize_builtin_source(source, target_type=override_target))
     for payload_source in PAYLOAD_SOURCES:
         source_domain = str(getattr(payload_source, "domain", "") or "shared")
         source_name = str(getattr(payload_source, "name", "") or "").strip()
-        if domain_filter and source_domain != domain_filter:
+        if domain_filters and source_domain not in domain_filters:
             continue
         if source_name.lower() in hidden_builtin_names:
             continue
-        builtin_resources.append(_serialize_builtin_payload_source(payload_source))
+        builtin_resources.append(_serialize_builtin_payload_source(payload_source, target_type=override_target))
 
-    custom_filter = None if not domain_filter else domain_filter
-    custom_rows = projects_store.list_intel_resources(target_type=custom_filter, enabled_only=False)
+    custom_rows = projects_store.list_intel_resources(enabled_only=False)
+    if domain_filters:
+        custom_rows = [
+            row
+            for row in custom_rows
+            if _normalize_target_type(str(row.get("target_type", "all"))) in domain_filters
+        ]
     custom_resources = [_serialize_custom_source(row) for row in custom_rows]
 
     combined = builtin_resources + custom_resources
@@ -692,7 +876,9 @@ def intel_update_status(target_type: str | None = None) -> dict[str, Any]:
 
     custom_by_target: dict[str, list[dict[str, Any]]] = {}
     for row in custom_enabled:
-        row_target = str(row.get("target_type", "all")).strip().lower() or "all"
+        row_target = _normalize_target_type(str(row.get("target_type", "all")))
+        if not row_target:
+            row_target = "all"
         custom_by_target.setdefault(row_target, []).append(row)
 
     if normalized_target:
@@ -819,7 +1005,18 @@ async def _run_force_update(target_type: str, info: str) -> None:
         def on_warn(self, message: str) -> None:
             self._update("running", message)
 
-    agent = IntelAgent(callback=_ProgressCallback(target_type))
+    progress = _ProgressCallback(target_type)
+    progress.on_step(f"Force update requested for '{target_type}'")
+    await _force_ingest_target_knowledge(
+        target_type=target_type,
+        on_step=progress.on_step,
+        on_done=progress.on_done,
+        on_warn=progress.on_warn,
+        cancel_requested=_cancel_requested,
+    )
+
+    progress.on_step(f"Starting intel enrichment for '{target_type}'")
+    agent = IntelAgent(callback=progress)
     await agent.run(
         target_type=target_type,
         info=info,
@@ -834,16 +1031,29 @@ def _force_update_worker(target_type: str, info: str) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
         with _FORCE_UPDATE_LOCK:
             current = _FORCE_UPDATE_RUNNING.get(target_type, {})
-            _FORCE_UPDATE_RUNNING[target_type] = {
-                **current,
-                "target_type": target_type,
-                "status": "completed",
-                "progress": 100,
-                "message": str(current.get("message", "Force update completed.")) or "Force update completed.",
-                "updated_at": now_iso,
-                "finished_at": now_iso,
-            }
-        logger.info("intel_force_update_complete", target_type=target_type)
+            cancel_requested = bool(current.get("cancel_requested"))
+            if cancel_requested:
+                _FORCE_UPDATE_RUNNING[target_type] = {
+                    **current,
+                    "target_type": target_type,
+                    "status": "cancelled",
+                    "message": str(current.get("message", "Force update cancelled by user.")) or "Force update cancelled by user.",
+                    "updated_at": now_iso,
+                    "finished_at": now_iso,
+                    "cancel_requested": False,
+                }
+                logger.info("intel_force_update_cancelled", target_type=target_type)
+            else:
+                _FORCE_UPDATE_RUNNING[target_type] = {
+                    **current,
+                    "target_type": target_type,
+                    "status": "completed",
+                    "progress": 100,
+                    "message": str(current.get("message", "Force update completed.")) or "Force update completed.",
+                    "updated_at": now_iso,
+                    "finished_at": now_iso,
+                }
+                logger.info("intel_force_update_complete", target_type=target_type)
     except _ForceUpdateCancelled as exc:
         now_iso = datetime.now(timezone.utc).isoformat()
         with _FORCE_UPDATE_LOCK:
@@ -881,7 +1091,7 @@ def force_intel_update(payload: IntelForceUpdatePayload) -> dict[str, Any]:
     with _FORCE_UPDATE_LOCK:
         current = _FORCE_UPDATE_RUNNING.get(target_type)
         current_status = str(current.get("status", "")).lower() if isinstance(current, dict) else ""
-        if current_status in {"running", "cancelling"}:
+        if current_status in {"running", "cancelling"} or bool((current or {}).get("cancel_requested")):
             return {
                 "ok": True,
                 "started": False,
@@ -941,9 +1151,9 @@ def cancel_force_intel_update(payload: IntelForceUpdateCancelPayload) -> dict[st
         _FORCE_UPDATE_RUNNING[target_type] = {
             **current,
             "target_type": target_type,
-            "status": "cancelling",
+            "status": "cancelled",
             "cancel_requested": True,
-            "message": "Cancellation requested by user.",
+            "message": "Cancellation requested by user. Finalizing...",
             "updated_at": now_iso,
         }
     return {

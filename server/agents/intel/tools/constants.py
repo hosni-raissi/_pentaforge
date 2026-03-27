@@ -19,6 +19,10 @@ TRUSTED_SOURCES: dict[str, dict[str, str]] = {
         "url": "https://attack.mitre.org",
         "type": "standards_body",
     },
+    "MITRE-ATTACK-Enterprise": {
+        "url": "https://attack.mitre.org/techniques/enterprise/",
+        "type": "standards_body",
+    },
     "PayloadsAllTheThings": {
         "url": "https://github.com/swisskyrepo/PayloadsAllTheThings",
         "type": "community_verified",
@@ -36,15 +40,25 @@ TRUSTED_SOURCES: dict[str, dict[str, str]] = {
 }
 
 DOMAIN_CONTENT_TYPE: dict[str, str] = {
-    "web": ContentType.EXPLOITS,
+    "web_app": ContentType.EXPLOITS,
     "api": ContentType.EXPLOITS,
     "network": ContentType.ATTACK_TYPES,
     "mobile": ContentType.EXPLOITS,
     "cloud": ContentType.STRATEGIES,
+    "container": ContentType.STRATEGIES,
     "iot": ContentType.STRATEGIES,
+    "linux_server": ContentType.ATTACK_TYPES,
+    "database": ContentType.ATTACK_TYPES,
+    "desktop": ContentType.EXPLOITS,
+    "repository": ContentType.STRATEGIES,
+    "shared": ContentType.STRATEGIES,
+    # Legacy aliases for backward compatibility.
+    "web": ContentType.EXPLOITS,
+    "infrastructure": ContentType.ATTACK_TYPES,
     "binary": ContentType.EXPLOITS,
     "identity": ContentType.ATTACK_TYPES,
     "supply_chain": ContentType.STRATEGIES,
     "web3": ContentType.EXPLOITS,
-    "shared": ContentType.STRATEGIES,
+    "recon": ContentType.STRATEGIES,
+    "red_team": ContentType.STRATEGIES,
 }

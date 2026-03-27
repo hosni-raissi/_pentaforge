@@ -134,6 +134,8 @@ export default function Settings() {
   const [forceUpdateSuccess, setForceUpdateSuccess] = useState("");
   const [forceUpdateStatus, setForceUpdateStatus] = useState<IntelForceUpdateStatus | null>(null);
   const [showForceUpdatePanel, setShowForceUpdatePanel] = useState(false);
+  const forceUpdateStatusValue = String(forceUpdateStatus?.status || "").toLowerCase();
+  const forceUpdateIsActive = forceUpdateStatusValue === "running" || forceUpdateStatusValue === "cancelling";
 
   const loadIntelData = useCallback(async () => {
     setIntelLoading(true);
@@ -482,6 +484,17 @@ export default function Settings() {
       const response = await cancelForceIntelUpdateFromDesktop(scheduleTargetType);
       if (response.cancelled) {
         setForceUpdateSuccess("Force update cancellation requested.");
+        setForceUpdateStatus((current) => {
+          if (!current) {
+            return current;
+          }
+          return {
+            ...current,
+            status: "cancelled",
+            message: "Cancellation requested by user.",
+            updated_at: new Date().toISOString(),
+          };
+        });
       } else {
         setForceUpdateSuccess(
           response.reason
@@ -498,10 +511,20 @@ export default function Settings() {
     }
   }
 
+  async function handleForceUpdateAction() {
+    if (forceUpdateIsActive) {
+      await handleCancelForceUpdate();
+      return;
+    }
+    await handleForceUpdateNow();
+  }
+
   return (
-    <div className="mx-auto max-w-5xl space-y-4">
+    <div className="mx-auto flex h-full min-h-0 max-w-5xl flex-col gap-4">
       <h1 className="text-lg font-bold text-text-primary">Settings</h1>
       <Tabs
+        className="min-h-0 flex-1"
+        contentClassName="min-h-0 flex-1 overflow-y-auto pr-1"
         tabs={[
           {
             id: "runtime",
@@ -858,12 +881,14 @@ export default function Settings() {
                     <div className="flex items-end">
                       <Button
                         size="sm"
-                        variant="ghost"
-                        onClick={handleForceUpdateNow}
-                        loading={forceUpdateLoading}
+                        variant={forceUpdateIsActive ? "danger" : "ghost"}
+                        onClick={handleForceUpdateAction}
+                        loading={forceUpdateIsActive ? forceUpdateCancelLoading : forceUpdateLoading}
                         className="w-full"
                       >
-                        Force Update Now
+                        {forceUpdateIsActive
+                          ? (forceUpdateCancelLoading ? "Cancelling..." : "Cancel Force Update")
+                          : "Force Update Now"}
                       </Button>
                     </div>
                   </div>
@@ -914,19 +939,6 @@ export default function Settings() {
                       <p className="mt-2 text-[11px] text-text-muted">
                         {forceUpdateStatus.message || "Waiting..."}
                       </p>
-                      {(forceUpdateStatus.status === "running" || forceUpdateStatus.status === "cancelling") && (
-                        <div className="mt-2 flex justify-end">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={handleCancelForceUpdate}
-                            loading={forceUpdateCancelLoading}
-                            disabled={forceUpdateStatus.status === "cancelling"}
-                          >
-                            {forceUpdateStatus.status === "cancelling" ? "Cancelling..." : "Cancel Force Update"}
-                          </Button>
-                        </div>
-                      )}
                     </div>
                   )}
                 </Card>

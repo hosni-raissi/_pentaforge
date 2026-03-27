@@ -13,15 +13,23 @@ interface TabsProps {
   tabs: Tab[];
   defaultTab?: string;
   className?: string;
+  headerClassName?: string;
+  contentClassName?: string;
 }
 
-export function Tabs({ tabs, defaultTab, className }: TabsProps) {
+export function Tabs({
+  tabs,
+  defaultTab,
+  className,
+  headerClassName,
+  contentClassName,
+}: TabsProps) {
   const [active, setActive] = useState(defaultTab ?? tabs[0]?.id ?? '');
   const activeTab = tabs.find((t) => t.id === active);
 
   return (
-    <div className={className}>
-      <div className="flex items-center gap-0.5 border-b border-border mb-4">
+    <div className={cn('flex min-h-0 flex-col', className)}>
+      <div className={cn('mb-4 flex items-center gap-0.5 border-b border-border', headerClassName)}>
         {tabs.map((tab) => (
           <button
             key={tab.id}
@@ -43,7 +51,7 @@ export function Tabs({ tabs, defaultTab, className }: TabsProps) {
           </button>
         ))}
       </div>
-      <div>{activeTab?.content}</div>
+      <div className={cn('min-h-0', contentClassName)}>{activeTab?.content}</div>
     </div>
   );
 }

@@ -49,6 +49,37 @@ from .prompts import FORMATTER_SYSTEM_PROMPT, build_user_message
 
 logger = structlog.get_logger(__name__)
 
+_TARGET_TYPE_ALIASES: dict[str, str] = {
+    "web": "web_app",
+    "web3": "web_app",
+    "infrastructure": "linux_server",
+    "binary": "desktop",
+    "identity": "linux_server",
+    "supply_chain": "repository",
+    "recon": "shared",
+    "red_team": "shared",
+    "cve_exploit": "shared",
+}
+
+_TARGET_TO_RAG_DOMAIN: dict[str, str] = {
+    "container": "cloud",
+    "database": "linux_server",
+}
+
+
+def _normalize_target_type(value: str) -> str:
+    clean = str(value or "").strip().lower().replace("-", "_")
+    if not clean:
+        return "all"
+    return _TARGET_TYPE_ALIASES.get(clean, clean)
+
+
+def _resolve_rag_domain(target_type: str) -> str:
+    normalized = _normalize_target_type(target_type)
+    if normalized in {"", "all"}:
+        return "shared"
+    return _TARGET_TO_RAG_DOMAIN.get(normalized, normalized)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CALLBACK PROTOCOL
@@ -216,6 +247,7 @@ def _build_summary_from_sections(data: dict[str, Any]) -> str:
         (("methods", "strategies", "methodologies", "testing_methods"), "METHODS"),
         (("techniques", "attack_techniques", "attack_types", "ttps"), "TECHNIQUES"),
         (("vulnerabilities", "vulnerability_types", "vulns", "exploits", "weakness_classes"), "VULNERABILITIES"),
+        (("checklist", "checklist_items", "target_checklist", "tests"), "CHECKLIST"),
         (("gaps", "coverage_gaps", "missing", "not_covered"), "GAPS"),
     ]:
         for key in keys:
@@ -247,7 +279,7 @@ def _parse_json_intel(data: dict[str, Any]) -> IntelResult:
         summary_text = _build_summary_from_sections(summary_lower)
         if summary_text.strip():
             return IntelResult(status=data_lower.get("status", "complete"), summary=summary_text, stats=_normalize_stats(_extract_stats_from_alt_keys(data_lower)))
-    section_keys = {"methods", "techniques", "vulnerabilities", "strategies", "attack_techniques", "attack_types", "vulns", "gaps", "methodologies", "testing_methods", "ttps", "vulnerability_types", "weakness_classes"}
+    section_keys = {"methods", "techniques", "vulnerabilities", "strategies", "attack_techniques", "attack_types", "vulns", "checklist", "checklist_items", "target_checklist", "tests", "gaps", "methodologies", "testing_methods", "ttps", "vulnerability_types", "weakness_classes"}
     if any(k in data_lower and isinstance(data_lower[k], (list, str)) for k in section_keys):
         summary = _build_summary_from_sections(data_lower)
         if summary.strip():
@@ -256,10 +288,11 @@ def _parse_json_intel(data: dict[str, Any]) -> IntelResult:
 
 
 def _extract_markdown_sections(text: str) -> str:
-    methods, techniques, vulns = [], [], []
+    methods, techniques, vulns, checklist = [], [], [], []
     method_re = re.compile(r"(?:method|strateg|approach|assessment|testing\s+guide|ptes|wstg)", re.IGNORECASE)
     technique_re = re.compile(r"(?:technique|attack\s+vector|bypass|injection|xss|ssrf|csrf|smuggling|traversal|ssti|rce|lfi|rfi|xxe|idor|deserialization)", re.IGNORECASE)
     vuln_re = re.compile(r"(?:vulnerabilit|weakness|exploit|cve-|misconfigur|broken\s+access|insecure)", re.IGNORECASE)
+    checklist_re = re.compile(r"(?:checklist|test\s*cases?|test\s*plan|validation\s*list)", re.IGNORECASE)
     current = "techniques"
     for line in text.split("\n"):
         stripped = line.strip()
@@ -269,17 +302,19 @@ def _extract_markdown_sections(text: str) -> str:
             heading = stripped.lstrip("#* ").rstrip("*: ")
             if method_re.search(heading): current = "methods"
             elif vuln_re.search(heading): current = "vulns"
+            elif checklist_re.search(heading): current = "checklist"
             elif technique_re.search(heading): current = "techniques"
             continue
         if stripped.startswith("- ") or stripped.startswith("* "):
             item = stripped[2:].strip()
             if item and len(item) >= 3:
-                {"methods": methods, "vulns": vulns, "techniques": techniques}[current].append(item)
+                {"methods": methods, "vulns": vulns, "techniques": techniques, "checklist": checklist}[current].append(item)
     sections = []
     if methods: sections.append(_format_list_section("METHODS", methods))
     if techniques: sections.append(_format_list_section("TECHNIQUES", techniques))
     if vulns: sections.append(_format_list_section("VULNERABILITIES", vulns))
-    return "\n\n".join(sections) if len(methods) + len(techniques) + len(vulns) >= 3 else ""
+    if checklist: sections.append(_format_list_section("CHECKLIST", checklist))
+    return "\n\n".join(sections) if len(methods) + len(techniques) + len(vulns) + len(checklist) >= 3 else ""
 
 
 def _parse_intel_output(raw: str) -> IntelResult:
@@ -389,6 +424,7 @@ class IntelAgent:
         refresh_days_override: int | None = None,
         update_only: bool = False,
     ) -> IntelResult:
+        target_type = _normalize_target_type(target_type)
         self._cb.on_step(f"Intel Agent starting for target_type='{target_type}'")
         await self._context.ensure_ready()
 
@@ -567,7 +603,11 @@ class IntelAgent:
 
                 query_preview = str(args.get("query", ""))[:50]
                 content_type = args.get("content_type", "")
-                self._cb.on_step(f"  {tool_name}(query='{query_preview}...', type='{content_type}')")
+                if tool_name == "get_checklists":
+                    target_preview = str(args.get("target_type", target_type))
+                    self._cb.on_step(f"  {tool_name}(target='{target_preview}')")
+                else:
+                    self._cb.on_step(f"  {tool_name}(query='{query_preview}...', type='{content_type}')")
 
                 tool = self._tools.get(tool_name)
                 if tool is None:
@@ -582,6 +622,8 @@ class IntelAgent:
                         hit_rows = parsed.get("hits")
                         if not isinstance(hit_rows, list):
                             hit_rows = parsed.get("results", [])
+                        if not isinstance(hit_rows, list):
+                            hit_rows = parsed.get("items", [])
                         hits = len(hit_rows) if isinstance(hit_rows, list) else 0
                     else:
                         hits = 0
@@ -620,7 +662,9 @@ class IntelAgent:
             custom_sources = []
 
         for row in custom_sources:
-            row_target = str(row.get("target_type", "all")).strip().lower() or "all"
+            row_target = _normalize_target_type(str(row.get("target_type", "all")))
+            if not row_target:
+                row_target = "all"
             if target_type == "all":
                 pass
             elif row_target not in {"all", target_type}:
@@ -648,7 +692,7 @@ class IntelAgent:
         return deduped
 
     async def _run_update_pipeline(self, target_type: str, info: str) -> dict[str, Any]:
-        domain = target_type if target_type != "all" else "shared"
+        domain = _resolve_rag_domain(target_type)
         self._cb.on_step(f"Update: Verifying sources for '{target_type}'")
 
         source_list = self._collect_source_entries(target_type)
@@ -852,7 +896,7 @@ class IntelAgent:
 
     async def _collect_rag_snapshot(self, target_type: str) -> dict[str, Any]:
         query = f"{target_type} methodology techniques vulnerabilities"
-        domain = target_type if target_type != "all" else "shared"
+        domain = _resolve_rag_domain(target_type)
         out: dict[str, Any] = {"query": query, "domain": domain, "results": {}}
         for ct in ("strategies", "attack_types", "exploits"):
             tool_result = await self._call_tool_json("search_rag", query=query, domain=domain, content_type=ct, n_results=6)

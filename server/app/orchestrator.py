@@ -23,12 +23,15 @@ from server.db.projects import ProjectsStore
 logger = structlog.get_logger(__name__)
 
 _TARGET_TYPE_ALIASES: dict[str, str] = {
-    "web_app": "web",
-    "linux_server": "infrastructure",
-    "desktop": "binary",
-    "repository": "supply_chain",
-    "container": "cloud",
-    "database": "infrastructure",
+    "web": "web_app",
+    "web3": "web_app",
+    "infrastructure": "linux_server",
+    "binary": "desktop",
+    "identity": "linux_server",
+    "supply_chain": "repository",
+    "recon": "shared",
+    "red_team": "shared",
+    "cve_exploit": "shared",
 }
 
 _TARGET_CONFIG_KEYS = (
@@ -50,7 +53,7 @@ def _utc_now_iso() -> str:
 def _normalize_target_type(value: Any) -> str:
     clean = str(value or "").strip().lower().replace("-", "_")
     if not clean:
-        return "web"
+        return "web_app"
     return _TARGET_TYPE_ALIASES.get(clean, clean)
 
 
