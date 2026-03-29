@@ -41,7 +41,8 @@ class _ForceUpdateCancelled(Exception):
 _TARGET_TYPE_ALIASES: dict[str, str] = {
     "web": "web_app",
     "web3": "web_app",
-    "infrastructure": "linux_server",
+    "infrastructure": "infra",
+    "infra": "infra",
     "binary": "desktop",
     "identity": "linux_server",
     "supply_chain": "repository",
@@ -58,13 +59,14 @@ _PUBLIC_TO_INTERNAL_DOMAINS: dict[str, set[str]] = {
     "web_app": {"web_app"},
     "api": {"api"},
     "mobile": {"mobile"},
+    "infra": {"infra", "network", "linux_server", "cloud", "container", "shared"},
     "network": {"network"},
     "iot": {"iot"},
     "linux_server": {"linux_server"},
     "desktop": {"desktop"},
     "cloud": {"cloud"},
     "container": {"container", "cloud"},
-    "database": {"database", "linux_server"},
+    "database": {"database"},
     "repository": {"repository"},
     "shared": {"shared"},
 }
@@ -531,7 +533,7 @@ def _list_combined_intel_resources(target_type: str | None = None) -> list[dict[
     domain_filters = _resource_domain_filters(target_type)
     hidden_builtin_names = projects_store.list_hidden_builtin_intel_resources()
     selected_target = _normalize_target_type(target_type)
-    override_target = selected_target if selected_target in {"container", "database"} else None
+    override_target = selected_target if selected_target in {"container", "database", "infra"} else None
 
     builtin_resources: list[dict[str, Any]] = []
     for source in get_enabled_sources():

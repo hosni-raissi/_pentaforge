@@ -13,6 +13,7 @@ from .scan_request.desktop         import DesktopScanRequest
 from .scan_request.cloud           import CloudScanRequest
 from .scan_request.container       import ContainerScanRequest
 from .scan_request.database        import DatabaseScanRequest
+from .scan_request.infra           import InfraScanRequest
 from .scan_request.repository      import RepositoryScanRequest
 
 
@@ -20,6 +21,7 @@ class TargetType(str, Enum):
     web_app          = "web_app"
     api              = "api"
     mobile           = "mobile"
+    infra            = "infra"
     network          = "network"
     iot              = "iot"
     linux_server     = "linux_server"
@@ -45,6 +47,7 @@ TargetConfig = Union[
     WebAppScanRequest,
     ApiScanRequest,
     MobileScanRequest,
+    InfraScanRequest,
     NetworkScanRequest,
     IotScanRequest,
     LinuxServerScanRequest,

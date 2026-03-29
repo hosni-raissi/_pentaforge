@@ -22,6 +22,7 @@ const FALLBACK_TARGET_TYPES: ProjectTargetTypeOption[] = [
   { value: 'web_app', label: 'Web Application' },
   { value: 'api', label: 'API' },
   { value: 'mobile', label: 'Mobile App' },
+  { value: 'infra', label: 'Infrastructure' },
   { value: 'network', label: 'Network' },
   { value: 'iot', label: 'IoT' },
   { value: 'linux_server', label: 'Linux Server' },

@@ -197,6 +197,26 @@ _CLOUD_EXPLOITS: list[SourceConfig] = [
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# DATABASE — Database security assessment
+# ═════════════════════════════════════════════════════════════════════════════
+
+_DATABASE_STRATEGIES: list[SourceConfig] = [
+    SourceConfig(
+        name="DatabaseSecurityAudit",
+        url="https://github.com/JFR-C/Database-Security-Audit",
+        source_type=SourceType.GITHUB_REPO,
+        domain="database",
+        category="methodology",
+        content_type=ContentType.STRATEGIES,
+        branch="main",
+        include_patterns=["**/*.md"],
+        tags=["database", "audit", "sql", "security"],
+        description="Database Security Audit — practical database security assessment checklist and guidance.",
+    ),
+]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # INFRASTRUCTURE — Internal pentest, AD, privilege escalation
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -491,6 +511,9 @@ ALL_SOURCES: list[SourceConfig] = [
     # CLOUD
     *_CLOUD_STRATEGIES,
     *_CLOUD_EXPLOITS,
+
+    # DATABASE
+    *_DATABASE_STRATEGIES,
 
     # INFRASTRUCTURE
     *_INFRASTRUCTURE_STRATEGIES,

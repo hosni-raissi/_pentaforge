@@ -8,6 +8,7 @@ from .get_checklists import get_checklists
 from .notify_planner import notify_planner
 from .payloads import _matches_category, fetch_payloads
 from .search_rag import search_rag
+from .set_checklist import set_checklist
 from .verify_source import _resolve_check_url, verify_source
 
 ALL_INTEL_TOOLS = [
@@ -19,6 +20,7 @@ ALL_INTEL_TOOLS = [
     notify_planner,
     search_rag,
     get_checklists,
+    set_checklist,
 ]
 
 __all__ = [
@@ -33,6 +35,7 @@ __all__ = [
     "notify_planner",
     "search_rag",
     "get_checklists",
+    "set_checklist",
     "_matches_category",
     "_parse_items_input",
     "_resolve_check_url",

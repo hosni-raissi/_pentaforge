@@ -27,6 +27,7 @@ from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 
 from .tools import ALL_INTEL_TOOLS, IntelContext, set_context
+from .tools.get_checklists import build_deterministic_checklist_payload, clean_checklists_with_llm
 from server.agents.intel.config import (
     FORMATTER_ROUNDS,
     FORMATTER_CALL_TIMEOUT_SECONDS,
@@ -52,7 +53,8 @@ logger = structlog.get_logger(__name__)
 _TARGET_TYPE_ALIASES: dict[str, str] = {
     "web": "web_app",
     "web3": "web_app",
-    "infrastructure": "linux_server",
+    "infrastructure": "infra",
+    "infra": "infra",
     "binary": "desktop",
     "identity": "linux_server",
     "supply_chain": "repository",
@@ -62,6 +64,7 @@ _TARGET_TYPE_ALIASES: dict[str, str] = {
 }
 
 _TARGET_TO_RAG_DOMAIN: dict[str, str] = {
+    "infra": "linux_server",
     "container": "cloud",
     "database": "linux_server",
 }
@@ -79,6 +82,26 @@ def _resolve_rag_domain(target_type: str) -> str:
     if normalized in {"", "all"}:
         return "shared"
     return _TARGET_TO_RAG_DOMAIN.get(normalized, normalized)
+
+
+def _target_query_text(target_type: str) -> str:
+    normalized = _normalize_target_type(target_type)
+    labels = {
+        "web_app": "web application",
+        "api": "API",
+        "mobile": "mobile app",
+        "infra": "infrastructure",
+        "network": "network",
+        "iot": "IoT device",
+        "linux_server": "linux server",
+        "desktop": "desktop application",
+        "cloud": "cloud environment",
+        "container": "container platform",
+        "database": "database",
+        "repository": "source code repository",
+        "shared": "shared security knowledge",
+    }
+    return labels.get(normalized, normalized.replace("_", " "))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -241,24 +264,677 @@ def _format_list_section(label: str, items: Any) -> str:
     return "\n".join(lines)
 
 
+_GENERIC_VULNERABILITY_NAMES = frozenset(
+    {
+        "vulnerability reproduction",
+        "vulnerability reproduce",
+        "reproduction",
+        "exploit",
+        "exploitation",
+        "vulnerability",
+    }
+)
+
+_KNOWN_VULNERABILITY_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("sql injection", "SQL Injection"),
+    ("stored cross site scripting", "Stored XSS"),
+    ("reflected cross site scripting", "Reflected XSS"),
+    ("dom based cross site scripting", "DOM XSS"),
+    ("cross site scripting", "Cross-Site Scripting (XSS)"),
+    ("xss", "Cross-Site Scripting (XSS)"),
+    ("server-side request forgery", "Server-Side Request Forgery (SSRF)"),
+    ("ssrf", "Server-Side Request Forgery (SSRF)"),
+    ("server-side template injection", "Server-Side Template Injection (SSTI)"),
+    ("ssti", "Server-Side Template Injection (SSTI)"),
+    ("command injection", "Command Injection"),
+    ("code injection", "Code Injection"),
+    ("xml injection", "XML Injection"),
+    ("xxe", "XML External Entity (XXE)"),
+    ("ldap injection", "LDAP Injection"),
+    ("xpath injection", "XPath Injection"),
+    ("csrf", "Cross-Site Request Forgery (CSRF)"),
+    ("cross site request forgery", "Cross-Site Request Forgery (CSRF)"),
+    ("idor", "Insecure Direct Object Reference (IDOR)"),
+    ("insecure direct object references", "Insecure Direct Object Reference (IDOR)"),
+    ("insecure direct object reference", "Insecure Direct Object Reference (IDOR)"),
+    ("mass assignment", "Mass Assignment"),
+    ("oauth", "OAuth Weaknesses"),
+    ("json web tokens", "JWT Weaknesses"),
+    ("jwt", "JWT Weaknesses"),
+    ("path traversal", "Path Traversal"),
+    ("directory traversal", "Directory Traversal"),
+    ("file include", "File Inclusion"),
+    ("deserialization", "Insecure Deserialization"),
+    ("request smuggling", "HTTP Request Smuggling"),
+    ("host header injection", "Host Header Injection"),
+    ("prototype pollution", "Prototype Pollution"),
+    ("clickjacking", "Clickjacking"),
+    ("open redirect", "Open Redirect"),
+    ("file upload", "Unrestricted File Upload"),
+    ("privilege escalation", "Privilege Escalation"),
+    ("authentication schema", "Authentication Bypass"),
+    ("authorization schema", "Authorization Bypass"),
+    ("default credentials", "Default Credentials"),
+    ("weak password", "Weak Password Policy"),
+)
+
+_EXCLUSION_TOPICS: dict[str, dict[str, Any]] = {
+    "sql_injection": {
+        "label": "SQL Injection",
+        "terms": ("sql injection", "sqli"),
+    },
+    "xss": {
+        "label": "XSS",
+        "terms": (
+            "xss",
+            "cross site scripting",
+            "cross-site scripting",
+            "dom xss",
+            "stored xss",
+            "reflected xss",
+            "dom based cross site scripting",
+        ),
+    },
+    "ssrf": {
+        "label": "SSRF",
+        "terms": ("ssrf", "server-side request forgery", "server side request forgery"),
+    },
+    "ssti": {
+        "label": "SSTI",
+        "terms": ("ssti", "server-side template injection", "server side template injection"),
+    },
+    "csrf": {
+        "label": "CSRF",
+        "terms": ("csrf", "cross site request forgery", "cross-site request forgery"),
+    },
+    "idor": {
+        "label": "IDOR",
+        "terms": ("idor", "insecure direct object reference", "insecure direct object references"),
+    },
+    "xxe": {
+        "label": "XXE",
+        "terms": ("xxe", "xml external entity"),
+    },
+    "command_injection": {
+        "label": "Command Injection",
+        "terms": ("command injection",),
+    },
+    "file_upload": {
+        "label": "File Upload",
+        "terms": ("file upload", "upload of malicious files", "upload of unexpected file types"),
+    },
+}
+
+_EXCLUSION_PREFIXES: tuple[str, ...] = (
+    "no ",
+    "without ",
+    "exclude ",
+    "excluding ",
+    "skip ",
+    "ignore ",
+    "do not test ",
+    "don't test ",
+    "dont test ",
+    "no testing for ",
+)
+
+
+def _normalize_known_vulnerability(value: str) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "").strip(" -\t\r\n:;,")).strip()
+    if not clean:
+        return ""
+
+    lowered = clean.lower()
+    if lowered in _GENERIC_VULNERABILITY_NAMES:
+        return ""
+    if re.search(r"\bcve-\d{4}-\d{4,7}\b", lowered, flags=re.IGNORECASE):
+        return clean
+
+    for needle, label in _KNOWN_VULNERABILITY_PATTERNS:
+        if needle in lowered:
+            return label
+    return ""
+
+
+def _filter_known_vulnerabilities(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_known_vulnerability(value)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return out
+
+
+def _extract_excluded_topics(info: str) -> dict[str, str]:
+    lowered = re.sub(r"\s+", " ", str(info or "").lower())
+    excluded: dict[str, str] = {}
+    for topic, config in _EXCLUSION_TOPICS.items():
+        for term in config.get("terms", ()):
+            term_text = str(term or "").strip().lower()
+            if not term_text:
+                continue
+            if any(f"{prefix}{term_text}" in lowered for prefix in _EXCLUSION_PREFIXES):
+                excluded[topic] = str(config.get("label", topic))
+                break
+    return excluded
+
+
+def _matches_excluded_topic(text: str, excluded_topics: dict[str, str]) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered or not excluded_topics:
+        return False
+    for topic in excluded_topics:
+        topic_config = _EXCLUSION_TOPICS.get(topic, {})
+        for term in topic_config.get("terms", ()):
+            if str(term or "").lower() in lowered:
+                return True
+    return False
+
+
+def _filter_checklist_section_block(block: str, excluded_topics: dict[str, str]) -> str:
+    if not block.strip() or not excluded_topics:
+        return block.strip()
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in block.splitlines():
+        if line.startswith("- [ ] "):
+            if current:
+                blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    kept: list[str] = []
+    for checklist_block in blocks:
+        title = checklist_block[0][6:].strip() if checklist_block and checklist_block[0].startswith("- [ ] ") else ""
+        if _matches_excluded_topic(title, excluded_topics):
+            continue
+        kept.append("\n".join(checklist_block).strip())
+    return "\n".join(kept).strip()
+
+
+def _apply_info_constraints_to_summary(summary: str, info: str) -> str:
+    raw = str(summary or "").strip()
+    if not raw:
+        return raw
+
+    excluded_topics = _extract_excluded_topics(info)
+    if not excluded_topics:
+        return raw
+
+    sections = _parse_summary_sections(raw)
+    if not sections:
+        return raw
+
+    summary_sections: list[str] = []
+
+    vulnerability_candidates = _extract_block_items(sections.get("known_vulnerabilities", ""))
+    vulnerability_candidates.extend(_extract_block_items(sections.get("vulnerabilities", "")))
+    kept_vulnerabilities = [
+        item
+        for item in _filter_known_vulnerabilities(vulnerability_candidates)
+        if not _matches_excluded_topic(item, excluded_topics)
+    ]
+    if kept_vulnerabilities:
+        summary_sections.append(_format_list_section("KNOWN VULNERABILITIES", kept_vulnerabilities))
+
+    filtered_checklist = _filter_checklist_section_block(sections.get("checklist", ""), excluded_topics)
+    if filtered_checklist:
+        summary_sections.append("CHECKLIST:\n" + filtered_checklist)
+    else:
+        summary_sections.append("CHECKLIST:\n- (none found)")
+
+    gap_items = _extract_block_items(sections.get("gaps", ""))
+    if sections.get("gaps", "").strip() and not gap_items:
+        gap_items = [sections["gaps"].strip()]
+    excluded_labels = ", ".join(sorted(excluded_topics.values()))
+    gap_items.append(f"Excluded by target info: {excluded_labels}.")
+    summary_sections.append(_format_list_section("GAPS", _dedupe_keep_order(gap_items)))
+    return "\n\n".join(summary_sections)
+
+
+def _phase_block_title(phase: str) -> str:
+    return {
+        "1": "Reconnaissance",
+        "2": "Mapping",
+        "3": "Configuration Review",
+        "4": "Exploitation & Validation",
+        "5": "Session & Access Control",
+    }.get(str(phase).strip(), f"Phase {phase or 'unknown'}")
+
+
+def _build_deterministic_formatter_checklist_payload(checklist_data: dict[str, Any], info: str) -> dict[str, Any]:
+    cats = checklist_data.get("cats", {})
+    available_total = int(checklist_data.get("available_total", checklist_data.get("total", 0)) or 0)
+    excluded_topics = _extract_excluded_topics(info)
+
+    phase_map: dict[str, list[dict[str, str]]] = {}
+    known_vulnerabilities: list[str] = []
+
+    if isinstance(cats, dict):
+        for cat_id, cat_data in cats.items():
+            if not isinstance(cat_data, dict):
+                continue
+            phase = str(cat_data.get("p", "unknown")).strip() or "unknown"
+            items = cat_data.get("items", [])
+            if not isinstance(items, list):
+                continue
+            for row in items:
+                if not isinstance(row, list) or len(row) < 2:
+                    continue
+                ref = str(row[0]).strip()
+                name = str(row[1]).strip()
+                if not ref or not name:
+                    continue
+                if _matches_excluded_topic(name, excluded_topics):
+                    continue
+                phase_map.setdefault(phase, []).append({"ref": ref, "name": name, "category": str(cat_id)})
+                normalized_vuln = _normalize_known_vulnerability(name)
+                if normalized_vuln and not _matches_excluded_topic(normalized_vuln, excluded_topics):
+                    known_vulnerabilities.append(normalized_vuln)
+
+    phase_blocks = [
+        {
+            "phase": phase,
+            "title": _phase_block_title(phase),
+            "items": phase_map[phase],
+        }
+        for phase in sorted(phase_map.keys(), key=_phase_sort_key)
+    ]
+
+    gaps = []
+    if excluded_topics:
+        gaps.append(f"Excluded by target info: {', '.join(sorted(excluded_topics.values()))}.")
+    if not gaps:
+        gaps.append("No major checklist generation gaps detected.")
+
+    return {
+        "target_type": checklist_data.get("t", ""),
+        "available_total": available_total,
+        "known_vulnerabilities": _dedupe_keep_order(known_vulnerabilities)[:14],
+        "phase_blocks": phase_blocks,
+        "gaps": gaps,
+    }
+
+
+def _build_checklist_llm_input(checklist_data: dict[str, Any], info: str) -> str:
+    payload = _build_deterministic_formatter_checklist_payload(checklist_data, info)
+    lines = [
+        f"Target type: {payload.get('target_type', '')}",
+        f"Target info: {info or 'none'}",
+        f"Available checklist items: {payload.get('available_total', 0)}",
+        "",
+        "Candidate checklist blocks:",
+    ]
+    for block in payload.get("phase_blocks", []):
+        if not isinstance(block, dict):
+            continue
+        phase = str(block.get("phase", ""))
+        title = str(block.get("title", "")).strip()
+        lines.append(f"Phase {phase} - {title}")
+        for item in block.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- {item.get('ref', '')}: {item.get('name', '')}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _compact_search_results_for_formatter(parsed: dict[str, Any]) -> str:
+    hits = parsed.get("hits", [])
+    compact_hits: list[dict[str, Any]] = []
+    if isinstance(hits, list):
+        for hit in hits[:6]:
+            if not isinstance(hit, dict):
+                continue
+            metadata = hit.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            compact_hits.append(
+                {
+                    "score": round(float(hit.get("score", 0) or 0), 4),
+                    "source": metadata.get("source_name", ""),
+                    "heading": metadata.get("heading", ""),
+                    "tags": metadata.get("tags", []),
+                }
+            )
+    return json.dumps(
+        {
+            "query": parsed.get("query", ""),
+            "domain": parsed.get("domain", ""),
+            "content_type": parsed.get("content_type", ""),
+            "total": parsed.get("total", len(compact_hits)),
+            "hits": compact_hits,
+        },
+        ensure_ascii=True,
+    )
+
+
+_SUMMARY_HEADING_MAP: dict[str, str] = {
+    "methods": "methods",
+    "strategies": "methods",
+    "techniques": "techniques",
+    "known vulnerabilities": "known_vulnerabilities",
+    "vulnerabilities": "vulnerabilities",
+    "checklist": "checklist",
+    "gaps": "gaps",
+}
+
+
+def _parse_summary_sections(text: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buffer: list[str] = []
+
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        mapped = ""
+        if stripped.endswith(":"):
+            heading = stripped[:-1].strip().lower()
+            mapped = _SUMMARY_HEADING_MAP.get(heading, "")
+        if mapped:
+            if current is not None:
+                sections[current] = "\n".join(buffer).strip()
+            current = mapped
+            buffer = []
+            continue
+        if current is not None:
+            buffer.append(line)
+
+    if current is not None:
+        sections[current] = "\n".join(buffer).strip()
+    return sections
+
+
+def _extract_block_items(block: str) -> list[str]:
+    items: list[str] = []
+    for raw in str(block or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(("- ", "* ", "• ")):
+            items.append(line[2:].strip())
+        elif re.match(r"^\d+[\.\)]\s+", line):
+            items.append(re.sub(r"^\d+[\.\)]\s+", "", line).strip())
+    return _dedupe_keep_order(items)
+
+
+def _sanitize_summary_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    sections = _parse_summary_sections(raw)
+    if not sections:
+        return raw
+
+    summary_sections: list[str] = []
+
+    vulnerability_candidates = _extract_block_items(sections.get("known_vulnerabilities", ""))
+    vulnerability_candidates.extend(_extract_block_items(sections.get("vulnerabilities", "")))
+    known_vulnerabilities = _filter_known_vulnerabilities(vulnerability_candidates)
+    if known_vulnerabilities:
+        summary_sections.append(_format_list_section("KNOWN VULNERABILITIES", known_vulnerabilities))
+
+    checklist_block = sections.get("checklist", "").strip()
+    if checklist_block:
+        summary_sections.append("CHECKLIST:\n" + checklist_block)
+
+    gap_items = _extract_block_items(sections.get("gaps", ""))
+    if sections.get("gaps", "").strip() and not gap_items:
+        gap_items = [sections["gaps"].strip()]
+    summary_sections.append(_format_list_section("GAPS", gap_items))
+    return "\n\n".join(summary_sections)
+
+
 def _build_summary_from_sections(data: dict[str, Any]) -> str:
     sections: list[str] = []
-    for keys, label in [
-        (("methods", "strategies", "methodologies", "testing_methods"), "METHODS"),
-        (("techniques", "attack_techniques", "attack_types", "ttps"), "TECHNIQUES"),
-        (("vulnerabilities", "vulnerability_types", "vulns", "exploits", "weakness_classes"), "VULNERABILITIES"),
-        (("checklist", "checklist_items", "target_checklist", "tests"), "CHECKLIST"),
-        (("gaps", "coverage_gaps", "missing", "not_covered"), "GAPS"),
-    ]:
-        for key in keys:
-            val = data.get(key)
-            if isinstance(val, list) and val:
-                sections.append(_format_list_section(label, val))
-                break
-            if isinstance(val, str) and val.strip():
-                sections.append(f"{label}:\n{val.strip()}")
-                break
+    vulnerability_values: list[str] = []
+    for key in ("vulnerabilities", "vulnerability_types", "vulns", "exploits", "weakness_classes", "known_vulnerabilities"):
+        val = data.get(key)
+        if isinstance(val, list):
+            vulnerability_values.extend(str(item) for item in val if str(item or "").strip())
+        elif isinstance(val, str) and val.strip():
+            vulnerability_values.extend(_extract_block_items(val) or [val.strip()])
+    known_vulnerabilities = _filter_known_vulnerabilities(vulnerability_values)
+    if known_vulnerabilities:
+        sections.append(_format_list_section("KNOWN VULNERABILITIES", known_vulnerabilities))
+
+    for key in ("checklist", "checklist_items", "target_checklist", "tests"):
+        val = data.get(key)
+        if isinstance(val, list) and val:
+            sections.append(_format_list_section("CHECKLIST", val))
+            break
+        if isinstance(val, str) and val.strip():
+            sections.append(f"CHECKLIST:\n{val.strip()}")
+            break
+
+    for key in ("gaps", "coverage_gaps", "missing", "not_covered"):
+        val = data.get(key)
+        if isinstance(val, list) and val:
+            sections.append(_format_list_section("GAPS", val))
+            break
+        if isinstance(val, str) and val.strip():
+            sections.append(_format_list_section("GAPS", _extract_block_items(val) or [val.strip()]))
+            break
     return "\n\n".join(sections)
+
+
+_PLACEHOLDER_TOKEN_RE = re.compile(
+    r"\b(?:method|technique|gap|checklist item|item)\s*\d+\b",
+    re.IGNORECASE,
+)
+_REFERENCE_TOKEN_RE = re.compile(
+    r"\b(?:WSTG-[A-Z]+-\d+|API\d{1,2}\s*:\s*20\d{2}|T\d{4}(?:\.\d{3})?|CVE-\d{4}-\d{4,7})\b",
+    re.IGNORECASE,
+)
+
+
+def _is_low_quality_summary(text: str) -> bool:
+    """Reject synthetic placeholder-style summaries from the formatter."""
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+
+    lowered = raw.lower()
+    placeholder_hits = len(_PLACEHOLDER_TOKEN_RE.findall(raw))
+    if placeholder_hits >= 2:
+        return True
+
+    if "[ ] checklist item" in lowered:
+        return True
+
+    if "checklist:" in lowered:
+        has_checklist_shape = "phase" in lowered and "reference" in lowered and "objective" in lowered
+        if not has_checklist_shape:
+            return True
+
+    if "methods:" in lowered and "techniques:" in lowered and "vulnerabilities:" in lowered:
+        # A full structured summary should include at least one concrete reference token.
+        if not _REFERENCE_TOKEN_RE.search(raw):
+            return True
+
+    return False
+
+
+def _count_checklist_items(text: str) -> int:
+    return len(re.findall(r"^\s*-\s*\[\s*\]\s+", str(text or ""), flags=re.MULTILINE))
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        s = str(v or "").strip()
+        if not s:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def _phase_sort_key(phase: str) -> int:
+    try:
+        return int(str(phase).strip())
+    except Exception:
+        return 99
+
+
+def _objective_from_test_name(name: str) -> str:
+    clean = re.sub(r"^\s*Testing\s+for\s+", "", str(name or ""), flags=re.IGNORECASE).strip()
+    clean = re.sub(r"^\s*Test\s+", "", clean, flags=re.IGNORECASE).strip()
+    if not clean:
+        clean = str(name or "").strip()
+    return f"Validate whether {clean.lower()} is exploitable."
+
+
+def _steps_for_test_name(name: str) -> str:
+    low = str(name or "").lower()
+    if "sql injection" in low:
+        return (
+            "1. Send safe SQLi probes across parameters and bodies.\n"
+            "               2. Confirm behavior differences/errors and data exposure.\n"
+            "               3. Capture reproducible request/response evidence."
+        )
+    if "cross site scripting" in low or "xss" in low:
+        return (
+            "1. Inject reflected/stored/DOM payloads in reachable sinks.\n"
+            "               2. Confirm script execution context and impact.\n"
+            "               3. Record PoC payload, trigger path, and screenshot evidence."
+        )
+    if "authorization" in low or "idor" in low:
+        return (
+            "1. Test horizontal/vertical access with altered identifiers.\n"
+            "               2. Verify unauthorized data/action access.\n"
+            "               3. Save before/after responses proving broken access control."
+        )
+    if "ssrf" in low:
+        return (
+            "1. Probe SSRF sinks with controlled callback endpoints.\n"
+            "               2. Validate internal/network metadata reachability.\n"
+            "               3. Preserve callback logs and affected request traces."
+        )
+    return (
+        "1. Reproduce the test case with controlled malicious input.\n"
+        "               2. Confirm security impact and exploitability.\n"
+        "               3. Capture precise PoC evidence and affected parameters."
+    )
+
+
+def _extract_rag_headings(report: dict[str, Any], content_type: str, limit: int = 12) -> list[str]:
+    rag = report.get("rag_snapshot", {})
+    if not isinstance(rag, dict):
+        return []
+    results = rag.get("results", {})
+    if not isinstance(results, dict):
+        return []
+    hits = results.get(content_type, [])
+    if not isinstance(hits, list):
+        return []
+
+    out: list[str] = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        metadata = hit.get("metadata", {})
+        heading = ""
+        if isinstance(metadata, dict):
+            heading = str(metadata.get("heading", "")).strip()
+        if not heading:
+            heading = str(hit.get("content", "")).strip().split("\n")[0][:120]
+        if heading:
+            out.append(heading)
+        if len(out) >= limit:
+            break
+    return _dedupe_keep_order(out)
+
+
+def _build_grounded_summary_from_checklists(
+    *,
+    target_type: str,
+    checklist_data: dict[str, Any],
+    pipeline_report: dict[str, Any],
+    max_items: int = 18,
+) -> str:
+    cats = checklist_data.get("cats", {})
+    if not isinstance(cats, dict) or not cats:
+        return ""
+
+    checklist_rows: list[tuple[int, str, str, str]] = []
+    derived_techniques: list[str] = []
+    checklist_names: list[str] = []
+    for cat_id, cat_data in cats.items():
+        if not isinstance(cat_data, dict):
+            continue
+        phase = str(cat_data.get("p", "4")).strip() or "4"
+        items = cat_data.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for row in items:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            ref = str(row[0]).strip()
+            name = str(row[1]).strip()
+            if not ref or not name:
+                continue
+            checklist_names.append(name)
+            clean_tech = re.sub(r"^\s*Testing\s+for\s+", "", name, flags=re.IGNORECASE).strip()
+            clean_tech = re.sub(r"^\s*Test\s+", "", clean_tech, flags=re.IGNORECASE).strip()
+            if clean_tech:
+                derived_techniques.append(clean_tech)
+            checklist_rows.append((_phase_sort_key(phase), phase, ref, name))
+
+    checklist_rows.sort(key=lambda x: (x[0], x[2], x[3]))
+    checklist_rows = checklist_rows[:max_items]
+
+    rag_vulns = _extract_rag_headings(pipeline_report, "exploits", limit=14)
+    vulnerabilities = _filter_known_vulnerabilities(rag_vulns + derived_techniques + checklist_names)[:14]
+
+    checklist_lines: list[str] = []
+    for _, phase, ref, name in checklist_rows:
+        checklist_lines.append(
+            f"- [ ] {name}\n"
+            f"    Phase     : {phase}\n"
+            f"    Reference : {ref}\n"
+            f"    Objective : {_objective_from_test_name(name)}\n"
+            f"    Steps     : {_steps_for_test_name(name)}"
+        )
+
+    gaps: list[str] = []
+    rag_techniques = _extract_rag_headings(pipeline_report, "attack_types", limit=14)
+    if not rag_techniques:
+        gaps.append("RAG attack_types coverage is thin; rely mostly on OWASP checklist mapping.")
+    if not checklist_rows:
+        gaps.append(f"No checklist rows could be built for target_type={target_type}.")
+    if not vulnerabilities:
+        gaps.append(f"No specific known vulnerabilities were recovered for {target_type}; prioritize the checklist coverage.")
+    if not gaps:
+        gaps.append("No major checklist generation gaps detected.")
+
+    def _section(title: str, rows: list[str]) -> str:
+        if not rows:
+            return f"{title}:\n- (none found)"
+        return "\n".join([f"{title}:", *[f"- {r}" for r in rows]])
+
+    return "\n\n".join(
+        ([ _section("KNOWN VULNERABILITIES", vulnerabilities) ] if vulnerabilities else [])
+        + [
+            "CHECKLIST:\n" + ("\n".join(checklist_lines) if checklist_lines else "- (none found)"),
+            _section("GAPS", gaps),
+        ]
+    )
 
 
 def _extract_stats_from_alt_keys(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -273,48 +949,53 @@ def _parse_json_intel(data: dict[str, Any]) -> IntelResult:
     data_lower = {k.lower(): v for k, v in data.items()}
     summary_val = data_lower.get("summary")
     if isinstance(summary_val, str) and summary_val.strip():
-        return IntelResult(status=data_lower.get("status", "complete"), summary=summary_val.strip(), stats=_normalize_stats(data_lower.get("stats", {})))
+        clean_summary = _sanitize_summary_text(summary_val.strip())
+        if _is_low_quality_summary(clean_summary):
+            return IntelResult(status=data_lower.get("status", "complete"), summary="")
+        return IntelResult(status=data_lower.get("status", "complete"), summary=clean_summary, stats=_normalize_stats(data_lower.get("stats", {})))
     if isinstance(summary_val, dict):
         summary_lower = {k.lower(): v for k, v in summary_val.items()}
         summary_text = _build_summary_from_sections(summary_lower)
         if summary_text.strip():
+            if _is_low_quality_summary(summary_text):
+                return IntelResult(status=data_lower.get("status", "complete"), summary="")
             return IntelResult(status=data_lower.get("status", "complete"), summary=summary_text, stats=_normalize_stats(_extract_stats_from_alt_keys(data_lower)))
     section_keys = {"methods", "techniques", "vulnerabilities", "strategies", "attack_techniques", "attack_types", "vulns", "checklist", "checklist_items", "target_checklist", "tests", "gaps", "methodologies", "testing_methods", "ttps", "vulnerability_types", "weakness_classes"}
     if any(k in data_lower and isinstance(data_lower[k], (list, str)) for k in section_keys):
         summary = _build_summary_from_sections(data_lower)
         if summary.strip():
+            if _is_low_quality_summary(summary):
+                return IntelResult(status=data_lower.get("status", "complete"), summary="")
             return IntelResult(status=data_lower.get("status", "complete"), summary=summary, stats=_normalize_stats(_extract_stats_from_alt_keys(data_lower)))
     return IntelResult(status="complete", summary="")
 
 
 def _extract_markdown_sections(text: str) -> str:
-    methods, techniques, vulns, checklist = [], [], [], []
-    method_re = re.compile(r"(?:method|strateg|approach|assessment|testing\s+guide|ptes|wstg)", re.IGNORECASE)
-    technique_re = re.compile(r"(?:technique|attack\s+vector|bypass|injection|xss|ssrf|csrf|smuggling|traversal|ssti|rce|lfi|rfi|xxe|idor|deserialization)", re.IGNORECASE)
+    vulns, checklist, gaps = [], [], []
     vuln_re = re.compile(r"(?:vulnerabilit|weakness|exploit|cve-|misconfigur|broken\s+access|insecure)", re.IGNORECASE)
     checklist_re = re.compile(r"(?:checklist|test\s*cases?|test\s*plan|validation\s*list)", re.IGNORECASE)
-    current = "techniques"
+    gap_re = re.compile(r"(?:gap|missing|not covered|coverage)", re.IGNORECASE)
+    current = "checklist"
     for line in text.split("\n"):
         stripped = line.strip()
         if not stripped:
             continue
         if stripped.startswith("#") or stripped.startswith("**"):
             heading = stripped.lstrip("#* ").rstrip("*: ")
-            if method_re.search(heading): current = "methods"
-            elif vuln_re.search(heading): current = "vulns"
+            if vuln_re.search(heading): current = "vulns"
             elif checklist_re.search(heading): current = "checklist"
-            elif technique_re.search(heading): current = "techniques"
+            elif gap_re.search(heading): current = "gaps"
             continue
         if stripped.startswith("- ") or stripped.startswith("* "):
             item = stripped[2:].strip()
             if item and len(item) >= 3:
-                {"methods": methods, "vulns": vulns, "techniques": techniques, "checklist": checklist}[current].append(item)
+                {"vulns": vulns, "checklist": checklist, "gaps": gaps}[current].append(item)
     sections = []
-    if methods: sections.append(_format_list_section("METHODS", methods))
-    if techniques: sections.append(_format_list_section("TECHNIQUES", techniques))
-    if vulns: sections.append(_format_list_section("VULNERABILITIES", vulns))
+    known_vulnerabilities = _filter_known_vulnerabilities(vulns)
+    if known_vulnerabilities: sections.append(_format_list_section("KNOWN VULNERABILITIES", known_vulnerabilities))
     if checklist: sections.append(_format_list_section("CHECKLIST", checklist))
-    return "\n\n".join(sections) if len(methods) + len(techniques) + len(vulns) + len(checklist) >= 3 else ""
+    if gaps: sections.append(_format_list_section("GAPS", gaps))
+    return "\n\n".join(sections) if len(known_vulnerabilities) + len(checklist) + len(gaps) >= 2 else ""
 
 
 def _parse_intel_output(raw: str) -> IntelResult:
@@ -339,7 +1020,7 @@ def _parse_intel_output(raw: str) -> IntelResult:
         pass
     if len(text) > 50:
         summary = _extract_markdown_sections(text)
-        if summary:
+        if summary and not _is_low_quality_summary(summary):
             return IntelResult(status="complete", summary=summary, stats=_default_stats())
     return IntelResult(status="complete", summary="")
 
@@ -516,9 +1197,25 @@ class IntelAgent:
         llm_result = await self._run_formatter(target_type=target_type, info=info, pipeline_report=pipeline_report)
 
         result_stats = _normalize_stats(llm_result.stats)
-        summary = llm_result.summary.strip() or _build_deterministic_summary(pipeline_report)
-        self._cb.on_done(f"Intel Agent complete — status={llm_result.status}")
-        return IntelResult(status=llm_result.status or "complete", summary=summary, stats=result_stats)
+        summary = _apply_info_constraints_to_summary(llm_result.summary.strip(), info)
+        final_status = llm_result.status or "complete"
+
+        needs_rebuild = _is_low_quality_summary(summary) or _count_checklist_items(summary) < 8
+        if needs_rebuild:
+            self._cb.on_warn("Formatter summary quality is low — rebuilding checklist from get_checklists")
+            rebuilt = await self._rebuild_summary_from_checklists(
+                target_type=target_type,
+                info=info,
+                pipeline_report=pipeline_report,
+            )
+            if rebuilt:
+                summary = _apply_info_constraints_to_summary(rebuilt, info)
+                final_status = "complete"
+
+        if not summary:
+            summary = _build_deterministic_summary(pipeline_report)
+        self._cb.on_done(f"Intel Agent complete — status={final_status}")
+        return IntelResult(status=final_status, summary=summary, stats=result_stats)
 
     # ── Background Task ────────────────────────────────────────────────
 
@@ -533,6 +1230,28 @@ class IntelAgent:
             logger.error("intel_background_update_failed", task=task.get_name(), error=repr(exc))
         else:
             self._cb.on_done("Background RAG update completed")
+
+    async def _rebuild_summary_from_checklists(
+        self,
+        *,
+        target_type: str,
+        info: str,
+        pipeline_report: dict[str, Any],
+    ) -> str:
+        checklist_data = await self._call_tool_json(
+            "get_checklists",
+            target_type=target_type,
+            info=info[:250],
+        )
+        if not isinstance(checklist_data, dict):
+            return ""
+        rebuilt = _build_grounded_summary_from_checklists(
+            target_type=target_type,
+            checklist_data=checklist_data,
+            pipeline_report=pipeline_report,
+            max_items=18,
+        )
+        return rebuilt.strip()
 
     # ── LLM Formatter ──────────────────────────────────────────────────
 
@@ -606,6 +1325,18 @@ class IntelAgent:
                 if tool_name == "get_checklists":
                     target_preview = str(args.get("target_type", target_type))
                     self._cb.on_step(f"  {tool_name}(target='{target_preview}')")
+                elif tool_name == "fetch_page":
+                    target_preview = str(args.get("target_type", target_type))
+                    url_preview = str(args.get("url", ""))[:80]
+                    self._cb.on_step(
+                        f"  {tool_name}(target='{target_preview}', url='{url_preview}...')"
+                    )
+                elif tool_name == "set_checklist":
+                    target_preview = str(args.get("target_type", target_type))
+                    checklist_preview = str(args.get("checklist", ""))[:50]
+                    self._cb.on_step(
+                        f"  {tool_name}(target='{target_preview}', checklist='{checklist_preview}...')"
+                    )
                 else:
                     self._cb.on_step(f"  {tool_name}(query='{query_preview}...', type='{content_type}')")
 
@@ -616,22 +1347,66 @@ class IntelAgent:
                     result_str = await self._execute_with_retry(tool, **args)
 
                 # Report hits count
+                parsed_for_formatter: dict[str, Any] | None = None
                 try:
                     parsed = json.loads(result_str)
+                    parsed_for_formatter = parsed if isinstance(parsed, dict) else None
                     if isinstance(parsed, dict):
-                        hit_rows = parsed.get("hits")
-                        if not isinstance(hit_rows, list):
-                            hit_rows = parsed.get("results", [])
-                        if not isinstance(hit_rows, list):
-                            hit_rows = parsed.get("items", [])
-                        hits = len(hit_rows) if isinstance(hit_rows, list) else 0
+                        total_val = parsed.get("total")
+                        if tool_name == "get_checklists" and isinstance(total_val, (int, float)):
+                            hits = int(total_val)
+                            available_total = parsed.get("available_total")
+                            if isinstance(available_total, (int, float)) and int(available_total) >= hits:
+                                self._cb.on_done(f"  → {hits} checklist items returned ({int(available_total)} available)")
+                                tool_message_content = await self._compact_tool_message_for_formatter(
+                                    tool_name=tool_name,
+                                    parsed=parsed,
+                                    raw_content=result_str,
+                                    target_type=target_type,
+                                    info=info,
+                                )
+                                messages.append(ChatMessage(role="tool", content=tool_message_content, tool_call_id=call_id, name=tool_name))
+                                continue
+                        elif tool_name == "set_checklist":
+                            counts = parsed.get("counts", {})
+                            checklist_count = counts.get("checklist", 0) if isinstance(counts, dict) else 0
+                            vuln_count = counts.get("vulnerabilities", 0) if isinstance(counts, dict) else 0
+                            gap_count = counts.get("gaps", 0) if isinstance(counts, dict) else 0
+                            self._cb.on_done(
+                                f"  → checklist={int(checklist_count)}, vulnerabilities={int(vuln_count)}, gaps={int(gap_count)}"
+                            )
+                            tool_message_content = await self._compact_tool_message_for_formatter(
+                                tool_name=tool_name,
+                                parsed=parsed,
+                                raw_content=result_str,
+                                target_type=target_type,
+                                info=info,
+                            )
+                            messages.append(ChatMessage(role="tool", content=tool_message_content, tool_call_id=call_id, name=tool_name))
+                            continue
+                        else:
+                            hit_rows = parsed.get("hits")
+                            if not isinstance(hit_rows, list):
+                                hit_rows = parsed.get("results", [])
+                            if not isinstance(hit_rows, list):
+                                hit_rows = parsed.get("items", [])
+                            if not isinstance(hit_rows, list):
+                                hit_rows = parsed.get("checklist", [])
+                            hits = len(hit_rows) if isinstance(hit_rows, list) else 0
                     else:
                         hits = 0
                     self._cb.on_done(f"  → {hits} hits returned")
                 except (json.JSONDecodeError, TypeError):
                     self._cb.on_done(f"  → {len(result_str)} chars returned")
 
-                messages.append(ChatMessage(role="tool", content=result_str, tool_call_id=call_id, name=tool_name))
+                tool_message_content = await self._compact_tool_message_for_formatter(
+                    tool_name=tool_name,
+                    parsed=parsed_for_formatter,
+                    raw_content=result_str,
+                    target_type=target_type,
+                    info=info,
+                )
+                messages.append(ChatMessage(role="tool", content=tool_message_content, tool_call_id=call_id, name=tool_name))
 
             # Budget reminder
             next_round = round_num + 1
@@ -861,7 +1636,8 @@ class IntelAgent:
     # ── Category Discovery ─────────────────────────────────────────────
 
     async def _discover_categories(self, target_type: str, domain: str) -> list[str]:
-        result = await self._call_tool_json("search_rag", query=f"{target_type} attack techniques categories payloads", domain=domain, content_type="attack_types", n_results=25)
+        query_target = _target_query_text(target_type)
+        result = await self._call_tool_json("search_rag", query=f"{query_target} attack techniques categories payloads", domain=domain, content_type="attack_types", n_results=25)
         hits = result.get("hits", []) if isinstance(result, dict) else []
         seen: set[str] = set()
         categories: list[str] = []
@@ -895,7 +1671,7 @@ class IntelAgent:
         return int(result.get("embedded", 0) or 0) if isinstance(result, dict) else 0
 
     async def _collect_rag_snapshot(self, target_type: str) -> dict[str, Any]:
-        query = f"{target_type} methodology techniques vulnerabilities"
+        query = f"{_target_query_text(target_type)} methodology techniques vulnerabilities"
         domain = _resolve_rag_domain(target_type)
         out: dict[str, Any] = {"query": query, "domain": domain, "results": {}}
         for ct in ("strategies", "attack_types", "exploits"):
@@ -906,10 +1682,11 @@ class IntelAgent:
     async def _prepare_formatter_context(self, target_type: str, pipeline_report: dict[str, Any]) -> dict[str, Any]:
         rag_snapshot = pipeline_report.get("rag_snapshot", {})
         rag_domain = str(rag_snapshot.get("domain", "shared")) if isinstance(rag_snapshot, dict) else "shared"
+        query_target = _target_query_text(target_type)
         queries = {
-            "methods": {"query": f"{target_type} security testing methodology strategy OWASP", "content_type": "strategies"},
-            "techniques": {"query": f"{target_type} attack techniques TTP MITRE ATT&CK", "content_type": "attack_types"},
-            "vulnerabilities": {"query": f"{target_type} vulnerabilities exploit patterns", "content_type": "exploits"},
+            "methods": {"query": f"{query_target} security testing methodology strategy OWASP", "content_type": "strategies"},
+            "techniques": {"query": f"{query_target} attack techniques TTP MITRE ATT&CK", "content_type": "attack_types"},
+            "vulnerabilities": {"query": f"{query_target} vulnerabilities exploit patterns", "content_type": "exploits"},
         }
         rag_prefetch: dict[str, Any] = {}
         for key, cfg in queries.items():
@@ -921,6 +1698,58 @@ class IntelAgent:
         return {"rag_prefetch": rag_prefetch, "coverage_counts": {"methods": methods_n, "techniques": techniques_n, "vulnerabilities": vulns_n}, "web_fallback": web_fallback}
 
     # ── Tool Execution ─────────────────────────────────────────────────
+
+    async def _refine_checklists_for_formatter(
+        self,
+        *,
+        checklist_data: dict[str, Any],
+        target_type: str,
+        info: str,
+    ) -> str:
+        try:
+            return await asyncio.wait_for(
+                clean_checklists_with_llm(
+                    checklist_data=checklist_data,
+                    target_type=target_type,
+                    info=info,
+                    llm=self._llm,
+                ),
+                timeout=FORMATTER_CALL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning("intel_checklist_refine_failed", error=str(exc), target_type=target_type)
+        return json.dumps(build_deterministic_checklist_payload(checklist_data, info), ensure_ascii=True)
+
+    async def _compact_tool_message_for_formatter(
+        self,
+        *,
+        tool_name: str,
+        parsed: dict[str, Any] | None,
+        raw_content: str,
+        target_type: str,
+        info: str,
+    ) -> str:
+        if not isinstance(parsed, dict):
+            return raw_content
+        if tool_name == "get_checklists":
+            return await self._refine_checklists_for_formatter(
+                checklist_data=parsed,
+                target_type=target_type,
+                info=info,
+            )
+        if tool_name == "search_rag":
+            return _compact_search_results_for_formatter(parsed)
+        if tool_name == "set_checklist":
+            counts = parsed.get("counts", {}) if isinstance(parsed.get("counts", {}), dict) else {}
+            return json.dumps(
+                {
+                    "target_type": parsed.get("target_type", target_type),
+                    "counts": counts,
+                    "summary": parsed.get("summary", ""),
+                },
+                ensure_ascii=True,
+            )
+        return raw_content
 
     async def _call_tool_json(self, tool_name: str, **kwargs: Any) -> dict[str, Any]:
         tool = self._tools.get(tool_name)

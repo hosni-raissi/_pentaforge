@@ -4,7 +4,7 @@ Orchestrator — LangGraph-based pipeline that coordinates all agents.
 Current flow:
     START → intel_refresh → build_planner_input → plan → collect → END
 
-Intel Agent produces methods/techniques/vulnerabilities for the target.
+Intel Agent produces checklist-focused target intelligence for the target.
 Planner Agent uses that intelligence to build a structured pentest plan
 with scenarios for executor agents.
 """

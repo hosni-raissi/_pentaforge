@@ -16,13 +16,14 @@ VERIFY_SOURCES: dict[str, list[str]] = {
     "web_app": ["OWASP-WSTG", "PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK-Enterprise"],
     "api": ["OWASP-APISecurity", "PayloadsAllTheThings", "HackTricks", "MITRE-ATTACK-Enterprise"],
     "mobile": ["OWASP-MASTG", "HackTricks", "MITRE-ATTACK-Enterprise"],
+    "infra": ["InternalAllTheThings", "HackingTheCloud", "MITRE-ATTACK-Enterprise", "PayloadsAllTheThings", "HackTricks"],
     "network": ["MITRE-ATTACK-Enterprise", "PayloadsAllTheThings", "HackTricks"],
     "iot": ["OWASP-FSTM", "HackTricks", "PayloadsAllTheThings"],
     "linux_server": ["InternalAllTheThings", "PayloadsAllTheThings", "HackTricks"],
     "desktop": ["PayloadsAllTheThings", "MITRE-ATTACK-Enterprise", "HackTricks"],
     "cloud": ["HackingTheCloud", "MITRE-ATTACK-Enterprise", "PayloadsAllTheThings"],
     "container": ["OWASP-K8sTop10", "HackingTheCloud", "MITRE-ATTACK-Enterprise"],
-    "database": ["OWASP-ASVS", "PayloadsAllTheThings", "HackTricks"],
+    "database": ["DatabaseSecurityAudit", "OWASP-ASVS", "PayloadsAllTheThings", "HackTricks"],
     "repository": ["OWASP-CICDTop10", "OSSFScorecard", "PayloadsAllTheThings"],
     "shared": ["PayloadsAllTheThings", "HackTricks", "CISA-KEV", "Vulhub", "MITRE-ATTACK-Enterprise"],
 }
@@ -35,7 +36,9 @@ DEFAULT_VERIFY_SOURCES: list[str] = [
 
 # ── Operational constants ──────────────────────────────────────────────
 
-FORMATTER_ALLOWED_TOOLS: frozenset[str] = frozenset({"search_rag", "get_checklists"})
+FORMATTER_ALLOWED_TOOLS: frozenset[str] = frozenset(
+    {"search_rag", "get_checklists", "set_checklist"}
+)
 FORMATTER_TOOL_MAX_RETRIES: int = 2
 MAX_SOURCE_ERRORS: int = 10
 MAX_VERIFIED_COMPACT: int = 10

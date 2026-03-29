@@ -2,7 +2,7 @@
 Test the Orchestrator — Intel → Planner pipeline.
 
 Validates that:
-  1. Intel Agent produces methods/techniques/vulnerabilities
+  1. Intel Agent produces a checklist-focused intelligence summary
   2. Planner receives intel and builds a structured plan
   3. Planner returns scenarios for executor agents
   4. Full plan is stored via update_pentest_plan

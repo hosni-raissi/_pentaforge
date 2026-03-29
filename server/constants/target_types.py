@@ -13,6 +13,7 @@ from server.schemas.scan_request.cloud import CloudScanRequest
 from server.schemas.scan_request.container import ContainerScanRequest
 from server.schemas.scan_request.database import DatabaseScanRequest
 from server.schemas.scan_request.desktop import DesktopScanRequest
+from server.schemas.scan_request.infra import InfraScanRequest
 from server.schemas.scan_request.iot import IotScanRequest
 from server.schemas.scan_request.linux_server import LinuxServerScanRequest
 from server.schemas.scan_request.mobile import MobileScanRequest
@@ -24,6 +25,7 @@ _TYPE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {"value": "web_app", "label": "Web Application", "schema": WebAppScanRequest},
     {"value": "api", "label": "API", "schema": ApiScanRequest},
     {"value": "mobile", "label": "Mobile App", "schema": MobileScanRequest},
+    {"value": "infra", "label": "Infrastructure", "schema": InfraScanRequest},
     {"value": "network", "label": "Network", "schema": NetworkScanRequest},
     {"value": "iot", "label": "IoT", "schema": IotScanRequest},
     {"value": "linux_server", "label": "Linux Server", "schema": LinuxServerScanRequest},

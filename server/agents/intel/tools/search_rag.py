@@ -11,7 +11,8 @@ from .context import get_context
 _DOMAIN_ALIASES: dict[str, str] = {
     "web": "web_app",
     "web3": "web_app",
-    "infrastructure": "linux_server",
+    "infrastructure": "infra",
+    "infra": "linux_server",
     "identity": "linux_server",
     "binary": "desktop",
     "supply_chain": "repository",
@@ -22,12 +23,65 @@ _DOMAIN_ALIASES: dict[str, str] = {
     "database": "linux_server",
 }
 
+_DOMAIN_SEARCH_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "web_app": ("web_app", "web"),
+    "linux_server": ("linux_server", "infra", "infrastructure", "identity", "database"),
+    "cloud": ("cloud", "container"),
+    "repository": ("repository", "supply_chain"),
+}
+
+_CONTENT_TYPE_ALIASES: dict[str, str] = {
+    "strategy": "strategies",
+    "strategies": "strategies",
+    "method": "strategies",
+    "methods": "strategies",
+    "methodology": "strategies",
+    "methodologies": "strategies",
+    "exploit": "exploits",
+    "exploits": "exploits",
+    "vulnerability": "exploits",
+    "vulnerabilities": "exploits",
+    "vuln": "exploits",
+    "vulns": "exploits",
+    "weakness_classes": "exploits",
+    "tool": "tools",
+    "tools": "tools",
+    "standard": "standards",
+    "standards": "standards",
+    "checklist": "standards",
+    "checklists": "standards",
+    "attack_type": "attack_types",
+    "attack_types": "attack_types",
+    "technique": "attack_types",
+    "techniques": "attack_types",
+    "ttp": "attack_types",
+    "ttps": "attack_types",
+}
+
 
 def _normalize_domain(value: str) -> str:
     clean = str(value or "").strip().lower().replace("-", "_")
     if not clean:
         return "shared"
     return _DOMAIN_ALIASES.get(clean, clean)
+
+
+def _candidate_domains(value: str) -> list[str]:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    normalized = _normalize_domain(value)
+
+    candidates: list[str] = []
+    for item in (normalized, raw, *_DOMAIN_SEARCH_EXPANSIONS.get(normalized, ())):
+        clean = str(item or "").strip().lower().replace("-", "_")
+        if not clean or clean in candidates:
+            continue
+        candidates.append(clean)
+    return candidates or ["shared"]
+
+
+def _normalize_content_type(value: str) -> str:
+    clean = str(value or "").strip().lower().replace("-", "_")
+    return _CONTENT_TYPE_ALIASES.get(clean, "strategies")
 
 
 def _merge_hits(primary: list[dict[str, Any]], shared: list[dict[str, Any]], n_results: int) -> list[dict[str, Any]]:
@@ -65,26 +119,32 @@ async def search_rag(
 
     n_results = max(1, min(25, int(n_results)))
     normalized_domain = _normalize_domain(domain)
+    normalized_content_type = _normalize_content_type(content_type)
+    candidate_domains = _candidate_domains(domain)
 
     query_embedding = await ctx.embedder.embed_single(query, is_query=True)
 
-    primary = ctx.vector_store.search(
-        query_embedding=query_embedding,
-        content_type=content_type,
-        domain=normalized_domain,
-        n_results=n_results,
-    )
+    primary: list[dict[str, Any]] = []
+    for candidate in candidate_domains:
+        primary.extend(
+            ctx.vector_store.search(
+                query_embedding=query_embedding,
+                content_type=normalized_content_type,
+                domain=candidate,
+                n_results=n_results,
+            )
+        )
 
     if include_shared and normalized_domain != "shared":
         shared = ctx.vector_store.search(
             query_embedding=query_embedding,
-            content_type=content_type,
+            content_type=normalized_content_type,
             domain="shared",
             n_results=n_results,
         )
         hits = _merge_hits(primary, shared, n_results)
     else:
-        hits = primary
+        hits = _merge_hits(primary, [], n_results)
 
     compact = []
     for h in hits:
@@ -109,7 +169,8 @@ async def search_rag(
         {
             "query": query,
             "domain": normalized_domain,
-            "content_type": content_type,
+            "domains_searched": candidate_domains + (["shared"] if include_shared and normalized_domain != "shared" else []),
+            "content_type": normalized_content_type,
             "total": len(compact),
             "hits": compact,
         },

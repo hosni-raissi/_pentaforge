@@ -90,6 +90,58 @@ function resourceSourceLabel(resource: IntelResource): string {
   return "builtin fixed";
 }
 
+const RESOURCE_TARGET_SCOPE: Record<string, Set<string>> = {
+  web_app: new Set(["web_app"]),
+  api: new Set(["api"]),
+  mobile: new Set(["mobile"]),
+  infra: new Set(["infra", "network", "linux_server", "cloud", "container", "shared"]),
+  network: new Set(["network"]),
+  iot: new Set(["iot"]),
+  linux_server: new Set(["linux_server"]),
+  desktop: new Set(["desktop"]),
+  cloud: new Set(["cloud"]),
+  container: new Set(["container", "cloud"]),
+  database: new Set(["database"]),
+  repository: new Set(["repository"]),
+  shared: new Set(["shared"]),
+};
+
+const EXPECTED_TARGET_FILTERS = [
+  "all",
+  "web_app",
+  "api",
+  "mobile",
+  "infra",
+  "network",
+  "iot",
+  "linux_server",
+  "desktop",
+  "cloud",
+  "container",
+  "database",
+  "repository",
+  "shared",
+];
+
+function resourceMatchesTargetFilter(resourceTargetType: string, selectedTargetFilter: string): boolean {
+  const cleanTarget = String(resourceTargetType || "").trim().toLowerCase();
+  const cleanFilter = String(selectedTargetFilter || "").trim().toLowerCase();
+  if (!cleanFilter || cleanFilter === "all") {
+    return true;
+  }
+  const scope = RESOURCE_TARGET_SCOPE[cleanFilter] ?? new Set([cleanFilter]);
+  return scope.has(cleanTarget);
+}
+
+function resourceDisplayTarget(resourceTargetType: string, selectedTargetFilter: string): string {
+  const cleanTarget = String(resourceTargetType || "").trim().toLowerCase();
+  const cleanFilter = String(selectedTargetFilter || "").trim().toLowerCase();
+  if (cleanFilter === "infra" && resourceMatchesTargetFilter(cleanTarget, cleanFilter)) {
+    return "infra";
+  }
+  return cleanTarget || "all";
+}
+
 export default function Settings() {
   const config = useConfig();
   const { isDark, setDark } = useTheme();
@@ -235,21 +287,38 @@ export default function Settings() {
   }, [intelResources]);
 
   const targetFilterOptions = useMemo(() => {
-    const values = new Set<string>();
+    const labels = new Map<string, string>();
+    labels.set("all", "All Targets");
+    for (const option of intelTargetOptions) {
+      const value = String(option.value || "").trim().toLowerCase();
+      if (!value) {
+        continue;
+      }
+      labels.set(value, String(option.label || formatTargetTypeLabel(value)));
+    }
+    for (const value of EXPECTED_TARGET_FILTERS) {
+      if (!labels.has(value)) {
+        labels.set(value, formatTargetTypeLabel(value));
+      }
+    }
     for (const resource of intelResources) {
       const targetType = String(resource.target_type || "").trim();
       if (targetType) {
-        values.add(targetType);
+        const cleanValue = targetType.toLowerCase();
+        if (!labels.has(cleanValue)) {
+          labels.set(cleanValue, formatTargetTypeLabel(cleanValue));
+        }
       }
     }
+    const rows = Array.from(labels.entries()).map(([value, label]) => ({ value, label }));
+    const nonAll = rows
+      .filter((row) => row.value !== "all")
+      .sort((a, b) => a.label.localeCompare(b.label));
     return [
       { value: "all", label: "All Targets" },
-      ...Array.from(values).sort((a, b) => a.localeCompare(b)).map((value) => ({
-        value,
-        label: formatTargetTypeLabel(value),
-      })),
+      ...nonAll,
     ];
-  }, [intelResources]);
+  }, [intelResources, intelTargetOptions]);
 
   const updateFilterOptions = useMemo(
     () => [
@@ -273,7 +342,7 @@ export default function Settings() {
       if (typeFilter !== "all" && contentType !== typeFilter) {
         return false;
       }
-      if (targetFilter !== "all" && targetType !== targetFilter) {
+      if (!resourceMatchesTargetFilter(targetType, targetFilter)) {
         return false;
       }
       if (updateFilter !== "all" && updateMode !== updateFilter) {
@@ -797,7 +866,7 @@ export default function Settings() {
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-semibold text-text-primary">{resource.name}</p>
                                 <p className="text-[11px] text-text-muted">
-                                  {formatTargetTypeLabel(resource.target_type)}
+                                  {formatTargetTypeLabel(resourceDisplayTarget(resource.target_type, resourceTargetFilter))}
                                   {" • "}
                                   {resource.content_type || "unknown"}
                                   {" • "}

@@ -29,6 +29,7 @@ export function NewProjectDialog({
           options={[
             { value: "web_app", label: "Web App" },
             { value: "api", label: "API" },
+            { value: "infra", label: "Infrastructure" },
             { value: "network", label: "Network" }
           ]}
         />

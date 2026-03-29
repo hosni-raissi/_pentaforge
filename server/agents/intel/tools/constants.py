@@ -42,6 +42,7 @@ TRUSTED_SOURCES: dict[str, dict[str, str]] = {
 DOMAIN_CONTENT_TYPE: dict[str, str] = {
     "web_app": ContentType.EXPLOITS,
     "api": ContentType.EXPLOITS,
+    "infra": ContentType.ATTACK_TYPES,
     "network": ContentType.ATTACK_TYPES,
     "mobile": ContentType.EXPLOITS,
     "cloud": ContentType.STRATEGIES,

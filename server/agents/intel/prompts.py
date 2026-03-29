@@ -8,68 +8,43 @@ from typing import Any
 from server.agents.intel.config import FORMATTER_ROUNDS
 
 
+
+def _target_query_text(target_type: str) -> str:
+    normalized = str(target_type or "").strip().lower().replace("-", "_")
+    labels = {
+        "web_app": "web application",
+        "api": "API",
+        "mobile": "mobile app",
+        "infra": "infrastructure",
+        "network": "network",
+        "iot": "IoT device",
+        "linux_server": "linux server",
+        "desktop": "desktop application",
+        "cloud": "cloud environment",
+        "container": "container platform",
+        "database": "database",
+        "repository": "source code repository",
+    }
+    return labels.get(normalized, normalized.replace("_", " "))
+
+
 FORMATTER_SYSTEM_PROMPT = (
-    "You are a senior penetration testing intelligence analyst.\n"
+    "Role: Intel agent for aggressive pentest checklist generation.\n"
+    "Goal: maximize vulnerability coverage for the target.\n"
     "\n"
-    "You will receive RAG knowledge base data about a specific target type.\n"
-    "Your job is to produce a COMPLETE attack intelligence brief covering:\n"
+    "Tools: search_rag, get_checklists, set_checklist.\n"
+    "Required usage:\n"
+    "1) Call get_checklists exactly once.\n"
+    "2) Call search_rag only if it improves checklist coverage or surfaces specific, relevant vulnerability classes.\n"
+    "3) Respect explicit scope exclusions from the target info (for example: no SQL injection, do not test XSS).\n"
+    "4) Call set_checklist once with final CHECKLIST/GAPS and optional VULNERABILITIES.\n"
     "\n"
-    "1. METHODS — Every testing methodology and strategy to assess this target\n"
-    "   (e.g., OWASP WSTG chapters, PTES phases, specific assessment approaches)\n"
-    "\n"
-    "2. TECHNIQUES — Every specific attack technique applicable to this target\n"
-    "   (e.g., SQL injection, SSRF, Kerberoasting, container escape — be specific)\n"
-    "\n"
-    "3. VULNERABILITIES — Every vulnerability type and weakness class this target can have\n"
-    "   (e.g., broken access control, insecure deserialization, misconfigured CORS)\n"
-    "\n"
-    "4. CHECKLIST — A custom target-specific pentest checklist\n"
-    "   (actionable test items that planner/executors can run)\n"
-    "\n"
-    "## Mandatory Tool Usage\n"
-    "You MUST call search_rag at least once before producing your final output.\n"
-    "You SHOULD call get_checklists to build evidence-backed checklist items.\n"
-    "The RAG data provided is only a snapshot — the knowledge base contains more.\n"
-    "Search for what is MISSING from the provided data.\n"
-    "\n"
-    "Step 1: Read the provided RAG data.\n"
-    "Step 2: Identify which methods, techniques, or vulnerability types are NOT covered.\n"
-    "Step 3: Call search_rag with a specific query to find the missing entries.\n"
-    "Step 4: If search_rag still has gaps, refine the query and call search_rag again.\n"
-    "Step 5: Build a custom checklist from retrieved evidence.\n"
-    "Step 6: Combine everything and return the final JSON.\n"
-    "\n"
-    "## Budget\n"
-    f"You have {FORMATTER_ROUNDS} rounds total (1 round = 1 response from you).\n"
-    "Each tool call costs 1 round. Your final JSON answer costs 1 round.\n"
-    f"So you can make at most {FORMATTER_ROUNDS - 1} tool calls, then you MUST return your final answer.\n"
-    "Plan your tool calls carefully — do not waste rounds.\n"
-    "\n"
-    "## Rules\n"
-    "- Be EXHAUSTIVE. List everything relevant. Miss nothing.\n"
-    f"- Maximum {FORMATTER_ROUNDS - 1} tool calls total (you need 1 round for the final answer).\n"
-    "- ONLY report real methods, techniques, vulnerabilities, and checklist items. Never invent or guess.\n"
-    "- If a category has no data even after searching, say so in GAPS.\n"
-    "\n"
-    "## Output\n"
-    "After your tool calls, return ONLY this JSON:\n"
+
+    f"Budget: {FORMATTER_ROUNDS} rounds total; keep last round for final JSON.\n"
+    "Return strict JSON only. Copy pipeline stats exactly.\n"
     "```json\n"
-    "{\n"
-    '  "status": "complete",\n'
-    '  "summary": "METHODS:\\n- ...\\n\\nTECHNIQUES:\\n- ...\\n\\nVULNERABILITIES:\\n- ...\\n\\nCHECKLIST:\\n- ...\\n\\nGAPS:\\n- ...",\n'
-    '  "stats": {\n'
-    '    "new_payloads": 0,\n'
-    '    "new_exploits": 0,\n'
-    '    "total_embedded": 0,\n'
-    '    "content_types_updated": [],\n'
-    '    "domains_updated": [],\n'
-    '    "update_status": "no_new_data",\n'
-    '    "rate_limited": false,\n'
-    '    "source_errors": []\n'
-    "  }\n"
-    "}\n"
-    "```\n"
-    "Copy stats from pipeline data exactly. Do not change the numbers.\n"
+    
+    "```"
 )
 
 
@@ -104,6 +79,7 @@ def build_user_message(
     max_rounds: int = FORMATTER_ROUNDS,
 ) -> str:
     """Build the user message for the formatter LLM call."""
+    target_query = _target_query_text(target_type)
 
     coverage = formatter_payload.get("coverage_counts", {})
     if not isinstance(coverage, dict):
@@ -124,35 +100,25 @@ def build_user_message(
 
     # Build search suggestions
     search_suggestions: list[str] = []
-    if methods_n + len(strategies) < 5:
-        search_suggestions.append(
-            f'search_rag(query="{target_type} OWASP testing methodology PTES assessment", '
-            f'content_type="strategies", domain="{rag_domain}", n_results=10)'
-        )
-    else:
-        search_suggestions.append(
-            f'search_rag(query="{target_type} advanced attack techniques bypass evasion", '
-            f'content_type="attack_types", domain="{rag_domain}", n_results=10)'
-        )
-
     if techniques_n + len(attack_types) < 5:
         search_suggestions.append(
-            f'search_rag(query="{target_type} injection XSS SSRF RCE exploit technique", '
+            f'search_rag(query="{target_query} attack paths, injections, authorization bypass, SSRF, SSTI", '
             f'content_type="attack_types", domain="{rag_domain}", n_results=10)'
         )
-
     if vulns_n + len(exploits) < 5:
         search_suggestions.append(
-            f'search_rag(query="{target_type} vulnerability weakness misconfiguration", '
+            f'search_rag(query="{target_query} known vulnerability classes like SQL injection, XSS, SSRF, IDOR, auth bypass", '
             f'content_type="exploits", domain="{rag_domain}", n_results=10)'
         )
     search_suggestions.append(
-        f'get_checklists(target_type="{target_type}", info="{(info or "")[:120]}", n_items=24)'
+        f'get_checklists(target_type="{target_type}", info="{(info or "")[:120]}")'
+    )
+    search_suggestions.append(
+        f'set_checklist(target_type="{target_type}", checklist="...", techniques="...", vulnerabilities="...", methods="...", gaps="...")'
     )
 
-    suggestions_text = "\n".join(f"  → {s}" for s in search_suggestions[:4])
+    suggestions_text = "\n".join(f"  → {s}" for s in search_suggestions[:6])
 
-    strategies_text = _format_entries(strategies, "methods/strategies")
     techniques_text = _format_entries(attack_types, "techniques")
     vulns_text = _format_entries(exploits, "vulnerabilities/exploits")
 
@@ -173,41 +139,38 @@ def build_user_message(
         )
 
     return (
-        f"## Target: {target_type}\n"
+        f"Target: {target_type}\n"
         f"Info: {info or 'none'}\n"
-        f"\n"
-        f"## Round Budget\n"
-        f"{budget_text}\n"
-        f"\n"
-        f"## Task\n"
-        f"Find ALL methods, techniques, vulnerability types, and a custom checklist for "
-        f"'{target_type}' target.\n"
-        f"The data below is only a PARTIAL snapshot. You MUST search for more.\n"
-        f"\n"
-        f"## RAG Data — Methods & Strategies "
-        f"({methods_n + len(strategies)} entries, likely incomplete)\n"
-        f"{strategies_text}\n"
-        f"\n"
-        f"## RAG Data — Attack Techniques "
-        f"({techniques_n + len(attack_types)} entries, likely incomplete)\n"
-        f"{techniques_text}\n"
-        f"\n"
-        f"## RAG Data — Vulnerabilities & Exploits "
-        f"({vulns_n + len(exploits)} entries, likely incomplete)\n"
-        f"{vulns_text}\n"
-        f"\n"
-        f"## Recommended Searches (call at least one)\n"
-        f"{suggestions_text}\n"
-        f"\n"
-        f"## Pipeline Stats (copy these exactly into your output)\n"
-        f"```json\n"
-        f"{json.dumps(stats, ensure_ascii=True)}\n"
-        f"```\n"
-        f"\n"
-        f"## Steps\n"
-        f"1. Read the RAG data above — note what categories are thin.\n"
-        f"2. Call search_rag with one of the recommended queries above (REQUIRED).\n"
-        f"3. Call get_checklists to generate a target checklist from OWASP/PTES/MITRE-aware sources.\n"
-        f"4. If coverage is still thin, refine your query and call search_rag again.\n"
-        f"5. Combine ALL results into the final JSON.\n"
+        f"{budget_text}\n\n"
+        "Coverage snapshot:\n"
+        f"- techniques: {techniques_n + len(attack_types)}\n"
+        f"- vulnerabilities: {vulns_n + len(exploits)}\n\n"
+        "RAG techniques:\n"
+        f"{techniques_text}\n\n"
+        "RAG vulnerabilities:\n"
+        f"{vulns_text}\n\n"
+        "Recommended tool calls:\n"
+        f"{suggestions_text}\n\n"
+        "Required flow:\n"
+        "1) get_checklists exactly once.\n"
+        "2) search_rag only if it adds useful attack coverage or specific known vulnerabilities.\n"
+        "3) respect explicit scope exclusions from the info.\n"
+        "4) set_checklist once.\n"
+        "5) final JSON.\n\n"
+        "Pipeline stats (copy as-is):\n"
+        f"```json\n{json.dumps(stats, ensure_ascii=True)}\n```"
     )
+
+
+
+_CHECKLIST_CLEANER_SYSTEM_PROMPT = (
+    "You refine a structured pentest checklist.\n"
+    "Use the target info to remove clearly irrelevant checklist items.\n"
+    "Do not invent checklist items or references.\n"
+    "Prefer aggressive high-value coverage unless the target info explicitly excludes something.\n"
+    "Return strict JSON only. No markdown fences.\n"
+    "Required keys: target_type, available_total, checklist.\n"
+    "checklist must be a list of blocks with keys: phase, title, items.\n"
+    "items must be a list of objects with keys: name, priority.\n"
+    "priority must be an integer from 1 to 5 (5 is highest priority).\n"
+)

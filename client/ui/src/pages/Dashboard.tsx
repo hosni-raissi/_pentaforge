@@ -156,6 +156,42 @@ function eventDedupKey(event: ScanEventPayload): string {
   return `${event.project_id}|${event.scan_id}|${event.timestamp}|${event.event}|${event.level}|${event.message}`;
 }
 
+function extractChecklistLabels(summary: string): string[] {
+  const text = summary.trim();
+  if (!text) {
+    return [];
+  }
+  const match = text.match(/CHECKLIST:\s*([\s\S]*?)(?:\n[A-Z_ ]+:\s*|$)/i);
+  const body = match && match[1] ? match[1] : text;
+  const lines = body.split("\n");
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    let clean = "";
+    if (line.startsWith("- ") || line.startsWith("* ")) {
+      clean = line.slice(2).trim();
+    } else if (line.startsWith("[ ] ")) {
+      clean = line.slice(4).trim();
+    } else if (/^\d+[\.\)]\s+/.test(line)) {
+      clean = line.replace(/^\d+[\.\)]\s+/, "").trim();
+    }
+    if (!clean || clean === "(none found)") {
+      continue;
+    }
+    const key = clean.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    labels.push(clean);
+  }
+  return labels;
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const projects = useProjects((state) => state.projects);
@@ -173,7 +209,7 @@ export default function Dashboard() {
   })();
   const shouldStreamScanEvents = Boolean(activeProjectId && activeScanId);
 
-  const [insightTab, setInsightTab] = useState<InsightTab>("plan");
+  const [insightTab, setInsightTab] = useState<InsightTab>("checklist");
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [logLevelFilter, setLogLevelFilter] = useState<"all" | LogLevel>("all");
@@ -442,32 +478,25 @@ export default function Dashboard() {
       status: phase.status,
       progress: Math.round(phase.progress),
     }))
-    : [
-      { name: "Reconnaissance", status: "pending", progress: 0 },
-      { name: "Enumeration", status: "pending", progress: 0 },
-      { name: "Exploitation", status: "pending", progress: 0 },
-      { name: "Post-Exploitation", status: "pending", progress: 0 },
-      { name: "Reporting", status: "pending", progress: 0 },
-    ];
+    : [];
   const overviewPhases = planSteps.slice(0, 5);
 
-  const criticalFindings = activeProject.findings.filter((finding) => finding.severity === "critical");
-  const criticalResolved = criticalFindings.every(
-    (finding) => finding.status === "verified" || finding.status === "fixed",
-  );
-  const checklistItems = [
-    { label: "Target is configured", done: activeProject.target.trim().length > 0 },
-    { label: "Target type is selected", done: activeProject.targetType.trim().length > 0 },
-    {
-      label: "At least one phase has started",
-      done: activeProject.phases.some((phase) => phase.status !== "pending" || phase.progress > 0),
-    },
-    {
-      label: "At least one agent has executed",
-      done: activeProject.agents.some((agent) => agent.state !== "idle"),
-    },
-    { label: "Critical findings are verified/fixed", done: criticalResolved },
-  ];
+  const latestIntelSummary = (() => {
+    for (const event of scanEvents) {
+      if (event.event !== "intel_complete" || !isRecord(event.data)) {
+        continue;
+      }
+      const summary = typeof event.data.summary === "string" ? event.data.summary.trim() : "";
+      if (summary.length > 0) {
+        return summary;
+      }
+    }
+    return "";
+  })();
+  const intelChecklistLabels = extractChecklistLabels(latestIntelSummary);
+  const checklistItems = intelChecklistLabels.length > 0
+    ? intelChecklistLabels.map((label) => ({ label, done: false }))
+    : [];
 
   const agentInsights = (() => {
     const byRole = Object.fromEntries(
@@ -814,27 +843,39 @@ export default function Dashboard() {
 
           {insightTab === "plan" ? (
             <div className="max-h-[430px] space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
-              {planSteps.map((step, index) => (
-                <div key={`${step.name}-${index}`} className="rounded-md border border-border/70 bg-surface-1/50 p-2">
-                  <p className="text-xs font-medium text-text-primary">{index + 1}. {step.name}</p>
-                  <p className="mt-1 text-[11px] text-text-muted">
-                    Status: {step.status} • Progress: {step.progress}%
-                  </p>
-                </div>
-              ))}
+              {planSteps.length === 0 ? (
+                <p className="px-1 py-2 text-xs text-text-muted">
+                  No live execution plan data yet.
+                </p>
+              ) : (
+                planSteps.map((step, index) => (
+                  <div key={`${step.name}-${index}`} className="rounded-md border border-border/70 bg-surface-1/50 p-2">
+                    <p className="text-xs font-medium text-text-primary">{index + 1}. {step.name}</p>
+                    <p className="mt-1 text-[11px] text-text-muted">
+                      Status: {step.status} • Progress: {step.progress}%
+                    </p>
+                  </div>
+                ))
+              )}
             </div>
           ) : (
             <div className="max-h-[430px] space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
-              {checklistItems.map((item) => (
-                <div key={item.label} className="flex items-center gap-2 rounded-md border border-border/70 bg-surface-1/50 p-2 text-xs">
-                  {item.done ? (
-                    <CheckCircle size={14} className="shrink-0 text-emerald-400" />
-                  ) : (
-                    <Circle size={14} className="shrink-0 text-text-muted" />
-                  )}
-                  <p className={item.done ? "text-text-primary" : "text-text-secondary"}>{item.label}</p>
-                </div>
-              ))}
+              {checklistItems.length === 0 ? (
+                <p className="px-1 py-2 text-xs text-text-muted">
+                  No checklist generated yet.
+                </p>
+              ) : (
+                checklistItems.map((item) => (
+                  <div key={item.label} className="flex items-center gap-2 rounded-md border border-border/70 bg-surface-1/50 p-2 text-xs">
+                    {item.done ? (
+                      <CheckCircle size={14} className="shrink-0 text-emerald-400" />
+                    ) : (
+                      <Circle size={14} className="shrink-0 text-text-muted" />
+                    )}
+                    <p className={item.done ? "text-text-primary" : "text-text-secondary"}>{item.label}</p>
+                  </div>
+                ))
+              )}
             </div>
           )}
         </Card>

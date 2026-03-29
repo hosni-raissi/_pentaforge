@@ -25,7 +25,8 @@ logger = structlog.get_logger(__name__)
 _TARGET_TYPE_ALIASES: dict[str, str] = {
     "web": "web_app",
     "web3": "web_app",
-    "infrastructure": "linux_server",
+    "infrastructure": "infra",
+    "infra": "infra",
     "binary": "desktop",
     "identity": "linux_server",
     "supply_chain": "repository",
