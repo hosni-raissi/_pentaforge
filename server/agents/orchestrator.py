@@ -141,14 +141,15 @@ class Orchestrator:
                 "orchestrator_intel_complete",
                 target_type=target_type,
                 status=result.status,
-                summary_length=len(result.summary),
+                vulnerability_count=len(result.vulnerabilities),
             )
 
             return {
                 "intel_result": {
                     "status": result.status,
-                    "summary": result.summary,
                     "stats": result.stats,
+                    "vulnerabilities": result.vulnerabilities,
+                    "checklist": result.checklist,
                 },
             }
 
@@ -161,8 +162,9 @@ class Orchestrator:
             return {
                 "intel_result": {
                     "status": "error",
-                    "summary": "",
                     "stats": {},
+                    "vulnerabilities": [],
+                    "checklist": {},
                 },
                 "error": f"Intel Agent failed: {exc}",
             }
@@ -181,7 +183,8 @@ class Orchestrator:
         target_type = state["target_type"]
         scope = state.get("scope", "")
         intel = state.get("intel_result", {})
-        intel_summary = intel.get("summary", "")
+        intel_vulnerabilities = intel.get("vulnerabilities", [])
+        intel_checklist = intel.get("checklist", {})
 
         intel_status = intel.get("status", "")
         intel_stats = intel.get("stats", {})
@@ -192,7 +195,8 @@ class Orchestrator:
             f"\n"
             f"## Intelligence Brief (from Intel Agent)\n"
             f"Status: {intel_status}\n"
-            f"{intel_summary}\n"
+            f"Vulnerabilities: {json.dumps(intel_vulnerabilities, ensure_ascii=True)}\n"
+            f"Checklist: {json.dumps(intel_checklist, ensure_ascii=True)}\n"
             f"\n"
             f"Stats: {json.dumps(intel_stats, ensure_ascii=True)}\n"
             f"\n"
@@ -225,13 +229,13 @@ class Orchestrator:
 
             plan_data = dict(_current_plan)
 
-            logger.info(
-                "orchestrator_plan_complete",
-                scenarios=len(result.scenarios),
-                needs=len(result.needs),
-                plan_phases=len(plan_data.get("phases", [])),
-                summary_length=len(result.summary),
-            )
+        logger.info(
+            "orchestrator_plan_complete",
+            scenarios=len(result.scenarios),
+            needs=len(result.needs),
+            plan_phases=len(plan_data.get("phases", [])),
+            summary_length=len(result.summary),
+        )
 
             return {
                 "planner_result": {
@@ -258,7 +262,7 @@ class Orchestrator:
         """Final node — logs completion."""
         logger.info(
             "orchestrator_complete",
-            has_intel=bool(state.get("intel_result", {}).get("summary")),
+            has_intel=bool(state.get("intel_result", {}).get("checklist")),
             has_plan=bool(state.get("planner_result", {}).get("scenarios")),
             has_error=bool(state.get("error")),
         )
@@ -302,8 +306,9 @@ class Orchestrator:
         intel_data = final_state.get("intel_result", {})
         intel_result = IntelResult(
             status=intel_data.get("status", ""),
-            summary=intel_data.get("summary", ""),
             stats=intel_data.get("stats", {}),
+            vulnerabilities=intel_data.get("vulnerabilities", []),
+            checklist=intel_data.get("checklist", {}),
         )
 
         planner_data = final_state.get("planner_result", {})

@@ -16,7 +16,7 @@ checklists_module = importlib.import_module("server.agents.intel.tools.get_check
 
 
 async def main() -> None:
-    target_type = "infra"
+    target_type = "web_app"
     scenarios: list[dict[str, Any]] = [
         {
             "name": "exclude-sqli-xss",

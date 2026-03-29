@@ -242,6 +242,10 @@ class IntelResult:
     status: str = "incomplete"
     summary: str = ""
     stats: dict[str, Any] = field(default_factory=_default_stats)
+    vulnerabilities: list[str] = field(default_factory=list)
+    # Structured checklist in the same format as get_checklists / clean_checklists_with_llm:
+    # {"target_type": str, "available_total": int, "checklist": [...]}
+    checklist: dict[str, Any] = field(default_factory=dict)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -759,7 +763,6 @@ def _is_low_quality_summary(text: str) -> bool:
             return True
 
     if "methods:" in lowered and "techniques:" in lowered and "vulnerabilities:" in lowered:
-        # A full structured summary should include at least one concrete reference token.
         if not _REFERENCE_TOKEN_RE.search(raw):
             return True
 
@@ -947,27 +950,21 @@ def _extract_stats_from_alt_keys(data: dict[str, Any]) -> dict[str, Any] | None:
 
 def _parse_json_intel(data: dict[str, Any]) -> IntelResult:
     data_lower = {k.lower(): v for k, v in data.items()}
-    summary_val = data_lower.get("summary")
-    if isinstance(summary_val, str) and summary_val.strip():
-        clean_summary = _sanitize_summary_text(summary_val.strip())
-        if _is_low_quality_summary(clean_summary):
-            return IntelResult(status=data_lower.get("status", "complete"), summary="")
-        return IntelResult(status=data_lower.get("status", "complete"), summary=clean_summary, stats=_normalize_stats(data_lower.get("stats", {})))
-    if isinstance(summary_val, dict):
-        summary_lower = {k.lower(): v for k, v in summary_val.items()}
-        summary_text = _build_summary_from_sections(summary_lower)
-        if summary_text.strip():
-            if _is_low_quality_summary(summary_text):
-                return IntelResult(status=data_lower.get("status", "complete"), summary="")
-            return IntelResult(status=data_lower.get("status", "complete"), summary=summary_text, stats=_normalize_stats(_extract_stats_from_alt_keys(data_lower)))
-    section_keys = {"methods", "techniques", "vulnerabilities", "strategies", "attack_techniques", "attack_types", "vulns", "checklist", "checklist_items", "target_checklist", "tests", "gaps", "methodologies", "testing_methods", "ttps", "vulnerability_types", "weakness_classes"}
-    if any(k in data_lower and isinstance(data_lower[k], (list, str)) for k in section_keys):
-        summary = _build_summary_from_sections(data_lower)
-        if summary.strip():
-            if _is_low_quality_summary(summary):
-                return IntelResult(status=data_lower.get("status", "complete"), summary="")
-            return IntelResult(status=data_lower.get("status", "complete"), summary=summary, stats=_normalize_stats(_extract_stats_from_alt_keys(data_lower)))
-    return IntelResult(status="complete", summary="")
+    vulnerability_values: list[str] = []
+    for key in ("known_vulnerabilities", "vulnerabilities", "vulns", "weakness_classes", "vulnerability_types"):
+        val = data_lower.get(key)
+        if isinstance(val, list):
+            vulnerability_values.extend(str(v).strip() for v in val if str(v).strip())
+        elif isinstance(val, str) and val.strip():
+            vulnerability_values.extend(_extract_block_items(val))
+    vulnerabilities = _filter_known_vulnerabilities(vulnerability_values)
+
+    return IntelResult(
+        status=data_lower.get("status", "complete"),
+        summary="",
+        stats=_normalize_stats(_extract_stats_from_alt_keys(data_lower)),
+        vulnerabilities=vulnerabilities,
+    )
 
 
 def _extract_markdown_sections(text: str) -> str:
@@ -1013,15 +1010,9 @@ def _parse_intel_output(raw: str) -> IntelResult:
     try:
         data = json.loads(json_str)
         if isinstance(data, dict):
-            result = _parse_json_intel(data)
-            if result.summary:
-                return result
+            return _parse_json_intel(data)
     except json.JSONDecodeError:
         pass
-    if len(text) > 50:
-        summary = _extract_markdown_sections(text)
-        if summary and not _is_low_quality_summary(summary):
-            return IntelResult(status="complete", summary=summary, stats=_default_stats())
     return IntelResult(status="complete", summary="")
 
 
@@ -1137,10 +1128,6 @@ class IntelAgent:
                 )
                 return IntelResult(
                     status="complete",
-                    summary=(
-                        f"Update-only run skipped for {target_type}; "
-                        f"data is fresh ({days_ago:.1f} days ago, interval={refresh_days}d)."
-                    ),
                     stats=_default_stats(),
                 )
             if force_update:
@@ -1148,15 +1135,8 @@ class IntelAgent:
             self._cb.on_step("Update-only mode: running Intel update pipeline")
             pipeline_report = await self._run_update_pipeline(target_type=target_type, info=info)
             stats = _normalize_stats(pipeline_report.get("stats"))
-            summary = str(pipeline_report.get("summary", "")).strip()
-            if not summary:
-                summary = (
-                    f"Update-only run complete for {target_type}. "
-                    f"update_status={stats.get('update_status', 'unknown')}, "
-                    f"total_embedded={stats.get('total_embedded', 0)}."
-                )
             self._cb.on_done("Update-only run complete")
-            return IntelResult(status="complete", summary=summary, stats=stats)
+            return IntelResult(status="complete", stats=stats)
 
         if needs_update:
             if force_update:
@@ -1174,7 +1154,7 @@ class IntelAgent:
                 f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
             )
 
-        # Foreground: snapshot → prefetch → format
+        # Foreground: snapshot → checklist → clean
         self._cb.on_step("Collecting RAG snapshot")
         rag_snapshot = await self._collect_rag_snapshot(target_type=target_type)
         results = rag_snapshot.get("results", {})
@@ -1184,38 +1164,56 @@ class IntelAgent:
             f"exploits={len(results.get('exploits', []))}"
         )
 
-        self._cb.on_step("Prefetching formatter context")
-        pipeline_report: dict[str, Any] = {"target_type": target_type, "info": info, "rag_snapshot": rag_snapshot}
-        pipeline_report["formatter_prefetch"] = await self._prepare_formatter_context(target_type=target_type, pipeline_report=pipeline_report)
-        counts = pipeline_report["formatter_prefetch"].get("coverage_counts", {})
-        web_used = pipeline_report["formatter_prefetch"].get("web_fallback", {}).get("used", False)
-        self._cb.on_done(
-            f"Prefetch: methods={counts.get('methods', 0)}, techniques={counts.get('techniques', 0)}, "
-            f"vulns={counts.get('vulnerabilities', 0)}, web_fallback={'yes' if web_used else 'no'}"
+        self._cb.on_step("Fetching base checklist")
+        base_checklist = await self._call_tool_json("get_checklists", target_type=target_type, info=info[:250])
+
+        pipeline_report: dict[str, Any] = {
+            "target_type": target_type,
+            "info": info,
+            "rag_snapshot": rag_snapshot,
+            "base_checklist": base_checklist,
+        }
+
+        structured_checklist: dict[str, Any] = {}
+        if isinstance(base_checklist, dict):
+            try:
+                cleaned_json = await asyncio.wait_for(
+                    clean_checklists_with_llm(
+                        checklist_data=base_checklist,
+                        target_type=target_type,
+                        info=info,
+                        llm=self._llm,
+                    ),
+                    timeout=FORMATTER_CALL_TIMEOUT_SECONDS,
+                )
+                structured_checklist = json.loads(cleaned_json)
+            except Exception as exc:
+                logger.warning("intel_structured_checklist_failed", error=str(exc), target_type=target_type)
+                structured_checklist = build_deterministic_checklist_payload(base_checklist, info)
+
+        checklist_names: list[str] = []
+        for block in structured_checklist.get("checklist", []):
+            if not isinstance(block, dict):
+                continue
+            for item in block.get("items", []):
+                if isinstance(item, dict):
+                    name = str(item.get("name", "")).strip()
+                else:
+                    name = str(item).strip()
+                if name:
+                    checklist_names.append(name)
+
+        rag_vulns = _extract_rag_headings(pipeline_report, "exploits", limit=14)
+        rag_attacks = _extract_rag_headings(pipeline_report, "attack_types", limit=14)
+        vulnerabilities = _filter_known_vulnerabilities(rag_vulns + rag_attacks + checklist_names)[:18]
+
+        self._cb.on_done("Intel Agent complete — status=complete")
+        return IntelResult(
+            status="complete",
+            stats=_normalize_stats(pipeline_report.get("stats")),
+            vulnerabilities=vulnerabilities,
+            checklist=structured_checklist,
         )
-
-        llm_result = await self._run_formatter(target_type=target_type, info=info, pipeline_report=pipeline_report)
-
-        result_stats = _normalize_stats(llm_result.stats)
-        summary = _apply_info_constraints_to_summary(llm_result.summary.strip(), info)
-        final_status = llm_result.status or "complete"
-
-        needs_rebuild = _is_low_quality_summary(summary) or _count_checklist_items(summary) < 8
-        if needs_rebuild:
-            self._cb.on_warn("Formatter summary quality is low — rebuilding checklist from get_checklists")
-            rebuilt = await self._rebuild_summary_from_checklists(
-                target_type=target_type,
-                info=info,
-                pipeline_report=pipeline_report,
-            )
-            if rebuilt:
-                summary = _apply_info_constraints_to_summary(rebuilt, info)
-                final_status = "complete"
-
-        if not summary:
-            summary = _build_deterministic_summary(pipeline_report)
-        self._cb.on_done(f"Intel Agent complete — status={final_status}")
-        return IntelResult(status=final_status, summary=summary, stats=result_stats)
 
     # ── Background Task ────────────────────────────────────────────────
 
@@ -1255,7 +1253,7 @@ class IntelAgent:
 
     # ── LLM Formatter ──────────────────────────────────────────────────
 
-    async def _run_formatter(self, target_type: str, info: str, pipeline_report: dict[str, Any]) -> IntelResult:
+    async def _run_formatter(self, target_type: str, info: str, pipeline_report: dict[str, Any], base_checklist_text: str = "") -> IntelResult:
         self._cb.on_step(f"LLM formatter starting ({FORMATTER_ROUNDS} rounds max)")
         formatter_payload = _build_formatter_payload(pipeline_report)
 
@@ -1265,7 +1263,7 @@ class IntelAgent:
 
         messages: list[ChatMessage] = [
             ChatMessage(role="system", content=system_content),
-            ChatMessage(role="user", content=build_user_message(target_type, info, formatter_payload, current_round=1, max_rounds=FORMATTER_ROUNDS)),
+            ChatMessage(role="user", content=build_user_message(target_type, info, formatter_payload, current_round=1, max_rounds=FORMATTER_ROUNDS, base_checklist_text=base_checklist_text)),
         ]
 
         total_tool_calls = 0
@@ -1322,10 +1320,7 @@ class IntelAgent:
 
                 query_preview = str(args.get("query", ""))[:50]
                 content_type = args.get("content_type", "")
-                if tool_name == "get_checklists":
-                    target_preview = str(args.get("target_type", target_type))
-                    self._cb.on_step(f"  {tool_name}(target='{target_preview}')")
-                elif tool_name == "fetch_page":
+                if tool_name == "fetch_page":
                     target_preview = str(args.get("target_type", target_type))
                     url_preview = str(args.get("url", ""))[:80]
                     self._cb.on_step(
@@ -1346,28 +1341,12 @@ class IntelAgent:
                 else:
                     result_str = await self._execute_with_retry(tool, **args)
 
-                # Report hits count
                 parsed_for_formatter: dict[str, Any] | None = None
                 try:
                     parsed = json.loads(result_str)
                     parsed_for_formatter = parsed if isinstance(parsed, dict) else None
                     if isinstance(parsed, dict):
-                        total_val = parsed.get("total")
-                        if tool_name == "get_checklists" and isinstance(total_val, (int, float)):
-                            hits = int(total_val)
-                            available_total = parsed.get("available_total")
-                            if isinstance(available_total, (int, float)) and int(available_total) >= hits:
-                                self._cb.on_done(f"  → {hits} checklist items returned ({int(available_total)} available)")
-                                tool_message_content = await self._compact_tool_message_for_formatter(
-                                    tool_name=tool_name,
-                                    parsed=parsed,
-                                    raw_content=result_str,
-                                    target_type=target_type,
-                                    info=info,
-                                )
-                                messages.append(ChatMessage(role="tool", content=tool_message_content, tool_call_id=call_id, name=tool_name))
-                                continue
-                        elif tool_name == "set_checklist":
+                        if tool_name == "set_checklist":
                             counts = parsed.get("counts", {})
                             checklist_count = counts.get("checklist", 0) if isinstance(counts, dict) else 0
                             vuln_count = counts.get("vulnerabilities", 0) if isinstance(counts, dict) else 0
@@ -1601,7 +1580,6 @@ class IntelAgent:
     async def _sync_payload_store(self, *, target_type: str, domain: str) -> dict[str, Any]:
         from server.db.knowledge.orchestrator import KnowledgeOrchestrator
 
-        # When a specific domain is updated, also refresh shared payload sources.
         ingest_domains: list[str | None]
         if target_type == "all":
             ingest_domains = [None]

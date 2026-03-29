@@ -37,7 +37,7 @@ DEFAULT_VERIFY_SOURCES: list[str] = [
 # ── Operational constants ──────────────────────────────────────────────
 
 FORMATTER_ALLOWED_TOOLS: frozenset[str] = frozenset(
-    {"search_rag", "get_checklists", "set_checklist"}
+    {"search_rag", "set_checklist"}
 )
 FORMATTER_TOOL_MAX_RETRIES: int = 2
 MAX_SOURCE_ERRORS: int = 10

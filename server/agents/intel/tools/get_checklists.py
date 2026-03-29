@@ -1256,6 +1256,9 @@ def build_checklist_llm_input(checklist_data: dict[str, Any], info: str) -> str:
         f"Target info: {info or 'none'}",
         f"Available checklist items: {payload.get('available_total', 0)}",
         "",
+        "Return JSON in this exact shape:",
+        '{"target_type":"...","available_total":0,"checklist":[{"phase":"1","title":"Reconnaissance","items":[{"name":"...","priority":3}]}]}',
+        "",
         "Candidate checklist blocks:",
     ]
     for block in payload.get("checklist", []):
@@ -1337,6 +1340,17 @@ def _parse_checklist_json_best_effort(raw: str) -> dict[str, Any] | None:
                 return parsed
         except (json.JSONDecodeError, TypeError):
             continue
+
+    first_brace = text.find("{")
+    if first_brace >= 0:
+        obj_text = _extract_json_object_at(text, first_brace)
+        if obj_text:
+            try:
+                parsed = json.loads(obj_text)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     for marker in ('"checklist"', '"phase_blocks"'):
         marker_idx = text.find(marker)
@@ -1446,7 +1460,7 @@ async def clean_checklists_with_llm(
                 ChatMessage(role="user", content=llm_input),
             ],
             temperature=0.1,
-            max_tokens=1400,
+            max_tokens=3000,
             use_config_max_tokens=False,
         )
         parsed = _parse_checklist_json_best_effort(str(response.content or ""))
@@ -1521,5 +1535,3 @@ _ALL = [
     "web_app", "api", "mobile", "network", "iot",
     "linux_server", "infra", "desktop", "cloud", "container", "database", "repository",
 ]
-
-

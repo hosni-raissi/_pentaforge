@@ -2,7 +2,7 @@
 Test the Orchestrator — Intel → Planner pipeline.
 
 Validates that:
-  1. Intel Agent produces a checklist-focused intelligence summary
+  1. Intel Agent produces vulnerabilities + a clean checklist
   2. Planner receives intel and builds a structured plan
   3. Planner returns scenarios for executor agents
   4. Full plan is stored via update_pentest_plan
@@ -51,26 +51,11 @@ def print_intel(result: OrchestratorResult) -> None:
         print("  (no intel result)")
         return
     print(f"  Status: {intel.status}")
-    print(f"  Summary length: {len(intel.summary)} chars")
-
-    # Count sections
-    summary = intel.summary
-    methods = summary.count("- ") if "METHODS:" in summary else 0
-    techniques = 0
-    vulns = 0
-    for line in summary.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            if "TECHNIQUES:" in summary[:summary.index(stripped)]:
-                techniques += 1
-            elif "VULNERABILITIES:" in summary[:summary.index(stripped)] if stripped in summary else False:
-                vulns += 1
-
-    print(f"\n  Summary preview:")
-    for line in summary.split("\n")[:20]:
-        print(f"    {line}")
-    if summary.count("\n") > 20:
-        print(f"    ... ({summary.count(chr(10)) - 20} more lines)")
+    print(f"  Vulnerabilities: {len(intel.vulnerabilities)}")
+    if intel.vulnerabilities:
+        print("\n  Vulnerability preview:")
+        for item in intel.vulnerabilities[:12]:
+            print(f"    - {item}")
 
     stats = intel.stats or {}
     print(f"\n  Stats:")
@@ -78,6 +63,7 @@ def print_intel(result: OrchestratorResult) -> None:
     print(f"    new_payloads: {stats.get('new_payloads', 0)}")
     print(f"    new_exploits: {stats.get('new_exploits', 0)}")
     print(f"    total_embedded: {stats.get('total_embedded', 0)}")
+    print(f"\n  Checklist present: {bool(intel.checklist)}")
 
 
 def print_plan(result: OrchestratorResult) -> None:
@@ -144,10 +130,10 @@ def validate(result: OrchestratorResult) -> None:
     assert result.intel is not None, "Expected intel result"
     print("  ✓ Intel Agent produced a result")
 
-    if result.intel.summary:
-        print(f"  ✓ Intel summary: {len(result.intel.summary)} chars")
+    if result.intel.checklist:
+        print("  ✓ Intel checklist present")
     else:
-        print("  ⚠ Intel summary is empty")
+        print("  ⚠ Intel checklist is empty")
 
     # Plan validation
     assert result.plan is not None, "Expected plan result"

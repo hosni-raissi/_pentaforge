@@ -30,14 +30,14 @@ def _target_query_text(target_type: str) -> str:
 
 FORMATTER_SYSTEM_PROMPT = (
     "Role: Intel agent for aggressive pentest checklist generation.\n"
-    "Goal: maximize vulnerability coverage for the target.\n"
+    "Goal: maximize vulnerability coverage for the target by optimizing the provided baseline checklist.\n"
     "\n"
-    "Tools: search_rag, get_checklists, set_checklist.\n"
+    "Tools: search_rag, set_checklist.\n"
     "Required usage:\n"
-    "1) Call get_checklists exactly once.\n"
+    "1) Review the provided current checklist for the target.\n"
     "2) Call search_rag only if it improves checklist coverage or surfaces specific, relevant vulnerability classes.\n"
     "3) Respect explicit scope exclusions from the target info (for example: no SQL injection, do not test XSS).\n"
-    "4) Call set_checklist once with final CHECKLIST/GAPS and optional VULNERABILITIES.\n"
+    "4) Call set_checklist in the final round to update the checklist with your optimized and aggressive pentest manipulation.\n"
     "\n"
 
     f"Budget: {FORMATTER_ROUNDS} rounds total; keep last round for final JSON.\n"
@@ -77,6 +77,7 @@ def build_user_message(
     formatter_payload: dict[str, Any],
     current_round: int = 1,
     max_rounds: int = FORMATTER_ROUNDS,
+    base_checklist_text: str = "",
 ) -> str:
     """Build the user message for the formatter LLM call."""
     target_query = _target_query_text(target_type)
@@ -111,9 +112,6 @@ def build_user_message(
             f'content_type="exploits", domain="{rag_domain}", n_results=10)'
         )
     search_suggestions.append(
-        f'get_checklists(target_type="{target_type}", info="{(info or "")[:120]}")'
-    )
-    search_suggestions.append(
         f'set_checklist(target_type="{target_type}", checklist="...", techniques="...", vulnerabilities="...", methods="...", gaps="...")'
     )
 
@@ -141,6 +139,8 @@ def build_user_message(
     return (
         f"Target: {target_type}\n"
         f"Info: {info or 'none'}\n"
+        f"This is the current check list for this target:\n"
+        f"{base_checklist_text}\n\n"
         f"{budget_text}\n\n"
         "Coverage snapshot:\n"
         f"- techniques: {techniques_n + len(attack_types)}\n"
@@ -152,11 +152,10 @@ def build_user_message(
         "Recommended tool calls:\n"
         f"{suggestions_text}\n\n"
         "Required flow:\n"
-        "1) get_checklists exactly once.\n"
-        "2) search_rag only if it adds useful attack coverage or specific known vulnerabilities.\n"
-        "3) respect explicit scope exclusions from the info.\n"
-        "4) set_checklist once.\n"
-        "5) final JSON.\n\n"
+        "1) search_rag only if it adds useful attack coverage or specific known vulnerabilities.\n"
+        "2) respect explicit scope exclusions from the info.\n"
+        "3) set_checklist once in the final round.\n"
+        "4) final JSON.\n\n"
         "Pipeline stats (copy as-is):\n"
         f"```json\n{json.dumps(stats, ensure_ascii=True)}\n```"
     )
@@ -167,8 +166,9 @@ _CHECKLIST_CLEANER_SYSTEM_PROMPT = (
     "You refine a structured pentest checklist.\n"
     "Use the target info to remove clearly irrelevant checklist items.\n"
     "Do not invent checklist items or references.\n"
-    "Prefer aggressive high-value coverage unless the target info explicitly excludes something.\n"
-    "Return strict JSON only. No markdown fences.\n"
+    "Keep broad coverage; only remove items explicitly excluded by target info.\n"
+    "Return strict JSON only. No markdown fences, no prose, no leading text.\n"
+    "Use double quotes for all keys and strings. No trailing commas.\n"
     "Required keys: target_type, available_total, checklist.\n"
     "checklist must be a list of blocks with keys: phase, title, items.\n"
     "items must be a list of objects with keys: name, priority.\n"
