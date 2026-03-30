@@ -141,6 +141,7 @@ async def set_checklist(
     vulnerabilities: str = "",
     methods: str = "",
     gaps: str = "",
+    checklist_json: object | None = None,
 ) -> str:
     normalized_target = _normalize_target_type(target_type)
     methods_items = _split_items(methods)
@@ -148,6 +149,17 @@ async def set_checklist(
     vulnerabilities_items = _filter_known_vulnerabilities(_split_items(vulnerabilities))
     checklist_items = _split_items(checklist)
     gap_items = _split_items(gaps)
+    structured_checklist: dict[str, Any] | None = None
+
+    if isinstance(checklist_json, dict):
+        structured_checklist = checklist_json
+    elif isinstance(checklist_json, str) and checklist_json.strip():
+        try:
+            parsed = json.loads(checklist_json)
+            if isinstance(parsed, dict):
+                structured_checklist = parsed
+        except json.JSONDecodeError:
+            structured_checklist = None
 
     sections = []
     if vulnerabilities_items:
@@ -171,6 +183,7 @@ async def set_checklist(
             "vulnerabilities": vulnerabilities_items,
             "checklist": checklist_items,
             "gaps": gap_items,
+            "checklist_json": structured_checklist,
             "summary": summary,
         },
         ensure_ascii=True,

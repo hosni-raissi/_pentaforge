@@ -1193,9 +1193,9 @@ def _phase_block_title(phase: str) -> str:
     return {
         "1": "Reconnaissance",
         "2": "Mapping",
-        "3": "Configuration Review",
-        "4": "Exploitation & Validation",
-        "5": "Session & Access Control",
+        "2": "Configuration Review",
+        "3": "Exploitation & Validation",
+        "4": "Session & Access Control",
     }.get(str(phase).strip(), f"Phase {phase or 'unknown'}")
 
 
@@ -1232,7 +1232,7 @@ def build_deterministic_checklist_payload(checklist_data: dict[str, Any], info: 
             "phase": phase,
             "title": _phase_block_title(phase),
             "items": [
-                {"name": item_name, "priority": item_priority}
+                item_name
                 for item_name, item_priority in sorted(
                     phase_map[phase].items(),
                     key=lambda kv: (-kv[1], kv[0].lower()),
@@ -1257,7 +1257,7 @@ def build_checklist_llm_input(checklist_data: dict[str, Any], info: str) -> str:
         f"Available checklist items: {payload.get('available_total', 0)}",
         "",
         "Return JSON in this exact shape:",
-        '{"target_type":"...","available_total":0,"checklist":[{"phase":"1","title":"Reconnaissance","items":[{"name":"...","priority":3}]}]}',
+        '{"target_type":"...","available_total":0,"checklist":[{"phase":"1","title":"Reconnaissance","items":["..."]}]}',
         "",
         "Candidate checklist blocks:",
     ]
@@ -1270,11 +1270,12 @@ def build_checklist_llm_input(checklist_data: dict[str, Any], info: str) -> str:
         for item in block.get("items", []):
             if isinstance(item, dict):
                 item_name = str(item.get("name", "")).strip()
-                item_priority = _clamp_priority(item.get("priority", 3), default=3)
                 if item_name:
-                    lines.append(f"- {item_name} [priority={item_priority}]")
+                    lines.append(f"- {item_name}")
             elif isinstance(item, str):
-                lines.append(f"- {item.strip()} [priority={_default_priority_for_item(item, phase)}]")
+                clean = item.strip()
+                if clean:
+                    lines.append(f"- {clean}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -1417,7 +1418,7 @@ def _normalize_cleaned_checklist_payload(
                     "phase": phase,
                     "title": title,
                     "items": [
-                        {"name": item_name, "priority": item_priority}
+                        item_name
                         for item_name, item_priority in sorted(
                             items_by_name.items(),
                             key=lambda kv: (-kv[1], kv[0].lower()),

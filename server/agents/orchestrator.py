@@ -21,6 +21,10 @@ from langgraph.graph import END, START, StateGraph
 
 from server.agents.intel.agent import IntelAgent, IntelResult
 from server.agents.planner.agent import PlannerAgent, PlannerResult
+from server.agents.planner.config import (
+    PLANNER_CHECKLIST_WINDOW_MAX_ITEMS,
+    PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE,
+)
 from server.agents.planner.tools.pentest_plan import (
     _current_plan,
     _reset_plan,
@@ -40,6 +44,136 @@ class _SilentAgentCallback:
 
     def on_warn(self, message: str) -> None:
         pass
+
+
+def _coerce_priority(value: Any) -> int | None:
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= p <= 5:
+        return p
+    return None
+
+
+def _extract_checklist_window(
+    checklist_payload: dict[str, Any],
+    *,
+    max_items: int = PLANNER_CHECKLIST_WINDOW_MAX_ITEMS,
+    max_items_per_phase: int = PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE,
+) -> dict[str, Any]:
+    """Build a compact checklist window for planner prompt token control."""
+    raw_phases = checklist_payload.get("checklist", [])
+    phases: list[dict[str, Any]] = []
+    if isinstance(raw_phases, list):
+        for phase in raw_phases:
+            if not isinstance(phase, dict):
+                continue
+            phase_id = str(phase.get("phase", "")).strip()
+            title = str(phase.get("title", "")).strip() or phase_id or "Phase"
+            raw_items = phase.get("items", [])
+            normalized_items: list[dict[str, Any]] = []
+            if isinstance(raw_items, list):
+                for item in raw_items:
+                    if isinstance(item, str):
+                        name = item.strip()
+                        if name:
+                            normalized_items.append({"name": name})
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name", "")).strip()
+                    if not name:
+                        continue
+                    entry: dict[str, Any] = {"name": name}
+                    priority = _coerce_priority(item.get("priority"))
+                    if priority is not None:
+                        entry["priority"] = priority
+                    normalized_items.append(entry)
+            if normalized_items:
+                normalized_items.sort(
+                    key=lambda x: x.get("priority", 0),
+                    reverse=True,
+                )
+            phases.append(
+                {
+                    "phase": phase_id,
+                    "title": title,
+                    "items": normalized_items,
+                }
+            )
+
+    available_total_raw = checklist_payload.get("available_total")
+    try:
+        available_total = int(available_total_raw)
+    except (TypeError, ValueError):
+        available_total = sum(len(p.get("items", [])) for p in phases)
+
+    selected: list[dict[str, Any]] = []
+    included_count = 0
+    for phase in phases:
+        items = phase.get("items", [])
+        if not isinstance(items, list):
+            continue
+        if included_count >= max_items:
+            break
+        remaining = max_items - included_count
+        chosen = items[: min(max_items_per_phase, remaining)]
+        if not chosen:
+            continue
+        selected.append(
+            {
+                "phase": phase.get("phase", ""),
+                "title": phase.get("title", ""),
+                "items": chosen,
+            }
+        )
+        included_count += len(chosen)
+
+    return {
+        "target_type": str(checklist_payload.get("target_type", "") or ""),
+        "available_total": available_total,
+        "window_items": included_count,
+        "window_max_items": max_items,
+        "window_max_items_per_phase": max_items_per_phase,
+        "truncated": bool(available_total > included_count),
+        "checklist": selected,
+    }
+
+
+def _extract_checklist_overview(checklist_payload: dict[str, Any]) -> dict[str, Any]:
+    raw_phases = checklist_payload.get("checklist", [])
+    phases_overview: list[dict[str, Any]] = []
+    derived_total = 0
+
+    if isinstance(raw_phases, list):
+        for phase in raw_phases:
+            if not isinstance(phase, dict):
+                continue
+            phase_id = str(phase.get("phase", "")).strip()
+            title = str(phase.get("title", "")).strip() or phase_id or "Phase"
+            raw_items = phase.get("items", [])
+            item_count = len(raw_items) if isinstance(raw_items, list) else 0
+            derived_total += item_count
+            phases_overview.append(
+                {
+                    "phase": phase_id,
+                    "title": title,
+                    "items": item_count,
+                }
+            )
+
+    available_total_raw = checklist_payload.get("available_total")
+    try:
+        available_total = int(available_total_raw)
+    except (TypeError, ValueError):
+        available_total = derived_total
+
+    return {
+        "target_type": str(checklist_payload.get("target_type", "") or ""),
+        "available_total": available_total,
+        "phases": phases_overview,
+    }
 
 
 # ── Graph state ────────────────────────────────────────────────────────
@@ -185,6 +319,11 @@ class Orchestrator:
         intel = state.get("intel_result", {})
         intel_vulnerabilities = intel.get("vulnerabilities", [])
         intel_checklist = intel.get("checklist", {})
+        checklist_overview = (
+            _extract_checklist_overview(intel_checklist)
+            if isinstance(intel_checklist, dict)
+            else _extract_checklist_overview({})
+        )
 
         intel_status = intel.get("status", "")
         intel_stats = intel.get("stats", {})
@@ -196,22 +335,30 @@ class Orchestrator:
             f"## Intelligence Brief (from Intel Agent)\n"
             f"Status: {intel_status}\n"
             f"Vulnerabilities: {json.dumps(intel_vulnerabilities, ensure_ascii=True)}\n"
-            f"Checklist: {json.dumps(intel_checklist, ensure_ascii=True)}\n"
+            f"Checklist Overview: {json.dumps(checklist_overview, ensure_ascii=True)}\n"
             f"\n"
             f"Stats: {json.dumps(intel_stats, ensure_ascii=True)}\n"
             f"\n"
             f"## Instructions\n"
-            f"1. Use the intelligence above to build a complete pentest plan.\n"
-            f"2. Call update_pentest_plan to store the plan.\n"
-            f"3. Return the first batch of scenarios (max 3) for the "
+            f"1. FIRST STEP: create a great, target-specific pentest plan for this engagement.\n"
+            f"2. You must use your tools and Intel checklist context to improve plan quality.\n"
+            f"3. Treat checklist input as a context window (not the full list).\n"
+            f"   Runtime will inject rotating checklist windows each round.\n"
+            f"4. Use checklist phases/items to shape recon + enumeration depth.\n"
+            f"5. Return final plan JSON (full object) so runtime can persist it statically.\n"
+            f"6. Return the first batch of scenarios (max 3) for the "
             f"executor agents to run.\n"
-            f"4. Focus on reconnaissance first — we need to discover "
+            f"7. Focus on reconnaissance first — we need to discover "
             f"the attack surface before exploitation.\n"
         )
 
         logger.debug(
             "orchestrator_planner_input_built",
             message_length=len(planner_message),
+            checklist_available_total=checklist_overview.get("available_total", 0),
+            checklist_phase_count=len(checklist_overview.get("phases", []))
+            if isinstance(checklist_overview.get("phases", []), list)
+            else 0,
         )
 
         return {"planner_input": planner_message}
@@ -225,17 +372,24 @@ class Orchestrator:
         try:
             _reset_plan()
 
-            result = await self._planner_agent.run(planner_input, is_loop=False)
+            intel_checklist = state.get("intel_result", {}).get("checklist", {})
+            result = await self._planner_agent.run(
+                planner_input,
+                is_loop=False,
+                intel_checklist=intel_checklist
+                if isinstance(intel_checklist, dict)
+                else {},
+            )
 
             plan_data = dict(_current_plan)
 
-        logger.info(
-            "orchestrator_plan_complete",
-            scenarios=len(result.scenarios),
-            needs=len(result.needs),
-            plan_phases=len(plan_data.get("phases", [])),
-            summary_length=len(result.summary),
-        )
+            logger.info(
+                "orchestrator_plan_complete",
+                scenarios=len(result.scenarios),
+                needs=len(result.needs),
+                plan_phases=len(plan_data.get("phases", [])),
+                summary_length=len(result.summary),
+            )
 
             return {
                 "planner_result": {

@@ -33,6 +33,10 @@ from server.config.agent import (
 from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 from .config import (
+    PLANNER_CHECKLIST_WINDOW_MAX_ITEMS,
+    PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE,
+    PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP,
+    PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE,
     MAX_TOOL_ROUNDS,
     MAX_TOOL_RESULT_CHARS,
     PLANNER_CALL_TIMEOUT_SECONDS,
@@ -45,7 +49,7 @@ from .config import (
 )
 from .prompts import INITIAL_SYSTEM_PROMPT, LOOP_SYSTEM_PROMPT
 from .tools import ALL_PLANNER_TOOLS
-from .tools.pentest_plan import _current_plan
+from .tools.pentest_plan import _current_plan, update_pentest_plan
 
 logger = structlog.get_logger(__name__)
 
@@ -91,6 +95,9 @@ class PlannerState(TypedDict):
     plan_result: dict[str, Any]
     error: str
     recovery_attempted: bool
+    intel_checklist_overview: dict[str, Any]
+    intel_checklist_windows: list[dict[str, Any]]
+    planning_round_cap: int
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -718,15 +725,92 @@ def _format_tool_batch_results(tool_results: list[dict[str, Any]]) -> str:
 
 
 def _build_loop_plan_context_message() -> str:
-    """Build a deterministic loop-context message with the current plan JSON."""
+    """Build a deterministic, compact loop-context message."""
     plan = _current_plan if isinstance(_current_plan, dict) else {}
     if not plan:
         return (
             "Current plan context (JSON):\n"
             "{\"target\":\"\",\"scope\":\"\",\"target_types\":[],\"phases\":[],\"notes\":\"\"}"
         )
-    return "Current plan context (JSON):\n" + json.dumps(
-        plan, ensure_ascii=True
+
+    compact_phases: list[dict[str, Any]] = []
+    for phase in plan.get("phases", []):
+        if not isinstance(phase, dict):
+            continue
+        raw_steps = phase.get("steps", [])
+        steps: list[dict[str, Any]] = []
+        pending_scenarios = 0
+        done_scenarios = 0
+
+        if isinstance(raw_steps, list):
+            for step in raw_steps:
+                if not isinstance(step, dict):
+                    continue
+                raw_scenarios = step.get("scenarios", [])
+                if not isinstance(raw_scenarios, list):
+                    continue
+                for scenario in raw_scenarios:
+                    if not isinstance(scenario, dict):
+                        continue
+                    if bool(scenario.get("done", False)):
+                        done_scenarios += 1
+                    else:
+                        pending_scenarios += 1
+
+            for step in raw_steps[:PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE]:
+                if not isinstance(step, dict):
+                    continue
+                raw_scenarios = step.get("scenarios", [])
+                scenarios: list[dict[str, Any]] = []
+                if isinstance(raw_scenarios, list):
+                    for scenario in raw_scenarios:
+                        if not isinstance(scenario, dict):
+                            continue
+                        is_done = bool(scenario.get("done", False))
+                        if len(scenarios) >= PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP:
+                            continue
+                        scenarios.append(
+                            {
+                                "task": str(scenario.get("task", "")),
+                                "agent": str(scenario.get("agent", "")),
+                                "priority": scenario.get("priority", 3),
+                                "done": is_done,
+                            }
+                        )
+
+                steps.append(
+                    {
+                        "id": str(step.get("id", "")),
+                        "description": str(step.get("description", "")),
+                        "scenarios": scenarios,
+                    }
+                )
+
+        compact_phases.append(
+            {
+                "name": str(phase.get("name", "")),
+                "priority": phase.get("priority", 0),
+                "step_count": len(raw_steps) if isinstance(raw_steps, list) else 0,
+                "pending_scenarios": pending_scenarios,
+                "done_scenarios": done_scenarios,
+                "steps": steps,
+            }
+        )
+
+    compact_plan = {
+        "target": str(plan.get("target", "")),
+        "scope": str(plan.get("scope", "")),
+        "target_types": plan.get("target_types", []),
+        "notes": str(plan.get("notes", "")),
+        "phases": compact_phases,
+        "context_window": {
+            "steps_per_phase": PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE,
+            "scenarios_per_step": PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP,
+            "mode": "compact",
+        },
+    }
+    return "Current plan context (JSON, compact window):\n" + json.dumps(
+        compact_plan, ensure_ascii=True
     )
 
 
@@ -869,6 +953,207 @@ def _has_successful_plan_update(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _coerce_checklist_priority(value: Any) -> int | None:
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= p <= 5:
+        return p
+    return None
+
+
+def _normalize_intel_checklist(
+    checklist_payload: dict[str, Any],
+) -> dict[str, Any]:
+    phases_raw = checklist_payload.get("checklist", [])
+    phases: list[dict[str, Any]] = []
+    if isinstance(phases_raw, list):
+        for phase in phases_raw:
+            if not isinstance(phase, dict):
+                continue
+            phase_id = str(phase.get("phase", "")).strip()
+            title = str(phase.get("title", "")).strip() or phase_id or "Phase"
+            raw_items = phase.get("items", [])
+            items: list[dict[str, Any]] = []
+            if isinstance(raw_items, list):
+                for item in raw_items:
+                    if isinstance(item, str):
+                        name = item.strip()
+                        if name:
+                            items.append({"name": name})
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name", "")).strip()
+                    if not name:
+                        continue
+                    entry: dict[str, Any] = {"name": name}
+                    priority = _coerce_checklist_priority(item.get("priority"))
+                    if priority is not None:
+                        entry["priority"] = priority
+                    items.append(entry)
+            if items:
+                items.sort(key=lambda x: x.get("priority", 0), reverse=True)
+            phases.append({"phase": phase_id, "title": title, "items": items})
+
+    available_total_raw = checklist_payload.get("available_total")
+    try:
+        available_total = int(available_total_raw)
+    except (TypeError, ValueError):
+        available_total = sum(len(p.get("items", [])) for p in phases)
+
+    return {
+        "target_type": str(checklist_payload.get("target_type", "") or ""),
+        "available_total": available_total,
+        "phases": phases,
+    }
+
+
+def _build_intel_checklist_windows(
+    checklist_payload: dict[str, Any],
+    *,
+    max_items: int = PLANNER_CHECKLIST_WINDOW_MAX_ITEMS,
+    max_items_per_phase: int = PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Create round-robin checklist windows so planner can eventually see all items."""
+    normalized = _normalize_intel_checklist(checklist_payload)
+    phases = normalized.get("phases", [])
+    if not isinstance(phases, list) or not phases:
+        overview = {
+            "target_type": normalized.get("target_type", ""),
+            "available_total": int(normalized.get("available_total", 0)),
+            "phase_counts": [],
+            "windows_total": 0,
+        }
+        return overview, []
+
+    cursors = [0] * len(phases)
+    windows: list[dict[str, Any]] = []
+    safety_limit = 512
+    iterations = 0
+
+    while iterations < safety_limit:
+        iterations += 1
+        remaining_total = 0
+        for idx, phase in enumerate(phases):
+            items = phase.get("items", [])
+            if isinstance(items, list):
+                remaining_total += max(0, len(items) - cursors[idx])
+        if remaining_total <= 0:
+            break
+
+        selected_by_phase: list[list[dict[str, Any]]] = [[] for _ in phases]
+        taken_total = 0
+
+        # Pass 1: balanced slice per phase.
+        for idx, phase in enumerate(phases):
+            if taken_total >= max_items:
+                break
+            items = phase.get("items", [])
+            if not isinstance(items, list):
+                continue
+            cursor = cursors[idx]
+            if cursor >= len(items):
+                continue
+            take = min(max_items_per_phase, len(items) - cursor, max_items - taken_total)
+            if take <= 0:
+                continue
+            selected_by_phase[idx].extend(items[cursor: cursor + take])
+            cursors[idx] += take
+            taken_total += take
+
+        # Pass 2: fill remaining room if still under max_items.
+        progressed = True
+        while taken_total < max_items and progressed:
+            progressed = False
+            for idx, phase in enumerate(phases):
+                if taken_total >= max_items:
+                    break
+                items = phase.get("items", [])
+                if not isinstance(items, list):
+                    continue
+                cursor = cursors[idx]
+                if cursor >= len(items):
+                    continue
+                selected_by_phase[idx].append(items[cursor])
+                cursors[idx] += 1
+                taken_total += 1
+                progressed = True
+                if taken_total >= max_items:
+                    break
+
+        window_phases: list[dict[str, Any]] = []
+        for idx, phase in enumerate(phases):
+            chosen = selected_by_phase[idx]
+            if not chosen:
+                continue
+            window_phases.append(
+                {
+                    "phase": phase.get("phase", ""),
+                    "title": phase.get("title", ""),
+                    "items": chosen,
+                }
+            )
+
+        if not window_phases:
+            break
+
+        remaining_after = 0
+        for idx, phase in enumerate(phases):
+            items = phase.get("items", [])
+            if isinstance(items, list):
+                remaining_after += max(0, len(items) - cursors[idx])
+
+        windows.append(
+            {
+                "window_index": len(windows) + 1,
+                "window_items": taken_total,
+                "remaining_items_after_window": remaining_after,
+                "checklist": window_phases,
+            }
+        )
+
+    phase_counts = [
+        {
+            "phase": p.get("phase", ""),
+            "title": p.get("title", ""),
+            "items": len(p.get("items", []))
+            if isinstance(p.get("items", []), list)
+            else 0,
+        }
+        for p in phases
+    ]
+    overview = {
+        "target_type": normalized.get("target_type", ""),
+        "available_total": int(normalized.get("available_total", 0)),
+        "phase_counts": phase_counts,
+        "windows_total": len(windows),
+    }
+    return overview, windows
+
+
+def _build_intel_checklist_window_message(
+    checklist_overview: dict[str, Any],
+    checklist_windows: list[dict[str, Any]],
+    round_count: int,
+) -> str:
+    if not checklist_windows:
+        return ""
+    idx = min(max(round_count - 1, 0), len(checklist_windows) - 1)
+    payload = {
+        "checklist_overview": checklist_overview,
+        "window_index": idx + 1,
+        "window_total": len(checklist_windows),
+        "window": checklist_windows[idx],
+    }
+    return (
+        "Intel checklist runtime context window (JSON). "
+        "Use this window plus discovery evidence to maintain full coverage:\n"
+        + json.dumps(payload, ensure_ascii=True)
+    )
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # PLANNER AGENT
 # ═════════════════════════════════════════════════════════════════════════════
@@ -894,6 +1179,9 @@ class PlannerAgent:
         self._cb = callback or _NoOpCallback()
 
         tool_list = tools or ALL_PLANNER_TOOLS
+        # Planner LLM should not call update_pentest_plan directly.
+        # Plan persistence is applied statically in parse-output step.
+        tool_list = [t for t in tool_list if t.name != "update_pentest_plan"]
         self._tools = {t.name: t for t in tool_list}
         self._tool_schemas = [t.schema() for t in tool_list]
         self._tool_valid_params: dict[str, set[str] | None] = {
@@ -953,12 +1241,49 @@ class PlannerAgent:
             }
 
         round_count = state["round_count"] + 1
-        self._cb.on_step(f"LLM Round {round_count}/{MAX_TOOL_ROUNDS}")
+        round_cap = int(state.get("planning_round_cap", MAX_TOOL_ROUNDS) or MAX_TOOL_ROUNDS)
+        self._cb.on_step(f"LLM Round {round_count}/{round_cap}")
 
         # Determine if we should compress context (retry recovery).
         messages_raw = state["messages"]
         if state.get("recovery_attempted"):
             messages_raw = _compress_messages_for_retry(messages_raw)
+
+        # For initial planning, inject a rotating Intel checklist window per round.
+        # This keeps context bounded while still exposing full checklist coverage over rounds.
+        if not state.get("is_loop"):
+            checklist_windows = state.get("intel_checklist_windows", [])
+            if isinstance(checklist_windows, list) and checklist_windows:
+                checklist_overview = state.get("intel_checklist_overview", {})
+                checklist_ctx = _build_intel_checklist_window_message(
+                    checklist_overview
+                    if isinstance(checklist_overview, dict)
+                    else {},
+                    checklist_windows,
+                    round_count,
+                )
+                if checklist_ctx:
+                    window_idx = min(max(round_count - 1, 0), len(checklist_windows) - 1) + 1
+                    self._cb.on_step(
+                        f"Planner checklist window injected {window_idx}/{len(checklist_windows)}"
+                    )
+                    messages_raw = [
+                        *messages_raw,
+                        {"role": "user", "content": checklist_ctx},
+                    ]
+                if round_count >= round_cap:
+                    # Final initial-planning round: do not call tools.
+                    messages_raw = [
+                        *messages_raw,
+                        {
+                            "role": "user",
+                            "content": (
+                                "Final round: return final strict JSON now with keys "
+                                "`summary`, `needs`, `plan`. "
+                                "Do not call any tools."
+                            ),
+                        },
+                    ]
         messages = [_dict_to_msg(m) for m in messages_raw]
 
         # Adaptive token budget: allow more tokens in later rounds for plan output.
@@ -975,10 +1300,14 @@ class PlannerAgent:
                     f"{type(exc).__name__}; backing off..."
                 )
 
+            tools_for_call = state.get("tool_schemas") if self._tools else None
+            if not state.get("is_loop") and round_count >= round_cap:
+                tools_for_call = None
+
             response = await _retry_with_backoff(
                 lambda: self._llm.chat(
                     messages,
-                    tools=state.get("tool_schemas") if self._tools else None,
+                    tools=tools_for_call,
                     temperature=0.3,
                     max_tokens=token_budget,
                 ),
@@ -1013,25 +1342,6 @@ class PlannerAgent:
                 tool_calls = inline_calls
                 raw_content = cleaned_content
                 self._cb.on_warn("Recovered inline function-call from text.")
-
-        # If model returned a textual plan JSON instead of tool-calling, auto-convert
-        # it into update_pentest_plan so the plan is persisted before session ends.
-        if not tool_calls and raw_content and not _has_successful_plan_update(state["messages"]):
-            recovered_plan = _extract_plan_from_text(raw_content)
-            if recovered_plan is not None:
-                tool_calls = [
-                    {
-                        "id": f"autosave_{uuid.uuid4().hex[:10]}",
-                        "type": "function",
-                        "function": {
-                            "name": "update_pentest_plan",
-                            "arguments": json.dumps(recovered_plan, ensure_ascii=True),
-                        },
-                    },
-                ]
-                self._cb.on_warn(
-                    "Recovered plan JSON from final text; auto-saving via update_pentest_plan."
-                )
 
         if tool_calls:
             tool_names = [tc["function"]["name"] for tc in tool_calls]
@@ -1190,10 +1500,11 @@ class PlannerAgent:
     def _route_after_reason(self, state: PlannerState) -> str:
         if state.get("error"):
             return "parse_output"
+        round_cap = int(state.get("planning_round_cap", MAX_TOOL_ROUNDS) or MAX_TOOL_ROUNDS)
         if state["last_tool_calls"]:
-            if state["round_count"] >= MAX_TOOL_ROUNDS:
+            if state["round_count"] >= round_cap:
                 self._cb.on_warn(
-                    f"Reached max rounds ({MAX_TOOL_ROUNDS}); forcing output."
+                    f"Reached max rounds ({round_cap}); forcing output."
                 )
                 return "parse_output"
             return "execute_tools"
@@ -1351,6 +1662,24 @@ class PlannerAgent:
                     "summary": f"Planning failed: {state['error']}",
                 }
             }
+
+        plan_payload = _extract_plan_from_text(content)
+        if plan_payload is not None:
+            persist_status = await update_pentest_plan.execute(
+                plan_json=json.dumps(plan_payload, ensure_ascii=True)
+            )
+            lowered = str(persist_status).strip().lower()
+            if not lowered.startswith("plan updated"):
+                err_msg = str(persist_status).strip() or "invalid plan payload"
+                self._cb.on_warn(f"Planning failed: {err_msg}")
+                return {
+                    "plan_result": {
+                        "scenarios": [],
+                        "needs": [],
+                        "summary": f"Planning failed: {err_msg}",
+                    }
+                }
+            self._cb.on_done("Planner plan persisted (static apply).")
 
         result = _parse_planner_output(content)
 
@@ -1606,7 +1935,10 @@ class PlannerAgent:
     # ── Public API ─────────────────────────────────────────────────
 
     async def run(
-        self, user_message: str, is_loop: bool = False
+        self,
+        user_message: str,
+        is_loop: bool = False,
+        intel_checklist: dict[str, Any] | None = None,
     ) -> PlannerResult:
         mode_label = "loop re-entry" if is_loop else "initial plan"
         self._cb.on_step(f"Planner Agent starting ({mode_label})")
@@ -1614,6 +1946,16 @@ class PlannerAgent:
         system_content = LOOP_SYSTEM_PROMPT if is_loop else INITIAL_SYSTEM_PROMPT
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content
+
+        checklist_payload = intel_checklist if isinstance(intel_checklist, dict) else {}
+        checklist_overview, checklist_windows = _build_intel_checklist_windows(
+            checklist_payload
+        )
+        if not is_loop and checklist_windows:
+            self._cb.on_step(
+                "Planner checklist windows prepared: "
+                f"{len(checklist_windows)} (items={checklist_overview.get('available_total', 0)})"
+            )
 
         initial_state: PlannerState = {
             "messages": [
@@ -1641,6 +1983,13 @@ class PlannerAgent:
             "plan_result": {},
             "error": "",
             "recovery_attempted": False,
+            "intel_checklist_overview": checklist_overview,
+            "intel_checklist_windows": checklist_windows,
+            "planning_round_cap": (
+                min(MAX_TOOL_ROUNDS, max(1, len(checklist_windows)))
+                if (not is_loop and checklist_windows)
+                else MAX_TOOL_ROUNDS
+            ),
         }
 
         final_state = await self._graph.ainvoke(initial_state)

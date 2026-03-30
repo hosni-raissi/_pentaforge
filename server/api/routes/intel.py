@@ -33,6 +33,7 @@ logger = structlog.get_logger(__name__)
 _INTEL_UPDATABLE_SET = {name.lower() for name in INTEL_UPDATABLE_SOURCES}
 _FORCE_UPDATE_LOCK = threading.Lock()
 _FORCE_UPDATE_RUNNING: dict[str, dict[str, Any]] = {}
+_FORCE_UPDATE_RUNTIME: dict[str, dict[str, Any]] = {}
 
 
 class _ForceUpdateCancelled(Exception):
@@ -346,6 +347,8 @@ async def _force_ingest_target_knowledge(
                     raise _ForceUpdateCancelled("Force update cancelled by user.")
                 on_step(f"Ingesting source {idx}/{total_sources}: {source.name}")
                 result = await rag_orchestrator.ingest_source(source.name)
+                if cancel_requested():
+                    raise _ForceUpdateCancelled("Force update cancelled by user.")
                 if result.errors:
                     on_warn(
                         f"Source {source.name}: {len(result.errors)} error(s) while ingesting."
@@ -375,6 +378,8 @@ async def _force_ingest_target_knowledge(
             if cancel_requested():
                 raise _ForceUpdateCancelled("Force update cancelled by user.")
             rows = await payload_orchestrator.ingest_payloads(domain=domain)
+            if cancel_requested():
+                raise _ForceUpdateCancelled("Force update cancelled by user.")
             added = 0
             errors = 0
             for row in rows:
@@ -988,6 +993,8 @@ async def _run_force_update(target_type: str, info: str) -> None:
             now_iso = datetime.now(timezone.utc).isoformat()
             with _FORCE_UPDATE_LOCK:
                 current = _FORCE_UPDATE_RUNNING.get(self._target, {})
+                if bool(current.get("cancel_requested")) or str(current.get("status", "")).lower() == "cancelling":
+                    raise _ForceUpdateCancelled("Force update cancelled by user.")
                 existing_progress = int(current.get("progress", 0) or 0)
                 _FORCE_UPDATE_RUNNING[self._target] = {
                     **current,
@@ -1028,8 +1035,17 @@ async def _run_force_update(target_type: str, info: str) -> None:
 
 
 def _force_update_worker(target_type: str, info: str) -> None:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    task = loop.create_task(_run_force_update(target_type, info))
+    with _FORCE_UPDATE_LOCK:
+        _FORCE_UPDATE_RUNTIME[target_type] = {
+            "loop": loop,
+            "task": task,
+            "thread": threading.current_thread(),
+        }
     try:
-        asyncio.run(_run_force_update(target_type, info))
+        loop.run_until_complete(task)
         now_iso = datetime.now(timezone.utc).isoformat()
         with _FORCE_UPDATE_LOCK:
             current = _FORCE_UPDATE_RUNNING.get(target_type, {})
@@ -1056,6 +1072,20 @@ def _force_update_worker(target_type: str, info: str) -> None:
                     "finished_at": now_iso,
                 }
                 logger.info("intel_force_update_complete", target_type=target_type)
+    except asyncio.CancelledError:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with _FORCE_UPDATE_LOCK:
+            current = _FORCE_UPDATE_RUNNING.get(target_type, {})
+            _FORCE_UPDATE_RUNNING[target_type] = {
+                **current,
+                "target_type": target_type,
+                "status": "cancelled",
+                "message": str(current.get("message", "Force update cancelled by user.")) or "Force update cancelled by user.",
+                "updated_at": now_iso,
+                "finished_at": now_iso,
+                "cancel_requested": False,
+            }
+        logger.info("intel_force_update_cancelled", target_type=target_type)
     except _ForceUpdateCancelled as exc:
         now_iso = datetime.now(timezone.utc).isoformat()
         with _FORCE_UPDATE_LOCK:
@@ -1085,6 +1115,14 @@ def _force_update_worker(target_type: str, info: str) -> None:
                 "finished_at": now_iso,
             }
         logger.warning("intel_force_update_failed", target_type=target_type, error=str(exc))
+    finally:
+        with _FORCE_UPDATE_LOCK:
+            _FORCE_UPDATE_RUNTIME.pop(target_type, None)
+        try:
+            if not loop.is_closed():
+                loop.close()
+        except Exception:
+            pass
 
 
 @router.post("/api/intel/force-update")
@@ -1132,6 +1170,8 @@ def force_intel_update(payload: IntelForceUpdatePayload) -> dict[str, Any]:
 @router.post("/api/intel/force-update/cancel")
 def cancel_force_intel_update(payload: IntelForceUpdateCancelPayload) -> dict[str, Any]:
     target_type = _normalize_target_type(payload.target_type)
+    runtime_task: Any = None
+    runtime_loop: Any = None
     with _FORCE_UPDATE_LOCK:
         current = _FORCE_UPDATE_RUNNING.get(target_type)
         if not isinstance(current, dict):
@@ -1150,14 +1190,22 @@ def cancel_force_intel_update(payload: IntelForceUpdateCancelPayload) -> dict[st
                 "reason": f"status_{current_status or 'idle'}",
             }
         now_iso = datetime.now(timezone.utc).isoformat()
+        runtime = _FORCE_UPDATE_RUNTIME.get(target_type, {})
+        runtime_task = runtime.get("task")
+        runtime_loop = runtime.get("loop")
         _FORCE_UPDATE_RUNNING[target_type] = {
             **current,
             "target_type": target_type,
-            "status": "cancelled",
+            "status": "cancelling",
             "cancel_requested": True,
             "message": "Cancellation requested by user. Finalizing...",
             "updated_at": now_iso,
         }
+    if runtime_task is not None and runtime_loop is not None:
+        try:
+            runtime_loop.call_soon_threadsafe(runtime_task.cancel)
+        except Exception:
+            pass
     return {
         "ok": True,
         "cancelled": True,

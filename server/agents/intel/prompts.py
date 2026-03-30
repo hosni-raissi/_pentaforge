@@ -32,16 +32,16 @@ FORMATTER_SYSTEM_PROMPT = (
     "Role: Intel agent for aggressive pentest checklist generation.\n"
     "Goal: maximize vulnerability coverage for the target by optimizing the provided baseline checklist.\n"
     "\n"
-    "Tools: search_rag, set_checklist.\n"
+    "Tools: search_rag.\n"
     "Required usage:\n"
     "1) Review the provided current checklist for the target.\n"
-    "2) Call search_rag only if it improves checklist coverage or surfaces specific, relevant vulnerability classes.\n"
+    "2) In rounds 1-2, use search_rag to improve checklist coverage with vulnerabilities, methods, techniques, and gaps.\n"
     "3) Respect explicit scope exclusions from the target info (for example: no SQL injection, do not test XSS).\n"
-    "4) Call set_checklist in the final round to update the checklist with your optimized and aggressive pentest manipulation.\n"
     "\n"
 
     f"Budget: {FORMATTER_ROUNDS} rounds total; keep last round for final JSON.\n"
-    "Return strict JSON only. Copy pipeline stats exactly.\n"
+    "Return strict JSON only. No markdown fences or extra text.\n"
+    "Your final JSON must include: status, checklist.\n"
     "```json\n"
     
     "```"
@@ -101,20 +101,18 @@ def build_user_message(
 
     # Build search suggestions
     search_suggestions: list[str] = []
-    if techniques_n + len(attack_types) < 5:
-        search_suggestions.append(
-            f'search_rag(query="{target_query} attack paths, injections, authorization bypass, SSRF, SSTI", '
-            f'content_type="attack_types", domain="{rag_domain}", n_results=10)'
-        )
-    if vulns_n + len(exploits) < 5:
-        search_suggestions.append(
-            f'search_rag(query="{target_query} known vulnerability classes like SQL injection, XSS, SSRF, IDOR, auth bypass", '
-            f'content_type="exploits", domain="{rag_domain}", n_results=10)'
-        )
     search_suggestions.append(
-        f'set_checklist(target_type="{target_type}", checklist="...", techniques="...", vulnerabilities="...", methods="...", gaps="...")'
+        f'search_rag(query="{target_query} pentest methods strategy coverage gaps", '
+        f'content_type="strategies", domain="{rag_domain}", n_results=10)'
     )
-
+    search_suggestions.append(
+        f'search_rag(query="{target_query} attack techniques TTP coverage gaps", '
+        f'content_type="attack_types", domain="{rag_domain}", n_results=10)'
+    )
+    search_suggestions.append(
+        f'search_rag(query="{target_query} known vulnerability classes and exploit gaps", '
+        f'content_type="exploits", domain="{rag_domain}", n_results=10)'
+    )
     suggestions_text = "\n".join(f"  → {s}" for s in search_suggestions[:6])
 
     techniques_text = _format_entries(attack_types, "techniques")
@@ -139,7 +137,7 @@ def build_user_message(
     return (
         f"Target: {target_type}\n"
         f"Info: {info or 'none'}\n"
-        f"This is the current check list for this target:\n"
+        f"This is the current checklist for this target (JSON is not required in your response here):\n"
         f"{base_checklist_text}\n\n"
         f"{budget_text}\n\n"
         "Coverage snapshot:\n"
@@ -152,10 +150,9 @@ def build_user_message(
         "Recommended tool calls:\n"
         f"{suggestions_text}\n\n"
         "Required flow:\n"
-        "1) search_rag only if it adds useful attack coverage or specific known vulnerabilities.\n"
+        "1) in rounds 1-2 use search_rag to gather method/technique/vulnerability gap data.\n"
         "2) respect explicit scope exclusions from the info.\n"
-        "3) set_checklist once in the final round.\n"
-        "4) final JSON.\n\n"
+        "3) return final JSON with keys: status, checklist.\n"
         "Pipeline stats (copy as-is):\n"
         f"```json\n{json.dumps(stats, ensure_ascii=True)}\n```"
     )

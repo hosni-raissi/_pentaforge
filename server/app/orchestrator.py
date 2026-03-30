@@ -2,8 +2,9 @@
 
 This service is the API entrypoint for scan execution:
 1. Resolve project details from storage
-2. Run Intel Agent only (step-by-step rollout; planner disabled for now)
-3. Persist scan lifecycle/status back to the project record
+2. Run Intel Agent to produce pentest checklist intelligence
+3. Run Planner Agent to build/store the initial pentest plan
+4. Persist scan lifecycle/status back to the project record
 """
 
 from __future__ import annotations
@@ -96,9 +97,38 @@ def _ensure_intel_agent_importable() -> None:
         ) from exc
 
 
+def _ensure_planner_agent_importable() -> None:
+    """Raise a clear runtime error when Planner Agent deps are missing."""
+    try:
+        from server.agents.planner.agent import PlannerAgent as _PlannerAgent  # noqa: F401
+    except ModuleNotFoundError as exc:
+        missing = str(exc.name or "").strip() or "unknown"
+        raise RuntimeError(
+            "planner dependency is missing: "
+            f"{missing}. Install full backend dependencies with "
+            "`python -m pip install -r server/requirements.txt`.",
+        ) from exc
+
+
 def _is_truthy_env(name: str, default: str = "") -> bool:
     value = os.getenv(name, default).strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _count_checklist_items(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    blocks = payload.get("checklist")
+    if not isinstance(blocks, list):
+        return 0
+    total = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        items = block.get("items")
+        if isinstance(items, list):
+            total += len(items)
+    return total
 
 
 def _classify_intel_log_kind(message: str) -> str:
@@ -132,6 +162,55 @@ def _classify_intel_log_kind(message: str) -> str:
         return "thinking"
 
     return "thinking"
+
+
+def _classify_planner_log_kind(message: str) -> str:
+    raw = str(message or "").strip()
+    lowered = raw.lower()
+
+    if "planner agent starting" in lowered:
+        return "start"
+    if "planner agent complete" in lowered:
+        return "completed"
+    if "calling tools" in lowered or re.match(r"^[a-z0-9_]+\(", lowered):
+        return "run_tool"
+    if lowered.startswith("llm round"):
+        return "thinking"
+    if lowered.startswith("executed ") or lowered.startswith("final answer"):
+        return "result"
+    if "error" in lowered or "failed" in lowered:
+        return "warn"
+    return "thinking"
+
+
+def _build_planner_kickoff_message(
+    *,
+    target: str,
+    target_type: str,
+    scope: str,
+    info: str,
+    intel_status: str,
+    intel_vulnerabilities: list[str],
+    intel_stats: dict[str, Any],
+    checklist_overview: dict[str, Any],
+) -> str:
+    return (
+        f"Target: {target}\n"
+        f"Target type: {target_type}\n"
+        f"Scope: {scope}\n"
+        f"Info: {info}\n\n"
+        "## Intel Input\n"
+        f"Intel status: {intel_status}\n"
+        f"Vulnerabilities: {intel_vulnerabilities}\n"
+        f"Checklist overview: {checklist_overview}\n"
+        f"Intel stats: {intel_stats}\n\n"
+        "## Planner Task\n"
+        "1. FIRST STEP: create a great pentest plan for this target.\n"
+        "2. You must use your available tools and Intel checklist guidance.\n"
+        "3. Treat checklist as authoritative coverage guidance and fill gaps with discovery tools.\n"
+        "4. Return final plan JSON (full object); runtime will persist it statically.\n"
+        "5. Return first scenarios for execution.\n"
+    )
 
 
 class PrintCallback:
@@ -254,6 +333,7 @@ class ScanOrchestratorService:
         ]
         info_payload = "\n".join(part for part in info_parts if part).strip()
         _ensure_intel_agent_importable()
+        _ensure_planner_agent_importable()
 
         async with self._lock:
             active_task = self._tasks.get(project_key)
@@ -593,6 +673,32 @@ class ScanOrchestratorService:
             },
         )
 
+    def _emit_planner_callback_event(
+        self,
+        *,
+        project_id: str,
+        scan_id: str,
+        level: str,
+        raw_message: str,
+    ) -> None:
+        kind = _classify_planner_log_kind(raw_message)
+        if kind in {"start", "completed", "crashed"}:
+            return
+        safe_message = str(raw_message or "").strip() or kind.replace("_", " ")
+        display_kind = kind.replace("_", " ")
+        self._emit_event(
+            project_id,
+            event=f"planner_{kind}",
+            scan_id=scan_id,
+            level=level,
+            message=f"Planner [{display_kind}] {safe_message}",
+            data={
+                "stage": "planner",
+                "kind": kind,
+                "raw_message": raw_message,
+            },
+        )
+
     def get_scan_status(self, project_id: str) -> dict[str, Any]:
         project_key = str(project_id or "").strip()
         if not project_key:
@@ -696,28 +802,11 @@ class ScanOrchestratorService:
             self._mark_failed(project_id, scan_id, f"intel runtime error: {exc}")
             return
 
-        finished_at = _utc_now_iso()
-
         intel_summary = intel_result.summary
         intel_status = intel_result.status
         intel_stats: dict[str, Any] = intel_result.stats
-
-        scan_meta = {
-            "scanId": scan_id,
-            "status": "completed",
-            "startedAt": started_at,
-            "finishedAt": finished_at,
-            "error": "",
-            "result": {
-                "target": target,
-                "targetType": target_type,
-                "intel": {
-                    "status": intel_status,
-                    "summary": intel_summary,
-                    "stats": intel_stats,
-                },
-            },
-        }
+        intel_checklist = intel_result.checklist if isinstance(intel_result.checklist, dict) else {}
+        checklist_items_count = _count_checklist_items(intel_checklist)
         self._emit_event(
             project_id,
             event="intel_complete",
@@ -732,8 +821,155 @@ class ScanOrchestratorService:
                 # Keep full intel summary in event cache so UI can rehydrate
                 # agent result after reload, and clear it with event cache.
                 "summary": intel_summary,
+                "checklist": intel_checklist,
+                "checklist_items_count": checklist_items_count,
             },
         )
+
+        scope_text = ""
+        for raw_line in info.splitlines():
+            if raw_line.lower().startswith("scope:"):
+                scope_text = raw_line.split(":", 1)[1].strip()
+                break
+
+        planner_input = _build_planner_kickoff_message(
+            target=target,
+            target_type=target_type,
+            scope=scope_text,
+            info=info,
+            intel_status=intel_status,
+            intel_vulnerabilities=list(intel_result.vulnerabilities),
+            intel_stats=intel_stats,
+            checklist_overview={
+                "target_type": str(intel_checklist.get("target_type", "") or target_type),
+                "available_total": int(intel_checklist.get("available_total", 0) or 0),
+                "items_count": checklist_items_count,
+            },
+        )
+        self._emit_event(
+            project_id,
+            event="planner_started",
+            scan_id=scan_id,
+            level="info",
+            message="Planner [start] agent started to build pentest plan.",
+            data={"stage": "planner", "status": "running", "kind": "start"},
+        )
+
+        try:
+            from server.agents.planner.agent import PlannerAgent
+            from server.agents.planner.tools.pentest_plan import _current_plan, _reset_plan
+
+            planner_callback = PrintCallback(
+                enabled=print_steps,
+                on_log=lambda level, message: self._emit_planner_callback_event(
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    level=level,
+                    raw_message=message,
+                ),
+            )
+            async with PlannerAgent(callback=planner_callback) as planner_agent:
+                _reset_plan()
+                planner_result = await planner_agent.run(
+                    planner_input,
+                    is_loop=False,
+                    intel_checklist=intel_checklist,
+                )
+                plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
+        except asyncio.CancelledError:
+            current = self._runs.get(project_id, {})
+            if str(current.get("status")) in {"paused", "idle"}:
+                logger.info("scan_orchestrator_cancelled", project_id=project_id, scan_id=scan_id)
+                return
+            self._mark_failed(project_id, scan_id, "scan cancelled")
+            return
+        except Exception as exc:
+            self._emit_event(
+                project_id,
+                event="planner_crashed",
+                scan_id=scan_id,
+                level="error",
+                message=f"Planner [crashed] {exc}",
+                data={
+                    "stage": "planner",
+                    "kind": "crashed",
+                    "error": str(exc),
+                },
+            )
+            self._mark_failed(project_id, scan_id, f"planner runtime error: {exc}")
+            return
+
+        planner_summary = str(planner_result.summary or "").strip()
+        planner_summary_lower = planner_summary.lower()
+        plan_phases = plan_data.get("phases", [])
+        plan_phase_count = len(plan_phases) if isinstance(plan_phases, list) else 0
+        planner_failed = (
+            planner_summary_lower.startswith("planning failed:")
+            or plan_phase_count <= 0
+        )
+        if planner_failed:
+            failure_reason = planner_summary or "planner did not persist a valid plan"
+            self._emit_event(
+                project_id,
+                event="planner_failed",
+                scan_id=scan_id,
+                level="warn",
+                message=f"Planner [failed] {failure_reason}",
+                data={
+                    "stage": "planner",
+                    "kind": "failed",
+                    "summary": planner_summary,
+                    "plan_phase_count": plan_phase_count,
+                },
+            )
+            self._mark_failed(project_id, scan_id, f"planner failed: {failure_reason}")
+            return
+
+        self._emit_event(
+            project_id,
+            event="planner_complete",
+            scan_id=scan_id,
+            level="success",
+            message="Planner [completed] agent completed successfully.",
+            data={
+                "stage": "planner",
+                "kind": "completed",
+                "summary_length": len(planner_summary),
+                "scenario_count": len(planner_result.scenarios),
+                "needs_count": len(planner_result.needs),
+                "plan_phase_count": plan_phase_count,
+                "summary": planner_result.summary,
+                "scenarios": planner_result.scenarios,
+                "needs": planner_result.needs,
+                "plan_data": plan_data,
+            },
+        )
+
+        finished_at = _utc_now_iso()
+
+        scan_meta = {
+            "scanId": scan_id,
+            "status": "completed",
+            "startedAt": started_at,
+            "finishedAt": finished_at,
+            "error": "",
+            "result": {
+                "target": target,
+                "targetType": target_type,
+                "intel": {
+                    "status": intel_status,
+                    "summary": intel_summary,
+                    "stats": intel_stats,
+                    "checklist": intel_checklist,
+                },
+                "planner": {
+                    "summary": str(planner_result.summary),
+                    "scenarios": list(planner_result.scenarios),
+                    "needs": list(planner_result.needs),
+                    "plan_data": plan_data,
+                },
+            },
+        }
 
         self._runs[project_id] = {
             "scan_id": scan_id,

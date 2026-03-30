@@ -11,6 +11,14 @@ PLANNER_MAX_TOKENS_PER_REQUEST: int = 4096
 
 MAX_TOOL_RESULT_CHARS: int = 1200
 
+# Keep Intel checklist context small when handing off to Planner.
+PLANNER_CHECKLIST_WINDOW_MAX_ITEMS: int = 28
+PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE: int = 8
+
+# Keep loop context bounded so Planner does not carry the full plan forever.
+PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE: int = 2
+PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP: int = 3
+
 _DISCOVERY_TOOLS = frozenset({"get_page", "search_kb", "search_web"})
 _TRANSIENT_EXCEPTIONS = (
     asyncio.TimeoutError,

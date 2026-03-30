@@ -33,6 +33,13 @@ export interface Project {
         status?: string;
         summary?: string;
         stats?: Record<string, unknown>;
+        checklist?: Record<string, unknown>;
+      };
+      planner?: {
+        summary?: string;
+        scenarios?: unknown[];
+        needs?: unknown[];
+        plan_data?: Record<string, unknown>;
       };
       [key: string]: unknown;
     };

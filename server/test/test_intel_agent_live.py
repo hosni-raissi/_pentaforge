@@ -9,9 +9,27 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 
 from server.agents.intel.agent import IntelAgent
 from server.config.agent import llm_mode, local_llm_config, public_llm_config
+
+
+class _ConsoleIntelCallback:
+    def __init__(self) -> None:
+        self._started_at = time.perf_counter()
+
+    def _elapsed(self) -> float:
+        return time.perf_counter() - self._started_at
+
+    def on_step(self, message: str) -> None:
+        print(f"[STEP {self._elapsed():6.2f}s] {message}")
+
+    def on_done(self, message: str) -> None:
+        print(f"[DONE {self._elapsed():6.2f}s] {message}")
+
+    def on_warn(self, message: str) -> None:
+        print(f"[WARN {self._elapsed():6.2f}s] {message}")
 
 
 async def _run_live(target_type: str, info: str) -> None:
@@ -24,19 +42,17 @@ async def _run_live(target_type: str, info: str) -> None:
     print(f"Info     : {info}")
     print()
 
-    agent = IntelAgent()
+    agent = IntelAgent(callback=_ConsoleIntelCallback())
     result = await agent.run(target_type=target_type, info=info)
 
     print("=== Final Intel Output ===")
     print(f"status: {result.status}")
     print(f"stats : {result.stats}")
 
-    print("\nvulnerabilities:")
     if result.vulnerabilities:
+        print("\nvulnerabilities:")
         for item in result.vulnerabilities:
             print(f"- {item}")
-    else:
-        print("(empty)")
 
     print("\nchecklist:")
     if result.checklist:

@@ -27,10 +27,15 @@ from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 
 from .tools import ALL_INTEL_TOOLS, IntelContext, set_context
-from .tools.get_checklists import build_deterministic_checklist_payload, clean_checklists_with_llm
+from .tools.get_checklists import (
+    build_deterministic_checklist_payload,
+    clean_checklists_with_llm,
+    _clamp_priority,
+)
 from server.agents.intel.config import (
     FORMATTER_ROUNDS,
     FORMATTER_CALL_TIMEOUT_SECONDS,
+    FORMATTER_MAX_TOOLS_PER_ROUND,
     FORMATTER_ALLOWED_TOOLS,
     FORMATTER_TOOL_MAX_RETRIES,
     VERIFY_SOURCES,
@@ -151,6 +156,17 @@ def _normalize_stats(stats: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(merged.get("source_errors"), list):
         merged["source_errors"] = []
     return merged
+
+
+def _normalize_intel_status(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"complete", "completed", "ok", "success", "succeeded", "done"}:
+        return "complete"
+    if normalized in {"incomplete", "partial"}:
+        return "incomplete"
+    if normalized in {"error", "failed", "failure"}:
+        return "error"
+    return "complete"
 
 
 def _build_deterministic_summary(pipeline_report: dict[str, Any]) -> str:
@@ -415,6 +431,45 @@ def _filter_known_vulnerabilities(values: list[str]) -> list[str]:
     return out
 
 
+def _dedupe_vulnerabilities_against_checklist(
+    vulnerabilities: list[str],
+    checklist: dict[str, Any],
+) -> list[str]:
+    if not vulnerabilities:
+        return []
+    checklist_names: set[str] = set()
+    checklist_vulns: set[str] = set()
+    for block in checklist.get("checklist", []):
+        if not isinstance(block, dict):
+            continue
+        for item in block.get("items", []):
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+            else:
+                name = str(item).strip()
+            if not name:
+                continue
+            checklist_names.add(name.lower())
+            normalized = _normalize_known_vulnerability(name)
+            if normalized:
+                checklist_vulns.add(normalized.lower())
+
+    deduped: list[str] = []
+    for vuln in vulnerabilities:
+        clean = str(vuln or "").strip()
+        if not clean:
+            continue
+        if clean.lower() in checklist_names:
+            continue
+        if clean.lower() in checklist_vulns:
+            continue
+        normalized = _normalize_known_vulnerability(clean)
+        if normalized and normalized.lower() in checklist_vulns:
+            continue
+        deduped.append(clean)
+    return deduped
+
+
 def _extract_excluded_topics(info: str) -> dict[str, str]:
     lowered = re.sub(r"\s+", " ", str(info or "").lower())
     excluded: dict[str, str] = {}
@@ -592,6 +647,272 @@ def _build_checklist_llm_input(checklist_data: dict[str, Any], info: str) -> str
         lines.append("")
     return "\n".join(lines).strip()
 
+
+def _format_structured_checklist_for_formatter(payload: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append(f"Target type: {payload.get('target_type', '')}")
+    lines.append(f"Available checklist items: {payload.get('available_total', 0)}")
+    lines.append("")
+    lines.append("Current cleaned checklist:")
+    for block in payload.get("checklist", []):
+        if not isinstance(block, dict):
+            continue
+        phase = str(block.get("phase", "")).strip()
+        title = str(block.get("title", "")).strip()
+        if not phase or not title:
+            continue
+        lines.append(f"Phase {phase} - {title}")
+        for item in block.get("items", []):
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+                if name:
+                    lines.append(f"- {name}")
+            elif isinstance(item, str):
+                name = item.strip()
+                if name:
+                    lines.append(f"- {name}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _is_structured_checklist_payload(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    blocks = payload.get("checklist")
+    if not isinstance(blocks, list) or not blocks:
+        return False
+    for block in blocks:
+        if not isinstance(block, dict):
+            return False
+        phase = str(block.get("phase", "")).strip()
+        title = str(block.get("title", "")).strip()
+        items = block.get("items")
+        if not phase or not title or not isinstance(items, list):
+            return False
+    return True
+
+
+def _default_priority_for_phase(phase: str) -> int:
+    phase_str = str(phase or "").strip()
+    if phase_str == "4":
+        return 4
+    if phase_str in {"3", "5"}:
+        return 3
+    if phase_str == "1":
+        return 2
+    return 3
+
+
+def _priority_for_item_name(name: str, phase: str) -> int:
+    title = str(name or "").strip().lower()
+    if not title:
+        return _default_priority_for_phase(phase)
+
+    critical_markers = (
+        "sql injection",
+        "command injection",
+        "code injection",
+        "server-side request forgery",
+        "ssrf",
+        "insecure direct object references",
+        "idor",
+        "privilege escalation",
+        "bypassing authorization",
+        "default credentials",
+        "upload of malicious files",
+        "directory traversal",
+        "bypassing authentication",
+    )
+    if any(marker in title for marker in critical_markers):
+        return 5
+
+    high_markers = (
+        "cross site scripting",
+        "xss",
+        "cross site request forgery",
+        "csrf",
+        "server-side template injection",
+        "ssti",
+        "mass assignment",
+        "host header injection",
+        "oauth weaknesses",
+        "weak password policy",
+        "jwt",
+        "graphql",
+    )
+    if any(marker in title for marker in high_markers):
+        return 4
+
+    return _default_priority_for_phase(phase)
+
+
+def _checklist_all_items_have_priority(payload: dict[str, Any]) -> bool:
+    if not _is_structured_checklist_payload(payload):
+        return False
+    found_items = 0
+    for block in payload.get("checklist", []):
+        if not isinstance(block, dict):
+            continue
+        items = block.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            found_items += 1
+            if not isinstance(item, dict):
+                return False
+            raw_priority = item.get("priority")
+            has_priority = (
+                isinstance(raw_priority, int)
+                or (isinstance(raw_priority, str) and raw_priority.strip().isdigit())
+            )
+            if not has_priority:
+                return False
+    return found_items > 0
+
+
+def _normalize_llm_priorities_only(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _is_structured_checklist_payload(payload):
+        return payload
+
+    normalized_blocks: list[dict[str, Any]] = []
+    raw_blocks = payload.get("checklist", [])
+    if not isinstance(raw_blocks, list):
+        raw_blocks = []
+
+    for raw_block in raw_blocks:
+        if not isinstance(raw_block, dict):
+            continue
+        phase = str(raw_block.get("phase", "")).strip()
+        title = str(raw_block.get("title", "")).strip()
+        items = raw_block.get("items", [])
+        if not phase or not title or not isinstance(items, list):
+            continue
+
+        normalized_items: list[dict[str, Any] | str] = []
+        seen: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                name = str(item.get("name", item.get("title", ""))).strip()
+                if not name:
+                    continue
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                if "priority" in item:
+                    normalized_items.append(
+                        {
+                            "name": name,
+                            "priority": _clamp_priority(item.get("priority", 3), default=3),
+                        }
+                    )
+                else:
+                    normalized_items.append(name)
+            elif isinstance(item, str):
+                name = item.strip()
+                if not name:
+                    continue
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                normalized_items.append(name)
+
+        if normalized_items:
+            normalized_blocks.append(
+                {
+                    "phase": phase,
+                    "title": title,
+                    "items": normalized_items,
+                }
+            )
+
+    return {
+        "target_type": str(payload.get("target_type", "")).strip(),
+        "available_total": int(payload.get("available_total", 0) or 0),
+        "checklist": normalized_blocks,
+    }
+
+
+def _ensure_checklist_priorities(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _is_structured_checklist_payload(payload):
+        return payload
+
+    checklist_blocks: list[dict[str, Any]] = []
+    raw_blocks = payload.get("checklist", [])
+    if not isinstance(raw_blocks, list):
+        raw_blocks = []
+
+    for raw_block in raw_blocks:
+        if not isinstance(raw_block, dict):
+            continue
+        phase = str(raw_block.get("phase", "")).strip()
+        title = str(raw_block.get("title", "")).strip()
+        default_priority = _default_priority_for_phase(phase)
+        items = raw_block.get("items", [])
+        ranked_by_name: dict[str, int] = {}
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    name = str(item.get("name", item.get("title", ""))).strip()
+                    if not name:
+                        continue
+                    computed_default = _priority_for_item_name(name, phase)
+                    priority = _clamp_priority(item.get("priority", computed_default), default=computed_default)
+                    ranked_by_name[name] = max(ranked_by_name.get(name, 0), priority)
+                elif isinstance(item, str):
+                    name = item.strip()
+                    if not name:
+                        continue
+                    ranked_by_name[name] = max(
+                        ranked_by_name.get(name, 0),
+                        _priority_for_item_name(name, phase),
+                    )
+        if not phase or not title or not ranked_by_name:
+            continue
+        checklist_blocks.append(
+            {
+                "phase": phase,
+                "title": title,
+                "items": [
+                    {"name": item_name, "priority": item_priority}
+                    for item_name, item_priority in sorted(
+                        ranked_by_name.items(),
+                        key=lambda kv: (-kv[1], kv[0].lower()),
+                    )
+                ],
+            }
+        )
+
+    return {
+        "target_type": str(payload.get("target_type", "")).strip(),
+        "available_total": int(payload.get("available_total", 0) or 0),
+        "checklist": checklist_blocks,
+    }
+
+
+def _flatten_checklist_item_names(payload: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for block in payload.get("checklist", []):
+        if not isinstance(block, dict):
+            continue
+        items = block.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+            else:
+                name = str(item).strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+    return names
 
 def _compact_search_results_for_formatter(parsed: dict[str, Any]) -> str:
     hits = parsed.get("hits", [])
@@ -950,20 +1271,20 @@ def _extract_stats_from_alt_keys(data: dict[str, Any]) -> dict[str, Any] | None:
 
 def _parse_json_intel(data: dict[str, Any]) -> IntelResult:
     data_lower = {k.lower(): v for k, v in data.items()}
-    vulnerability_values: list[str] = []
-    for key in ("known_vulnerabilities", "vulnerabilities", "vulns", "weakness_classes", "vulnerability_types"):
-        val = data_lower.get(key)
-        if isinstance(val, list):
-            vulnerability_values.extend(str(v).strip() for v in val if str(v).strip())
-        elif isinstance(val, str) and val.strip():
-            vulnerability_values.extend(_extract_block_items(val))
-    vulnerabilities = _filter_known_vulnerabilities(vulnerability_values)
+    checklist_json = data.get("checklist")
+    if not isinstance(checklist_json, dict):
+        checklist_json = data.get("checklist_json")
+    if not isinstance(checklist_json, dict):
+        checklist_json = {}
+    if not _is_structured_checklist_payload(checklist_json):
+        checklist_json = {}
 
     return IntelResult(
         status=data_lower.get("status", "complete"),
         summary="",
         stats=_normalize_stats(_extract_stats_from_alt_keys(data_lower)),
-        vulnerabilities=vulnerabilities,
+        vulnerabilities=[],
+        checklist=checklist_json,
     )
 
 
@@ -1120,11 +1441,32 @@ class IntelAgent:
             or last_update is None
             or (now - last_update).total_seconds() >= refresh_seconds
         )
+        last_update_text = last_update.isoformat() if last_update else "none"
+        age_days = (now - last_update).total_seconds() / 86400 if last_update else None
+        age_text = f"{age_days:.2f} days" if age_days is not None else "n/a"
+        self._cb.on_step(
+            f"RAG update check: last_update={last_update_text}, age={age_text}, needs_update={'yes' if needs_update else 'no'}"
+        )
+        logger.info(
+            "intel_rag_update_check",
+            target_type=target_type,
+            last_update=last_update_text,
+            age_days=age_days,
+            needs_update=needs_update,
+            refresh_days=refresh_days,
+        )
         if update_only:
             if not needs_update and last_update is not None:
                 days_ago = (now - last_update).total_seconds() / 86400
                 self._cb.on_done(
                     f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
+                )
+                logger.info(
+                    "intel_rag_update_skipped",
+                    target_type=target_type,
+                    reason="fresh_data",
+                    age_days=days_ago,
+                    refresh_days=refresh_days,
                 )
                 return IntelResult(
                     status="complete",
@@ -1133,15 +1475,18 @@ class IntelAgent:
             if force_update:
                 self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
             self._cb.on_step("Update-only mode: running Intel update pipeline")
+            logger.info("intel_rag_update_start", target_type=target_type, mode="update_only")
             pipeline_report = await self._run_update_pipeline(target_type=target_type, info=info)
             stats = _normalize_stats(pipeline_report.get("stats"))
             self._cb.on_done("Update-only run complete")
+            logger.info("intel_rag_update_done", target_type=target_type, mode="update_only")
             return IntelResult(status="complete", stats=stats)
 
         if needs_update:
             if force_update:
                 self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
             self._cb.on_step("RAG update needed — starting background pipeline")
+            logger.info("intel_rag_update_start", target_type=target_type, mode="background")
             task = asyncio.create_task(
                 self._run_update_pipeline(target_type=target_type, info=info),
                 name=f"intel_update_{target_type}",
@@ -1153,28 +1498,20 @@ class IntelAgent:
             self._cb.on_done(
                 f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
             )
+            logger.info(
+                "intel_rag_update_skipped",
+                target_type=target_type,
+                reason="fresh_data",
+                age_days=days_ago,
+                refresh_days=refresh_days,
+            )
 
-        # Foreground: snapshot → checklist → clean
-        self._cb.on_step("Collecting RAG snapshot")
-        rag_snapshot = await self._collect_rag_snapshot(target_type=target_type)
-        results = rag_snapshot.get("results", {})
-        self._cb.on_done(
-            f"RAG snapshot: strategies={len(results.get('strategies', []))}, "
-            f"attack_types={len(results.get('attack_types', []))}, "
-            f"exploits={len(results.get('exploits', []))}"
-        )
+        # Foreground: checklist → clean → format (no static RAG fetch; formatter uses search_rag dynamically)
+        self._cb.on_step("Skipping static RAG snapshot; formatter will use search_rag tools dynamically")
 
         self._cb.on_step("Fetching base checklist")
         base_checklist = await self._call_tool_json("get_checklists", target_type=target_type, info=info[:250])
-
-        pipeline_report: dict[str, Any] = {
-            "target_type": target_type,
-            "info": info,
-            "rag_snapshot": rag_snapshot,
-            "base_checklist": base_checklist,
-        }
-
-        structured_checklist: dict[str, Any] = {}
+        cleaned_payload: dict[str, Any] = {}
         if isinstance(base_checklist, dict):
             try:
                 cleaned_json = await asyncio.wait_for(
@@ -1186,32 +1523,95 @@ class IntelAgent:
                     ),
                     timeout=FORMATTER_CALL_TIMEOUT_SECONDS,
                 )
-                structured_checklist = json.loads(cleaned_json)
+                cleaned_payload = json.loads(cleaned_json)
             except Exception as exc:
-                logger.warning("intel_structured_checklist_failed", error=str(exc), target_type=target_type)
-                structured_checklist = build_deterministic_checklist_payload(base_checklist, info)
+                logger.warning("intel_clean_checklist_failed", error=str(exc), target_type=target_type)
+                cleaned_payload = build_deterministic_checklist_payload(base_checklist, info)
 
-        checklist_names: list[str] = []
-        for block in structured_checklist.get("checklist", []):
-            if not isinstance(block, dict):
-                continue
-            for item in block.get("items", []):
-                if isinstance(item, dict):
-                    name = str(item.get("name", "")).strip()
+        base_checklist_text = (
+            _format_structured_checklist_for_formatter(cleaned_payload)
+            if cleaned_payload
+            else _build_checklist_llm_input(base_checklist, info)
+        )
+
+        pipeline_report: dict[str, Any] = {
+            "target_type": target_type,
+            "info": info,
+            "rag_snapshot": {"query": "", "domain": _resolve_rag_domain(target_type), "results": {}},
+            "base_checklist": base_checklist,
+            "formatter_prefetch": {
+                "coverage_counts": {"methods": 0, "techniques": 0, "vulnerabilities": 0},
+                "web_fallback": {"used": False, "query": "", "results": []},
+            },
+        }
+
+        llm_result = await self._run_formatter(
+            target_type=target_type,
+            info=info,
+            pipeline_report=pipeline_report,
+            base_checklist_text=base_checklist_text,
+            base_checklist_payload=cleaned_payload or None,
+        )
+
+        llm_produced_checklist = bool(
+            isinstance(llm_result.checklist, dict) and _is_structured_checklist_payload(llm_result.checklist)
+        )
+        structured_checklist = llm_result.checklist or cleaned_payload
+
+        # ── Priority resolution ────────────────────────────────────────
+        # Three-stage cascade:
+        #   1. LLM already set all priorities → just normalize/clamp
+        #   2. LLM missed some → one focused re-prompt to fill them in
+        #   3. Re-prompt also fails → deterministic hardcode fallback
+        if _is_structured_checklist_payload(structured_checklist):
+            if llm_produced_checklist:
+                structured_checklist = _normalize_llm_priorities_only(structured_checklist)
+
+            if not _checklist_all_items_have_priority(structured_checklist):
+                self._cb.on_warn(
+                    "Checklist missing priorities — sending focused re-prompt to LLM"
+                )
+                logger.info(
+                    "intel_priority_recheck",
+                    target_type=target_type,
+                    reason="missing_priorities",
+                )
+                fixed = await self._fix_missing_priorities(
+                    structured_checklist, target_type, info
+                )
+                if fixed:
+                    structured_checklist = fixed
+                    self._cb.on_done("Priorities filled by LLM re-prompt")
+                    logger.info("intel_priority_fixed_by_llm", target_type=target_type)
                 else:
-                    name = str(item).strip()
-                if name:
-                    checklist_names.append(name)
+                    self._cb.on_warn(
+                        "LLM re-prompt did not fix priorities — falling back to hardcode"
+                    )
+                    logger.warning(
+                        "intel_priority_hardcode_fallback", target_type=target_type
+                    )
+                    structured_checklist = _ensure_checklist_priorities(structured_checklist)
+            # else: all priorities already present, nothing to do
 
-        rag_vulns = _extract_rag_headings(pipeline_report, "exploits", limit=14)
-        rag_attacks = _extract_rag_headings(pipeline_report, "attack_types", limit=14)
-        vulnerabilities = _filter_known_vulnerabilities(rag_vulns + rag_attacks + checklist_names)[:18]
+            self._cb.on_step("Auto-normalizing checklist with set_checklist")
+            checklist_names = _flatten_checklist_item_names(structured_checklist)
+            auto_set = await self._call_tool_json(
+                "set_checklist",
+                target_type=target_type,
+                checklist="\n".join(checklist_names),
+                checklist_json=structured_checklist,
+            )
+            set_checklist_json = auto_set.get("checklist_json", {}) if isinstance(auto_set, dict) else {}
+            if isinstance(set_checklist_json, dict) and _is_structured_checklist_payload(set_checklist_json):
+                structured_checklist = set_checklist_json
+                self._cb.on_done("Checklist normalized by set_checklist")
 
-        self._cb.on_done("Intel Agent complete — status=complete")
+        final_status = _normalize_intel_status(llm_result.status)
+        self._cb.on_done(f"Intel Agent complete — status={final_status}")
         return IntelResult(
-            status="complete",
+            status=final_status,
             stats=_normalize_stats(pipeline_report.get("stats")),
-            vulnerabilities=vulnerabilities,
+            vulnerabilities=[],
             checklist=structured_checklist,
         )
 
@@ -1251,9 +1651,85 @@ class IntelAgent:
         )
         return rebuilt.strip()
 
+    # ── Priority Fixer ─────────────────────────────────────────────────
+
+    async def _fix_missing_priorities(
+        self,
+        checklist: dict[str, Any],
+        target_type: str,
+        info: str,
+    ) -> dict[str, Any]:
+        """
+        Single focused LLM call to add missing priorities to checklist items.
+
+        Sends the checklist as-is and asks only for priorities to be filled.
+        Returns the normalized payload on success, or an empty dict on any failure
+        so the caller can fall back to _ensure_checklist_priorities.
+        """
+        prompt = (
+            f"Add a priority (integer 1-5) to every checklist item below.\n"
+            f"Target: {target_type}\n"
+            f"Info: {info or 'none'}\n\n"
+            "Priority scale:\n"
+            "5 = critical  (direct exploitation, auth bypass, injections)\n"
+            "4 = high      (logic flaws, broken access control)\n"
+            "3 = medium    (configuration issues, info disclosure)\n"
+            "2 = low       (best practices, hardening)\n"
+            "1 = info      (informational only)\n\n"
+            "Rules:\n"
+            "- Return strict JSON only. No markdown fences, no prose.\n"
+            "- Keep the exact same structure as the input.\n"
+            "- Every item MUST be an object with keys: name, priority.\n"
+            "- priority MUST be an integer 1-5.\n\n"
+            f"Checklist:\n{json.dumps(checklist, ensure_ascii=True)}"
+        )
+        try:
+            response = await asyncio.wait_for(
+                self._llm.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    temperature=0,
+                    max_tokens=11000,
+                ),
+                timeout=20,
+            )
+            raw = (response.content or "").strip()
+
+            # Strip markdown fences if the LLM wrapped the JSON anyway
+            if "```json" in raw:
+                start = raw.index("```json") + 7
+                end = raw.index("```", start) if "```" in raw[start:] else len(raw)
+                raw = raw[start:end].strip()
+            elif raw.startswith("```"):
+                start = raw.index("```") + 3
+                end = raw.index("```", start) if "```" in raw[start:] else len(raw)
+                raw = raw[start:end].strip()
+
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and _is_structured_checklist_payload(parsed):
+                normalized = _normalize_llm_priorities_only(parsed)
+                if _checklist_all_items_have_priority(normalized):
+                    return normalized
+
+        except Exception as exc:
+            logger.warning(
+                "intel_fix_priorities_failed",
+                error=str(exc),
+                target_type=target_type,
+            )
+
+        # Signal failure — caller will hardcode
+        return {}
+
     # ── LLM Formatter ──────────────────────────────────────────────────
 
-    async def _run_formatter(self, target_type: str, info: str, pipeline_report: dict[str, Any], base_checklist_text: str = "") -> IntelResult:
+    async def _run_formatter(
+        self,
+        target_type: str,
+        info: str,
+        pipeline_report: dict[str, Any],
+        base_checklist_text: str = "",
+        base_checklist_payload: dict[str, Any] | None = None,
+    ) -> IntelResult:
         self._cb.on_step(f"LLM formatter starting ({FORMATTER_ROUNDS} rounds max)")
         formatter_payload = _build_formatter_payload(pipeline_report)
 
@@ -1267,18 +1743,19 @@ class IntelAgent:
         ]
 
         total_tool_calls = 0
+        last_set_checklist: dict[str, Any] | None = None
 
         for round_num in range(1, FORMATTER_ROUNDS + 1):
             self._cb.on_step(f"LLM Round {round_num}/{FORMATTER_ROUNDS}")
 
             try:
                 response = await asyncio.wait_for(
-                    self._llm.chat(messages, tools=self._formatter_tool_schemas or None, temperature=0.2, max_tokens=8000),
+                    self._llm.chat(messages, tools=self._formatter_tool_schemas or None, temperature=0.2, max_tokens=1800),
                     timeout=FORMATTER_CALL_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
                 self._cb.on_warn(f"LLM error: {exc}")
-                return IntelResult(status="complete", summary=_build_deterministic_summary(pipeline_report), stats=_normalize_stats(pipeline_report.get("stats")))
+                return IntelResult(status="complete", stats=_normalize_stats(pipeline_report.get("stats")))
 
             # Final response
             if not response.tool_calls:
@@ -1287,20 +1764,33 @@ class IntelAgent:
                 logger.info("intel_complete", rounds=round_num, total_tool_calls=total_tool_calls, tools_used=total_tool_calls > 0, usage=response.usage)
 
                 result = _parse_intel_output(raw_content)
-                if not result.summary:
-                    self._cb.on_warn("LLM returned unparseable output — using fallback")
+                if (not result.checklist or not _is_structured_checklist_payload(result.checklist)) and last_set_checklist:
+                    maybe_checklist = last_set_checklist.get("checklist_json", {}) or {}
+                    if _is_structured_checklist_payload(maybe_checklist):
+                        result.checklist = maybe_checklist
+                if not result.checklist and base_checklist_payload:
+                    result.checklist = base_checklist_payload
+                result.vulnerabilities = []
 
                 self._cb.on_done(f"Formatter done: {total_tool_calls} tool calls across {round_num} rounds")
                 return result
 
             # Tool calls
-            tool_names = [tc["function"]["name"] for tc in response.tool_calls]
-            total_tool_calls += len(response.tool_calls)
+            tool_calls_this_round = list(response.tool_calls or [])
+            if len(tool_calls_this_round) > FORMATTER_MAX_TOOLS_PER_ROUND:
+                skipped = len(tool_calls_this_round) - FORMATTER_MAX_TOOLS_PER_ROUND
+                self._cb.on_warn(
+                    f"LLM Round {round_num}: tool-call cap reached ({FORMATTER_MAX_TOOLS_PER_ROUND}); skipping {skipped} extra call(s)"
+                )
+                tool_calls_this_round = tool_calls_this_round[:FORMATTER_MAX_TOOLS_PER_ROUND]
+
+            tool_names = [tc["function"]["name"] for tc in tool_calls_this_round]
+            total_tool_calls += len(tool_calls_this_round)
             self._cb.on_step(f"LLM Round {round_num}: Calling tools → {tool_names}")
 
-            messages.append(ChatMessage(role="assistant", content=response.content, tool_calls=response.tool_calls))
+            messages.append(ChatMessage(role="assistant", content=response.content, tool_calls=tool_calls_this_round))
 
-            for tc in response.tool_calls:
+            for tc in tool_calls_this_round:
                 tool_name = tc["function"]["name"]
                 raw_args = tc["function"].get("arguments", "{}")
                 call_id = tc["id"]
@@ -1351,6 +1841,7 @@ class IntelAgent:
                             checklist_count = counts.get("checklist", 0) if isinstance(counts, dict) else 0
                             vuln_count = counts.get("vulnerabilities", 0) if isinstance(counts, dict) else 0
                             gap_count = counts.get("gaps", 0) if isinstance(counts, dict) else 0
+                            last_set_checklist = parsed
                             self._cb.on_done(
                                 f"  → checklist={int(checklist_count)}, vulnerabilities={int(vuln_count)}, gaps={int(gap_count)}"
                             )
@@ -1392,13 +1883,26 @@ class IntelAgent:
             if next_round <= FORMATTER_ROUNDS:
                 rounds_left = FORMATTER_ROUNDS - next_round
                 if rounds_left == 0:
-                    budget_msg = "⚠ THIS IS YOUR LAST ROUND. Return your final JSON now. Do NOT call any more tools."
+                    budget_msg = (
+                        "⚠ THIS IS YOUR LAST ROUND. Return your final JSON now. "
+                        "Do NOT call any more tools. "
+                        "Every checklist item MUST be an object with keys: name, priority. "
+                        "priority MUST be integer 1-5 for every item."
+                    )
                 else:
                     budget_msg = f"Round {next_round}/{FORMATTER_ROUNDS}. {rounds_left} rounds remaining ({max(0, rounds_left - 1)} for tools + 1 for final answer)."
                 messages.append(ChatMessage(role="user", content=budget_msg))
 
         self._cb.on_warn(f"Reached max rounds ({FORMATTER_ROUNDS}) without final answer")
-        return IntelResult(status="incomplete", summary=f"Reached maximum formatter rounds ({FORMATTER_ROUNDS}) without final answer.")
+        result = IntelResult(status="incomplete")
+        if last_set_checklist:
+            maybe_checklist = last_set_checklist.get("checklist_json", {}) or {}
+            if _is_structured_checklist_payload(maybe_checklist):
+                result.checklist = maybe_checklist
+        if not result.checklist and base_checklist_payload:
+            result.checklist = base_checklist_payload
+        result.vulnerabilities = []
+        return result
 
     # ── Update Pipeline ────────────────────────────────────────────────
 

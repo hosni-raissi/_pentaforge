@@ -2,6 +2,7 @@
 
 FORMATTER_ROUNDS = 3
 FORMATTER_CALL_TIMEOUT_SECONDS = 300
+FORMATTER_MAX_TOOLS_PER_ROUND: int = 2
 
 # ── Update pipeline ───────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ DEFAULT_VERIFY_SOURCES: list[str] = [
 # ── Operational constants ──────────────────────────────────────────────
 
 FORMATTER_ALLOWED_TOOLS: frozenset[str] = frozenset(
-    {"search_rag", "set_checklist"}
+    {"search_rag"}
 )
 FORMATTER_TOOL_MAX_RETRIES: int = 2
 MAX_SOURCE_ERRORS: int = 10
