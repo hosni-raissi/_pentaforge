@@ -76,6 +76,20 @@ async def stop_scan(payload: StopScanPayload) -> dict[str, Any]:
     return result
 
 
+@router.post("/api/scans/{project_id}/approve-planner")
+async def approve_planner(project_id: str) -> dict[str, Any]:
+    try:
+        result = await scan_orchestrator.approve_planner(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to approve planner: {exc}") from exc
+
+    return result
+
+
 @router.get("/api/scans/{project_id}/events")
 async def stream_scan_events(project_id: str, request: Request) -> StreamingResponse:
     try:

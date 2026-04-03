@@ -12,7 +12,7 @@ export function StatusBar() {
   const safeServerPort = typeof serverPort === 'number' ? serverPort : 8000;
 
   return (
-    <div className="h-6 bg-surface-1 border-t border-border flex items-center justify-between px-3 text-[10px] text-text-muted">
+    <div className="h-6 bg-surface-1 border-t border-border flex items-center justify-between px-3 text-sm text-text-muted">
       <div className="flex items-center gap-3">
         <span className="flex items-center gap-1">
           <Wifi size={10} />

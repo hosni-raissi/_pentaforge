@@ -258,10 +258,10 @@ function ExecutorLayerNode({ data }: { data: ExecutorLayerData }) {
       className="rounded-2xl border border-pf-500/20 bg-pf-500/5 px-3 pt-3 shadow-inner"
       style={{ width: 200, height: LAYER_HEIGHT }}
     >
-      <p className="text-center text-[10px] font-semibold uppercase tracking-widest text-pf-300">
+      <p className="text-center text-xs font-semibold uppercase tracking-widest text-pf-300">
         {data.label}
       </p>
-      <p className="mt-1 text-center text-[10px] leading-snug text-text-secondary">
+      <p className="mt-1 text-center text-xs leading-snug text-text-secondary">
         {data.subtitle}
       </p>
     </div>
@@ -504,7 +504,7 @@ export function AgentStatePath({
       {showHeader && (
         <CardHeader className="border-b border-border px-4 py-3">
           <CardTitle>Agent State Path</CardTitle>
-          <p className="mt-1 text-xs text-text-secondary">{subtitle}</p>
+          <p className="mt-1 text-sm text-text-secondary">{subtitle}</p>
         </CardHeader>
       )}
 
@@ -514,11 +514,11 @@ export function AgentStatePath({
             <div>
               <p className="text-sm font-semibold text-text-primary">{selectedNodeData.label} Agent Details</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
-                <Badge variant={selectedNodeData.state} dot className="text-[10px]">
+                <Badge variant={selectedNodeData.state} dot className="text-xs">
                   {selectedNodeData.state}
                 </Badge>
                 {typeof selectedNodeData.progress === 'number' && (
-                  <span className="text-[11px] font-mono text-text-muted">
+                  <span className="text-xs font-mono text-text-muted">
                     Progress: {selectedNodeData.progress}%
                   </span>
                 )}
@@ -531,7 +531,7 @@ export function AgentStatePath({
             <button
               type="button"
               onClick={() => setSelectedRole(null)}
-              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
               title="Back to graph"
             >
               <X size={12} />
@@ -541,37 +541,37 @@ export function AgentStatePath({
 
           <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[1.15fr_0.85fr]">
             <div className="min-h-0 rounded-md border border-border bg-surface-1/70 p-3">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">
                 {selectedResultLabel}
               </p>
               <div className="h-full max-h-full overflow-y-auto rounded-md border border-border/70 bg-surface-0/40 p-2">
-                <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-text-primary">
+                <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-text-primary">
                   {selectedResult || 'No returned result recorded for this agent yet.'}
                 </p>
               </div>
             </div>
 
             <div className="min-h-0 rounded-md border border-border bg-surface-1/70 p-3">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">
                 Full History
               </p>
               {selectedHistory.length === 0 ? (
                 <div className="rounded-md border border-border/70 bg-surface-0/40 p-2">
-                  <p className="text-xs text-text-muted">No historical logs for this agent yet.</p>
+                  <p className="text-sm text-text-muted">No historical logs for this agent yet.</p>
                 </div>
               ) : (
                 <div className="h-full max-h-full space-y-1.5 overflow-y-auto rounded-md border border-border/70 bg-surface-0/40 p-2">
                   {selectedHistory.map((entry) => (
                     <div key={entry.id} className="rounded-md border border-border/70 bg-surface-1/40 p-1.5">
-                      <div className="flex items-center justify-between text-[10px] text-text-muted">
+                      <div className="flex items-center justify-between text-xs text-text-muted">
                         <span className={cn('font-semibold uppercase tracking-wide', levelClass(entry.level))}>
                           {entry.level}
                         </span>
                         <span className="font-mono">{formatNodeTime(entry.at)}</span>
                       </div>
-                      <p className="mt-1 text-xs text-text-primary">{entry.message}</p>
+                      <p className="mt-1 text-sm text-text-primary">{entry.message}</p>
                       {entry.event && (
-                        <p className="mt-0.5 text-[10px] text-text-muted">event: {entry.event}</p>
+                        <p className="mt-0.5 text-sm text-text-muted">event: {entry.event}</p>
                       )}
                     </div>
                   ))}
@@ -613,7 +613,7 @@ export function AgentStatePath({
             <CustomControls locked={locked} onToggleLock={() => setLocked(l => !l)} />
           </ReactFlow>
 
-          <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-md border border-border bg-surface-1/90 px-2.5 py-1.5 text-[11px] text-text-secondary shadow">
+          <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-md border border-border bg-surface-1/90 px-2.5 py-1.5 text-xs text-text-secondary shadow">
             Click any agent node to inspect logs, result, and history
           </div>
         </div>

@@ -99,7 +99,7 @@ function WebLoginGate({ children }: { children: ReactNode }) {
           <p className="mt-2 text-xs text-text-muted">
             Browser access is blocked until `WEB_UI_PASSWORD` is set in `server/.env`.
           </p>
-          <p className="mt-2 text-[11px] text-text-secondary font-mono">
+          <p className="mt-2 text-xs text-text-secondary font-mono">
             WEB_UI_PASSWORD=change-me
           </p>
         </div>
@@ -128,7 +128,7 @@ function WebLoginGate({ children }: { children: ReactNode }) {
           }}
           className="mt-2 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-pf-500/40"
         />
-        {error && <p className="mt-2 text-[11px] text-red-400">{error}</p>}
+        {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
         <Button
           className="mt-4 w-full"
           onClick={async () => {

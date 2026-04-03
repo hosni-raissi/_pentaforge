@@ -9,29 +9,6 @@ class RepoInputType(str, Enum):
     bitbucket   = "bitbucket"
     local       = "local"       # uploaded zip
 
-class Language(str, Enum):
-    python      = "python"
-    javascript  = "javascript"
-    typescript  = "typescript"
-    java        = "java"
-    csharp      = "csharp"
-    php         = "php"
-    go          = "go"
-    ruby        = "ruby"
-    rust        = "rust"
-    cpp         = "cpp"
-    c           = "c"
-
-class Framework(str, Enum):
-    fastapi     = "fastapi"
-    django      = "django"
-    flask       = "flask"
-    express     = "express"
-    nestjs      = "nestjs"
-    nextjs      = "nextjs"
-    spring      = "spring"
-    laravel     = "laravel"
-    rails       = "rails"
 
 class RepoAuthConfig(BaseModel):
     token:          Optional[str]  = None       # GitHub/GitLab PAT
@@ -46,16 +23,8 @@ class RepositoryScanRequest(BaseModel):
     auth:               Optional[RepoAuthConfig] = None
 
     # --- Code context ---
-    language:           Optional[List[Language]]  = None
-    framework:          Optional[List[Framework]] = None
+    language:           Optional[List[str]]  = None
+    framework:          Optional[List[str]] = None
     database:           Optional[str]  = None
 
-    # --- Checks ---
-    check_secrets:      Optional[bool] = True   # TruffleHog, Gitleaks
-    check_sast:         Optional[bool] = True   # Semgrep, Bandit
-    check_dependencies: Optional[bool] = True   # pip-audit, npm audit
-    check_iac:          Optional[bool] = False  # Checkov (Dockerfile, K8s, Terraform)
-    check_git_history:  Optional[bool] = True   # secrets in old commits
-
-    # --- LLM context ---
-    sensitive_modules:  Optional[List[str]] = None  # ["auth/", "payment/"]
+    description:        Optional[str]  = None

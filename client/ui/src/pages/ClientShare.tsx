@@ -170,25 +170,25 @@ export default function ClientShare() {
 
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-md border border-border bg-surface-0/30 p-2">
-              <p className="text-[11px] text-text-muted">Total Findings</p>
+              <p className="text-xs text-text-muted">Total Findings</p>
               <p className="mt-0.5 text-lg font-semibold text-text-primary">{totalFindings}</p>
             </div>
             <div className="rounded-md border border-border bg-surface-0/30 p-2">
-              <p className="text-[11px] text-text-muted">Critical</p>
+              <p className="text-xs text-text-muted">Critical</p>
               <p className="mt-0.5 text-lg font-semibold text-red-300">{criticalCount}</p>
             </div>
             <div className="rounded-md border border-border bg-surface-0/30 p-2">
-              <p className="text-[11px] text-text-muted">High</p>
+              <p className="text-xs text-text-muted">High</p>
               <p className="mt-0.5 text-lg font-semibold text-orange-300">{highCount}</p>
             </div>
             <div className="rounded-md border border-border bg-surface-0/30 p-2">
-              <p className="text-[11px] text-text-muted">Verified</p>
+              <p className="text-xs text-text-muted">Verified</p>
               <p className="mt-0.5 text-lg font-semibold text-emerald-300">{verifiedCount}</p>
             </div>
           </div>
 
           <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px] text-text-muted">
+            <div className="flex items-center justify-between text-xs text-text-muted">
               <span>Scan Completion</span>
               <span className="font-mono">{project.scanProgress}%</span>
             </div>
@@ -248,7 +248,7 @@ export default function ClientShare() {
 
           {shareResult && (
             <div className="space-y-2 rounded-md border border-border bg-surface-0/35 p-2">
-              <p className="text-[11px] text-text-muted">
+              <p className="text-xs text-text-muted">
                 Expires: {formatDateTime(shareResult.expires_at)}
               </p>
               <div className="rounded-md border border-border bg-surface-1/40 px-2 py-1.5 text-xs text-text-primary">
@@ -279,7 +279,7 @@ export default function ClientShare() {
                   : "rounded-md border border-border bg-surface-1/50 p-2"
               }
             >
-              <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-text-muted">
+              <div className="mb-1 flex items-center justify-between text-xs uppercase tracking-wide text-text-muted">
                 <span>{message.sender === "team" ? "Team" : "Client"}</span>
                 <span>{formatTime(message.at)}</span>
               </div>
@@ -303,7 +303,7 @@ export default function ClientShare() {
           >
             Client
           </Button>
-          <span className="text-[11px] text-text-muted">
+          <span className="text-xs text-text-muted">
             Sending as {sender === "team" ? "Team" : "Client"}
           </span>
         </div>

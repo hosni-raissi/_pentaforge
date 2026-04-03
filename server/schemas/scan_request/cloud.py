@@ -19,9 +19,5 @@ class CloudScanRequest(BaseModel):
     # --- Scope ---
     region:             Optional[str]  = None       # e.g. "us-east-1"
     services:           Optional[List[str]] = None  # ["S3", "EC2", "IAM"]
-    # --- Checks ---
-    check_iam:          Optional[bool] = True       # misconfig IAM roles
-    check_storage:      Optional[bool] = True       # public buckets/blobs
-    check_network:      Optional[bool] = True       # open security groups
-    check_serverless:   Optional[bool] = False      # Lambda, Cloud Functions
     description:        Optional[str]  = None
+ 

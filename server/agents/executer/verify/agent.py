@@ -11,7 +11,21 @@ from .tools import ALL_VERIFY_TOOLS
 
 
 class VerifyExecuterAgent(BaseExecuterAgent):
-    """Executes verification scenarios."""
+    """
+    Validates exploitation findings and eliminates false positives.
+
+    Receives exploitation_success events from Exploit Agent and:
+    - Captures Playwright screenshots of exploitation results (NOT payloads)
+    - Submits screenshots to vision model for false positive validation
+    - Annotates evidence with bounding boxes
+    - Creates SHA-256 signed evidence chain
+
+    Security features:
+    - Never captures actual payloads in screenshots
+    - Redacts sensitive URL parameters automatically
+    - Creates cryptographically signed evidence chain
+    - Provides confidence scores for automated triage
+    """
 
     def __init__(
         self,

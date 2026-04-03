@@ -186,7 +186,8 @@ class OWASPChecklistParser:
     }
 
     _PHASE_KW: list[tuple[str, list[str]]] = [
-        ("1", ["recon", "disclosure", "information gathering", "identify", "enumeration", "fingerprint"]),
+        ("1", ["recon", "disclosure", "information gathering", "identify"]),
+        ("2", ["enumeration", "fingerprint", "mapping"]),
         ("3", ["misconfig", "weak", "outdated", "configuration", "patch", "crypt", "verification"]),
         ("4", ["inject", "input validation", "authorization", "logic", "privilege escalation", "unauthorized", "command injection"]),
         ("5", ["secret", "credential", "token", "session", "confidential"]),
@@ -1127,22 +1128,30 @@ def _phase_sort_key(phase: str) -> int:
 
 def _normalize_phase_value(phase: str, title: str = "") -> str:
     raw_phase = str(phase or "").strip()
-    if raw_phase in {"1", "2", "3", "4", "5"}:
+    if raw_phase in {"1", "2", "3", "4", "5", "6", "7", "8"}:
         return raw_phase
 
-    match = re.search(r"\b([1-5])\b", raw_phase)
+    match = re.search(r"\b([1-8])\b", raw_phase)
     if match:
         return match.group(1)
 
     lowered_title = str(title or "").lower()
     if "recon" in lowered_title:
         return "1"
+    if "enumeration" in lowered_title or "mapping" in lowered_title:
+        return "2"
     if "configuration" in lowered_title:
         return "3"
-    if "exploitation" in lowered_title or "validation" in lowered_title:
+    if "authentication" in lowered_title or "authorization" in lowered_title or "injection" in lowered_title:
         return "4"
-    if "session" in lowered_title or "access control" in lowered_title:
+    if "session" in lowered_title:
         return "5"
+    if "exploitation" in lowered_title or "validation" in lowered_title:
+        return "6"
+    if "post-exploitation" in lowered_title or "post exploitation" in lowered_title:
+        return "7"
+    if "report" in lowered_title:
+        return "8"
     return raw_phase or "unknown"
 
 
@@ -1155,9 +1164,19 @@ def _clamp_priority(value: Any, default: int) -> int:
 
 
 def _default_priority_for_item(name: str, phase: str) -> int:
+    """Assign priority based on industry-standard severity scale.
+
+    Priority scale (lower = more severe):
+      P1 = Critical -> SQLi, RCE, SSRF, Command Injection, IDOR, PrivEsc
+      P2 = High     -> XSS, SSTI, Auth Bypass, Directory Traversal, GraphQL
+      P3 = Medium   -> TLS, Headers, Config, Error Handling, Session
+      P4 = Low      -> Info leakage, clickjacking, cache weakness
+      P5 = Info     -> Fingerprinting, recon, enumeration items
+    """
     title = str(name or "").lower()
     phase_str = str(phase or "").strip()
 
+    # P1 = Critical
     if any(
         needle in title
         for needle in (
@@ -1173,29 +1192,94 @@ def _default_priority_for_item(name: str, phase: str) -> int:
             "upload of malicious files",
             "broken object level authorization",
             "bypassing authorization schema",
+            "remote code execution",
+            "rce",
+            "deserialization",
         )
     ):
-        return 5
+        return 1
 
-    if any(needle in title for needle in ("xss", "cross site scripting", "directory traversal", "oauth", "graphql")):
+    # P2 = High
+    if any(
+        needle in title
+        for needle in (
+            "xss",
+            "cross site scripting",
+            "directory traversal",
+            "path traversal",
+            "oauth",
+            "graphql",
+            "ssti",
+            "server-side template injection",
+            "authentication bypass",
+            "broken authentication",
+            "broken function level authorization",
+        )
+    ):
+        return 2
+
+    # P3 = Medium — config, headers, session, TLS
+    if any(
+        needle in title
+        for needle in (
+            "tls",
+            "ssl",
+            "security headers",
+            "error handling",
+            "session",
+            "configuration",
+            "misconfiguration",
+            "cors",
+            "content security policy",
+            "cache",
+        )
+    ):
+        return 3
+
+    # P4 = Low — info leakage, minor issues
+    if any(
+        needle in title
+        for needle in (
+            "information disclosure",
+            "information leakage",
+            "clickjacking",
+            "sensitive data",
+            "verbose error",
+        )
+    ):
         return 4
 
+    # Phase-based defaults:
+    # Exploitation/Post-Exploitation phases → default P2-P3
+    if phase_str in {"6", "7"}:
+        return 2
+    # Auth/Injection phase → default P2
     if phase_str == "4":
-        return 4
+        return 2
+    # Config/Session phases → default P3
     if phase_str in {"3", "5"}:
         return 3
-    if phase_str == "1":
-        return 2
+    # Recon/Enumeration phases → default P5 (informational)
+    if phase_str in {"1", "2"}:
+        return 5
+    # Reporting phase → default P4
+    if phase_str == "8":
+        return 4
+
+    # Fallback: medium priority
     return 3
 
 
 def _phase_block_title(phase: str) -> str:
     return {
         "1": "Reconnaissance",
-        "2": "Mapping",
-        "2": "Configuration Review",
-        "3": "Exploitation & Validation",
-        "4": "Session & Access Control",
+        "2": "Enumeration",
+        "3": "Configuration & Infrastructure Testing",
+        "4": "Authentication, Authorization & Injection Testing",
+        "5": "Session Management Testing",
+        "6": "Exploitation & Validation",
+        "7": "Post-Exploitation",
+        "8": "Reporting",
     }.get(str(phase).strip(), f"Phase {phase or 'unknown'}")
 
 
@@ -1210,7 +1294,10 @@ def build_deterministic_checklist_payload(checklist_data: dict[str, Any], info: 
         for _, cat_data in cats.items():
             if not isinstance(cat_data, dict):
                 continue
-            phase = str(cat_data.get("p", "unknown")).strip() or "unknown"
+            phase = _normalize_phase_value(
+                str(cat_data.get("p", "unknown")),
+                str(cat_data.get("n", cat_data.get("title", ""))),
+            )
             items = cat_data.get("items", [])
             if not isinstance(items, list):
                 continue

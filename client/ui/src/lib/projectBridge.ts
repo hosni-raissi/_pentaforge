@@ -43,7 +43,7 @@ export interface StartScanResponse {
 export interface StartScanRequest {
   projectId: string;
   target?: string;
-  targetConfig?: Record<string, string>;
+  targetConfig?: Record<string, unknown>;
   scope?: string;
   info?: string;
   resume?: boolean;
@@ -222,7 +222,7 @@ function normalizeProjectRow(value: unknown): Project | null {
     targetType: typeof row.targetType === "string" ? row.targetType : "web_app",
     targetConfig: (
       typeof row.targetConfig === "object" && row.targetConfig !== null
-    ) ? (row.targetConfig as Record<string, string>) : undefined,
+    ) ? (row.targetConfig as Record<string, unknown>) : undefined,
     status,
     createdAt,
     updatedAt,
@@ -348,6 +348,27 @@ export async function stopProjectScanFromDesktop(
       mode: request.mode,
     }),
   });
+}
+
+export async function approvePlannerForProjectScanFromDesktop(
+  projectId: string,
+): Promise<{
+  ok: boolean;
+  project_id?: string;
+  scan_id?: string;
+  status?: string;
+  awaiting_planner_approval?: boolean;
+  already_approved?: boolean;
+}> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/scans/${encodeURIComponent(projectId)}/approve-planner`,
+    {
+      method: "POST",
+    },
+  );
 }
 
 export async function clearProjectScanEventsCacheFromDesktop(projectId: string): Promise<void> {

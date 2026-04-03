@@ -14,20 +14,13 @@ class DesktopInputType(str, Enum):
     binary      = "binary"      # compiled binary
     local       = "local"       # already installed, path provided
 
-class DesktopTechnology(str, Enum):
-    electron    = "electron"    # JS-based desktop app
-    dotnet      = "dotnet"      # C# / .NET
-    java        = "java"        # Java Swing / JavaFX
-    qt          = "qt"          # C++ Qt
-    native      = "native"      # pure C / C++
-
 class DesktopScanRequest(BaseModel):
     # --- App ---
     os:                 DesktopOS
     input_type:         DesktopInputType
     file_path:          Optional[str]  = None   # uploaded installer/binary
     install_path:       Optional[str]  = None   # if already installed
-    technology:         Optional[DesktopTechnology] = None
+    technology:         Optional[str] = None
     version:            Optional[str]  = None
 
     # --- Auth ---
@@ -37,10 +30,4 @@ class DesktopScanRequest(BaseModel):
     api_backend_url:    Optional[str]  = None   # if app talks to a backend
     api_spec_url:       Optional[str]  = None
 
-    # --- Checks ---
-    check_memory:       Optional[bool] = True   # memory corruption, buffer overflow
-    check_privileges:   Optional[bool] = True   # privilege escalation
-    check_network:      Optional[bool] = True   # traffic interception
-    check_storage:      Optional[bool] = True   # sensitive data in local files/registry
-    check_update:       Optional[bool] = True   # insecure auto-update mechanism
-    check_electron:     Optional[bool] = False  # nodeIntegration, contextIsolation
+    description:        Optional[str]  = None

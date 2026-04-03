@@ -14,10 +14,14 @@ MAX_TOOL_RESULT_CHARS: int = 1200
 # Keep Intel checklist context small when handing off to Planner.
 PLANNER_CHECKLIST_WINDOW_MAX_ITEMS: int = 28
 PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE: int = 8
+# Track high-priority items (P1=Critical, P2=High) for focused planning
+PLANNER_CHECKLIST_SUMMARY_MAX_HIGH_PRIORITY_PENDING: int = 12
+PLANNER_CHECKLIST_SUMMARY_MAX_CHANGED_ITEMS: int = 10
 
 # Keep loop context bounded so Planner does not carry the full plan forever.
-PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE: int = 2
-PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP: int = 3
+# 0 => uncapped (no hard truncation). Set >0 to enforce a cap.
+PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE: int = 0
+PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP: int = 0
 
 _DISCOVERY_TOOLS = frozenset({"get_page", "search_kb", "search_web"})
 _TRANSIENT_EXCEPTIONS = (

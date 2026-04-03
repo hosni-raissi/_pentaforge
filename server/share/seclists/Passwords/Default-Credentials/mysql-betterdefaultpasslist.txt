@@ -1,0 +1,10 @@
+root:root
+root:password
+root:mysql
+root:toor
+admin:admin
+admin:mysql
+mysql:mysql
+user:user
+test:test
+root:123456

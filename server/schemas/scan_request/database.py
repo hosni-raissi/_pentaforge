@@ -19,9 +19,5 @@ class DatabaseScanRequest(BaseModel):
     port:               Optional[int]  = None       # default per db_type
     database_name:      Optional[str]  = None       # target DB name
     credentials:        Optional[List[Credential]]  = None
-    # --- Checks ---
-    check_auth:         Optional[bool] = True       # weak / default creds
-    check_injection:    Optional[bool] = True       # SQLi / NoSQLi
-    check_config:       Optional[bool] = True       # exposed without auth
-    check_privileges:   Optional[bool] = True       # over-privileged users
+
     description:        Optional[str]  = None

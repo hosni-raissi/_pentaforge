@@ -8,6 +8,7 @@ structlog>=23.1,<25.0
 
 # Async HTTP
 httpx>=0.25,<1.0
+mistralai>=1.2,<2.0
 
 # Embedding (local, no API key needed)
 sentence-transformers>=2.2,<4.0

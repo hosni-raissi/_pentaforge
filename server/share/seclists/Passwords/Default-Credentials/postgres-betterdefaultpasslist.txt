@@ -1,0 +1,9 @@
+postgres:postgres
+postgres:password
+postgres:admin
+postgres:123456
+admin:admin
+admin:postgres
+root:root
+dba:dba
+postgres:changeme

@@ -16,7 +16,7 @@ export function Tooltip({ content, children, side = 'top' }: TooltipProps) {
       {show && (
         <div
           className={cn(
-            'absolute z-50 px-2 py-1 rounded text-[10px] font-medium',
+            'absolute z-50 px-2 py-1 rounded text-sm font-medium',
             'bg-surface-3 text-text-primary border border-border shadow-lg',
             'whitespace-nowrap pointer-events-none animate-slide-in',
             side === 'top' ? 'bottom-full mb-1.5 left-1/2 -translate-x-1/2' : 'top-full mt-1.5 left-1/2 -translate-x-1/2'

@@ -1,74 +1,36 @@
 """
-Agent LLM Configuration — Pydantic-settings models for agent LLM backends.
+Agent LLM Configuration — Backward compatibility wrapper.
 
-Reads from environment variables (or .env file).
-  - PLANNER_AGENT_LLM_MODE controls whether the planner uses "public" or "local".
-  - PLANNER_AGENT_LLM_* configures the public (cloud) provider.
-  - LOCAL_LLM_* configures the local Ollama instance.
+All configuration is now centralized in server.core.llm.
+This module re-exports the configuration for backward compatibility.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+# Re-export from the unified LLM module for backward compatibility
+from server.core.llm import (
+    LLMConfig as PublicLLMConfig,
+    LLMConfig as LocalLLMConfig,
+    public_llm_config,
+    local_llm_config,
+    llm_mode,
+    get_llm_mode,
+    get_config,
+)
 
-from pydantic import Field
-from pydantic_settings import BaseSettings
-
-_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
-
-
-class LLMMode(BaseSettings):
+# Also export the LLMMode class for backward compat
+class LLMMode:
     """Controls which LLM backend the planner uses: 'public' or 'local'."""
 
-    mode: str = Field(default="local", description="'public' for cloud API, 'local' for Ollama")
+    @property
+    def mode(self) -> str:
+        return get_llm_mode()
 
-    model_config = {
-        "env_prefix": "AGENT_LLM_",
-        "env_file": str(_ENV_FILE),
-        "extra": "ignore",
-    }
-
-
-class PublicLLMConfig(BaseSettings):
-    """Configuration for all agents public (cloud) LLM backend.
-
-    All values are read from environment variables prefixed with AGENT_LLM_.
-    Required only when AGENT_LLM_MODE=public.
-    """
-
-    api_provider: str = "" 
-    model: str = ""          
-    api_url: str = ""      
-    api_key: str = ""
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=2048, ge=1)
-
-    model_config = {
-        "env_prefix": "AGENT_LLM_",
-        "env_file": str(_ENV_FILE),
-        "extra": "ignore",
-    }
-
-
-class LocalLLMConfig(BaseSettings):
-    """Configuration for the local Ollama LLM backend.
-
-    All values are read from environment variables prefixed with LOCAL_LLM_.
-    """
-
-    model: str = Field(default="qwen3:4b", description="Ollama model name")
-    api_url: str = Field(default="http://localhost:11434/v1", description="Ollama OpenAI-compatible endpoint")
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=2048, ge=1)
-
-    model_config = {
-        "env_prefix": "LOCAL_LLM_",
-        "env_file": str(_ENV_FILE),
-        "extra": "ignore",
-    }
-
-
-# Singletons — import and use directly.
-llm_mode = LLMMode()
-public_llm_config = PublicLLMConfig()
-local_llm_config = LocalLLMConfig()
+__all__ = [
+    "PublicLLMConfig",
+    "LocalLLMConfig",
+    "public_llm_config",
+    "local_llm_config",
+    "llm_mode",
+    "LLMMode",
+]

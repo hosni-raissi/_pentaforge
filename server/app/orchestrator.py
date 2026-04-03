@@ -206,10 +206,11 @@ def _build_planner_kickoff_message(
         f"Intel stats: {intel_stats}\n\n"
         "## Planner Task\n"
         "1. FIRST STEP: create a great pentest plan for this target.\n"
-        "2. You must use your available tools and Intel checklist guidance.\n"
-        "3. Treat checklist as authoritative coverage guidance and fill gaps with discovery tools.\n"
-        "4. Return final plan JSON (full object); runtime will persist it statically.\n"
-        "5. Return first scenarios for execution.\n"
+        "2. Use available tools and checklist guidance, but keep responses token-efficient.\n"
+        "3. Treat checklist as state machine guidance: prioritize S5 (critical severity) gaps first.\n"
+        "4. Return strict JSON with keys: summary, needs, plan, action_plan.\n"
+        "5. action_plan must include: checklist_updates, checklist_additions, "
+        "plan_modifications, dispatch, phase_advance, phase_advance_blocked_by, rationale.\n"
     )
 
 
@@ -255,6 +256,7 @@ class ScanOrchestratorService:
         self._projects_store = projects_store
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._runs: dict[str, dict[str, Any]] = {}
+        self._planner_approval_events: dict[str, asyncio.Event] = {}
         self._event_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
 
@@ -362,6 +364,7 @@ class ScanOrchestratorService:
                 "updated_at": started_at,
                 "finished_at": None,
                 "error": "",
+                "awaiting_planner_approval": False,
                 "already_running": False,
             }
             self._runs[project_key] = run_state
@@ -565,6 +568,9 @@ class ScanOrchestratorService:
         task = self._tasks.get(project_key)
         if task is not None and not task.done():
             task.cancel()
+        gate = self._planner_approval_events.get(project_key)
+        if gate is not None:
+            gate.set()
 
         now_iso = _utc_now_iso()
         run_state = self._runs.get(project_key, {})
@@ -579,6 +585,7 @@ class ScanOrchestratorService:
                 "updated_at": now_iso,
                 "finished_at": now_iso,
                 "error": "",
+                "awaiting_planner_approval": False,
                 "already_running": False,
             }
             last_scan = project.get("lastScan")
@@ -613,6 +620,7 @@ class ScanOrchestratorService:
             "updated_at": now_iso,
             "finished_at": now_iso,
             "error": "",
+            "awaiting_planner_approval": False,
             "already_running": False,
         }
         project["status"] = "idle"
@@ -643,6 +651,59 @@ class ScanOrchestratorService:
             "scan_id": scan_id,
             "status": "idle",
         }
+
+    async def approve_planner(self, project_id: str) -> dict[str, Any]:
+        project_key = str(project_id or "").strip()
+        if not project_key:
+            raise ValueError("project_id is required")
+
+        project = self._projects_store.get_project(project_key)
+        if project is None:
+            raise LookupError("project not found")
+
+        async with self._lock:
+            run_state = self._runs.get(project_key)
+            if not isinstance(run_state, dict):
+                raise ValueError("no active scan for project")
+
+            scan_id = str(run_state.get("scan_id", "")).strip()
+            status = str(run_state.get("status", "")).strip().lower()
+            waiting = bool(run_state.get("awaiting_planner_approval"))
+
+            if status != "running":
+                raise ValueError("scan is not running")
+
+            if waiting:
+                gate = self._planner_approval_events.get(project_key)
+                if gate is not None:
+                    gate.set()
+                now_iso = _utc_now_iso()
+                run_state["awaiting_planner_approval"] = False
+                run_state["updated_at"] = now_iso
+                self._runs[project_key] = run_state
+
+                self._emit_event(
+                    project_key,
+                    event="planner_approval_received",
+                    scan_id=scan_id,
+                    level="success",
+                    message="Planner [approved] Checklist approved by pentester. Starting planner now.",
+                    data={
+                        "stage": "planner",
+                        "kind": "approved",
+                        "status": "running",
+                        "awaiting_user_approval": False,
+                    },
+                )
+
+            return {
+                "ok": True,
+                "project_id": project_key,
+                "scan_id": scan_id,
+                "status": "running",
+                "awaiting_planner_approval": False,
+                "already_approved": not waiting,
+            }
 
     def _emit_intel_callback_event(
         self,
@@ -724,11 +785,13 @@ class ScanOrchestratorService:
             "updated_at": str(project.get("updatedAt", "")) or None,
             "finished_at": last_scan.get("finishedAt"),
             "error": str(last_scan.get("error", "")),
+            "awaiting_planner_approval": bool(last_scan.get("awaitingPlannerApproval")),
             "already_running": False,
         }
 
     def _on_task_done(self, project_id: str, task: asyncio.Task[None]) -> None:
         self._tasks.pop(project_id, None)
+        self._planner_approval_events.pop(project_id, None)
         try:
             task.result()
         except Exception as exc:  # pragma: no cover - defensive
@@ -832,6 +895,118 @@ class ScanOrchestratorService:
                 scope_text = raw_line.split(":", 1)[1].strip()
                 break
 
+        partial_intel_scan_meta = {
+            "scanId": scan_id,
+            "status": "awaiting_planner_approval",
+            "startedAt": started_at,
+            "finishedAt": None,
+            "error": "",
+            "awaitingPlannerApproval": True,
+            "result": {
+                "target": target,
+                "targetType": target_type,
+                "intel": {
+                    "status": intel_status,
+                    "summary": intel_summary,
+                    "stats": intel_stats,
+                    "checklist": intel_checklist,
+                },
+            },
+        }
+        self._persist_project_status(
+            project_id,
+            status="running",
+            scan_progress=60,
+            scan_meta=partial_intel_scan_meta,
+        )
+
+        run_state = self._runs.get(project_id)
+        if isinstance(run_state, dict):
+            run_state["awaiting_planner_approval"] = True
+            run_state["updated_at"] = _utc_now_iso()
+            self._runs[project_id] = run_state
+
+        gate = asyncio.Event()
+        self._planner_approval_events[project_id] = gate
+        self._emit_event(
+            project_id,
+            event="planner_waiting_approval",
+            scan_id=scan_id,
+            level="warn",
+            message=(
+                "Planner [waiting approval] Intel checklist is ready. "
+                "Review/edit checklist, then click Continue to Planner."
+            ),
+            data={
+                "stage": "planner",
+                "kind": "waiting_approval",
+                "status": "running",
+                "awaiting_user_approval": True,
+                "checklist_items_count": checklist_items_count,
+            },
+        )
+        logger.info(
+            "scan_orchestrator_waiting_planner_approval",
+            project_id=project_id,
+            scan_id=scan_id,
+            checklist_items_count=checklist_items_count,
+        )
+
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            current = self._runs.get(project_id, {})
+            if str(current.get("status")) in {"paused", "idle"}:
+                logger.info("scan_orchestrator_cancelled", project_id=project_id, scan_id=scan_id)
+                return
+            self._mark_failed(project_id, scan_id, "scan cancelled")
+            return
+        finally:
+            self._planner_approval_events.pop(project_id, None)
+
+        run_state = self._runs.get(project_id)
+        if isinstance(run_state, dict):
+            run_state["awaiting_planner_approval"] = False
+            run_state["updated_at"] = _utc_now_iso()
+            self._runs[project_id] = run_state
+
+        latest_project = self._projects_store.get_project(project_id)
+        if isinstance(latest_project, dict):
+            latest_last_scan = latest_project.get("lastScan")
+            if isinstance(latest_last_scan, dict):
+                latest_result = latest_last_scan.get("result")
+                if isinstance(latest_result, dict):
+                    latest_intel = latest_result.get("intel")
+                    if isinstance(latest_intel, dict):
+                        latest_checklist = latest_intel.get("checklist")
+                        if isinstance(latest_checklist, dict):
+                            intel_checklist = latest_checklist
+                            checklist_items_count = _count_checklist_items(intel_checklist)
+
+        self._persist_project_status(
+            project_id,
+            status="running",
+            scan_progress=70,
+            scan_meta={
+                "scanId": scan_id,
+                "status": "running",
+                "startedAt": started_at,
+                "finishedAt": None,
+                "error": "",
+                "awaitingPlannerApproval": False,
+                "result": {
+                    "target": target,
+                    "targetType": target_type,
+                    "intel": {
+                        "status": intel_status,
+                        "summary": intel_summary,
+                        "stats": intel_stats,
+                        "checklist": intel_checklist,
+                    },
+                },
+            },
+        )
+
         planner_input = _build_planner_kickoff_message(
             target=target,
             target_type=target_type,
@@ -903,10 +1078,7 @@ class ScanOrchestratorService:
         planner_summary_lower = planner_summary.lower()
         plan_phases = plan_data.get("phases", [])
         plan_phase_count = len(plan_phases) if isinstance(plan_phases, list) else 0
-        planner_failed = (
-            planner_summary_lower.startswith("planning failed:")
-            or plan_phase_count <= 0
-        )
+        planner_failed = planner_summary_lower.startswith("planning failed:")
         if planner_failed:
             failure_reason = planner_summary or "planner did not persist a valid plan"
             self._emit_event(
@@ -925,6 +1097,24 @@ class ScanOrchestratorService:
             self._mark_failed(project_id, scan_id, f"planner failed: {failure_reason}")
             return
 
+        if plan_phase_count <= 0:
+            self._emit_event(
+                project_id,
+                event="planner_incomplete",
+                scan_id=scan_id,
+                level="warn",
+                message=(
+                    "Planner [warn] No persisted plan phases; "
+                    "continuing with checklist-only summary."
+                ),
+                data={
+                    "stage": "planner",
+                    "kind": "incomplete",
+                    "summary": planner_summary,
+                    "plan_phase_count": 0,
+                },
+            )
+
         self._emit_event(
             project_id,
             event="planner_complete",
@@ -937,10 +1127,21 @@ class ScanOrchestratorService:
                 "summary_length": len(planner_summary),
                 "scenario_count": len(planner_result.scenarios),
                 "needs_count": len(planner_result.needs),
+                "checklist_updates_count": len(
+                    planner_result.action_plan.get("checklist_updates", [])
+                    if isinstance(planner_result.action_plan, dict)
+                    else []
+                ),
+                "checklist_additions_count": len(
+                    planner_result.action_plan.get("checklist_additions", [])
+                    if isinstance(planner_result.action_plan, dict)
+                    else []
+                ),
                 "plan_phase_count": plan_phase_count,
                 "summary": planner_result.summary,
                 "scenarios": planner_result.scenarios,
                 "needs": planner_result.needs,
+                "action_plan": planner_result.action_plan,
                 "plan_data": plan_data,
             },
         )
@@ -966,6 +1167,11 @@ class ScanOrchestratorService:
                     "summary": str(planner_result.summary),
                     "scenarios": list(planner_result.scenarios),
                     "needs": list(planner_result.needs),
+                    "action_plan": (
+                        dict(planner_result.action_plan)
+                        if isinstance(planner_result.action_plan, dict)
+                        else {}
+                    ),
                     "plan_data": plan_data,
                 },
             },
@@ -979,6 +1185,7 @@ class ScanOrchestratorService:
             "updated_at": finished_at,
             "finished_at": finished_at,
             "error": "",
+            "awaiting_planner_approval": False,
             "already_running": False,
         }
         self._persist_project_status(
@@ -1020,6 +1227,7 @@ class ScanOrchestratorService:
             "updated_at": finish_time,
             "finished_at": finish_time,
             "error": error_message,
+            "awaiting_planner_approval": False,
             "already_running": False,
         }
         self._persist_project_status(

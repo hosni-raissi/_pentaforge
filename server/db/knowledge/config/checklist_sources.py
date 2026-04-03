@@ -1,4 +1,3 @@
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Source registry
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -14,8 +13,10 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             "https://attack.mitre.org/tactics/TA0009/",
             "https://attack.mitre.org/tactics/TA0010/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-44ver2.pdf",
         ],
     },
     "api": {
@@ -37,8 +38,10 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             "https://attack.mitre.org/tactics/TA0006/",
             "https://attack.mitre.org/tactics/TA0010/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-95.pdf",
         ],
     },
     "mobile": {
@@ -50,8 +53,10 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
         "mitre": [
             "https://attack.mitre.org/matrices/mobile/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-124r2.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-163r1.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
         ],
     },
     "infra": {
@@ -62,8 +67,11 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             "https://attack.mitre.org/tactics/TA0008/",
             "https://attack.mitre.org/tactics/TA0006/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-123.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-128.pdf",
         ],
     },
     "cloud": {
@@ -73,8 +81,11 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
         "mitre": [
             "https://attack.mitre.org/matrices/enterprise/cloud/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-144.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-145.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-210.pdf",
         ],
     },
     "iot": {
@@ -84,8 +95,11 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
         "mitre": [
             "https://attack.mitre.org/matrices/ics/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-183.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/ir/2020/NIST.IR.8259.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/ir/2020/NIST.IR.8259A.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
         ],
     },
     "network": {
@@ -95,8 +109,12 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             "https://attack.mitre.org/tactics/TA0008/",
             "https://attack.mitre.org/tactics/TA0011/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-41r1.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-77r1.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-113.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
         ],
     },
     "database": {
@@ -107,8 +125,11 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             "https://attack.mitre.org/tactics/TA0006/",
             "https://attack.mitre.org/tactics/TA0009/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-123.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-92.pdf",
         ],
     },
     "linux_server": {
@@ -121,8 +142,12 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             "https://attack.mitre.org/tactics/TA0008/",
             "https://attack.mitre.org/tactics/TA0006/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-123.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-128.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-40r4.pdf",
         ],
     },
     "container": {
@@ -132,8 +157,10 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
         "mitre": [
             "https://attack.mitre.org/matrices/enterprise/cloud/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-190.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-125Ar1.pdf",
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
         ],
     },
     "repository": {
@@ -145,9 +172,11 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             "https://attack.mitre.org/tactics/TA0003/",
             "https://attack.mitre.org/tactics/TA0006/",
         ],
-        "ptes": [
-            "https://owasp.org/www-project-web-security-testing-guide/",
+        "nist": [
+            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-218.pdf",g
+            #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-160v1r1.pdf",
         ],
     },
 }
-

@@ -2,7 +2,7 @@
 
 FORMATTER_ROUNDS = 3
 FORMATTER_CALL_TIMEOUT_SECONDS = 300
-FORMATTER_MAX_TOOLS_PER_ROUND: int = 2
+FORMATTER_MAX_TOOLS_PER_ROUND: int = 3
 
 # ── Update pipeline ───────────────────────────────────────────────────
 

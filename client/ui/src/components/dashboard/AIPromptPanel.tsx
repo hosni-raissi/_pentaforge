@@ -120,12 +120,12 @@ export function AIPromptPanel({
             key={message.id}
             className={
               message.role === 'assistant'
-                ? 'max-w-[92%] rounded-md border border-pf-500/20 bg-pf-500/10 p-2 text-xs text-text-primary'
-                : 'ml-auto max-w-[92%] rounded-md border border-border bg-surface-2 p-2 text-xs text-text-primary'
+                ? 'max-w-[92%] rounded-md border border-pf-500/20 bg-pf-500/10 p-2 text-sm text-text-primary'
+                : 'ml-auto max-w-[92%] rounded-md border border-border bg-surface-2 p-2 text-sm text-text-primary'
             }
           >
             {message.role === 'assistant' && (
-              <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold text-pf-400">
+              <div className="mb-1 flex items-center gap-1 text-xs font-semibold text-pf-400">
                 <Bot size={11} />
                 Copilot
               </div>

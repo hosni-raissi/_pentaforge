@@ -11,7 +11,22 @@ from .tools import ALL_RECON_TOOLS
 
 
 class ReconExecuterAgent(BaseExecuterAgent):
-    """Executes reconnaissance scenarios."""
+    """
+    Executes reconnaissance scenarios with stealth capabilities.
+
+    Orchestrates passive and active reconnaissance including:
+    - Port scanning (Nmap, Masscan) with stealth adaptation
+    - Subdomain enumeration (Amass, Subfinder)
+    - OSINT collection (Shodan, certificate transparency)
+    - Technology detection (WhatWeb, header analysis)
+    - Secret discovery (TruffleHog, Gitleaks)
+
+    Features a Stealth Analyzer sub-component that:
+    - Detects honeypot indicators
+    - Identifies tarpit behavior
+    - Dynamically adapts scan cadence
+    - Avoids detection patterns
+    """
 
     def __init__(
         self,

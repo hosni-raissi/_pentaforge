@@ -341,15 +341,12 @@ class Orchestrator:
             f"\n"
             f"## Instructions\n"
             f"1. FIRST STEP: create a great, target-specific pentest plan for this engagement.\n"
-            f"2. You must use your tools and Intel checklist context to improve plan quality.\n"
-            f"3. Treat checklist input as a context window (not the full list).\n"
-            f"   Runtime will inject rotating checklist windows each round.\n"
-            f"4. Use checklist phases/items to shape recon + enumeration depth.\n"
-            f"5. Return final plan JSON (full object) so runtime can persist it statically.\n"
-            f"6. Return the first batch of scenarios (max 3) for the "
-            f"executor agents to run.\n"
-            f"7. Focus on reconnaissance first — we need to discover "
-            f"the attack surface before exploitation.\n"
+            f"2. Use available tools and checklist guidance with token-efficient context.\n"
+            f"3. Treat checklist as state-machine guidance and prioritize S5 (critical severity) risk coverage.\n"
+            f"4. Return strict JSON with keys: summary, needs, plan, action_plan.\n"
+            f"5. action_plan must include checklist_updates, checklist_additions, "
+            f"plan_modifications, dispatch, phase_advance, phase_advance_blocked_by, rationale.\n"
+            f"6. Focus on reconnaissance first — we need attack-surface evidence before exploitation.\n"
         )
 
         logger.debug(
@@ -389,6 +386,12 @@ class Orchestrator:
                 needs=len(result.needs),
                 plan_phases=len(plan_data.get("phases", [])),
                 summary_length=len(result.summary),
+                checklist_updates=len(result.action_plan.get("checklist_updates", []))
+                if isinstance(result.action_plan, dict)
+                else 0,
+                checklist_additions=len(result.action_plan.get("checklist_additions", []))
+                if isinstance(result.action_plan, dict)
+                else 0,
             )
 
             return {
@@ -396,6 +399,11 @@ class Orchestrator:
                     "scenarios": result.scenarios,
                     "needs": result.needs,
                     "summary": result.summary,
+                    "action_plan": (
+                        dict(result.action_plan)
+                        if isinstance(result.action_plan, dict)
+                        else {}
+                    ),
                 },
                 "plan_data": plan_data,
             }
@@ -407,6 +415,7 @@ class Orchestrator:
                     "scenarios": [],
                     "needs": [],
                     "summary": f"Planning failed: {exc}",
+                    "action_plan": {},
                 },
                 "plan_data": {},
                 "error": f"Planner failed: {exc}",
@@ -470,6 +479,7 @@ class Orchestrator:
             scenarios=planner_data.get("scenarios", []),
             needs=planner_data.get("needs", []),
             summary=planner_data.get("summary", ""),
+            action_plan=planner_data.get("action_plan", {}),
         )
 
         return OrchestratorResult(

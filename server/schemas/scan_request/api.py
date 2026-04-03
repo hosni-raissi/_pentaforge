@@ -37,12 +37,8 @@ class ApiScanRequest(BaseModel):
     format:             ApiFormat
     # --- Definition ---
     spec_url:           Optional[str]  = None   # Swagger / OpenAPI URL
-    spec_file:          Optional[str]  = None   # uploaded .json / .yaml
     endpoints:          Optional[List[ApiEndpoint]] = None
     # --- Auth ---
     auth:               Optional[ApiAuthConfig] = None
     credentials:        Optional[List[Credential]] = None
-    global_headers:     Optional[dict] = None
-    # --- LLM context ---
-    technology:         Optional[str]  = None   # Node.js, Django...
-    database:           Optional[str]  = None   # MySQL, MongoDB...
+    description:        Optional[str]  = None

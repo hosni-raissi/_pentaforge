@@ -36,7 +36,7 @@ export default function Scan() {
         </CardHeader>
 
         <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-3 text-xs">
+          <div className="grid grid-cols-2 gap-3 text-sm">
             <div className="p-2.5 rounded bg-surface-2">
               <span className="text-text-muted">Target</span>
               <p className="font-mono text-text-primary mt-0.5">{project.target}</p>
@@ -88,12 +88,12 @@ export default function Scan() {
           </div>
 
           {!canRun && (
-            <p className="text-[11px] text-yellow-400">
+            <p className="text-sm text-yellow-400">
               Another project is currently running. Stop it first.
             </p>
           )}
           {isStarting && (
-            <p className="text-[11px] text-text-muted">
+            <p className="text-sm text-text-muted">
               Starting scan...
             </p>
           )}
@@ -106,7 +106,7 @@ export default function Scan() {
         title="Stop Scan"
         description="Choose whether to pause or cancel the current scan."
       >
-        <div className="space-y-3 text-xs text-text-secondary">
+        <div className="space-y-3 text-sm text-text-secondary">
           <p>
             Pause will keep current logs and results so you can review them. Cancel will clear logs,
             agent results, and reset status to idle.

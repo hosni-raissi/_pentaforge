@@ -47,7 +47,7 @@ function AttackNode({ data }: { data: AttackNodeData }) {
       <Handle type="target" position={Position.Top} className="!bg-pf-500 !w-2 !h-2 !border-0" />
       <div className="flex items-center gap-1.5 justify-center">
         <Icon size={12} />
-        <span className="text-[11px] font-medium text-text-primary">{data.label}</span>
+        <span className="text-xs font-medium text-text-primary">{data.label}</span>
       </div>
       {data.severity && (
         <span className="text-[9px] text-text-muted capitalize mt-0.5 block">{data.severity}</span>

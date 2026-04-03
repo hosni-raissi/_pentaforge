@@ -865,7 +865,7 @@ export default function Settings() {
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-semibold text-text-primary">{resource.name}</p>
-                                <p className="text-[11px] text-text-muted">
+                                <p className="text-xs text-text-muted">
                                   {formatTargetTypeLabel(resourceDisplayTarget(resource.target_type, resourceTargetFilter))}
                                   {" • "}
                                   {resource.content_type || "unknown"}
@@ -876,7 +876,7 @@ export default function Settings() {
                                 </p>
                               </div>
                               <div className="flex items-center gap-1">
-                                <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
+                                <span className="rounded border border-border px-1.5 py-0.5 text-xs uppercase tracking-wide text-text-secondary">
                                   {resourceSourceLabel(resource)}
                                 </span>
                                 <Button
@@ -903,7 +903,7 @@ export default function Settings() {
                                 </Button>
                               </div>
                             </div>
-                            <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">
+                            <p className="mt-1 break-all font-mono text-xs text-text-secondary">
                               {resource.url || "No URL"}
                             </p>
                           </div>
@@ -990,7 +990,7 @@ export default function Settings() {
                       <p className="text-xs font-semibold text-text-primary">
                         Force Update Status • {formatTargetTypeLabel(forceUpdateStatus.target_type)}
                       </p>
-                      <p className="mt-1 text-[11px] text-text-secondary">
+                      <p className="mt-1 text-xs text-text-secondary">
                         {forceUpdateStatus.status.toUpperCase()} • {Math.max(0, Math.min(100, forceUpdateStatus.progress))}%
                       </p>
                       <div className="mt-2 h-2 w-full overflow-hidden rounded bg-surface-0">
@@ -1005,7 +1005,7 @@ export default function Settings() {
                           style={{ width: `${Math.max(0, Math.min(100, forceUpdateStatus.progress))}%` }}
                         />
                       </div>
-                      <p className="mt-2 text-[11px] text-text-muted">
+                      <p className="mt-2 text-xs text-text-muted">
                         {forceUpdateStatus.message || "Waiting..."}
                       </p>
                     </div>

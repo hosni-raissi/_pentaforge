@@ -168,6 +168,40 @@ _CHECKLIST_CLEANER_SYSTEM_PROMPT = (
     "Use double quotes for all keys and strings. No trailing commas.\n"
     "Required keys: target_type, available_total, checklist.\n"
     "checklist must be a list of blocks with keys: phase, title, items.\n"
-    "items must be a list of objects with keys: name, priority.\n"
-    "priority must be an integer from 1 to 5 (5 is highest priority).\n"
+    "phase must be a numeric string and sequential with no skips (1,2,3,... in checklist order).\n"
+    "items must be a list of names or objects with key: name.\n"
 )
+
+
+PRIORITY_REPROMPT_SYSTEM_PROMPT = (
+    "Return strict JSON only. No markdown fences, no prose. "
+    "Do not drop blocks or items. Add/fix priority fields and output explicit sequential phases."
+)
+
+
+def build_priority_reprompt_prompt(
+    *,
+    checklist: dict[str, Any],
+    target_type: str,
+    info: str,
+) -> str:
+    return (
+        "Add priorities and re-phase the checklist blocks.\n"
+        "Return strict JSON only as a full checklist object with this shape:\n"
+        "{\"target_type\":\"...\",\"available_total\":0,\"checklist\":[{\"phase\":\"1\",\"title\":\"...\",\"items\":[{\"name\":\"...\",\"priority\":1}]}]}\n\n"
+        "Rules:\n"
+        "- priority must be integer 1..5\n"
+        "- do not remove blocks or items\n"
+        "- set explicit phase numbers on all blocks as strings and do not skip numbers\n"
+        "- phase numbering must be sequential in checklist order: 1,2,3,...\n"
+        "- no markdown, no prose\n\n"
+        "Severity scale:\n"
+        "S1 / priority 1 = Critical -> SQLi, RCE, SSRF, Command Injection, Privilege Escalation\n"
+        "S2 / priority 2 = High -> XSS, SSTI, Auth Bypass, IDOR, File Upload\n"
+        "S3 / priority 3 = Medium -> TLS, Headers, Config, Error Handling\n"
+        "S4 / priority 4 = Low -> Info leakage, clickjacking, cache weakness\n"
+        "S5 / priority 5 = Info -> Fingerprinting, recon items\n\n"
+        f"Target: {target_type}\n"
+        f"Info: {info or 'none'}\n\n"
+        f"Intel checklist JSON:\n{json.dumps(checklist, ensure_ascii=True)}"
+    )

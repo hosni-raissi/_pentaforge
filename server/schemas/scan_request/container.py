@@ -30,11 +30,5 @@ class ContainerScanRequest(BaseModel):
     registry:           Optional[ContainerRegistry] = None
     kubernetes:         Optional[KubernetesConfig]  = None
 
-    # --- Checks ---
-    check_image:        Optional[bool] = True   # CVEs in image layers (Trivy)
-    check_config:       Optional[bool] = True   # misconfigs (privileged, root)
-    check_secrets:      Optional[bool] = True   # secrets in env vars / layers
-    check_network:      Optional[bool] = True   # exposed ports, network policies
-    check_escape:       Optional[bool] = True   # container escape techniques
-    check_rbac:         Optional[bool] = True   # K8s RBAC misconfig
     credentials:        Optional[List[Credential]] = None
+    description:        Optional[str]  = None

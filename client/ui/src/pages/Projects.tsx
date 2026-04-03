@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Play, Square, FolderOpen, Share2, RefreshCcw } from 'lucide-react';
+import { Plus, Trash2, Play, Square, FolderOpen, Share2, RefreshCcw, Pencil } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -52,11 +52,49 @@ const PRIMARY_TARGET_KEYS = [
   'targets.ip_address',
 ];
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getNestedValue(payload: Record<string, unknown>, dottedKey: string): unknown {
+  const parts = dottedKey.split('.');
+  let cursor: unknown = payload;
+  for (const part of parts) {
+    if (!isRecord(cursor)) {
+      return undefined;
+    }
+    cursor = cursor[part];
+  }
+  return cursor;
+}
+
+function setNestedValue(payload: Record<string, unknown>, dottedKey: string, value: unknown): void {
+  const parts = dottedKey.split('.');
+  let cursor: Record<string, unknown> = payload;
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i];
+    const isLast = i === parts.length - 1;
+    if (isLast) {
+      cursor[part] = value;
+      return;
+    }
+    const next = cursor[part];
+    if (!isRecord(next)) {
+      const created: Record<string, unknown> = {};
+      cursor[part] = created;
+      cursor = created;
+      continue;
+    }
+    cursor = next;
+  }
+}
+
 export default function Projects() {
   const navigate = useNavigate();
   const {
     projects,
     addProject,
+    updateProject,
     removeProject,
     setActive,
     setRunning,
@@ -70,12 +108,15 @@ export default function Projects() {
   const [targetTypes, setTargetTypes] = useState<ProjectTargetTypeOption[]>([]);
   const [targetFields, setTargetFields] = useState<ProjectTargetField[]>([]);
   const [targetInfo, setTargetInfo] = useState<Record<string, string>>({});
+  const [credentialProfiles, setCredentialProfiles] = useState<Array<Record<string, string>>>([{}]);
   const [typesLoading, setTypesLoading] = useState(false);
   const [fieldsLoading, setFieldsLoading] = useState(false);
   const [typesError, setTypesError] = useState<string>('');
   const [fieldsError, setFieldsError] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [pendingEditProject, setPendingEditProject] = useState<Project | null>(null);
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
   const [stopProjectId, setStopProjectId] = useState<string | null>(null);
 
@@ -179,9 +220,76 @@ export default function Projects() {
     };
   }, [dialogOpen, form.targetType]);
 
+  const credentialFields = useMemo(
+    () => targetFields.filter((field) => field.key.startsWith('credentials.')),
+    [targetFields],
+  );
+
+  const nonCredentialFields = useMemo(
+    () => targetFields.filter((field) => !field.key.startsWith('credentials.')),
+    [targetFields],
+  );
+
+  useEffect(() => {
+    if (!dialogOpen || credentialFields.length === 0) {
+      return;
+    }
+    setCredentialProfiles((previous) => (
+      previous.length > 0 ? previous : [{}]
+    ));
+  }, [dialogOpen, credentialFields.length]);
+
+  useEffect(() => {
+    if (!dialogOpen || !pendingEditProject) {
+      return;
+    }
+    const config = isRecord(pendingEditProject.targetConfig) ? pendingEditProject.targetConfig : {};
+    const nextTargetInfo: Record<string, string> = {};
+
+    for (const field of nonCredentialFields) {
+      const value = getNestedValue(config, field.key);
+      nextTargetInfo[field.key] = typeof value === 'string' ? value : '';
+    }
+
+    const credentialSource = Array.isArray(config.credentials)
+      ? config.credentials
+      : [];
+    const nextProfiles: Array<Record<string, string>> = credentialSource
+      .filter((profile): profile is Record<string, unknown> => isRecord(profile))
+      .map((profile) => {
+        const next: Record<string, string> = {};
+        for (const field of credentialFields) {
+          const suffix = field.key.slice('credentials.'.length);
+          const value = getNestedValue(profile, suffix);
+          next[suffix] = typeof value === 'string' ? value : '';
+        }
+        return next;
+      });
+
+    if (nextProfiles.length === 0 && credentialFields.length > 0) {
+      const fallbackProfile: Record<string, string> = {};
+      for (const field of credentialFields) {
+        const suffix = field.key.slice('credentials.'.length);
+        const value = getNestedValue(config, field.key);
+        fallbackProfile[suffix] = typeof value === 'string' ? value : '';
+      }
+      if (Object.values(fallbackProfile).some((value) => value.trim().length > 0)) {
+        nextProfiles.push(fallbackProfile);
+      }
+    }
+
+    setTargetInfo(nextTargetInfo);
+    setCredentialProfiles(nextProfiles.length > 0 ? nextProfiles : [{}]);
+    setPendingEditProject(null);
+  }, [dialogOpen, pendingEditProject, nonCredentialFields, credentialFields]);
+
   const missingRequiredField = targetFields.some((field) => {
     if (!field.required) {
       return false;
+    }
+    if (field.key.startsWith('credentials.')) {
+      const suffix = field.key.slice('credentials.'.length);
+      return !credentialProfiles.some((profile) => (profile[suffix] ?? '').trim().length > 0);
     }
     return !(targetInfo[field.key] ?? '').trim();
   });
@@ -197,27 +305,101 @@ export default function Projects() {
     });
   }, [projects, searchTerm]);
 
-  function handleCreate() {
+  function resetProjectFormState() {
+    setEditingProjectId(null);
+    setPendingEditProject(null);
+    setForm({
+      name: '',
+      targetType: targetTypes[0]?.value ?? '',
+      description: '',
+    });
+    setTargetInfo({});
+    setCredentialProfiles([{}]);
+    setCreatingProject(false);
+  }
+
+  function handleOpenCreateDialog() {
+    resetProjectFormState();
+    setDialogOpen(true);
+  }
+
+  function handleOpenEditDialog(project: Project) {
+    setEditingProjectId(project.id);
+    setForm({
+      name: project.name,
+      targetType: project.targetType,
+      description: project.description ?? '',
+    });
+    setTargetInfo({});
+    setCredentialProfiles([{}]);
+    setPendingEditProject(project);
+    setDialogOpen(true);
+  }
+
+  function buildTargetConfigPayload(): { primaryTarget: string; payload: Record<string, unknown> } {
+    const cleanedTargetInfo: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(targetInfo)) {
+      if (value.trim().length > 0) {
+        setNestedValue(cleanedTargetInfo, key, value.trim());
+      }
+    }
+
+    const cleanedProfiles = credentialProfiles
+      .map((profile) => {
+        const next: Record<string, unknown> = {};
+        for (const [suffix, value] of Object.entries(profile)) {
+          const clean = value.trim();
+          if (!clean) {
+            continue;
+          }
+          setNestedValue(next, suffix, clean);
+        }
+        return next;
+      })
+      .filter((profile) => Object.keys(profile).length > 0);
+
+    if (cleanedProfiles.length > 0) {
+      cleanedTargetInfo.credentials = cleanedProfiles;
+    }
+
+    const primaryTargetFromPreferred = PRIMARY_TARGET_KEYS
+      .map((key) => getNestedValue(cleanedTargetInfo, key))
+      .find((value): value is string => typeof value === 'string' && value.length > 0);
+    const primaryTargetFromFields = nonCredentialFields
+      .map((field) => getNestedValue(cleanedTargetInfo, field.key))
+      .find((value): value is string => typeof value === 'string' && value.length > 0);
+    const primaryTarget = primaryTargetFromPreferred || primaryTargetFromFields || '';
+
+    return { primaryTarget, payload: cleanedTargetInfo };
+  }
+
+  function handleCreateOrUpdate() {
     if (creatingProject) {
       return;
     }
     setCreatingProject(true);
 
-    const cleanedTargetInfo = Object.fromEntries(
-      Object.entries(targetInfo).filter(([, value]) => value.trim().length > 0),
-    );
+    const { primaryTarget, payload } = buildTargetConfigPayload();
 
-    const primaryTarget =
-      PRIMARY_TARGET_KEYS.map((key) => cleanedTargetInfo[key]).find((value) => typeof value === 'string' && value.length > 0)
-      || targetFields.map((field) => cleanedTargetInfo[field.key]).find((value) => typeof value === 'string' && value.length > 0)
-      || '';
+    if (editingProjectId) {
+      updateProject(editingProjectId, {
+        name: form.name,
+        targetType: form.targetType,
+        target: primaryTarget,
+        targetConfig: payload,
+        description: form.description,
+      });
+      setDialogOpen(false);
+      resetProjectFormState();
+      return;
+    }
 
     const project: Project = {
       id: crypto.randomUUID(),
       name: form.name,
       target: primaryTarget,
       targetType: form.targetType,
-      targetConfig: cleanedTargetInfo,
+      targetConfig: payload,
       status: 'idle',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -242,14 +424,8 @@ export default function Projects() {
     };
     addProject(project);
     setDialogOpen(false);
-    setForm({
-      name: '',
-      targetType: targetTypes[0]?.value ?? '',
-      description: '',
-    });
-    setTargetInfo({});
+    resetProjectFormState();
     navigate('/dashboard');
-    setCreatingProject(false);
   }
 
   function openProject(id: string) {
@@ -268,7 +444,7 @@ export default function Projects() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-bold text-text-primary">Projects</h1>
-          <p className="text-xs text-text-muted">
+          <p className="text-sm text-text-muted">
             {filteredProjects.length}
             {' '}
             of
@@ -288,7 +464,7 @@ export default function Projects() {
             <RefreshCcw size={14} />
             Reload
           </Button>
-          <Button onClick={() => setDialogOpen(true)} size="sm">
+          <Button onClick={handleOpenCreateDialog} size="sm">
             <Plus size={14} /> New Project
           </Button>
         </div>
@@ -314,8 +490,8 @@ export default function Projects() {
           <Card className="flex flex-col items-center justify-center py-16">
             <FolderOpen size={40} className="text-text-muted mb-3" />
             <p className="text-sm text-text-secondary mb-1">No projects yet</p>
-            <p className="text-xs text-text-muted mb-4">Create a new engagement to get started.</p>
-            <Button onClick={() => setDialogOpen(true)} size="sm">
+            <p className="text-sm text-text-muted mb-4">Create a new engagement to get started.</p>
+            <Button onClick={handleOpenCreateDialog} size="sm">
               <Plus size={14} /> Create Project
             </Button>
           </Card>
@@ -323,7 +499,7 @@ export default function Projects() {
           <Card className="flex flex-col items-center justify-center py-16">
             <FolderOpen size={40} className="text-text-muted mb-3" />
             <p className="text-sm text-text-secondary mb-1">No matching projects</p>
-            <p className="text-xs text-text-muted mb-4">Try a different search keyword.</p>
+            <p className="text-sm text-text-muted mb-4">Try a different search keyword.</p>
             <Button variant="secondary" size="sm" onClick={() => setSearchTerm('')}>
               Clear Search
             </Button>
@@ -345,16 +521,16 @@ export default function Projects() {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-text-primary truncate">{project.name}</p>
-                      <p className="text-[11px] text-text-muted font-mono truncate">{project.target}</p>
+                      <p className="text-sm text-text-muted font-mono truncate">{project.target}</p>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0 ml-4">
                     <Badge variant={project.status} dot>{project.status}</Badge>
                     {startingProjectId === project.id && (
-                      <span className="text-[10px] text-text-muted">starting...</span>
+                      <span className="text-sm text-text-muted">starting...</span>
                     )}
-                    <span className="text-[10px] text-text-muted w-16 text-right">
+                    <span className="text-sm text-text-muted w-16 text-right">
                       {formatShortDate(project.updatedAt)}
                     </span>
                     <div className="flex items-center gap-1 ml-2" onClick={(e) => e.stopPropagation()}>
@@ -415,6 +591,14 @@ export default function Projects() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        onClick={() => handleOpenEditDialog(project)}
+                        title="Edit project"
+                      >
+                        <Pencil size={12} />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => openClientShare(project.id)}
                         title="Share scan result"
                       >
@@ -437,9 +621,9 @@ export default function Projects() {
         open={dialogOpen}
         onClose={() => {
           setDialogOpen(false);
-          setCreatingProject(false);
+          resetProjectFormState();
         }}
-        title="New Project"
+        title={editingProjectId ? "Edit Project" : "New Project"}
         width="max-w-3xl"
       >
         <div className="space-y-4">
@@ -457,44 +641,85 @@ export default function Projects() {
               onChange={(e) => {
                 setForm({ ...form, targetType: e.target.value });
                 setTargetInfo({});
+                setCredentialProfiles([{}]);
               }}
             />
           </div>
 
-          {typesLoading && <p className="text-[11px] text-text-muted">Loading target types...</p>}
-          {typesError && <p className="text-[11px] text-yellow-400">{typesError}</p>}
+          {typesLoading && <p className="text-sm text-text-muted">Loading target types...</p>}
+          {typesError && <p className="text-sm text-yellow-400">{typesError}</p>}
 
           <div className="rounded-lg border border-border bg-surface-0/35 p-3">
             <div className="mb-3 flex items-center justify-between">
-              <p className="text-xs font-semibold tracking-wide text-text-secondary">Target Information</p>
-              <p className="text-[11px] text-text-muted">
+              <p className="text-sm font-semibold tracking-wide text-text-secondary">Target Information</p>
+              <p className="text-sm text-text-muted">
                 {targetFields.length} field{targetFields.length === 1 ? '' : 's'}
               </p>
             </div>
             {fieldsLoading ? (
-              <p className="text-[11px] text-text-muted">Loading target info fields from schema...</p>
+              <p className="text-sm text-text-muted">Loading target info fields from schema...</p>
             ) : (
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {targetFields.map((field) => {
-                  const isWideField = (
-                    field.data_type === 'array'
-                    || field.key.includes('headers')
-                    || field.key.includes('params')
-                    || field.key.includes('body')
-                    || field.key.includes('description')
-                    || field.key.startsWith('endpoints.')
-                    || field.key.startsWith('credentials.two_factor')
-                  );
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {nonCredentialFields.map((field) => {
+                    const isWideField = (
+                      field.data_type === 'array'
+                      || field.key.includes('headers')
+                      || field.key.includes('params')
+                      || field.key.includes('body')
+                      || field.key.includes('description')
+                      || field.key.startsWith('endpoints.')
+                    );
 
-                  if (field.data_type === 'enum') {
+                    if (field.data_type === 'enum') {
+                      return (
+                        <div key={field.key} className={isWideField ? 'md:col-span-2' : ''}>
+                          <Select
+                            label={`${field.label}${field.required ? ' *' : ''}`}
+                            options={(field.options.length > 0 ? field.options : ['']).map((value) => ({
+                              value,
+                              label: value || 'Unknown',
+                            }))}
+                            value={targetInfo[field.key] ?? ''}
+                            onChange={(event) => {
+                              setTargetInfo((previous) => ({
+                                ...previous,
+                                [field.key]: event.target.value,
+                              }));
+                            }}
+                          />
+                        </div>
+                      );
+                    }
+
+                    if (field.data_type === 'boolean') {
+                      return (
+                        <div key={field.key} className={isWideField ? 'md:col-span-2' : ''}>
+                          <Select
+                            label={`${field.label}${field.required ? ' *' : ''}`}
+                            options={[
+                              { value: 'true', label: 'True' },
+                              { value: 'false', label: 'False' },
+                            ]}
+                            value={targetInfo[field.key] ?? 'false'}
+                            onChange={(event) => {
+                              setTargetInfo((previous) => ({
+                                ...previous,
+                                [field.key]: event.target.value,
+                              }));
+                            }}
+                          />
+                        </div>
+                      );
+                    }
+
+                    const inputType = field.data_type === 'integer' || field.data_type === 'number' ? 'number' : 'text';
                     return (
                       <div key={field.key} className={isWideField ? 'md:col-span-2' : ''}>
-                        <Select
+                        <Input
                           label={`${field.label}${field.required ? ' *' : ''}`}
-                          options={(field.options.length > 0 ? field.options : ['']).map((value) => ({
-                            value,
-                            label: value || 'Unknown',
-                          }))}
+                          placeholder={field.key}
+                          type={inputType}
                           value={targetInfo[field.key] ?? ''}
                           onChange={(event) => {
                             setTargetInfo((previous) => ({
@@ -505,50 +730,122 @@ export default function Projects() {
                         />
                       </div>
                     );
-                  }
+                  })}
+                </div>
 
-                  if (field.data_type === 'boolean') {
-                    return (
-                      <div key={field.key} className={isWideField ? 'md:col-span-2' : ''}>
-                        <Select
-                          label={`${field.label}${field.required ? ' *' : ''}`}
-                          options={[
-                            { value: 'true', label: 'True' },
-                            { value: 'false', label: 'False' },
-                          ]}
-                          value={targetInfo[field.key] ?? 'false'}
-                          onChange={(event) => {
-                            setTargetInfo((previous) => ({
-                              ...previous,
-                              [field.key]: event.target.value,
-                            }));
-                          }}
-                        />
-                      </div>
-                    );
-                  }
-
-                  const inputType = field.data_type === 'integer' || field.data_type === 'number' ? 'number' : 'text';
-                  return (
-                    <div key={field.key} className={isWideField ? 'md:col-span-2' : ''}>
-                      <Input
-                        label={`${field.label}${field.required ? ' *' : ''}`}
-                        placeholder={field.key}
-                        type={inputType}
-                        value={targetInfo[field.key] ?? ''}
-                        onChange={(event) => {
-                          setTargetInfo((previous) => ({
-                            ...previous,
-                            [field.key]: event.target.value,
-                          }));
+                {credentialFields.length > 0 && (
+                  <div className="rounded-md border border-border bg-surface-1/35 p-2">
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-sm font-semibold tracking-wide text-text-secondary">
+                        Credential Profiles
+                      </p>
+                      <Button
+                        variant="secondary"
+                        size="xs"
+                        onClick={() => {
+                          setCredentialProfiles((previous) => [...previous, {}]);
                         }}
-                      />
+                        title="Add credential profile"
+                      >
+                        <Plus size={12} />
+                      </Button>
                     </div>
-                  );
-                })}
+                    <div className="space-y-2">
+                      {credentialProfiles.map((profile, profileIndex) => (
+                        <div key={`credential-profile-${profileIndex}`} className="rounded-md border border-border bg-surface-0/35 p-2">
+                          <div className="mb-2 flex items-center justify-between">
+                            <p className="text-sm font-semibold text-text-primary">
+                              Profile {profileIndex + 1}
+                            </p>
+                            <Button
+                              variant="ghost"
+                              size="xs"
+                              onClick={() => {
+                                setCredentialProfiles((previous) => (
+                                  previous.filter((_, idx) => idx !== profileIndex).length > 0
+                                    ? previous.filter((_, idx) => idx !== profileIndex)
+                                    : [{}]
+                                ));
+                              }}
+                              title="Remove profile"
+                            >
+                              <Trash2 size={12} />
+                            </Button>
+                          </div>
+                          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                            {credentialFields.map((field) => {
+                              const suffix = field.key.slice('credentials.'.length);
+                              const labelBase = field.label.startsWith('Credentials ')
+                                ? field.label.slice('Credentials '.length)
+                                : field.label;
+                              if (field.data_type === 'enum') {
+                                return (
+                                  <Select
+                                    key={`credential-${profileIndex}-${suffix}`}
+                                    label={`${labelBase}${field.required ? ' *' : ''}`}
+                                    options={(field.options.length > 0 ? field.options : ['']).map((value) => ({
+                                      value,
+                                      label: value || 'Unknown',
+                                    }))}
+                                    value={profile[suffix] ?? ''}
+                                    onChange={(event) => {
+                                      setCredentialProfiles((previous) => previous.map((entry, idx) => (
+                                        idx === profileIndex
+                                          ? { ...entry, [suffix]: event.target.value }
+                                          : entry
+                                      )));
+                                    }}
+                                  />
+                                );
+                              }
+
+                              if (field.data_type === 'boolean') {
+                                return (
+                                  <Select
+                                    key={`credential-${profileIndex}-${suffix}`}
+                                    label={`${labelBase}${field.required ? ' *' : ''}`}
+                                    options={[
+                                      { value: 'true', label: 'True' },
+                                      { value: 'false', label: 'False' },
+                                    ]}
+                                    value={profile[suffix] ?? 'false'}
+                                    onChange={(event) => {
+                                      setCredentialProfiles((previous) => previous.map((entry, idx) => (
+                                        idx === profileIndex
+                                          ? { ...entry, [suffix]: event.target.value }
+                                          : entry
+                                      )));
+                                    }}
+                                  />
+                                );
+                              }
+
+                              return (
+                                <Input
+                                  key={`credential-${profileIndex}-${suffix}`}
+                                  label={`${labelBase}${field.required ? ' *' : ''}`}
+                                  placeholder={suffix}
+                                  type={suffix.toLowerCase().includes('password') ? 'password' : 'text'}
+                                  value={profile[suffix] ?? ''}
+                                  onChange={(event) => {
+                                    setCredentialProfiles((previous) => previous.map((entry, idx) => (
+                                      idx === profileIndex
+                                        ? { ...entry, [suffix]: event.target.value }
+                                        : entry
+                                    )));
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
-            {fieldsError && <p className="mt-2 text-[11px] text-yellow-400">{fieldsError}</p>}
+            {fieldsError && <p className="mt-2 text-sm text-yellow-400">{fieldsError}</p>}
           </div>
 
           <Input
@@ -563,7 +860,7 @@ export default function Projects() {
               size="sm"
               onClick={() => {
                 setDialogOpen(false);
-                setCreatingProject(false);
+                resetProjectFormState();
               }}
             >
               Cancel
@@ -574,7 +871,7 @@ export default function Projects() {
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                handleCreate();
+                handleCreateOrUpdate();
               }}
               disabled={
                 creatingProject
@@ -585,7 +882,7 @@ export default function Projects() {
                 || fieldsLoading
               }
             >
-              Create
+              {editingProjectId ? 'Save' : 'Create'}
             </Button>
           </div>
         </div>
@@ -597,7 +894,7 @@ export default function Projects() {
         title="Stop Scan"
         description="Choose whether to pause or cancel the current scan."
       >
-        <div className="space-y-3 text-xs text-text-secondary">
+        <div className="space-y-3 text-sm text-text-secondary">
           <p>
             Pause will keep current logs and results so you can review them. Cancel will clear logs,
             agent results, and reset status to idle.

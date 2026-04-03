@@ -34,11 +34,11 @@ export function AgentStatus({ agents }: AgentStatusProps) {
             >
               <div className="flex items-center gap-2">
                 <Icon size={14} className="text-text-muted" />
-                <span className="text-xs font-medium text-text-primary capitalize">{agent.name}</span>
+                <span className="text-sm font-medium text-text-primary capitalize">{agent.name}</span>
               </div>
               <div className="flex items-center gap-2">
                 {agent.currentTask && (
-                  <span className="text-[10px] text-text-muted max-w-[140px] truncate">
+                  <span className="text-sm text-text-muted max-w-[140px] truncate">
                     {agent.currentTask}
                   </span>
                 )}

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import inspect
 import json
 import random
@@ -35,6 +36,8 @@ from server.core.tool import Tool, coerce_args_from_schema
 from .config import (
     PLANNER_CHECKLIST_WINDOW_MAX_ITEMS,
     PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE,
+    PLANNER_CHECKLIST_SUMMARY_MAX_CHANGED_ITEMS,
+    PLANNER_CHECKLIST_SUMMARY_MAX_HIGH_PRIORITY_PENDING,
     PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP,
     PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE,
     MAX_TOOL_ROUNDS,
@@ -95,8 +98,10 @@ class PlannerState(TypedDict):
     plan_result: dict[str, Any]
     error: str
     recovery_attempted: bool
+    world_state_hash: str
     intel_checklist_overview: dict[str, Any]
     intel_checklist_windows: list[dict[str, Any]]
+    intel_checklist_compact_summary: dict[str, Any]
     planning_round_cap: int
 
 
@@ -111,6 +116,7 @@ class PlannerResult:
     needs: list[dict] = field(default_factory=list)
     summary: str = ""
     tool_results: list[dict[str, Any]] = field(default_factory=list)
+    action_plan: dict[str, Any] = field(default_factory=dict)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -733,6 +739,9 @@ def _build_loop_plan_context_message() -> str:
             "{\"target\":\"\",\"scope\":\"\",\"target_types\":[],\"phases\":[],\"notes\":\"\"}"
         )
 
+    step_cap = max(0, int(PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE or 0))
+    scenario_cap = max(0, int(PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP or 0))
+
     compact_phases: list[dict[str, Any]] = []
     for phase in plan.get("phases", []):
         if not isinstance(phase, dict):
@@ -757,7 +766,8 @@ def _build_loop_plan_context_message() -> str:
                     else:
                         pending_scenarios += 1
 
-            for step in raw_steps[:PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE]:
+            steps_source = raw_steps if step_cap == 0 else raw_steps[:step_cap]
+            for step in steps_source:
                 if not isinstance(step, dict):
                     continue
                 raw_scenarios = step.get("scenarios", [])
@@ -767,7 +777,7 @@ def _build_loop_plan_context_message() -> str:
                         if not isinstance(scenario, dict):
                             continue
                         is_done = bool(scenario.get("done", False))
-                        if len(scenarios) >= PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP:
+                        if scenario_cap > 0 and len(scenarios) >= scenario_cap:
                             continue
                         scenarios.append(
                             {
@@ -804,9 +814,10 @@ def _build_loop_plan_context_message() -> str:
         "notes": str(plan.get("notes", "")),
         "phases": compact_phases,
         "context_window": {
-            "steps_per_phase": PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE,
-            "scenarios_per_step": PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP,
+            "steps_per_phase": step_cap,
+            "scenarios_per_step": scenario_cap,
             "mode": "compact",
+            "note": "0 means uncapped",
         },
     }
     return "Current plan context (JSON, compact window):\n" + json.dumps(
@@ -814,9 +825,132 @@ def _build_loop_plan_context_message() -> str:
     )
 
 
+def _compute_world_state_hash(
+    *,
+    user_message: str,
+    is_loop: bool,
+    checklist_compact_summary: dict[str, Any],
+) -> str:
+    canonical = {
+        "is_loop": bool(is_loop),
+        "user_message": str(user_message or "").strip(),
+        "checklist_compact_summary": checklist_compact_summary
+        if isinstance(checklist_compact_summary, dict)
+        else {},
+        "current_plan": _current_plan if isinstance(_current_plan, dict) else {},
+    }
+    raw = json.dumps(canonical, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _normalize_action_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize mutation-instruction action plan payload."""
+    if not isinstance(payload, dict):
+        return {}
+
+    def _as_list(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    normalized: dict[str, Any] = {
+        "loop": payload.get("loop"),
+        "engagement_id": str(payload.get("engagement_id", "") or ""),
+        "checklist_updates": [x for x in _as_list(payload.get("checklist_updates")) if isinstance(x, dict)],
+        "checklist_additions": [x for x in _as_list(payload.get("checklist_additions")) if isinstance(x, dict)],
+        "plan_modifications": [x for x in _as_list(payload.get("plan_modifications")) if isinstance(x, dict)],
+        "dispatch": [x for x in _as_list(payload.get("dispatch")) if isinstance(x, dict)],
+        "phase_advance": bool(payload.get("phase_advance", False)),
+        "phase_advance_blocked_by": [
+            str(x).strip() for x in _as_list(payload.get("phase_advance_blocked_by"))
+            if str(x).strip()
+        ],
+        "rationale": str(payload.get("rationale", "") or "").strip(),
+    }
+
+    # Optional nested/attached plan payload.
+    plan_obj = payload.get("plan")
+    if isinstance(plan_obj, dict):
+        normalized["plan"] = plan_obj
+
+    return normalized
+
+
+def _extract_action_plan_from_text(raw: str) -> dict[str, Any] | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    candidates: list[dict[str, Any]] = []
+
+    def _collect_candidate(obj: Any) -> None:
+        if not isinstance(obj, dict):
+            return
+        if "action_plan" in obj and isinstance(obj.get("action_plan"), dict):
+            candidates.append(obj["action_plan"])
+            return
+        keys = {
+            "checklist_updates",
+            "checklist_additions",
+            "plan_modifications",
+            "dispatch",
+            "phase_advance",
+            "phase_advance_blocked_by",
+            "rationale",
+        }
+        if any(k in obj for k in keys):
+            candidates.append(obj)
+
+    try:
+        parsed = json.loads(text)
+        _collect_candidate(parsed)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    if not candidates:
+        for block in re.findall(r"```(?:json)?\s*([\s\S]*?)```", text):
+            candidate = block.strip()
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            _collect_candidate(parsed)
+
+    if not candidates:
+        for marker in ('"action_plan"', '"checklist_updates"', '"dispatch"'):
+            marker_idx = text.find(marker)
+            if marker_idx < 0:
+                continue
+            start = text.rfind("{", 0, marker_idx)
+            while start >= 0:
+                obj_text = _extract_json_object_at(text, start)
+                if not obj_text:
+                    break
+                try:
+                    parsed = json.loads(obj_text)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                if parsed is not None:
+                    _collect_candidate(parsed)
+                    if candidates:
+                        break
+                start = text.rfind("{", 0, start)
+            if candidates:
+                break
+
+    if not candidates:
+        return None
+
+    normalized = _normalize_action_plan(candidates[0])
+    return normalized or None
+
+
 def _parse_planner_output(raw: str) -> PlannerResult:
     text = raw.strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    action_plan = _extract_action_plan_from_text(text) or {}
 
     json_str = text
     if "```json" in text:
@@ -846,15 +980,25 @@ def _parse_planner_output(raw: str) -> PlannerResult:
             summary = data_lower.get("summary", "")
             if isinstance(summary, dict):
                 summary = json.dumps(summary)
+            if not summary and action_plan:
+                summary = str(action_plan.get("rationale", "") or "")
             return PlannerResult(
-                scenarios=scenarios[:3], needs=needs, summary=str(summary)
+                scenarios=scenarios[:3],
+                needs=needs,
+                summary=str(summary),
+                action_plan=action_plan,
             )
     except (json.JSONDecodeError, ValueError):
         pass
 
     if text:
-        return PlannerResult(summary=text)
-    return PlannerResult(summary="No plan generated.")
+        fallback_summary = (
+            str(action_plan.get("rationale", "") or "").strip()
+            if action_plan
+            else text
+        )
+        return PlannerResult(summary=fallback_summary or text, action_plan=action_plan)
+    return PlannerResult(summary="No plan generated.", action_plan=action_plan)
 
 
 def _is_plan_payload(data: Any) -> bool:
@@ -903,6 +1047,15 @@ def _extract_plan_from_text(raw: str) -> dict[str, Any] | None:
         parsed = json.loads(text)
         if _is_plan_payload(parsed):
             return parsed
+        if isinstance(parsed, dict):
+            plan_obj = parsed.get("plan")
+            if _is_plan_payload(plan_obj):
+                return plan_obj
+            action_plan = parsed.get("action_plan")
+            if isinstance(action_plan, dict):
+                nested_plan = action_plan.get("plan")
+                if _is_plan_payload(nested_plan):
+                    return nested_plan
     except (json.JSONDecodeError, TypeError):
         pass
 
@@ -915,6 +1068,15 @@ def _extract_plan_from_text(raw: str) -> dict[str, Any] | None:
             parsed = json.loads(candidate)
             if _is_plan_payload(parsed):
                 return parsed
+            if isinstance(parsed, dict):
+                plan_obj = parsed.get("plan")
+                if _is_plan_payload(plan_obj):
+                    return plan_obj
+                action_plan = parsed.get("action_plan")
+                if isinstance(action_plan, dict):
+                    nested_plan = action_plan.get("plan")
+                    if _is_plan_payload(nested_plan):
+                        return nested_plan
         except (json.JSONDecodeError, TypeError):
             continue
 
@@ -1133,6 +1295,116 @@ def _build_intel_checklist_windows(
     return overview, windows
 
 
+def _build_intel_checklist_compact_summary(
+    checklist_payload: dict[str, Any],
+    *,
+    max_high_priority_pending: int = PLANNER_CHECKLIST_SUMMARY_MAX_HIGH_PRIORITY_PENDING,
+    max_changed: int = PLANNER_CHECKLIST_SUMMARY_MAX_CHANGED_ITEMS,
+) -> dict[str, Any]:
+    """Build a token-efficient checklist summary for planner context.
+
+    Priority scale (lower = more severe, industry standard):
+      P1 = Critical (SQLi, RCE, SSRF, Command Injection)
+      P2 = High (XSS, Auth Bypass, SSTI)
+      P3 = Medium (TLS, Headers, Config)
+      P4 = Low (Info leakage)
+      P5 = Info (Recon, Enumeration)
+
+    The source checklist from Intel is usually status-less (all pending), but this
+    keeps a stable schema that can later include real deltas from DB-backed runtime
+    checklist states.
+    """
+    normalized = _normalize_intel_checklist(checklist_payload)
+    phases = normalized.get("phases", [])
+    if not isinstance(phases, list):
+        phases = []
+
+    totals = {
+        "pending": 0,
+        "in_progress": 0,
+        "done": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    # Track high-priority items (P1=Critical, P2=High) for focused planning
+    high_priority_pending: list[dict[str, Any]] = []
+    phase_counts: list[dict[str, Any]] = []
+
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        phase_id = str(phase.get("phase", "")).strip()
+        title = str(phase.get("title", "")).strip() or phase_id or "Phase"
+        items = phase.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        phase_counts.append(
+            {
+                "phase": phase_id,
+                "title": title,
+                "items": len(items),
+            }
+        )
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            # Intel baseline has no runtime status; default to pending.
+            totals["pending"] += 1
+            priority = _coerce_checklist_priority(item.get("priority"))
+            # Capture high-priority items (P1=Critical, P2=High) for focus
+            if priority in (1, 2) and len(high_priority_pending) < max_high_priority_pending:
+                high_priority_pending.append(
+                    {
+                        "key": _normalized_token(name),
+                        "phase": phase_id or title,
+                        "label": name,
+                        "priority": priority,
+                    }
+                )
+
+    available_total = int(normalized.get("available_total", 0) or 0)
+    if available_total <= 0:
+        available_total = totals["pending"]
+
+    return {
+        "target_type": str(normalized.get("target_type", "") or ""),
+        "available_total": available_total,
+        "totals": totals,
+        "high_priority_pending": high_priority_pending,  # P1/P2 items to prioritize
+        # Reserved fields for DB/runtime checklist deltas.
+        "in_progress": [],
+        "just_completed": [],
+        "failed": [],
+        "phase_counts": phase_counts,
+        "max_changed_items": max_changed,
+    }
+
+
+def _build_intel_checklist_compact_message(summary: dict[str, Any]) -> str:
+    if not isinstance(summary, dict) or not summary:
+        return ""
+    payload = {
+        "target_type": str(summary.get("target_type", "")),
+        "available_total": int(summary.get("available_total", 0) or 0),
+        "totals": summary.get("totals", {}),
+        "high_priority_pending": summary.get("high_priority_pending", []),
+        "in_progress": summary.get("in_progress", []),
+        "just_completed": summary.get("just_completed", []),
+        "failed": summary.get("failed", []),
+        "phase_counts": summary.get("phase_counts", []),
+    }
+    return (
+        "Checklist compact state (JSON). Priority scale: P1=Critical, P2=High, P3=Medium, P4=Low, P5=Info. "
+        "Focus on high_priority_pending items (P1/P2) first. "
+        "Mutate via action_plan.checklist_updates/checklist_additions:\n"
+        + json.dumps(payload, ensure_ascii=True)
+    )
+
+
 def _build_intel_checklist_window_message(
     checklist_overview: dict[str, Any],
     checklist_windows: list[dict[str, Any]],
@@ -1199,6 +1471,8 @@ class PlannerAgent:
 
         logger.info("planner_initialized", mode=self._mode, model=self._model_name)
         self._graph = self._build_graph()
+        self._last_state_hash: str = ""
+        self._last_plan_result: PlannerResult | None = None
 
     def _tool_schemas_for_mode(self, is_loop: bool) -> list[dict[str, Any]]:
         if not is_loop:
@@ -1249,41 +1523,49 @@ class PlannerAgent:
         if state.get("recovery_attempted"):
             messages_raw = _compress_messages_for_retry(messages_raw)
 
-        # For initial planning, inject a rotating Intel checklist window per round.
-        # This keeps context bounded while still exposing full checklist coverage over rounds.
+        # For initial planning, inject compact checklist state once.
+        # This keeps context bounded and avoids re-injecting large windows every round.
         if not state.get("is_loop"):
-            checklist_windows = state.get("intel_checklist_windows", [])
-            if isinstance(checklist_windows, list) and checklist_windows:
-                checklist_overview = state.get("intel_checklist_overview", {})
-                checklist_ctx = _build_intel_checklist_window_message(
-                    checklist_overview
-                    if isinstance(checklist_overview, dict)
-                    else {},
-                    checklist_windows,
-                    round_count,
-                )
-                if checklist_ctx:
-                    window_idx = min(max(round_count - 1, 0), len(checklist_windows) - 1) + 1
-                    self._cb.on_step(
-                        f"Planner checklist window injected {window_idx}/{len(checklist_windows)}"
-                    )
-                    messages_raw = [
-                        *messages_raw,
-                        {"role": "user", "content": checklist_ctx},
-                    ]
-                if round_count >= round_cap:
-                    # Final initial-planning round: do not call tools.
-                    messages_raw = [
-                        *messages_raw,
-                        {
-                            "role": "user",
-                            "content": (
-                                "Final round: return final strict JSON now with keys "
-                                "`summary`, `needs`, `plan`. "
-                                "Do not call any tools."
-                            ),
-                        },
-                    ]
+            if round_count == 1:
+                compact_summary = state.get("intel_checklist_compact_summary", {})
+                if isinstance(compact_summary, dict) and compact_summary:
+                    checklist_ctx = _build_intel_checklist_compact_message(compact_summary)
+                    if checklist_ctx:
+                        self._cb.on_step("Planner checklist compact summary injected")
+                        messages_raw = [
+                            *messages_raw,
+                            {"role": "user", "content": checklist_ctx},
+                        ]
+                else:
+                    # Fallback path: if compact summary missing, use first checklist window.
+                    checklist_windows = state.get("intel_checklist_windows", [])
+                    if isinstance(checklist_windows, list) and checklist_windows:
+                        checklist_overview = state.get("intel_checklist_overview", {})
+                        checklist_ctx = _build_intel_checklist_window_message(
+                            checklist_overview if isinstance(checklist_overview, dict) else {},
+                            checklist_windows,
+                            1,
+                        )
+                        if checklist_ctx:
+                            self._cb.on_step("Planner checklist fallback window injected 1/1")
+                            messages_raw = [
+                                *messages_raw,
+                                {"role": "user", "content": checklist_ctx},
+                            ]
+
+            if round_count >= round_cap:
+                # Final initial-planning round: do not call tools.
+                messages_raw = [
+                    *messages_raw,
+                    {
+                        "role": "user",
+                        "content": (
+                            "Final round: return strict JSON now with keys "
+                            "`summary`, `needs`, `plan`, `action_plan`. "
+                            "Do not call any tools."
+                        ),
+                    },
+                ]
         messages = [_dict_to_msg(m) for m in messages_raw]
 
         # Adaptive token budget: allow more tokens in later rounds for plan output.
@@ -1652,6 +1934,7 @@ class PlannerAgent:
         content = state["last_response"]
         total_tools = state["total_tool_calls"]
         rounds = state["round_count"]
+        action_plan = _extract_action_plan_from_text(content) or {}
 
         if state.get("error"):
             self._cb.on_warn(f"Planning failed: {state['error']}")
@@ -1660,10 +1943,16 @@ class PlannerAgent:
                     "scenarios": [],
                     "needs": [],
                     "summary": f"Planning failed: {state['error']}",
+                    "action_plan": {},
                 }
             }
 
         plan_payload = _extract_plan_from_text(content)
+        if plan_payload is None and action_plan:
+            action_plan_plan = action_plan.get("plan")
+            if isinstance(action_plan_plan, dict):
+                plan_payload = action_plan_plan
+
         if plan_payload is not None:
             persist_status = await update_pentest_plan.execute(
                 plan_json=json.dumps(plan_payload, ensure_ascii=True)
@@ -1677,11 +1966,17 @@ class PlannerAgent:
                         "scenarios": [],
                         "needs": [],
                         "summary": f"Planning failed: {err_msg}",
+                        "action_plan": {},
                     }
                 }
             self._cb.on_done("Planner plan persisted (static apply).")
 
         result = _parse_planner_output(content)
+        if action_plan and not result.action_plan:
+            result.action_plan = action_plan
+        action_plan_payload = (
+            result.action_plan if isinstance(result.action_plan, dict) else {}
+        )
 
         # Planner runs in plan-only mode: never return scenario batches here.
         result.scenarios = []
@@ -1699,6 +1994,15 @@ class PlannerAgent:
                 "needs": result.needs,
                 "summary": result.summary,
                 "tool_results": state.get("last_tool_results", []),
+                "action_plan": action_plan_payload,
+                "checklist_updates": action_plan_payload.get("checklist_updates", []),
+                "checklist_additions": action_plan_payload.get("checklist_additions", []),
+                "plan_modifications": action_plan_payload.get("plan_modifications", []),
+                "dispatch": action_plan_payload.get("dispatch", []),
+                "phase_advance": bool(action_plan_payload.get("phase_advance", False)),
+                "phase_advance_blocked_by": action_plan_payload.get("phase_advance_blocked_by", []),
+                "rationale": action_plan_payload.get("rationale", ""),
+                "world_state_hash": state.get("world_state_hash", ""),
             }
         }
 
@@ -1948,14 +2252,28 @@ class PlannerAgent:
             system_content = "/nothink\n" + system_content
 
         checklist_payload = intel_checklist if isinstance(intel_checklist, dict) else {}
+        checklist_compact_summary = _build_intel_checklist_compact_summary(checklist_payload)
         checklist_overview, checklist_windows = _build_intel_checklist_windows(
             checklist_payload
         )
-        if not is_loop and checklist_windows:
+        if not is_loop and checklist_compact_summary:
             self._cb.on_step(
-                "Planner checklist windows prepared: "
-                f"{len(checklist_windows)} (items={checklist_overview.get('available_total', 0)})"
+                "Planner checklist compact state prepared: "
+                f"items={checklist_compact_summary.get('available_total', 0)} "
+                f"high_priority={len(checklist_compact_summary.get('high_priority_pending', []))}"
             )
+
+        world_state_hash = _compute_world_state_hash(
+            user_message=user_message,
+            is_loop=is_loop,
+            checklist_compact_summary=checklist_compact_summary,
+        )
+        if self._last_state_hash and self._last_state_hash == world_state_hash:
+            if self._last_plan_result is not None:
+                self._cb.on_done(
+                    "Planner world-state unchanged; reusing previous ActionPlan (0 LLM tokens)."
+                )
+                return self._last_plan_result
 
         initial_state: PlannerState = {
             "messages": [
@@ -1983,11 +2301,13 @@ class PlannerAgent:
             "plan_result": {},
             "error": "",
             "recovery_attempted": False,
+            "world_state_hash": world_state_hash,
             "intel_checklist_overview": checklist_overview,
             "intel_checklist_windows": checklist_windows,
+            "intel_checklist_compact_summary": checklist_compact_summary,
             "planning_round_cap": (
-                min(MAX_TOOL_ROUNDS, max(1, len(checklist_windows)))
-                if (not is_loop and checklist_windows)
+                min(MAX_TOOL_ROUNDS, 4)
+                if not is_loop
                 else MAX_TOOL_ROUNDS
             ),
         }
@@ -1995,12 +2315,16 @@ class PlannerAgent:
         final_state = await self._graph.ainvoke(initial_state)
 
         plan_data = final_state.get("plan_result") or {}
-        return PlannerResult(
+        result = PlannerResult(
             scenarios=plan_data.get("scenarios", []),
             needs=plan_data.get("needs", []),
             summary=plan_data.get("summary", ""),
             tool_results=plan_data.get("tool_results", []),
+            action_plan=plan_data.get("action_plan", {}),
         )
+        self._last_state_hash = world_state_hash
+        self._last_plan_result = result
+        return result
 
     async def close(self) -> None:
         await self._llm.close()

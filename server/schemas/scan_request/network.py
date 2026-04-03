@@ -5,7 +5,7 @@ from enum import Enum
 from .credentials import Credential
 
 class NetworkType(str, Enum):
-    full_infrastructure = "full_infrastructure"  # full internal network
+    ethernet = "ethernet"  
     wifi                = "wifi"                 # wireless network
     voip                = "voip"                 # VoIP / SIP
     firewall            = "firewall"             # firewall / ACL rules
@@ -15,14 +15,11 @@ class NetworkType(str, Enum):
 # Sub-configs per network type
 # ─────────────────────────────────────────────
 
-class InfrastructureConfig(BaseModel):
+class EthernetConfig(BaseModel):
     cidr:               List[str]                # ["192.168.1.0/24", "10.0.0.0/16"]
     excluded_hosts:     Optional[List[str]] = None  # IPs to never touch
     gateway:            Optional[str]  = None    # e.g. "192.168.1.1"
-    dns_server:         Optional[str]  = None    # e.g. "192.168.1.53"
     port_range:         Optional[str]  = "1-65535"
-    stealth_mode:       Optional[bool] = False   # slow scan to avoid IDS
-
 class WifiConfig(BaseModel):
     ssid:               str    # target network name
     bssid:              Optional[str]  = None    # target MAC address
@@ -57,10 +54,7 @@ class VpnConfig(BaseModel):
 
 class FirewallConfig(BaseModel):
     target_ip:          str                      # firewall IP
-    test_bypass:        Optional[bool] = True    # test ACL bypass techniques
-    test_dos:           Optional[bool] = False   # DoS resistance (careful!)
-    test_fragmentation: Optional[bool] = True    # fragmented packet evasion
-
+    
 
 # ─────────────────────────────────────────────
 # Main Request
@@ -69,7 +63,7 @@ class FirewallConfig(BaseModel):
 class NetworkScanRequest(BaseModel):
     network_type:       NetworkType
     depth:              Optional[int]  = 3       # how deep to scan (e.g. for pivoting)
-    infrastructure:     Optional[InfrastructureConfig] = None
+    ethernet:           Optional[EthernetConfig] = None
     wifi:               Optional[WifiScanConfig]       = None
     voip:               Optional[VoipConfig]           = None
     vpn:                Optional[VpnConfig]            = None

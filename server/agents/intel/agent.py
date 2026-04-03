@@ -51,7 +51,12 @@ from server.agents.intel.config import (
 )
 from server.db.knowledge.storage.intel_state_store import IntelStateStore
 from server.db.projects import ProjectsStore
-from .prompts import FORMATTER_SYSTEM_PROMPT, build_user_message
+from .prompts import (
+    FORMATTER_SYSTEM_PROMPT,
+    PRIORITY_REPROMPT_SYSTEM_PROMPT,
+    build_priority_reprompt_prompt,
+    build_user_message,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -564,10 +569,13 @@ def _apply_info_constraints_to_summary(summary: str, info: str) -> str:
 def _phase_block_title(phase: str) -> str:
     return {
         "1": "Reconnaissance",
-        "2": "Mapping",
-        "3": "Configuration Review",
-        "4": "Exploitation & Validation",
-        "5": "Session & Access Control",
+        "2": "Enumeration",
+        "3": "Configuration & Infrastructure Testing",
+        "4": "Authentication, Authorization & Injection Testing",
+        "5": "Session Management Testing",
+        "6": "Exploitation & Validation",
+        "7": "Post-Exploitation",
+        "8": "Reporting",
     }.get(str(phase).strip(), f"Phase {phase or 'unknown'}")
 
 
@@ -831,6 +839,56 @@ def _normalize_llm_priorities_only(payload: dict[str, Any]) -> dict[str, Any]:
         "target_type": str(payload.get("target_type", "")).strip(),
         "available_total": int(payload.get("available_total", 0) or 0),
         "checklist": normalized_blocks,
+    }
+
+
+def _strip_checklist_priorities(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the same checklist structure with priority fields removed from all items."""
+    if not _is_structured_checklist_payload(payload):
+        return payload
+
+    stripped_blocks: list[dict[str, Any]] = []
+    raw_blocks = payload.get("checklist", [])
+    if not isinstance(raw_blocks, list):
+        raw_blocks = []
+
+    for raw_block in raw_blocks:
+        if not isinstance(raw_block, dict):
+            continue
+        phase = str(raw_block.get("phase", "")).strip()
+        title = str(raw_block.get("title", "")).strip()
+        items = raw_block.get("items", [])
+        if not phase or not title or not isinstance(items, list):
+            continue
+
+        normalized_items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                name = str(item.get("name", item.get("title", ""))).strip()
+            else:
+                name = str(item).strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append({"name": name})
+
+        if normalized_items:
+            stripped_blocks.append(
+                {
+                    "phase": phase,
+                    "title": title,
+                    "items": normalized_items,
+                }
+            )
+
+    return {
+        "target_type": str(payload.get("target_type", "")).strip(),
+        "available_total": int(payload.get("available_total", 0) or 0),
+        "checklist": stripped_blocks,
     }
 
 
@@ -1553,45 +1611,43 @@ class IntelAgent:
             base_checklist_payload=cleaned_payload or None,
         )
 
-        llm_produced_checklist = bool(
-            isinstance(llm_result.checklist, dict) and _is_structured_checklist_payload(llm_result.checklist)
-        )
         structured_checklist = llm_result.checklist or cleaned_payload
 
-        # ── Priority resolution ────────────────────────────────────────
-        # Three-stage cascade:
-        #   1. LLM already set all priorities → just normalize/clamp
-        #   2. LLM missed some → one focused re-prompt to fill them in
-        #   3. Re-prompt also fails → deterministic hardcode fallback
-        if _is_structured_checklist_payload(structured_checklist):
-            if llm_produced_checklist:
-                structured_checklist = _normalize_llm_priorities_only(structured_checklist)
+        # ── Priority resolution (LLM-only strict mode) ─────────────────
+        # Requirement:
+        #   - Priorities must come from LLM output.
+        #   - If LLM cannot provide complete priorities, stop the scan.
+        if not _is_structured_checklist_payload(structured_checklist):
+            message = "Intel checklist payload is invalid; stopping scan in strict LLM-priority mode."
+            self._cb.on_warn(message)
+            logger.error("intel_checklist_invalid_strict_failure", target_type=target_type)
+            raise RuntimeError(message)
 
-            if not _checklist_all_items_have_priority(structured_checklist):
-                self._cb.on_warn(
-                    "Checklist missing priorities — sending focused re-prompt to LLM"
+        if _is_structured_checklist_payload(structured_checklist):
+            # Enforce re-prompt-only priority ownership: strip any existing priorities first.
+            structured_checklist = _strip_checklist_priorities(structured_checklist)
+
+            self._cb.on_step(
+                "Sending Intel checklist result to LLM to add priorities and re-phase"
+            )
+            refined = await self._fix_missing_priorities(
+                structured_checklist, target_type, info
+            )
+            if refined:
+                structured_checklist = refined
+                self._cb.on_done("Checklist priorities/phases refined by LLM")
+                logger.info("intel_priority_refined_by_llm", target_type=target_type)
+            else:
+                message = (
+                    "LLM priority refinement failed or timed out; "
+                    "stopping scan (no hardcoded fallback)."
                 )
-                logger.info(
-                    "intel_priority_recheck",
+                self._cb.on_warn(message)
+                logger.error(
+                    "intel_priority_refinement_strict_failure",
                     target_type=target_type,
-                    reason="missing_priorities",
                 )
-                fixed = await self._fix_missing_priorities(
-                    structured_checklist, target_type, info
-                )
-                if fixed:
-                    structured_checklist = fixed
-                    self._cb.on_done("Priorities filled by LLM re-prompt")
-                    logger.info("intel_priority_fixed_by_llm", target_type=target_type)
-                else:
-                    self._cb.on_warn(
-                        "LLM re-prompt did not fix priorities — falling back to hardcode"
-                    )
-                    logger.warning(
-                        "intel_priority_hardcode_fallback", target_type=target_type
-                    )
-                    structured_checklist = _ensure_checklist_priorities(structured_checklist)
-            # else: all priorities already present, nothing to do
+                raise RuntimeError(message)
 
             self._cb.on_step("Auto-normalizing checklist with set_checklist")
             checklist_names = _flatten_checklist_item_names(structured_checklist)
@@ -1663,61 +1719,133 @@ class IntelAgent:
         Single focused LLM call to add missing priorities to checklist items.
 
         Sends the checklist as-is and asks only for priorities to be filled.
-        Returns the normalized payload on success, or an empty dict on any failure
-        so the caller can fall back to _ensure_checklist_priorities.
+        Returns a fully-prioritized payload on success, or an empty dict on failure.
         """
-        prompt = (
-            f"Add a priority (integer 1-5) to every checklist item below.\n"
-            f"Target: {target_type}\n"
-            f"Info: {info or 'none'}\n\n"
-            "Priority scale:\n"
-            "5 = critical  (direct exploitation, auth bypass, injections)\n"
-            "4 = high      (logic flaws, broken access control)\n"
-            "3 = medium    (configuration issues, info disclosure)\n"
-            "2 = low       (best practices, hardening)\n"
-            "1 = info      (informational only)\n\n"
-            "Rules:\n"
-            "- Return strict JSON only. No markdown fences, no prose.\n"
-            "- Keep the exact same structure as the input.\n"
-            "- Every item MUST be an object with keys: name, priority.\n"
-            "- priority MUST be an integer 1-5.\n\n"
-            f"Checklist:\n{json.dumps(checklist, ensure_ascii=True)}"
+        prompt = build_priority_reprompt_prompt(
+            checklist=checklist,
+            target_type=target_type,
+            info=info,
         )
+
+        def _extract_json_object_at(text: str, start_idx: int) -> str | None:
+            if start_idx < 0 or start_idx >= len(text) or text[start_idx] != "{":
+                return None
+            depth = 0
+            in_string = False
+            escape = False
+            for idx in range(start_idx, len(text)):
+                ch = text[idx]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start_idx : idx + 1]
+            return None
+
+        def _parse_json_best_effort(raw_text: str) -> Any | None:
+            text = re.sub(r"<think>.*?</think>", "", str(raw_text or ""), flags=re.DOTALL).strip()
+            if not text:
+                return None
+
+            candidates: list[str] = [text]
+            for block in re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE):
+                candidate = block.strip()
+                if candidate:
+                    candidates.append(candidate)
+
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                obj_text = _extract_json_object_at(text, first_brace)
+                if obj_text:
+                    candidates.append(obj_text)
+
+            for candidate in candidates:
+                probe = candidate
+                for _ in range(3):
+                    try:
+                        parsed = json.loads(probe)
+                    except (json.JSONDecodeError, TypeError):
+                        break
+
+                    if isinstance(parsed, dict):
+                        return parsed
+                    if isinstance(parsed, list):
+                        return parsed
+                    if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+                        return parsed[0]
+                    if isinstance(parsed, str):
+                        next_probe = parsed.strip()
+                        if not next_probe or next_probe == probe:
+                            break
+                        probe = next_probe
+                        continue
+                    break
+            return None
+
+        def _has_sequential_phases(payload: dict[str, Any]) -> bool:
+            if not _is_structured_checklist_payload(payload):
+                return False
+            blocks = payload.get("checklist", [])
+            if not isinstance(blocks, list) or not blocks:
+                return False
+            phases: list[str] = []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    return False
+                phase = str(block.get("phase", "")).strip()
+                if not phase.isdigit():
+                    return False
+                phases.append(phase)
+            expected = [str(idx) for idx in range(1, len(phases) + 1)]
+            return phases == expected
+
         try:
             response = await asyncio.wait_for(
                 self._llm.chat(
-                    [ChatMessage(role="user", content=prompt)],
+                    [
+                        ChatMessage(
+                            role="system",
+                            content=PRIORITY_REPROMPT_SYSTEM_PROMPT,
+                        ),
+                        ChatMessage(role="user", content=prompt),
+                    ],
                     temperature=0,
                     max_tokens=11000,
                 ),
-                timeout=20,
+                timeout=60,
             )
-            raw = (response.content or "").strip()
+            parsed = _parse_json_best_effort(response.content or "")
+            if parsed is not None:
+                if isinstance(parsed, dict) and _is_structured_checklist_payload(parsed):
+                    normalized = _normalize_llm_priorities_only(parsed)
+                    if _checklist_all_items_have_priority(normalized) and _has_sequential_phases(normalized):
+                        return normalized
 
-            # Strip markdown fences if the LLM wrapped the JSON anyway
-            if "```json" in raw:
-                start = raw.index("```json") + 7
-                end = raw.index("```", start) if "```" in raw[start:] else len(raw)
-                raw = raw[start:end].strip()
-            elif raw.startswith("```"):
-                start = raw.index("```") + 3
-                end = raw.index("```", start) if "```" in raw[start:] else len(raw)
-                raw = raw[start:end].strip()
-
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict) and _is_structured_checklist_payload(parsed):
-                normalized = _normalize_llm_priorities_only(parsed)
-                if _checklist_all_items_have_priority(normalized):
-                    return normalized
+            # If the model returns malformed/partial payload, fail softly so caller fallback applies.
+            logger.info("intel_fix_priorities_unusable_payload", target_type=target_type)
 
         except Exception as exc:
             logger.warning(
                 "intel_fix_priorities_failed",
                 error=str(exc),
+                error_type=type(exc).__name__,
+                error_repr=repr(exc),
                 target_type=target_type,
             )
 
-        # Signal failure — caller will hardcode
+        # Signal failure — caller runs strict stop behavior.
         return {}
 
     # ── LLM Formatter ──────────────────────────────────────────────────

@@ -27,11 +27,11 @@ export function FindingsTable({ findings, limit = 10 }: FindingsTableProps) {
     <Card className="p-0">
       <CardHeader className="px-4 pt-4">
         <CardTitle>Recent Findings</CardTitle>
-        <span className="text-[11px] text-text-muted">{findings.length} total</span>
+        <span className="text-xs text-text-muted">{findings.length} total</span>
       </CardHeader>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-text-muted">
               <th className="text-left px-4 py-2 font-medium">Severity</th>

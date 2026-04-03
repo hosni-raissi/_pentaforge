@@ -28,7 +28,7 @@ export function StatsGrid({ findings }: StatsGridProps) {
           </div>
           <div>
             <p className="text-2xl font-bold text-text-primary">{value}</p>
-            <p className="text-[11px] text-text-muted">{label}</p>
+            <p className="text-sm text-text-muted">{label}</p>
           </div>
         </Card>
       ))}

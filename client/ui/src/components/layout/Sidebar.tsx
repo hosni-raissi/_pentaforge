@@ -29,7 +29,7 @@ export function Sidebar() {
       <div className="border-b border-border px-3 py-3">
         <div className="flex items-center gap-2">
           <Shield size={14} className="text-pf-500" />
-          <span className="truncate text-[11px] font-medium text-text-secondary">
+          <span className="truncate text-sm font-medium text-text-secondary">
             {running?.name ?? "No active scan"}
           </span>
         </div>
@@ -49,7 +49,7 @@ export function Sidebar() {
               key={to}
               to={to}
               className={clsx(
-                "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors duration-100",
+                "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors duration-100",
                 active
                   ? "bg-pf-600/15 text-pf-400"
                   : "text-text-secondary hover:bg-surface-2 hover:text-text-primary"
@@ -63,7 +63,7 @@ export function Sidebar() {
       </nav>
 
       <div className="border-t border-border px-3 py-2">
-        <span className="text-[10px] text-text-muted">v1.0.0</span>
+        <span className="text-xs text-text-muted">v1.0.0</span>
       </div>
     </aside>
   );

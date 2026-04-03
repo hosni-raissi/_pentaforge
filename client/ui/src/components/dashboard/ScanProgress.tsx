@@ -12,7 +12,7 @@ export function ScanProgress({ phases, progress }: ScanProgressProps) {
     <Card>
       <CardHeader>
         <CardTitle>Scan Progress</CardTitle>
-        <span className="text-xs text-pf-400 font-mono">{progress}%</span>
+        <span className="text-sm text-pf-400 font-mono">{progress}%</span>
       </CardHeader>
 
       {/* Overall bar */}
@@ -37,7 +37,7 @@ export function ScanProgress({ phases, progress }: ScanProgressProps) {
 
             {/* Phase name */}
             <span className={clsx(
-              'text-xs flex-1',
+              'text-sm flex-1',
               phase.status === 'active' ? 'text-text-primary font-medium' : 'text-text-muted'
             )}>
               {phase.name}
@@ -54,7 +54,7 @@ export function ScanProgress({ phases, progress }: ScanProgressProps) {
               />
             </div>
 
-            <span className="text-[10px] text-text-muted w-8 text-right font-mono">
+            <span className="text-sm text-text-muted w-8 text-right font-mono">
               {phase.progress}%
             </span>
           </div>

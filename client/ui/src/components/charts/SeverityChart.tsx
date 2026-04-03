@@ -76,7 +76,7 @@ export function SeverityChart({ findings }: SeverityChartProps) {
               className="w-2 h-2 rounded-full"
               style={{ backgroundColor: SEVERITY_COLORS[d.name as keyof typeof SEVERITY_COLORS] }}
             />
-            <span className="text-[10px] text-text-muted capitalize">{d.name}: {d.value}</span>
+            <span className="text-xs text-text-muted capitalize">{d.name}: {d.value}</span>
           </div>
         ))}
       </div>

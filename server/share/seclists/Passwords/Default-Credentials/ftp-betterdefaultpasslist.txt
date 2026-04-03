@@ -1,0 +1,10 @@
+ftp:ftp
+ftp:anonymous
+anonymous:anonymous
+anonymous:guest
+admin:admin
+admin:password
+root:root
+user:user
+test:test
+support:support

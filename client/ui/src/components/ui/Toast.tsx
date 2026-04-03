@@ -73,11 +73,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               <div className="flex items-start gap-2.5">
                 <Icon size={16} className={cn('mt-0.5 shrink-0', iconStyles[t.variant])} />
                 <div className="flex-1 min-w-0">
-                  <ToastPrimitive.Title className="text-xs font-medium text-text-primary">
+                  <ToastPrimitive.Title className="text-sm font-medium text-text-primary">
                     {t.title}
                   </ToastPrimitive.Title>
                   {t.description && (
-                    <ToastPrimitive.Description className="text-[11px] text-text-muted mt-0.5">
+                    <ToastPrimitive.Description className="text-sm text-text-muted mt-0.5">
                       {t.description}
                     </ToastPrimitive.Description>
                   )}

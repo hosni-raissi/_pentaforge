@@ -11,7 +11,22 @@ from .tools import ALL_REPORT_TOOLS
 
 
 class ReportExecuterAgent(BaseExecuterAgent):
-    """Executes reporting scenarios."""
+    """
+    Transforms verified findings into professional, audit-ready security reports.
+
+    Capabilities:
+    - Calculate CVSS 3.1 scores with full vector strings
+    - Map findings to OWASP Top 10 2021, MITRE ATT&CK, and CWE
+    - Generate LLM-authored remediation guidance with code examples
+    - Produce PDF, HTML, SARIF, and JSON report outputs
+    - Create executive summaries with risk heat maps
+
+    Report outputs include:
+    - JSON: Structured data for programmatic access
+    - HTML: Interactive web reports with charts
+    - SARIF: CI/CD and IDE integration format
+    - PDF: Professional print-ready documents
+    """
 
     def __init__(
         self,

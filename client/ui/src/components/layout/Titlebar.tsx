@@ -45,8 +45,8 @@ export function Titlebar() {
       <div className="flex min-w-0 items-center gap-2 flex-1" data-tauri-drag-region>
         <div className="h-3 w-3 rounded-sm bg-pf-600" />
         <div className="min-w-0 leading-tight">
-          <div className="text-xs font-semibold tracking-wide text-text-primary">PENTAFORGE</div>
-          <div className="truncate font-mono text-[10px] text-text-muted">{routeLabel}</div>
+          <div className="text-sm font-semibold tracking-wide text-text-primary">PENTAFORGE</div>
+          <div className="truncate font-mono text-sm text-text-muted">{routeLabel}</div>
         </div>
       </div>
 

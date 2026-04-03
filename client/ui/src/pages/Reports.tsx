@@ -25,7 +25,7 @@ export default function Reports() {
         {['PDF Report', 'HTML Report', 'SARIF Export'].map((type) => (
           <Card key={type} hover className="flex flex-col items-center py-6 gap-3">
             <FileText size={24} className="text-pf-400" />
-            <span className="text-xs font-medium text-text-primary">{type}</span>
+            <span className="text-sm font-medium text-text-primary">{type}</span>
             <Button size="sm" variant="secondary">
               <Download size={12} /> Generate
             </Button>

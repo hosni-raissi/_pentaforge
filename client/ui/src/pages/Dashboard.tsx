@@ -1,16 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, Clock3, FolderOpen, Pencil, Play, Plus, Repeat2, Square, Trash2, X } from "lucide-react";
+import {
+  Check,
+  Clock3,
+  FolderOpen,
+  Maximize2,
+  Minimize2,
+  Pencil,
+  Play,
+  Plus,
+  Repeat2,
+  Square,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import { AIPromptPanel } from "@/components/dashboard/AIPromptPanel";
-import { AgentStatePath, type AgentGraphRole, type AgentInsightPanelData } from "@/components/dashboard/AgentStatePath";
+import {
+  AgentStatePath,
+  type AgentGraphRole,
+  type AgentInsightPanelData,
+} from "@/components/dashboard/AgentStatePath";
 import { FindingsTable } from "@/components/dashboard/FindingsTable";
 import { StatsGrid } from "@/components/dashboard/StatsGrid";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
+import { Input } from "@/components/ui/Input";
 import {
+  approvePlannerForProjectScanFromDesktop,
   listProjectScanEventsFromDesktop,
   saveProjectToDesktop,
   streamProjectScanEvents,
@@ -102,15 +121,32 @@ interface DashboardLogEntry {
   source: string;
 }
 
-const PROJECT_STATUSES: ProjectStatus[] = ["idle", "running", "paused", "completed", "error"];
-const AGENT_ROLES: AgentGraphRole[] = ["intel", "planner", "recon", "exploit", "verify", "report", "retest", "perceptor"];
+const PROJECT_STATUSES: ProjectStatus[] = [
+  "idle",
+  "running",
+  "paused",
+  "completed",
+  "error",
+];
+const AGENT_ROLES: AgentGraphRole[] = [
+  "intel",
+  "planner",
+  "recon",
+  "exploit",
+  "verify",
+  "report",
+  "retest",
+  "perceptor",
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
 function isAgentRole(value: unknown): value is AgentGraphRole {
-  return typeof value === "string" && AGENT_ROLES.includes(value as AgentGraphRole);
+  return (
+    typeof value === "string" && AGENT_ROLES.includes(value as AgentGraphRole)
+  );
 }
 
 function detectEventAgentRole(event: ScanEventPayload): AgentGraphRole | null {
@@ -146,7 +182,9 @@ function toProjectStatus(value: unknown): ProjectStatus | null {
   if (typeof value !== "string") {
     return null;
   }
-  return PROJECT_STATUSES.includes(value as ProjectStatus) ? (value as ProjectStatus) : null;
+  return PROJECT_STATUSES.includes(value as ProjectStatus)
+    ? (value as ProjectStatus)
+    : null;
 }
 
 function normalizeRunningStatus(project: {
@@ -157,14 +195,15 @@ function normalizeRunningStatus(project: {
     return project.status;
   }
   const lastScan = isRecord(project.lastScan) ? project.lastScan : null;
-  const lastScanStatus = typeof lastScan?.status === "string"
-    ? lastScan.status.trim().toLowerCase()
-    : "";
+  const lastScanStatus =
+    typeof lastScan?.status === "string"
+      ? lastScan.status.trim().toLowerCase()
+      : "";
   if (
-    lastScanStatus === "completed"
-    || lastScanStatus === "paused"
-    || lastScanStatus === "idle"
-    || lastScanStatus === "error"
+    lastScanStatus === "completed" ||
+    lastScanStatus === "paused" ||
+    lastScanStatus === "idle" ||
+    lastScanStatus === "error"
   ) {
     return lastScanStatus as ProjectStatus;
   }
@@ -259,7 +298,9 @@ function normalizePhase(value: unknown): string {
   return digitMatch[0];
 }
 
-function toStructuredChecklist(value: unknown): StructuredChecklistPayload | null {
+function toStructuredChecklist(
+  value: unknown,
+): StructuredChecklistPayload | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -274,7 +315,8 @@ function toStructuredChecklist(value: unknown): StructuredChecklistPayload | nul
       continue;
     }
     const phase = normalizePhase(block.phase);
-    const title = normalizeText(block.title) || (phase ? `Phase ${phase}` : "Checklist");
+    const title =
+      normalizeText(block.title) || (phase ? `Phase ${phase}` : "Checklist");
     const rawItems = block.items;
     if (!Array.isArray(rawItems)) {
       continue;
@@ -317,9 +359,11 @@ function toStructuredChecklist(value: unknown): StructuredChecklistPayload | nul
   }
 
   const targetType = normalizeText(value.target_type) || "web_app";
-  const availableTotal = typeof value.available_total === "number" && Number.isFinite(value.available_total)
-    ? value.available_total
-    : blocks.reduce((count, block) => count + block.items.length, 0);
+  const availableTotal =
+    typeof value.available_total === "number" &&
+    Number.isFinite(value.available_total)
+      ? value.available_total
+      : blocks.reduce((count, block) => count + block.items.length, 0);
 
   return {
     target_type: targetType,
@@ -328,7 +372,9 @@ function toStructuredChecklist(value: unknown): StructuredChecklistPayload | nul
   };
 }
 
-function cloneStructuredChecklist(payload: StructuredChecklistPayload): StructuredChecklistPayload {
+function cloneStructuredChecklist(
+  payload: StructuredChecklistPayload,
+): StructuredChecklistPayload {
   return {
     target_type: payload.target_type,
     available_total: payload.available_total,
@@ -343,13 +389,16 @@ function cloneStructuredChecklist(payload: StructuredChecklistPayload): Structur
   };
 }
 
-function checklistFromLabels(labels: string[], targetType = "web_app"): StructuredChecklistPayload | null {
+function checklistFromLabels(
+  labels: string[],
+  targetType = "web_app",
+): StructuredChecklistPayload | null {
   if (labels.length === 0) {
     return null;
   }
   const items: StructuredChecklistItem[] = labels.map((label) => {
     const trimmed = label.trim();
-    const match = trimmed.match(/^\[P([1-5])\]\s+(.+)$/i);
+    const match = trimmed.match(/^\[[PS]([1-5])\]\s+(.+)$/i);
     if (match && match[2]) {
       return {
         name: match[2].trim(),
@@ -410,7 +459,9 @@ function extractChecklistLabels(summary: string): string[] {
   return labels;
 }
 
-function extractChecklistLabelsFromStructuredChecklist(value: unknown): string[] {
+function extractChecklistLabelsFromStructuredChecklist(
+  value: unknown,
+): string[] {
   const structured = toStructuredChecklist(value);
   if (!structured) {
     return [];
@@ -425,7 +476,7 @@ function extractChecklistLabelsFromStructuredChecklist(value: unknown): string[]
         continue;
       }
       seen.add(key);
-      labels.push(`[P${item.priority}] ${item.name}`);
+      labels.push(`[S${item.priority}] ${item.name}`);
     }
   }
   return labels;
@@ -437,7 +488,10 @@ function buildChecklistInsightText(value: unknown, maxItems = 18): string {
     return "";
   }
 
-  const totalItems = structured.checklist.reduce((count, block) => count + block.items.length, 0);
+  const totalItems = structured.checklist.reduce(
+    (count, block) => count + block.items.length,
+    0,
+  );
   const phaseCount = structured.checklist.length;
   const lines: string[] = [
     `Checklist finalized: ${totalItems} items across ${phaseCount} phases.`,
@@ -457,7 +511,7 @@ function buildChecklistInsightText(value: unknown, maxItems = 18): string {
       if (shown >= maxItems) {
         break;
       }
-      lines.push(`- [P${item.priority}] ${item.name}`);
+      lines.push(`- [S${item.priority}] ${item.name}`);
       shown += 1;
     }
     if (shown >= maxItems) {
@@ -495,7 +549,9 @@ function toPlannerPlanSummary(value: unknown): PlannerPlanSummary | null {
       if (!isRecord(rawStep)) {
         continue;
       }
-      const rawScenarios = Array.isArray(rawStep.scenarios) ? rawStep.scenarios : [];
+      const rawScenarios = Array.isArray(rawStep.scenarios)
+        ? rawStep.scenarios
+        : [];
       for (const rawScenario of rawScenarios) {
         if (!isRecord(rawScenario)) {
           continue;
@@ -509,7 +565,7 @@ function toPlannerPlanSummary(value: unknown): PlannerPlanSummary | null {
 
     phases.push({
       name: normalizeText(rawPhase.name) || `Phase ${phaseIndex + 1}`,
-      priority: normalizePriority(rawPhase.priority) ?? (phaseIndex + 1),
+      priority: normalizePriority(rawPhase.priority) ?? phaseIndex + 1,
       stepCount: rawSteps.filter((step) => isRecord(step)).length,
       scenarioCount,
       completedScenarioCount,
@@ -561,18 +617,30 @@ function buildPlannerInsightText(
 
   const plan = toPlannerPlanSummary(planData);
   if (plan) {
-    const totalSteps = plan.phases.reduce((count, phase) => count + phase.stepCount, 0);
-    const totalScenarios = plan.phases.reduce((count, phase) => count + phase.scenarioCount, 0);
-    const totalDone = plan.phases.reduce((count, phase) => count + phase.completedScenarioCount, 0);
+    const totalSteps = plan.phases.reduce(
+      (count, phase) => count + phase.stepCount,
+      0,
+    );
+    const totalScenarios = plan.phases.reduce(
+      (count, phase) => count + phase.scenarioCount,
+      0,
+    );
+    const totalDone = plan.phases.reduce(
+      (count, phase) => count + phase.completedScenarioCount,
+      0,
+    );
     const targetLabel = plan.target || "target";
     lines.push(
       `${targetLabel}: ${plan.phases.length} phases, ${totalSteps} steps, ${totalScenarios} scenarios (${totalDone} completed).`,
     );
     lines.push("", "Phase breakdown:");
     for (const phase of plan.phases) {
-      const pending = Math.max(phase.scenarioCount - phase.completedScenarioCount, 0);
+      const pending = Math.max(
+        phase.scenarioCount - phase.completedScenarioCount,
+        0,
+      );
       lines.push(
-        `- P${phase.priority} ${phase.name}: ${phase.stepCount} steps, ${phase.scenarioCount} scenarios, ${pending} pending`,
+        `- S${phase.priority} ${phase.name}: ${phase.stepCount} steps, ${phase.scenarioCount} scenarios, ${pending} pending`,
       );
     }
   }
@@ -619,7 +687,9 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
       if (!isRecord(rawStep)) {
         continue;
       }
-      const rawScenarios = Array.isArray(rawStep.scenarios) ? rawStep.scenarios : [];
+      const rawScenarios = Array.isArray(rawStep.scenarios)
+        ? rawStep.scenarios
+        : [];
       const scenarios: PlannerScenarioView[] = [];
       for (const rawScenario of rawScenarios) {
         if (!isRecord(rawScenario)) {
@@ -635,7 +705,8 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
         });
       }
 
-      const description = normalizeText(rawStep.description) || normalizeText(rawStep.id);
+      const description =
+        normalizeText(rawStep.description) || normalizeText(rawStep.id);
       if (!description && scenarios.length === 0) {
         continue;
       }
@@ -658,7 +729,10 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
   return { phases };
 }
 
-function buildTargetArchitectureDraft(targetType: string, target: string): TargetArchitectureDraft {
+function buildTargetArchitectureDraft(
+  targetType: string,
+  target: string,
+): TargetArchitectureDraft {
   const normalized = targetType.trim().toLowerCase();
   const targetLabel = target.trim() || "target";
 
@@ -771,12 +845,15 @@ export default function Dashboard() {
   const startingProjectId = useProjects((state) => state.startingProjectId);
   const activeProjectId = activeProject?.id ?? null;
   const activeScanId = (() => {
-    const scanMeta = isRecord(activeProject?.lastScan) ? activeProject.lastScan : null;
+    const scanMeta = isRecord(activeProject?.lastScan)
+      ? activeProject.lastScan
+      : null;
     return typeof scanMeta?.scanId === "string" ? scanMeta.scanId.trim() : "";
   })();
   const shouldStreamScanEvents = Boolean(activeProjectId && activeScanId);
 
   const [insightTab, setInsightTab] = useState<InsightTab>("checklist");
+  const [isInsightFullscreen, setIsInsightFullscreen] = useState(false);
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [logLevelFilter, setLogLevelFilter] = useState<"all" | LogLevel>("all");
@@ -790,7 +867,10 @@ export default function Dashboard() {
   const streamDegradedRef = useRef(true);
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
-  const [checklistActionKey, setChecklistActionKey] = useState<string | null>(null);
+  const [plannerApprovalLoading, setPlannerApprovalLoading] = useState(false);
+  const [checklistActionKey, setChecklistActionKey] = useState<string | null>(
+    null,
+  );
   const [checklistError, setChecklistError] = useState("");
   const [addItemName, setAddItemName] = useState("");
   const [addItemPhase, setAddItemPhase] = useState("0");
@@ -799,60 +879,100 @@ export default function Dashboard() {
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
   const [editItemName, setEditItemName] = useState("");
   const [editItemPriority, setEditItemPriority] = useState(3);
+  const [projectEditOpen, setProjectEditOpen] = useState(false);
+  const [projectEditName, setProjectEditName] = useState("");
+  const [projectEditTarget, setProjectEditTarget] = useState("");
+  const [projectEditDescription, setProjectEditDescription] = useState("");
+  const dashboardSelectClass =
+    "h-7 rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]";
 
   const handleCloseProject = () => {
     setActive(null);
     navigate("/projects");
   };
 
-  const ingestScanEvent = useCallback((event: ScanEventPayload) => {
-    if (!activeProjectId) {
+  const handleOpenProjectEdit = () => {
+    if (!activeProject) {
       return;
     }
-    const key = eventDedupKey(event);
-    if (seenEventKeysRef.current.has(key)) {
+    setProjectEditName(activeProject.name);
+    setProjectEditTarget(activeProject.target);
+    setProjectEditDescription(activeProject.description ?? "");
+    setProjectEditOpen(true);
+  };
+
+  const handleSaveProjectEdit = () => {
+    if (!activeProject) {
       return;
     }
-    seenEventKeysRef.current.add(key);
-    if (seenEventKeysRef.current.size > 6000) {
-      const pruned = new Set(Array.from(seenEventKeysRef.current).slice(-3000));
-      seenEventKeysRef.current = pruned;
-    }
-
-    setScanEvents((previous) => [event, ...previous].slice(0, 400));
-
-    setStreamLogs((previous) => {
-      const nextEntry: DashboardLogEntry = {
-        id: `${event.timestamp}-${Math.random().toString(36).slice(2, 10)}`,
-        level: toLogLevel(event.level),
-        message: event.message,
-        at: event.timestamp,
-        source: detectLogSource(event),
-      };
-      return [...previous, nextEntry].slice(-120);
+    updateProject(activeProject.id, {
+      name: projectEditName.trim() || activeProject.name,
+      target: projectEditTarget.trim() || activeProject.target,
+      description: projectEditDescription.trim(),
     });
+    setProjectEditOpen(false);
+  };
 
-    const nextStatus = toProjectStatus(event.data.status);
-    const rawProgress = event.data.scan_progress;
-    const nextProgress = typeof rawProgress === "number" && Number.isFinite(rawProgress)
-      ? rawProgress
-      : undefined;
+  const ingestScanEvent = useCallback(
+    (event: ScanEventPayload) => {
+      if (!activeProjectId) {
+        return;
+      }
+      const key = eventDedupKey(event);
+      if (seenEventKeysRef.current.has(key)) {
+        return;
+      }
+      seenEventKeysRef.current.add(key);
+      if (seenEventKeysRef.current.size > 6000) {
+        const pruned = new Set(
+          Array.from(seenEventKeysRef.current).slice(-3000),
+        );
+        seenEventKeysRef.current = pruned;
+      }
 
-    if (nextStatus || typeof nextProgress === "number") {
-      updateProject(activeProjectId, {
-        ...(nextStatus ? { status: nextStatus } : {}),
-        ...(typeof nextProgress === "number" ? { scanProgress: nextProgress } : {}),
-      }, { persist: false });
-    }
+      setScanEvents((previous) => [event, ...previous].slice(0, 400));
 
-    if (
-      event.event === "scan_completed"
-      || event.event === "scan_failed"
-      || event.event === "intel_complete"
-    ) {
-      void hydrateFromDatabase();
-    }
-  }, [activeProjectId, updateProject, hydrateFromDatabase]);
+      setStreamLogs((previous) => {
+        const nextEntry: DashboardLogEntry = {
+          id: `${event.timestamp}-${Math.random().toString(36).slice(2, 10)}`,
+          level: toLogLevel(event.level),
+          message: event.message,
+          at: event.timestamp,
+          source: detectLogSource(event),
+        };
+        return [...previous, nextEntry].slice(-120);
+      });
+
+      const nextStatus = toProjectStatus(event.data.status);
+      const rawProgress = event.data.scan_progress;
+      const nextProgress =
+        typeof rawProgress === "number" && Number.isFinite(rawProgress)
+          ? rawProgress
+          : undefined;
+
+      if (nextStatus || typeof nextProgress === "number") {
+        updateProject(
+          activeProjectId,
+          {
+            ...(nextStatus ? { status: nextStatus } : {}),
+            ...(typeof nextProgress === "number"
+              ? { scanProgress: nextProgress }
+              : {}),
+          },
+          { persist: false },
+        );
+      }
+
+      if (
+        event.event === "scan_completed" ||
+        event.event === "scan_failed" ||
+        event.event === "intel_complete"
+      ) {
+        void hydrateFromDatabase();
+      }
+    },
+    [activeProjectId, updateProject, hydrateFromDatabase],
+  );
 
   useEffect(() => {
     if (!activeProjectId) {
@@ -917,7 +1037,13 @@ export default function Dashboard() {
         }
       },
     });
-  }, [activeProjectId, shouldStreamScanEvents, ingestScanEvent, hydrateFromDatabase, streamRetry]);
+  }, [
+    activeProjectId,
+    shouldStreamScanEvents,
+    ingestScanEvent,
+    hydrateFromDatabase,
+    streamRetry,
+  ]);
 
   useEffect(() => {
     if (!autoScrollLogs) {
@@ -943,7 +1069,10 @@ export default function Dashboard() {
         return;
       }
       try {
-        const recent = await listProjectScanEventsFromDesktop(activeProjectId, 220);
+        const recent = await listProjectScanEventsFromDesktop(
+          activeProjectId,
+          220,
+        );
         if (cancelled || recent.length === 0) {
           return;
         }
@@ -966,6 +1095,17 @@ export default function Dashboard() {
     };
   }, [activeProjectId, shouldStreamScanEvents, ingestScanEvent]);
 
+  // Handle Escape key to exit fullscreen mode
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && isInsightFullscreen) {
+        setIsInsightFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [isInsightFullscreen]);
+
   if (!activeProject) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
@@ -980,16 +1120,78 @@ export default function Dashboard() {
   const isRunning = effectiveStatus === "running";
   const isStarting = startingProjectId === activeProject.id;
   const hasAnotherRunningProject = projects.some(
-    (project) => project.id !== activeProject.id && normalizeRunningStatus(project) === "running",
+    (project) =>
+      project.id !== activeProject.id &&
+      normalizeRunningStatus(project) === "running",
   );
   const canRun = !isRunning && !isStarting && !hasAnotherRunningProject;
+  const awaitingPlannerApproval = (() => {
+    for (const event of scanEvents) {
+      if (event.event === "planner_waiting_approval") {
+        return true;
+      }
+      if (
+        event.event === "planner_approval_received" ||
+        event.event === "planner_started" ||
+        event.event === "planner_complete" ||
+        event.event === "planner_failed" ||
+        event.event === "planner_crashed" ||
+        event.event === "scan_completed" ||
+        event.event === "scan_failed" ||
+        event.event === "scan_paused" ||
+        event.event === "scan_cancelled"
+      ) {
+        return false;
+      }
+    }
+
+    const lastScan = isRecord(activeProject.lastScan)
+      ? activeProject.lastScan
+      : null;
+    const waitingFlag = lastScan?.awaitingPlannerApproval;
+    if (typeof waitingFlag === "boolean") {
+      return waitingFlag;
+    }
+    return lastScan?.status === "awaiting_planner_approval";
+  })();
+
+  const handleApprovePlanner = async () => {
+    if (!activeProjectId || plannerApprovalLoading || !isRunning) {
+      return;
+    }
+    setPlannerApprovalLoading(true);
+    try {
+      await approvePlannerForProjectScanFromDesktop(activeProjectId);
+      setChecklistError("");
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to approve planner start.";
+      setStreamLogs((previous) => {
+        const nextEntry: DashboardLogEntry = {
+          id: `planner-approve-error-${Math.random().toString(36).slice(2, 10)}`,
+          level: "warn",
+          message: `Planner approval failed: ${message}`,
+          at: new Date().toISOString(),
+          source: "planner",
+        };
+        return [...previous, nextEntry].slice(-120);
+      });
+    } finally {
+      setPlannerApprovalLoading(false);
+    }
+  };
 
   const fallbackLogs: DashboardLogEntry[] = [];
   const baseTimestamp = activeProject.updatedAt || new Date().toISOString();
-  const fallbackLastScan = isRecord(activeProject.lastScan) ? activeProject.lastScan : null;
-  const fallbackLastScanError = typeof fallbackLastScan?.error === "string"
-    ? fallbackLastScan.error.trim()
-    : "";
+  const fallbackLastScan = isRecord(activeProject.lastScan)
+    ? activeProject.lastScan
+    : null;
+  const fallbackLastScanError =
+    typeof fallbackLastScan?.error === "string"
+      ? fallbackLastScan.error.trim()
+      : "";
   fallbackLogs.push({
     id: "fallback-status",
     level: effectiveStatus === "error" ? "warn" : "info",
@@ -1002,9 +1204,11 @@ export default function Dashboard() {
       id: "fallback-error-detail",
       level: "error",
       message: `Scan failed: ${fallbackLastScanError}`,
-      at: typeof fallbackLastScan?.finishedAt === "string" && fallbackLastScan.finishedAt
-        ? fallbackLastScan.finishedAt
-        : baseTimestamp,
+      at:
+        typeof fallbackLastScan?.finishedAt === "string" &&
+        fallbackLastScan.finishedAt
+          ? fallbackLastScan.finishedAt
+          : baseTimestamp,
       source: "system",
     });
   }
@@ -1020,12 +1224,15 @@ export default function Dashboard() {
       source: "system",
     });
   }
-  const baseLogs = (
+  const baseLogs =
     streamLogs.length > 0
       ? streamLogs
-      : fallbackLogs.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()).slice(-14)
+      : fallbackLogs
+          .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+          .slice(-14);
+  const sourceOptions = Array.from(
+    new Set(baseLogs.map((entry) => entry.source)),
   );
-  const sourceOptions = Array.from(new Set(baseLogs.map((entry) => entry.source)));
   const displayedLogs = baseLogs.filter((entry) => {
     if (logLevelFilter !== "all" && entry.level !== logLevelFilter) {
       return false;
@@ -1041,7 +1248,8 @@ export default function Dashboard() {
     if (!container) {
       return;
     }
-    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const distanceToBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
     const nearBottom = distanceToBottom <= 24;
     if (nearBottom !== autoScrollLogs) {
       setAutoScrollLogs(nearBottom);
@@ -1063,12 +1271,18 @@ export default function Dashboard() {
           error: "",
         };
       }
-      if (!plannerError && (event.event === "planner_failed" || event.event === "planner_crashed")) {
-        plannerError = normalizeText(event.data.error) || normalizeText(event.data.summary);
+      if (
+        !plannerError &&
+        (event.event === "planner_failed" || event.event === "planner_crashed")
+      ) {
+        plannerError =
+          normalizeText(event.data.error) || normalizeText(event.data.summary);
       }
     }
 
-    const lastScan = isRecord(activeProject.lastScan) ? activeProject.lastScan : null;
+    const lastScan = isRecord(activeProject.lastScan)
+      ? activeProject.lastScan
+      : null;
     const result = isRecord(lastScan?.result) ? lastScan.result : null;
     const planner = isRecord(result?.planner) ? result.planner : null;
     return {
@@ -1085,8 +1299,13 @@ export default function Dashboard() {
     resolvedPlannerResult.needs,
   );
   const plannerPlanView = toPlannerPlanView(resolvedPlannerResult.planData);
-  const architectureDraft = buildTargetArchitectureDraft(activeProject.targetType, activeProject.target);
-  const architectureHostMap = new Map(architectureDraft.hosts.map((host) => [host.id, host]));
+  const architectureDraft = buildTargetArchitectureDraft(
+    activeProject.targetType,
+    activeProject.target,
+  );
+  const architectureHostMap = new Map(
+    architectureDraft.hosts.map((host) => [host.id, host]),
+  );
   const architectureEdges = architectureDraft.flows
     .map((flow) => {
       const from = architectureHostMap.get(flow.fromId);
@@ -1096,7 +1315,15 @@ export default function Dashboard() {
       }
       return { from, to, label: flow.label };
     })
-    .filter((edge): edge is { from: ArchitectureHost; to: ArchitectureHost; label: string } => edge !== null);
+    .filter(
+      (
+        edge,
+      ): edge is {
+        from: ArchitectureHost;
+        to: ArchitectureHost;
+        label: string;
+      } => edge !== null,
+    );
 
   const resolvedChecklist = (() => {
     for (const event of scanEvents) {
@@ -1107,7 +1334,8 @@ export default function Dashboard() {
       if (structured) {
         return structured;
       }
-      const summary = typeof event.data.summary === "string" ? event.data.summary.trim() : "";
+      const summary =
+        typeof event.data.summary === "string" ? event.data.summary.trim() : "";
       const summaryFallback = checklistFromLabels(
         extractChecklistLabels(summary),
         activeProject.targetType,
@@ -1117,7 +1345,9 @@ export default function Dashboard() {
       }
     }
 
-    const lastScan = isRecord(activeProject.lastScan) ? activeProject.lastScan : null;
+    const lastScan = isRecord(activeProject.lastScan)
+      ? activeProject.lastScan
+      : null;
     const result = isRecord(lastScan?.result) ? lastScan.result : null;
     const intel = isRecord(result?.intel) ? result.intel : null;
     const persisted = toStructuredChecklist(intel?.checklist);
@@ -1125,10 +1355,16 @@ export default function Dashboard() {
       return persisted;
     }
 
-    const persistedSummary = typeof intel?.summary === "string" ? intel.summary.trim() : "";
-    return checklistFromLabels(extractChecklistLabels(persistedSummary), activeProject.targetType);
+    const persistedSummary =
+      typeof intel?.summary === "string" ? intel.summary.trim() : "";
+    return checklistFromLabels(
+      extractChecklistLabels(persistedSummary),
+      activeProject.targetType,
+    );
   })();
-  const displayChecklist = resolvedChecklist ? cloneStructuredChecklist(resolvedChecklist) : null;
+  const displayChecklist = resolvedChecklist
+    ? cloneStructuredChecklist(resolvedChecklist)
+    : null;
 
   const persistChecklist = async (
     nextChecklist: StructuredChecklistPayload,
@@ -1143,7 +1379,9 @@ export default function Dashboard() {
     setChecklistActionKey(actionKey);
     setChecklistError("");
     const nowIso = new Date().toISOString();
-    const lastScan = isRecord(activeProject.lastScan) ? activeProject.lastScan : {};
+    const lastScan = isRecord(activeProject.lastScan)
+      ? activeProject.lastScan
+      : {};
     const result = isRecord(lastScan.result) ? lastScan.result : {};
     const intel = isRecord(result.intel) ? result.intel : {};
     const nextLastScan = {
@@ -1157,13 +1395,21 @@ export default function Dashboard() {
       },
     };
 
-    updateProject(activeProject.id, {
-      lastScan: nextLastScan,
-      updatedAt: nowIso,
-    }, { persist: false });
+    updateProject(
+      activeProject.id,
+      {
+        lastScan: nextLastScan,
+        updatedAt: nowIso,
+      },
+      { persist: false },
+    );
 
     try {
-      const currentProject = useProjects.getState().projects.find((project) => project.id === activeProject.id) ?? activeProject;
+      const currentProject =
+        useProjects
+          .getState()
+          .projects.find((project) => project.id === activeProject.id) ??
+        activeProject;
       await saveProjectToDesktop({
         ...currentProject,
         lastScan: nextLastScan,
@@ -1172,7 +1418,10 @@ export default function Dashboard() {
       await hydrateFromDatabase();
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to save checklist changes.";
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to save checklist changes.";
       setChecklistError(message);
       await hydrateFromDatabase();
       return false;
@@ -1194,13 +1443,15 @@ export default function Dashboard() {
     const nextChecklist = displayChecklist
       ? cloneStructuredChecklist(displayChecklist)
       : {
-        target_type: activeProject.targetType,
-        available_total: 0,
-        checklist: [],
-      };
-    const duplicate = nextChecklist.checklist.some((block) => (
-      block.items.some((item) => item.name.trim().toLowerCase() === name.toLowerCase())
-    ));
+          target_type: activeProject.targetType,
+          available_total: 0,
+          checklist: [],
+        };
+    const duplicate = nextChecklist.checklist.some((block) =>
+      block.items.some(
+        (item) => item.name.trim().toLowerCase() === name.toLowerCase(),
+      ),
+    );
     if (duplicate) {
       setChecklistError("Checklist item already exists.");
       return;
@@ -1209,15 +1460,18 @@ export default function Dashboard() {
     if (nextChecklist.checklist.length === 0) {
       nextChecklist.checklist.push({
         phase: "4",
-        title: "Exploitation & Validation",
+        title: "Authentication, Authorization & Injection Testing",
         items: [],
       });
     }
 
     const selectedIndex = Number.parseInt(addItemPhase, 10);
-    const blockIndex = Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < nextChecklist.checklist.length
-      ? selectedIndex
-      : 0;
+    const blockIndex =
+      Number.isInteger(selectedIndex) &&
+      selectedIndex >= 0 &&
+      selectedIndex < nextChecklist.checklist.length
+        ? selectedIndex
+        : 0;
 
     nextChecklist.checklist[blockIndex].items.push({
       name,
@@ -1237,7 +1491,10 @@ export default function Dashboard() {
     }
   };
 
-  const handleRemoveChecklistItem = async (blockIndex: number, itemIndex: number) => {
+  const handleRemoveChecklistItem = async (
+    blockIndex: number,
+    itemIndex: number,
+  ) => {
     if (!displayChecklist || checklistActionKey) {
       return;
     }
@@ -1247,13 +1504,18 @@ export default function Dashboard() {
       return;
     }
     block.items = block.items.filter((_, index) => index !== itemIndex);
-    nextChecklist.checklist = nextChecklist.checklist.filter((entry) => entry.items.length > 0);
+    nextChecklist.checklist = nextChecklist.checklist.filter(
+      (entry) => entry.items.length > 0,
+    );
     nextChecklist.available_total = nextChecklist.checklist.reduce(
       (count, entry) => count + entry.items.length,
       0,
     );
 
-    const saved = await persistChecklist(nextChecklist, `checklist-remove-${blockIndex}-${itemIndex}`);
+    const saved = await persistChecklist(
+      nextChecklist,
+      `checklist-remove-${blockIndex}-${itemIndex}`,
+    );
     if (saved) {
       setChecklistError("");
       setEditingRowKey(null);
@@ -1280,12 +1542,14 @@ export default function Dashboard() {
       return;
     }
 
-    const duplicate = nextChecklist.checklist.some((checklistBlock, blockCursor) => (
-      checklistBlock.items.some((item, itemCursor) => (
-        !(blockCursor === blockIndex && itemCursor === itemIndex)
-        && item.name.trim().toLowerCase() === normalizedName.toLowerCase()
-      ))
-    ));
+    const duplicate = nextChecklist.checklist.some(
+      (checklistBlock, blockCursor) =>
+        checklistBlock.items.some(
+          (item, itemCursor) =>
+            !(blockCursor === blockIndex && itemCursor === itemIndex) &&
+            item.name.trim().toLowerCase() === normalizedName.toLowerCase(),
+        ),
+    );
     if (duplicate) {
       setChecklistError("Checklist item already exists.");
       return;
@@ -1295,7 +1559,10 @@ export default function Dashboard() {
       name: normalizedName,
       priority: editItemPriority,
     };
-    const saved = await persistChecklist(nextChecklist, `checklist-update-${blockIndex}-${itemIndex}`);
+    const saved = await persistChecklist(
+      nextChecklist,
+      `checklist-update-${blockIndex}-${itemIndex}`,
+    );
     if (saved) {
       setChecklistError("");
       setEditingRowKey((current) => (current === rowKey ? null : current));
@@ -1309,7 +1576,11 @@ export default function Dashboard() {
       return "0";
     }
     const parsed = Number.parseInt(addItemPhase, 10);
-    if (!Number.isInteger(parsed) || parsed < 0 || parsed >= checklistBlocks.length) {
+    if (
+      !Number.isInteger(parsed) ||
+      parsed < 0 ||
+      parsed >= checklistBlocks.length
+    ) {
       return "0";
     }
     return String(parsed);
@@ -1317,22 +1588,33 @@ export default function Dashboard() {
 
   const agentInsights = (() => {
     const byRole = Object.fromEntries(
-      AGENT_ROLES.map((role) => [role, { history: [] as AgentInsightPanelData["history"] }]),
+      AGENT_ROLES.map((role) => [
+        role,
+        { history: [] as AgentInsightPanelData["history"] },
+      ]),
     ) as Record<AgentGraphRole, AgentInsightPanelData>;
 
-    const scanMeta = isRecord(activeProject.lastScan) ? activeProject.lastScan : null;
-    const currentScanId = typeof scanMeta?.scanId === "string" ? scanMeta.scanId.trim() : "";
+    const scanMeta = isRecord(activeProject.lastScan)
+      ? activeProject.lastScan
+      : null;
+    const currentScanId =
+      typeof scanMeta?.scanId === "string" ? scanMeta.scanId.trim() : "";
     const allEvents = [...scanEvents];
-    const latestStartedScanId = allEvents.find(
-      (event) => event.event === "scan_started" && event.scan_id.trim().length > 0,
-    )?.scan_id ?? "";
-    const latestAnyScanId = allEvents.find(
-      (event) => event.scan_id.trim().length > 0,
-    )?.scan_id ?? "";
+    const latestStartedScanId =
+      allEvents.find(
+        (event) =>
+          event.event === "scan_started" && event.scan_id.trim().length > 0,
+      )?.scan_id ?? "";
+    const latestAnyScanId =
+      allEvents.find((event) => event.scan_id.trim().length > 0)?.scan_id ?? "";
 
     // Prefer the active running scan id from events if metadata is stale.
     let scopedScanId = currentScanId;
-    if (effectiveStatus === "running" && latestStartedScanId && latestStartedScanId !== currentScanId) {
+    if (
+      effectiveStatus === "running" &&
+      latestStartedScanId &&
+      latestStartedScanId !== currentScanId
+    ) {
       scopedScanId = latestStartedScanId;
     }
     if (!scopedScanId) {
@@ -1341,8 +1623,10 @@ export default function Dashboard() {
 
     const scopedEvents = scopedScanId
       ? allEvents.filter(
-        (event) => event.scan_id === scopedScanId || event.event === "scan_status_snapshot",
-      )
+          (event) =>
+            event.scan_id === scopedScanId ||
+            event.event === "scan_status_snapshot",
+        )
       : allEvents;
 
     const filteredEvents = [...scopedEvents].reverse(); // chronological (oldest -> newest)
@@ -1372,32 +1656,39 @@ export default function Dashboard() {
       }
 
       if (event.event === "intel_complete") {
-        const summaryCandidate = typeof event.data.summary === "string"
-          ? event.data.summary.trim()
-          : "";
-        const checklistInsight = buildChecklistInsightText(event.data.checklist);
+        const summaryCandidate =
+          typeof event.data.summary === "string"
+            ? event.data.summary.trim()
+            : "";
+        const checklistInsight = buildChecklistInsightText(
+          event.data.checklist,
+        );
         if (summaryCandidate.length > 0) {
           intelSummary = checklistInsight
             ? `${summaryCandidate}\n\n${checklistInsight}`
             : summaryCandidate;
-          intelStatus = typeof event.data.intel_status === "string"
-            ? event.data.intel_status.trim()
-            : "complete";
+          intelStatus =
+            typeof event.data.intel_status === "string"
+              ? event.data.intel_status.trim()
+              : "complete";
           break;
         }
         if (checklistInsight.length > 0) {
           intelSummary = checklistInsight;
-          intelStatus = typeof event.data.intel_status === "string"
-            ? event.data.intel_status.trim()
-            : "complete";
+          intelStatus =
+            typeof event.data.intel_status === "string"
+              ? event.data.intel_status.trim()
+              : "complete";
           break;
         }
       }
 
-      if (!intelError && (event.event === "intel_crashed" || event.event === "scan_failed")) {
-        const errorCandidate = typeof event.data.error === "string"
-          ? event.data.error.trim()
-          : "";
+      if (
+        !intelError &&
+        (event.event === "intel_crashed" || event.event === "scan_failed")
+      ) {
+        const errorCandidate =
+          typeof event.data.error === "string" ? event.data.error.trim() : "";
         if (errorCandidate.length > 0) {
           intelError = errorCandidate;
         }
@@ -1405,25 +1696,40 @@ export default function Dashboard() {
     }
 
     if (intelSummary.length === 0) {
-      const persistedLastScan = isRecord(activeProject.lastScan) ? activeProject.lastScan : null;
-      const persistedResult = isRecord(persistedLastScan?.result) ? persistedLastScan.result : null;
-      const persistedIntel = isRecord(persistedResult?.intel) ? persistedResult.intel : null;
-      const persistedSummary = typeof persistedIntel?.summary === "string"
-        ? persistedIntel.summary.trim()
-        : "";
-      const persistedChecklistInsight = buildChecklistInsightText(persistedIntel?.checklist);
+      const persistedLastScan = isRecord(activeProject.lastScan)
+        ? activeProject.lastScan
+        : null;
+      const persistedResult = isRecord(persistedLastScan?.result)
+        ? persistedLastScan.result
+        : null;
+      const persistedIntel = isRecord(persistedResult?.intel)
+        ? persistedResult.intel
+        : null;
+      const persistedSummary =
+        typeof persistedIntel?.summary === "string"
+          ? persistedIntel.summary.trim()
+          : "";
+      const persistedChecklistInsight = buildChecklistInsightText(
+        persistedIntel?.checklist,
+      );
       if (persistedSummary || persistedChecklistInsight) {
-        intelSummary = persistedSummary && persistedChecklistInsight
-          ? `${persistedSummary}\n\n${persistedChecklistInsight}`
-          : (persistedSummary || persistedChecklistInsight);
-        intelStatus = typeof persistedIntel?.status === "string"
-          ? persistedIntel.status.trim()
-          : (typeof persistedLastScan?.status === "string" ? persistedLastScan.status.trim() : "");
+        intelSummary =
+          persistedSummary && persistedChecklistInsight
+            ? `${persistedSummary}\n\n${persistedChecklistInsight}`
+            : persistedSummary || persistedChecklistInsight;
+        intelStatus =
+          typeof persistedIntel?.status === "string"
+            ? persistedIntel.status.trim()
+            : typeof persistedLastScan?.status === "string"
+              ? persistedLastScan.status.trim()
+              : "";
       }
     }
 
     if (intelSummary.length > 0) {
-      byRole.intel.resultLabel = intelStatus ? `Intel Final Result (${intelStatus})` : "Intel Final Result";
+      byRole.intel.resultLabel = intelStatus
+        ? `Intel Final Result (${intelStatus})`
+        : "Intel Final Result";
       byRole.intel.result = intelSummary;
     } else if (intelError.length > 0) {
       byRole.intel.resultLabel = "Intel Error";
@@ -1452,7 +1758,9 @@ export default function Dashboard() {
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-2xl font-bold">{activeProject.name}</h1>
-              <Badge variant={effectiveStatus} dot>{effectiveStatus}</Badge>
+              <Badge variant={effectiveStatus} dot>
+                {effectiveStatus}
+              </Badge>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1461,21 +1769,31 @@ export default function Dashboard() {
                 size="xs"
                 onClick={() => {
                   if (effectiveStatus === "completed") {
-                    const confirmed = window.confirm("This scan already completed. Start a new scan and clear previous results?");
+                    const confirmed = window.confirm(
+                      "This scan already completed. Start a new scan and clear previous results?",
+                    );
                     if (!confirmed) {
                       return;
                     }
                     setStreamLogs([]);
                     setScanEvents([]);
-                    setRunning(activeProject.id, { triggerScan: true, force: true });
+                    setRunning(activeProject.id, {
+                      triggerScan: true,
+                      force: true,
+                    });
                     return;
                   }
                   if (effectiveStatus === "paused") {
-                    const confirmed = window.confirm("Resume will start a new scan and keep previous history visible. Continue?");
+                    const confirmed = window.confirm(
+                      "Resume will start a new scan and keep previous history visible. Continue?",
+                    );
                     if (!confirmed) {
                       return;
                     }
-                    setRunning(activeProject.id, { triggerScan: true, resume: true });
+                    setRunning(activeProject.id, {
+                      triggerScan: true,
+                      resume: true,
+                    });
                     return;
                   }
                   if (effectiveStatus === "idle") {
@@ -1486,36 +1804,58 @@ export default function Dashboard() {
                 }}
                 disabled={!canRun}
                 loading={isStarting}
-                title={hasAnotherRunningProject ? "Another scan is already running" : "Start scan"}
+                title={
+                  hasAnotherRunningProject
+                    ? "Another scan is already running"
+                    : "Start scan"
+                }
               >
                 <Play size={12} />
                 Start Scan
               </Button>
             ) : (
-              <Button
-                size="xs"
-                variant="danger"
-                onClick={() => {
-                  setStopDialogOpen(true);
-                }}
-                title="Stop running scan"
-              >
-                <Square size={12} />
-                Stop Scan
-              </Button>
+              <div className="flex items-center gap-2">
+                {awaitingPlannerApproval ? (
+                  <Button
+                    size="xs"
+                    variant="secondary"
+                    onClick={() => {
+                      void handleApprovePlanner();
+                    }}
+                    loading={plannerApprovalLoading}
+                    title="Approve checklist and continue to Planner"
+                  >
+                    <Check size={12} />
+                    Continue to Planner
+                  </Button>
+                ) : null}
+                <Button
+                  size="xs"
+                  variant="danger"
+                  onClick={() => {
+                    setStopDialogOpen(true);
+                  }}
+                  title="Stop running scan"
+                >
+                  <Square size={12} />
+                  Stop Scan
+                </Button>
+              </div>
             )}
             {isStarting && (
-              <span className="text-[11px] text-text-muted">Starting scan...</span>
+              <span className="text-sm text-text-muted">
+                Starting scan...
+              </span>
             )}
-            <Button size="xs" variant="secondary" onClick={() => navigate("/projects")}>
+            <Button
+              size="xs"
+              variant="secondary"
+              onClick={() => navigate("/projects")}
+            >
               <Repeat2 size={12} />
               Change
             </Button>
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={handleCloseProject}
-            >
+            <Button size="xs" variant="ghost" onClick={handleCloseProject}>
               <X size={12} />
               Close
             </Button>
@@ -1525,36 +1865,61 @@ export default function Dashboard() {
 
       <Card className="space-y-2 p-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-text-primary">Target Overview</h2>
-          <span className="inline-flex items-center gap-1 text-[11px] text-text-muted">
-            <Clock3 size={12} />
-            Updated {formatDateTime(activeProject.updatedAt)}
-          </span>
+          <h2 className="text-sm font-semibold text-text-primary">
+            Target Overview
+          </h2>
+          <div className="flex items-center gap-2">
+            <Button
+              size="xs"
+              variant="secondary"
+              onClick={handleOpenProjectEdit}
+              title="Edit project details"
+            >
+              <Pencil size={12} />
+              Edit
+            </Button>
+            <span className="inline-flex items-center gap-1 text-xs text-text-muted">
+              <Clock3 size={12} />
+              Updated {formatDateTime(activeProject.updatedAt)}
+            </span>
+          </div>
         </div>
 
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-[11px] text-text-muted">Target</p>
-            <p className="mt-0.5 break-all font-mono text-xs text-text-primary">{activeProject.target}</p>
+            <p className="text-xs text-text-muted">Target</p>
+            <p className="mt-0.5 break-all font-mono text-xs text-text-primary">
+              {activeProject.target}
+            </p>
           </div>
           <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-[11px] text-text-muted">Target Type</p>
-            <p className="mt-0.5 text-xs text-text-primary">{activeProject.targetType.replaceAll("_", " ")}</p>
+            <p className="text-xs text-text-muted">Target Type</p>
+            <p className="mt-0.5 text-xs text-text-primary">
+              {activeProject.targetType.replaceAll("_", " ")}
+            </p>
           </div>
           <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-[11px] text-text-muted">Created</p>
-            <p className="mt-0.5 text-xs text-text-primary">{formatDateTime(activeProject.createdAt)}</p>
+            <p className="text-xs text-text-muted">Created</p>
+            <p className="mt-0.5 text-xs text-text-primary">
+              {formatDateTime(activeProject.createdAt)}
+            </p>
           </div>
           <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-[11px] text-text-muted">Status</p>
-            <p className="mt-0.5 text-xs text-text-primary">{effectiveStatus}</p>
+            <p className="text-xs text-text-muted">Status</p>
+            <p className="mt-0.5 text-xs text-text-primary">
+              {effectiveStatus}
+            </p>
           </div>
         </div>
 
         <div className="rounded-md border border-border bg-surface-0/35 p-2">
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Scan Progress</h3>
-            <span className="text-xs font-mono text-pf-400">{activeProject.scanProgress}%</span>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+              Scan Progress
+            </h3>
+            <span className="text-xs font-mono text-pf-400">
+              {activeProject.scanProgress}%
+            </span>
           </div>
 
           <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-surface-2">
@@ -1563,7 +1928,6 @@ export default function Dashboard() {
               style={{ width: `${activeProject.scanProgress}%` }}
             />
           </div>
-
         </div>
       </Card>
 
@@ -1573,33 +1937,88 @@ export default function Dashboard() {
         <Card className="flex h-[420px] flex-col space-y-3 p-3">
           <div className="flex items-center justify-between">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-sm font-semibold text-text-primary">Real-Time Logs</h2>
+              <h2 className="text-base font-semibold text-text-primary">
+                Real-Time Logs
+              </h2>
 
               <select
                 value={logLevelFilter}
-                onChange={(event) => setLogLevelFilter(event.target.value as "all" | LogLevel)}
-                className="rounded-md border border-border bg-surface-0/55 px-2 py-1 text-[11px] text-text-primary dark:bg-transparent"
+                onChange={(event) =>
+                  setLogLevelFilter(event.target.value as "all" | LogLevel)
+                }
+                className="rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]"
                 title="Filter by level"
               >
-                <option value="all" style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}>All Levels</option>
-                <option value="info" style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}>Info</option>
-                <option value="success" style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}>Success</option>
-                <option value="warn" style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}>Warn</option>
-                <option value="error" style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}>Error</option>
+                <option
+                  value="all"
+                  style={{
+                    backgroundColor: "var(--surface-1)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  All Levels
+                </option>
+                <option
+                  value="info"
+                  style={{
+                    backgroundColor: "var(--surface-1)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  Info
+                </option>
+                <option
+                  value="success"
+                  style={{
+                    backgroundColor: "var(--surface-1)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  Success
+                </option>
+                <option
+                  value="warn"
+                  style={{
+                    backgroundColor: "var(--surface-1)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  Warn
+                </option>
+                <option
+                  value="error"
+                  style={{
+                    backgroundColor: "var(--surface-1)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  Error
+                </option>
               </select>
 
               <select
                 value={logSourceFilter}
                 onChange={(event) => setLogSourceFilter(event.target.value)}
-                className="rounded-md border border-border bg-surface-0/55 px-2 py-1 text-[11px] text-text-primary dark:bg-transparent"
+                className="rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]"
                 title="Filter by source"
               >
-                <option value="all" style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}>All Sources</option>
+                <option
+                  value="all"
+                  style={{
+                    backgroundColor: "var(--surface-1)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  All Sources
+                </option>
                 {sourceOptions.map((source) => (
                   <option
                     key={source}
                     value={source}
-                    style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}
+                    style={{
+                      backgroundColor: "var(--surface-1)",
+                      color: "var(--text-primary)",
+                    }}
                   >
                     {formatSourceLabel(source)}
                   </option>
@@ -1607,7 +2026,9 @@ export default function Dashboard() {
               </select>
             </div>
             <div className="text-right">
-              <p className="text-[11px] text-text-muted">{displayedLogs.length}/{baseLogs.length} events</p>
+              <p className="text-sm text-text-muted">
+                {displayedLogs.length}/{baseLogs.length} events
+              </p>
             </div>
           </div>
           <div
@@ -1616,21 +2037,29 @@ export default function Dashboard() {
             className="min-h-0 flex-1 space-y-1 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2"
           >
             {displayedLogs.length === 0 ? (
-              <p className="px-1 py-2 text-xs text-text-muted">No logs match current filters.</p>
+              <p className="px-1 py-2 text-sm text-text-muted">
+                No logs match current filters.
+              </p>
             ) : (
               displayedLogs.map((entry) => (
-                <div key={entry.id} className="grid grid-cols-[70px_1fr] gap-2 rounded px-1 py-1 text-xs">
-                  <span className="font-mono text-[10px] text-text-muted">{formatTime(entry.at)}</span>
+                <div
+                  key={entry.id}
+                  className="grid grid-cols-[100px_1fr] gap-2 rounded px-1 py-1 text-sm"
+                >
+                  <span className="font-mono text-sm text-text-muted">
+                    {formatTime(entry.at)}
+                  </span>
                   <p
+                    title={`[${entry.source}] ${entry.message}`}
                     className={
                       entry.level === "warn" || entry.level === "error"
-                        ? "text-red-300"
+                        ? "min-w-0 truncate whitespace-nowrap text-red-300"
                         : entry.level === "success"
-                          ? "text-emerald-300"
-                          : "text-text-secondary"
+                          ? "min-w-0 truncate whitespace-nowrap text-emerald-300"
+                          : "min-w-0 truncate whitespace-nowrap text-text-secondary"
                     }
                   >
-                    <span className="mr-1 text-[10px] uppercase tracking-wide text-text-muted">
+                    <span className="mr-1 text-sm uppercase tracking-wide text-text-muted">
                       [{entry.source}]
                     </span>
                     {entry.message}
@@ -1639,6 +2068,23 @@ export default function Dashboard() {
               ))
             )}
           </div>
+          {awaitingPlannerApproval ? (
+            <div className="flex justify-center pt-2">
+              <Button
+                size="sm"
+                variant="primary"
+                className="bg-blue-600 hover:bg-blue-700"
+                onClick={() => {
+                  void handleApprovePlanner();
+                }}
+                loading={plannerApprovalLoading}
+                title="Approve checklist and continue to Planner"
+              >
+                <Check size={14} />
+                Continue to Planner
+              </Button>
+            </div>
+          ) : null}
         </Card>
 
         <AIPromptPanel
@@ -1650,11 +2096,27 @@ export default function Dashboard() {
         />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-        <Card className="space-y-3 p-3">
+      {/* Fullscreen overlay for Execution Notes */}
+      {isInsightFullscreen && (
+        <div
+          className="fixed inset-0 z-50 bg-surface-0/95 backdrop-blur-sm"
+          onClick={() => setIsInsightFullscreen(false)}
+        />
+      )}
+
+      <div className={isInsightFullscreen ? "" : "grid gap-4 xl:grid-cols-[1.15fr_0.85fr]"}>
+        <Card
+          className={
+            isInsightFullscreen
+              ? "fixed inset-4 z-50 flex flex-col space-y-3 overflow-hidden p-4"
+              : "space-y-3 p-3"
+          }
+        >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-text-primary">Execution Notes</h2>
+              <h2 className={`font-semibold text-text-primary ${isInsightFullscreen ? "text-lg" : "text-base"}`}>
+                Execution Notes
+              </h2>
               {insightTab === "checklist" ? (
                 <Button
                   size="icon"
@@ -1664,72 +2126,96 @@ export default function Dashboard() {
                     setIsAddEditorOpen((open) => !open);
                   }}
                   disabled={isChecklistSaving}
-                  title={isAddEditorOpen ? "Close add item form" : "Add checklist item"}
+                  title={
+                    isAddEditorOpen
+                      ? "Close add item form"
+                      : "Add checklist item"
+                  }
                 >
                   <Plus size={13} />
                 </Button>
               ) : null}
             </div>
-            <div className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-0/40 p-1">
+            <div className="flex items-center gap-2">
+              <div className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-0/40 p-1">
+                <Button
+                  size="xs"
+                  variant={insightTab === "plan" ? "secondary" : "ghost"}
+                  onClick={() => setInsightTab("plan")}
+                >
+                  Plan
+                </Button>
+                <Button
+                  size="xs"
+                  variant={insightTab === "checklist" ? "secondary" : "ghost"}
+                  onClick={() => setInsightTab("checklist")}
+                >
+                  Checklist
+                </Button>
+              </div>
               <Button
-                size="xs"
-                variant={insightTab === "plan" ? "secondary" : "ghost"}
-                onClick={() => setInsightTab("plan")}
+                size="icon"
+                variant="ghost"
+                onClick={() => setIsInsightFullscreen((prev) => !prev)}
+                title={isInsightFullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
               >
-                Plan
-              </Button>
-              <Button
-                size="xs"
-                variant={insightTab === "checklist" ? "secondary" : "ghost"}
-                onClick={() => setInsightTab("checklist")}
-              >
-                Checklist
+                {isInsightFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
               </Button>
             </div>
           </div>
 
           {insightTab === "plan" ? (
-            <div className="max-h-[430px] space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
+            <div className={`space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2 ${isInsightFullscreen ? "flex-1" : "max-h-[430px]"}`}>
               {plannerPlanView?.phases?.length ? (
-                <div className="space-y-2">
+                <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
                   {plannerPlanView.phases.map((phase, phaseIndex) => (
                     <div
                       key={`${phase.phase}-${phaseIndex}`}
-                      className="rounded-lg border border-border/55 bg-surface-1/45"
+                      className="rounded-md border border-border bg-surface-1/45"
                     >
-                      <div className="flex items-center justify-between gap-2 border-b border-border/40 px-2 py-1.5">
-                        <p className="text-xs font-semibold text-text-primary">
+                      <div className={`flex items-center justify-between gap-2 border-b border-border ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}>
+                        <p className={`font-semibold text-text-primary text-[15px]`}>
                           Phase {phaseIndex + 1}: {phase.phase}
                         </p>
-                        <span className="text-[10px] text-text-muted">{phase.steps.length} steps</span>
+                        <span className={`text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
+                          {phase.steps.length} steps
+                        </span>
                       </div>
-                      <div className="space-y-2 p-2">
+                      <div className={`space-y-2 ${isInsightFullscreen ? "p-3 space-y-3" : "p-2"}`}>
                         {phase.steps.length === 0 ? (
-                          <p className="text-[11px] text-text-muted">No steps yet.</p>
+                          <p className={`text-text-muted text-sm`}>
+                            No steps yet.
+                          </p>
                         ) : (
                           phase.steps.map((step, stepIndex) => (
                             <div
                               key={`${phase.phase}-${step.step}-${stepIndex}`}
-                              className="rounded-md border border-border/35 bg-surface-0/45"
+                              className="rounded-md border border-border bg-surface-0/35"
                             >
-                              <p className="border-b border-border/30 px-2 py-1.5 text-[11px] font-medium text-text-primary">
+                              <p className={`border-b border-border font-medium text-text-primary ${isInsightFullscreen ? "px-3 py-2 text-sm" : "px-2 py-1.5 text-sm"}`}>
                                 {stepIndex + 1}. {step.step}
                               </p>
                               {step.scenarios.length === 0 ? (
-                                <p className="px-2 py-1.5 text-[11px] text-text-muted">No scenarios yet.</p>
+                                <p className={`text-text-muted ${isInsightFullscreen ? "px-3 py-2 text-sm" : "px-2 py-1.5 text-sm"}`}>
+                                  No scenarios yet.
+                                </p>
                               ) : (
-                                <div className="divide-y divide-border/25">
-                                  {step.scenarios.map((scenario, scenarioIndex) => (
-                                    <div
-                                      key={`${phase.phase}-${step.step}-scenario-${scenarioIndex}`}
-                                      className="flex items-center justify-between gap-2 px-2 py-1.5"
-                                    >
-                                      <p className="text-[11px] text-text-secondary">{scenario.scenario}</p>
-                                      <span className="rounded border border-border/45 bg-surface-1/65 px-1.5 py-0.5 text-[10px] text-text-muted">
-                                        {scenario.agent}
-                                      </span>
-                                    </div>
-                                  ))}
+                                <div className="divide-y divide-border">
+                                  {step.scenarios.map(
+                                    (scenario, scenarioIndex) => (
+                                      <div
+                                        key={`${phase.phase}-${step.step}-scenario-${scenarioIndex}`}
+                                        className={`flex items-center justify-between gap-2 ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
+                                      >
+                                        <p className="text-text-secondary text-[13px]">
+                                          {scenario.scenario}
+                                        </p>
+                                        <span className={`rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs`}>
+                                          {scenario.agent}
+                                        </span>
+                                      </div>
+                                    ),
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -1740,42 +2226,54 @@ export default function Dashboard() {
                   ))}
                 </div>
               ) : (
-                <p className="px-1 py-2 text-xs text-text-muted">
-                  {isRunning ? "Plan is loading. We will show planner phases as soon as they are persisted." : "No planner result available yet."}
+                <p className={`px-1 py-2 text-text-muted text-sm`}>
+                  {isRunning
+                    ? "Plan is loading. We will show planner phases as soon as they are persisted."
+                    : "No planner result available yet."}
                 </p>
               )}
             </div>
           ) : (
-            <div className="max-h-[430px] space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
+            <div className={`space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2 ${isInsightFullscreen ? "flex-1" : "max-h-[430px]"}`}>
               {isAddEditorOpen ? (
-                <div className="space-y-2 rounded-md border border-border/70 bg-surface-1/50 p-2">
+                <div className="space-y-2 rounded-md border border-border bg-surface-1/50 p-2">
                   <div className="grid gap-2 lg:grid-cols-[1fr_auto_auto_auto]">
                     <input
                       value={addItemName}
                       onChange={(event) => setAddItemName(event.target.value)}
                       placeholder="New checklist item"
                       disabled={isChecklistSaving}
-                      className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-xs text-text-primary outline-none focus:border-pf-500/50"
+                      className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-sm text-text-primary outline-none focus:border-pf-500/50"
                     />
                     <select
                       value={selectedAddPhase}
                       onChange={(event) => setAddItemPhase(event.target.value)}
                       disabled={isChecklistSaving}
-                      className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-xs text-text-primary"
+                      className={dashboardSelectClass}
                       title="Target phase"
                     >
                       {checklistBlocks.length === 0 ? (
-                        <option value="0" style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}>
-                          Phase 4 - Exploitation & Validation
+                        <option
+                          value="0"
+                          style={{
+                            backgroundColor: "var(--surface-1)",
+                            color: "var(--text-primary)",
+                          }}
+                        >
+                          Phase 4 - Authentication, Authorization & Injection Testing
                         </option>
                       ) : (
                         checklistBlocks.map((block, blockIndex) => (
                           <option
                             key={`${block.phase}-${block.title}-${blockIndex}`}
                             value={String(blockIndex)}
-                            style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}
+                            style={{
+                              backgroundColor: "var(--surface-1)",
+                              color: "var(--text-primary)",
+                            }}
                           >
-                            {block.phase ? `Phase ${block.phase}` : "Phase"} - {block.title}
+                            {block.phase ? `Phase ${block.phase}` : "Phase"} -{" "}
+                            {block.title}
                           </option>
                         ))
                       )}
@@ -1787,16 +2285,19 @@ export default function Dashboard() {
                         setAddItemPriority(Number.isInteger(next) ? next : 3);
                       }}
                       disabled={isChecklistSaving}
-                      className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-xs text-text-primary"
-                      title="Priority"
+                      className={dashboardSelectClass}
+                      title="Severity"
                     >
                       {[1, 2, 3, 4, 5].map((priority) => (
                         <option
                           key={priority}
                           value={String(priority)}
-                          style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}
+                          style={{
+                            backgroundColor: "var(--surface-1)",
+                            color: "var(--text-primary)",
+                          }}
                         >
-                          P{priority}
+                          S{priority}
                         </option>
                       ))}
                     </select>
@@ -1808,7 +2309,9 @@ export default function Dashboard() {
                           void handleAddChecklistItem();
                         }}
                         loading={checklistActionKey === "checklist-add"}
-                        disabled={isChecklistSaving || addItemName.trim().length === 0}
+                        disabled={
+                          isChecklistSaving || addItemName.trim().length === 0
+                        }
                         title="Save new item"
                       >
                         <Check size={13} />
@@ -1831,22 +2334,27 @@ export default function Dashboard() {
               ) : null}
 
               {checklistBlocks.length === 0 ? (
-                <p className="px-1 py-2 text-xs text-text-muted">
-                  {isRunning ? "Checklist is generating and will appear after Intel finalizes set_checklist." : "No checklist generated yet."}
+                <p className={`px-1 py-2 text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
+                  {isRunning
+                    ? "Checklist is generating and will appear after Intel finalizes set_checklist."
+                    : "No checklist generated yet."}
                 </p>
               ) : (
                 checklistBlocks.map((block, blockIndex) => (
                   <div
                     key={`${block.phase}-${block.title}-${blockIndex}`}
-                    className="space-y-2 rounded-md border border-border/40 bg-surface-1/45 p-2"
+                    className={`rounded-md border border-border bg-surface-1/45 ${isInsightFullscreen ? "space-y-3 p-3" : "space-y-2 p-2"}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-xs font-semibold text-text-primary">
-                        {block.phase ? `Phase ${block.phase}` : "Phase"} - {block.title}
+                      <p className="text-[15px] font-semibold leading-5 text-text-primary">
+                        {block.phase ? `Phase ${block.phase}` : "Phase"} -{" "}
+                        {block.title}
                       </p>
-                      <span className="text-[11px] text-text-muted">{block.items.length} items</span>
+                      <span className={`text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
+                        {block.items.length} items
+                      </span>
                     </div>
-                    <div className="space-y-1.5">
+                    <div className={isInsightFullscreen ? "space-y-2" : "space-y-1.5"}>
                       {block.items.map((item, itemIndex) => {
                         const rowKey = `${blockIndex}:${itemIndex}`;
                         const updateActionKey = `checklist-update-${blockIndex}-${itemIndex}`;
@@ -1855,12 +2363,14 @@ export default function Dashboard() {
                         return (
                           <div
                             key={rowKey}
-                            className="space-y-2 rounded-md border border-border/45 bg-surface-0/35 px-2 py-1.5 text-xs"
+                            className={`space-y-2 rounded-md border border-border bg-surface-0/35 text-sm ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
                           >
                             <div className="flex flex-wrap items-center gap-2">
-                              <p className="min-w-[220px] flex-1 text-text-secondary">{item.name}</p>
-                              <span className="rounded-md border border-border/45 bg-surface-1/55 px-1.5 py-0.5 text-[10px] text-text-muted">
-                                P{item.priority}
+                              <p className={`flex-1 text-text-secondary ${isInsightFullscreen ? "min-w-[280px]" : "min-w-[220px]"}`}>
+                                {item.name}
+                              </p>
+                              <span className={`rounded-md border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted ${isInsightFullscreen ? "text-xs" : "text-xs"}`}>
+                                S{item.priority}
                               </span>
                               <Button
                                 size="icon"
@@ -1879,46 +2389,61 @@ export default function Dashboard() {
                                 disabled={isChecklistSaving}
                                 title="Edit item"
                               >
-                                <Pencil size={13} />
+                                <Pencil size={isInsightFullscreen ? 15 : 13} />
                               </Button>
                               <Button
                                 size="icon"
                                 variant="secondary"
                                 onClick={() => {
-                                  void handleRemoveChecklistItem(blockIndex, itemIndex);
+                                  void handleRemoveChecklistItem(
+                                    blockIndex,
+                                    itemIndex,
+                                  );
                                 }}
                                 loading={checklistActionKey === removeActionKey}
                                 disabled={isChecklistSaving}
                                 title="Remove item"
                               >
-                                <Trash2 size={13} />
+                                <Trash2 size={isInsightFullscreen ? 15 : 13} />
                               </Button>
                             </div>
                             {isEditingThisRow ? (
-                              <div className="grid gap-2 border-t border-border/45 pt-2 lg:grid-cols-[1fr_auto_auto_auto]">
+                              <div className="grid gap-2 border-t border-border pt-2 lg:grid-cols-[1fr_auto_auto_auto]">
                                 <input
                                   value={editItemName}
-                                  onChange={(event) => setEditItemName(event.target.value)}
+                                  onChange={(event) =>
+                                    setEditItemName(event.target.value)
+                                  }
                                   disabled={isChecklistSaving}
                                   className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-xs text-text-primary outline-none focus:border-pf-500/50"
                                 />
                                 <select
                                   value={String(editItemPriority)}
                                   onChange={(event) => {
-                                    const next = Number.parseInt(event.target.value, 10);
-                                    setEditItemPriority(Number.isInteger(next) ? next : item.priority);
+                                    const next = Number.parseInt(
+                                      event.target.value,
+                                      10,
+                                    );
+                                    setEditItemPriority(
+                                      Number.isInteger(next)
+                                        ? next
+                                        : item.priority,
+                                    );
                                   }}
                                   disabled={isChecklistSaving}
-                                  className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-xs text-text-primary"
-                                  title="Priority"
+                                  className={dashboardSelectClass}
+                                  title="Severity"
                                 >
                                   {[1, 2, 3, 4, 5].map((priority) => (
                                     <option
                                       key={priority}
                                       value={String(priority)}
-                                      style={{ backgroundColor: "var(--surface-1)", color: "var(--text-primary)" }}
+                                      style={{
+                                        backgroundColor: "var(--surface-1)",
+                                        color: "var(--text-primary)",
+                                      }}
                                     >
-                                      P{priority}
+                                      S{priority}
                                     </option>
                                   ))}
                                 </select>
@@ -1926,10 +2451,19 @@ export default function Dashboard() {
                                   size="icon"
                                   variant="secondary"
                                   onClick={() => {
-                                    void handleUpdateChecklistItem(blockIndex, itemIndex, rowKey);
+                                    void handleUpdateChecklistItem(
+                                      blockIndex,
+                                      itemIndex,
+                                      rowKey,
+                                    );
                                   }}
-                                  loading={checklistActionKey === updateActionKey}
-                                  disabled={isChecklistSaving || editItemName.trim().length === 0}
+                                  loading={
+                                    checklistActionKey === updateActionKey
+                                  }
+                                  disabled={
+                                    isChecklistSaving ||
+                                    editItemName.trim().length === 0
+                                  }
                                   title="Save edit"
                                 >
                                   <Check size={13} />
@@ -1956,7 +2490,9 @@ export default function Dashboard() {
                 ))
               )}
               {checklistError ? (
-                <p className="px-1 text-[11px] text-red-300">{checklistError}</p>
+                <p className="px-1 text-xs text-red-300">
+                  {checklistError}
+                </p>
               ) : null}
             </div>
           )}
@@ -1973,8 +2509,10 @@ export default function Dashboard() {
 
       <Card className="space-y-3 p-3">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-text-primary">Target Architecture (Draft)</h2>
-          <span className="rounded-md border border-border bg-surface-0/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-text-muted">
+          <h2 className="text-sm font-semibold text-text-primary">
+            Target Architecture (Draft)
+          </h2>
+          <span className="rounded-md border border-border bg-surface-0/40 px-2 py-0.5 text-xs uppercase tracking-wide text-text-muted">
             Planned View
           </span>
         </div>
@@ -2007,7 +2545,11 @@ export default function Dashboard() {
               }}
             />
 
-            <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <svg
+              className="pointer-events-none absolute inset-0 h-full w-full"
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+            >
               <defs>
                 <marker
                   id="architecture-arrow"
@@ -2034,8 +2576,18 @@ export default function Dashboard() {
                       strokeDasharray="1.4 0.8"
                       markerEnd="url(#architecture-arrow)"
                     />
-                    <circle cx={edge.from.x} cy={edge.from.y} r="0.7" fill="rgba(167,243,208,0.9)" />
-                    <circle cx={edge.to.x} cy={edge.to.y} r="0.7" fill="rgba(191,219,254,0.9)" />
+                    <circle
+                      cx={edge.from.x}
+                      cy={edge.from.y}
+                      r="0.7"
+                      fill="rgba(167,243,208,0.9)"
+                    />
+                    <circle
+                      cx={edge.to.x}
+                      cy={edge.to.y}
+                      r="0.7"
+                      fill="rgba(191,219,254,0.9)"
+                    />
                   </g>
                 );
               })}
@@ -2050,31 +2602,44 @@ export default function Dashboard() {
                   top: `${host.y}%`,
                 }}
               >
-                <p className="text-[11px] font-semibold text-text-primary">{host.name}</p>
-                <p className="mt-0.5 text-[10px] text-text-muted">{host.role}</p>
+                <p className="text-xs font-semibold text-text-primary">
+                  {host.name}
+                </p>
+                <p className="mt-0.5 text-xs text-text-muted">
+                  {host.role}
+                </p>
                 <div className="mt-1 flex flex-wrap gap-1">
                   {host.ports.map((port) => (
                     <span
                       key={`${host.id}-${port}`}
-                      className="rounded border border-border/55 bg-surface-0/70 px-1.5 py-0.5 text-[10px] text-text-secondary"
+                      className="rounded border border-border/55 bg-surface-0/70 px-1.5 py-0.5 text-xs text-text-secondary"
                     >
                       {port}
                     </span>
                   ))}
                 </div>
-                <p className="mt-1 text-[10px] text-text-secondary">{host.note}</p>
+                <p className="mt-1 text-xs text-text-secondary">
+                  {host.note}
+                </p>
               </div>
             ))}
           </div>
         </div>
 
         <div className="space-y-2 md:hidden">
-          <p className="text-[11px] text-text-muted">Graph view opens on larger screens. Mobile fallback:</p>
+          <p className="text-xs text-text-muted">
+            Graph view opens on larger screens. Mobile fallback:
+          </p>
           {architectureDraft.hosts.map((host) => (
-            <div key={host.id} className="space-y-1 rounded-md border border-border/70 bg-surface-1/45 p-2">
-              <p className="text-xs font-semibold text-text-primary">{host.name}</p>
-              <p className="text-[11px] text-text-muted">{host.role}</p>
-              <p className="text-[11px] text-text-secondary">{host.note}</p>
+            <div
+              key={host.id}
+              className="space-y-1 rounded-md border border-border/70 bg-surface-1/45 p-2"
+            >
+              <p className="text-xs font-semibold text-text-primary">
+                {host.name}
+              </p>
+              <p className="text-xs text-text-muted">{host.role}</p>
+              <p className="text-xs text-text-secondary">{host.note}</p>
             </div>
           ))}
         </div>
@@ -2083,15 +2648,58 @@ export default function Dashboard() {
       <FindingsTable findings={activeProject.findings} />
 
       <Dialog
+        open={projectEditOpen}
+        onClose={() => setProjectEditOpen(false)}
+        title="Edit Project"
+      >
+        <div className="space-y-3">
+          <Input
+            label="Project Name"
+            value={projectEditName}
+            onChange={(event) => setProjectEditName(event.target.value)}
+            placeholder="Project name"
+          />
+          <Input
+            label="Target"
+            value={projectEditTarget}
+            onChange={(event) => setProjectEditTarget(event.target.value)}
+            placeholder="Target URL / IP"
+          />
+          <Input
+            label="Description"
+            value={projectEditDescription}
+            onChange={(event) => setProjectEditDescription(event.target.value)}
+            placeholder="Optional scope/notes"
+          />
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setProjectEditOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleSaveProjectEdit}
+              disabled={!projectEditName.trim() || !projectEditTarget.trim()}
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
         open={stopDialogOpen}
         onClose={() => setStopDialogOpen(false)}
         title="Stop Scan"
         description="Choose whether to pause or cancel the current scan."
       >
-        <div className="space-y-3 text-xs text-text-secondary">
+        <div className="space-y-3 text-sm text-text-secondary">
           <p>
-            Pause will keep current logs and results so you can review them. Cancel will clear logs,
-            agent results, and reset status to idle.
+            Pause will keep current logs and results so you can review them.
+            Cancel will clear logs, agent results, and reset status to idle.
           </p>
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
             <Button

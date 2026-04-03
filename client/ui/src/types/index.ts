@@ -11,7 +11,7 @@ export interface Project {
   name: string;
   target: string;
   targetType: string;
-  targetConfig?: Record<string, string>;
+  targetConfig?: Record<string, unknown>;
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;
