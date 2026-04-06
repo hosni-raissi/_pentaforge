@@ -1,0 +1,39 @@
+wafw00f
+nmap
+whatwaf
+(cd /home/hosnizap/projects/PentaForge/server/tools/whatwaf
+
+sudo dnf install -y rsync
+
+python3 -m pip install -r requirements.txt
+
+chmod +x whatwaf install_helper.sh
+
+./install_helper.sh
+
+ls -l ~/.whatwaf/files/default_payloads.lst
+
+./whatwaf -u https://hackerone.com
+)
+httpx(~/projects/PentaForge main !27 ?35 ······································································································································································ 3m 53s
+╰─❯ sudo apt update
+sudo apt install -y golang-go
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+sudo install -m 0755 "$HOME/go/bin/httpx" /usr/local/bin/httpx
+which httpx
+httpx -version
+)
+ffuf
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+go install github.com/jaeles-project/gospider@latest
+go install github.com/hakluke/hakrawler@latest
+mitmproxy(python) ---> mitmdump installed default with mitmproxy 
+whatweb
+sslscan
+testssl
+nmap
+naabu
+netcat
+pip install arjun
+sudo dnf install cargo --> cargo install x8
+pip install git+https://github.com/devanshbatham/ParamSpider.git

@@ -248,6 +248,41 @@ class PrintCallback:
         if self._on_log is not None:
             self._on_log("warn", message)
 
+    async def request_tool_approval(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        if self._enabled:
+            print(
+                f"  ⚠ approval required: role={role} tool={tool_name} call_id={call_id}",
+                flush=True,
+            )
+        if self._on_log is not None:
+            self._on_log(
+                "warn",
+                (
+                    f"Tool approval required: role={role} "
+                    f"tool={tool_name} call_id={call_id} args={args}"
+                ),
+            )
+        # Secure default: deny unless orchestration layer explicitly approves.
+        return False
+
+
+@dataclass
+class _PendingToolApproval:
+    scan_id: str
+    role: str
+    tool_name: str
+    args: dict[str, Any]
+    call_id: str
+    event: asyncio.Event
+    decision: str | None = None
+
 
 class ScanOrchestratorService:
     """Runs and tracks orchestrated scan executions per project."""
@@ -257,6 +292,7 @@ class ScanOrchestratorService:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._runs: dict[str, dict[str, Any]] = {}
         self._planner_approval_events: dict[str, asyncio.Event] = {}
+        self._tool_approval_events: dict[str, dict[str, _PendingToolApproval]] = {}
         self._event_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
 
@@ -365,6 +401,8 @@ class ScanOrchestratorService:
                 "finished_at": None,
                 "error": "",
                 "awaiting_planner_approval": False,
+                "awaiting_tool_approval": False,
+                "pending_tool_approval": None,
                 "already_running": False,
             }
             self._runs[project_key] = run_state
@@ -586,6 +624,8 @@ class ScanOrchestratorService:
                 "finished_at": now_iso,
                 "error": "",
                 "awaiting_planner_approval": False,
+                "awaiting_tool_approval": False,
+                "pending_tool_approval": None,
                 "already_running": False,
             }
             last_scan = project.get("lastScan")
@@ -621,6 +661,8 @@ class ScanOrchestratorService:
             "finished_at": now_iso,
             "error": "",
             "awaiting_planner_approval": False,
+            "awaiting_tool_approval": False,
+            "pending_tool_approval": None,
             "already_running": False,
         }
         project["status"] = "idle"
@@ -705,6 +747,134 @@ class ScanOrchestratorService:
                 "already_approved": not waiting,
             }
 
+    async def request_executer_tool_approval(
+        self,
+        *,
+        project_id: str,
+        scan_id: str,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        project_key = str(project_id or "").strip()
+        if not project_key:
+            return False
+
+        approval_id = str(uuid.uuid4())
+        pending = _PendingToolApproval(
+            scan_id=str(scan_id or ""),
+            role=str(role or ""),
+            tool_name=str(tool_name or ""),
+            args=dict(args or {}),
+            call_id=str(call_id or ""),
+            event=asyncio.Event(),
+        )
+        project_pending = self._tool_approval_events.setdefault(project_key, {})
+        project_pending[approval_id] = pending
+
+        run_state = self._runs.get(project_key)
+        if isinstance(run_state, dict):
+            run_state["awaiting_tool_approval"] = True
+            run_state["pending_tool_approval"] = {
+                "approval_id": approval_id,
+                "scan_id": pending.scan_id,
+                "role": pending.role,
+                "tool_name": pending.tool_name,
+                "call_id": pending.call_id,
+            }
+            run_state["updated_at"] = _utc_now_iso()
+            self._runs[project_key] = run_state
+
+        self._emit_event(
+            project_key,
+            event="executer_tool_waiting_approval",
+            scan_id=pending.scan_id,
+            level="warn",
+            message=(
+                f"Executer [waiting approval] {pending.role} requested "
+                f"tool '{pending.tool_name}'. Approve or skip."
+            ),
+            data={
+                "stage": "executer",
+                "kind": "waiting_tool_approval",
+                "awaiting_user_approval": True,
+                "approval_id": approval_id,
+                "role": pending.role,
+                "tool_name": pending.tool_name,
+                "call_id": pending.call_id,
+                "args": pending.args,
+            },
+        )
+
+        await pending.event.wait()
+        approved = pending.decision == "approve"
+
+        project_pending = self._tool_approval_events.get(project_key, {})
+        project_pending.pop(approval_id, None)
+        if not project_pending:
+            self._tool_approval_events.pop(project_key, None)
+
+        run_state = self._runs.get(project_key)
+        if isinstance(run_state, dict):
+            run_state["awaiting_tool_approval"] = False
+            run_state["pending_tool_approval"] = None
+            run_state["updated_at"] = _utc_now_iso()
+            self._runs[project_key] = run_state
+
+        self._emit_event(
+            project_key,
+            event="executer_tool_approval_decision",
+            scan_id=pending.scan_id,
+            level="success" if approved else "warn",
+            message=(
+                f"Executer [approval {'approved' if approved else 'skipped'}] "
+                f"{pending.role} tool '{pending.tool_name}'."
+            ),
+            data={
+                "stage": "executer",
+                "kind": "tool_approval_decision",
+                "approved": approved,
+                "decision": pending.decision,
+                "role": pending.role,
+                "tool_name": pending.tool_name,
+                "call_id": pending.call_id,
+            },
+        )
+        return approved
+
+    async def approve_executer_tool(
+        self,
+        project_id: str,
+        *,
+        approval_id: str,
+        action: str,
+    ) -> dict[str, Any]:
+        project_key = str(project_id or "").strip()
+        if not project_key:
+            raise ValueError("project_id is required")
+        action_clean = str(action or "").strip().lower()
+        if action_clean not in {"approve", "skip"}:
+            raise ValueError("action must be 'approve' or 'skip'")
+
+        pending_by_id = self._tool_approval_events.get(project_key, {})
+        pending = pending_by_id.get(str(approval_id or "").strip())
+        if pending is None:
+            raise ValueError("tool approval request not found")
+
+        pending.decision = action_clean
+        pending.event.set()
+
+        return {
+            "ok": True,
+            "project_id": project_key,
+            "approval_id": approval_id,
+            "action": action_clean,
+            "role": pending.role,
+            "tool_name": pending.tool_name,
+            "scan_id": pending.scan_id,
+        }
+
     def _emit_intel_callback_event(
         self,
         *,
@@ -786,12 +956,15 @@ class ScanOrchestratorService:
             "finished_at": last_scan.get("finishedAt"),
             "error": str(last_scan.get("error", "")),
             "awaiting_planner_approval": bool(last_scan.get("awaitingPlannerApproval")),
+            "awaiting_tool_approval": bool(last_scan.get("awaitingToolApproval")),
+            "pending_tool_approval": last_scan.get("pendingToolApproval"),
             "already_running": False,
         }
 
     def _on_task_done(self, project_id: str, task: asyncio.Task[None]) -> None:
         self._tasks.pop(project_id, None)
         self._planner_approval_events.pop(project_id, None)
+        self._tool_approval_events.pop(project_id, None)
         try:
             task.result()
         except Exception as exc:  # pragma: no cover - defensive
@@ -1186,6 +1359,8 @@ class ScanOrchestratorService:
             "finished_at": finished_at,
             "error": "",
             "awaiting_planner_approval": False,
+            "awaiting_tool_approval": False,
+            "pending_tool_approval": None,
             "already_running": False,
         }
         self._persist_project_status(
@@ -1228,6 +1403,8 @@ class ScanOrchestratorService:
             "finished_at": finish_time,
             "error": error_message,
             "awaiting_planner_approval": False,
+            "awaiting_tool_approval": False,
+            "pending_tool_approval": None,
             "already_running": False,
         }
         self._persist_project_status(

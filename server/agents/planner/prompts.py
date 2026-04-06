@@ -150,6 +150,11 @@ Recon: >=3 steps, >=2 scenarios each | Enum: >=3 steps, >=2 scenarios each
 Every scenario MUST reference a specific artifact from tool output (URL, param, header, version).
 BAD: "Check for injection" | GOOD: "Test POST /api/login param `email` — endpoint from get_page"
 
+═══ TARGET SURFACE EXPANSION ═══
+When evidence reveals a new surface (example: network scan finds mobile app/API/cloud bucket),
+call add_target_type(new_type) and include dispatch entries for recon/exploit on that target type.
+Keep original target type as primary and treat discovered ones as additional.
+
 ═══ SCENARIO FORMAT ═══
 {"task":"...","agent":"recon","priority":1-5,"details":"...","methods":["..."],"done":false}
 - NEVER name tools (nmap, sqlmap, burp). methods[] = technique descriptions only.
@@ -206,6 +211,11 @@ Every expanded phase: >=3 steps, >=2 scenarios each. Never reduce existing count
 ═══ EVIDENCE RULE ═══
 Every scenario MUST reference a specific artifact from executor results (path, param, header, version).
 BAD: "Test SQLi" | GOOD: "Test POST /api/auth `username` for blind SQLi — endpoint confirmed"
+
+═══ TARGET SURFACE EXPANSION ═══
+If executor evidence introduces a new surface type, add it via add_target_type(type)
+and update action_plan.dispatch with entries per target_type + agent (recon/exploit).
+Example: main=network, discovered=mobile -> keep network, add mobile as secondary stream.
 
 ═══ SCENARIO FORMAT ═══
 {"task":"...","agent":"recon|exploit|verify|report","priority":1-5,"details":"...","methods":["..."],"done":false}

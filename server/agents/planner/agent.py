@@ -24,6 +24,11 @@ import structlog
 import httpx
 from langgraph.graph import END, START, StateGraph
 
+from server.agents.executer.target_tool_routing import (
+    mapped_tool_names_for_target_type,
+    normalize_target_type,
+    normalize_target_types,
+)
 from server.config.agent import (
     LocalLLMConfig,
     PublicLLMConfig,
@@ -858,6 +863,10 @@ def _normalize_action_plan(payload: dict[str, Any]) -> dict[str, Any]:
         "checklist_additions": [x for x in _as_list(payload.get("checklist_additions")) if isinstance(x, dict)],
         "plan_modifications": [x for x in _as_list(payload.get("plan_modifications")) if isinstance(x, dict)],
         "dispatch": [x for x in _as_list(payload.get("dispatch")) if isinstance(x, dict)],
+        "target_type_additions": [
+            t for t in normalize_target_types(_as_list(payload.get("target_type_additions")))
+            if t
+        ],
         "phase_advance": bool(payload.get("phase_advance", False)),
         "phase_advance_blocked_by": [
             str(x).strip() for x in _as_list(payload.get("phase_advance_blocked_by"))
@@ -872,6 +881,71 @@ def _normalize_action_plan(payload: dict[str, Any]) -> dict[str, Any]:
         normalized["plan"] = plan_obj
 
     return normalized
+
+
+def _normalize_dispatch_items(dispatch_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in dispatch_items:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        agent = str(entry.get("agent") or entry.get("role") or "").strip().lower()
+        if agent in {"recon", "exploit", "verify", "report", "retest"}:
+            entry["agent"] = agent
+        target_type = normalize_target_type(
+            entry.get("target_type") or entry.get("surface") or ""
+        )
+        if target_type:
+            entry["target_type"] = target_type
+        if target_type and agent in {"recon", "exploit"}:
+            if not isinstance(entry.get("tool_candidates"), list) or not entry.get("tool_candidates"):
+                entry["tool_candidates"] = mapped_tool_names_for_target_type(
+                    role=agent,
+                    target_type=target_type,
+                )
+        normalized.append(entry)
+    return normalized
+
+
+def _auto_dispatch_for_target_types(
+    *,
+    dispatch: list[dict[str, Any]],
+    target_types: list[str],
+) -> list[dict[str, Any]]:
+    out = list(dispatch)
+    seen_pairs = {
+        (
+            str(item.get("agent", "")).strip().lower(),
+            normalize_target_type(item.get("target_type") or ""),
+        )
+        for item in out
+        if isinstance(item, dict)
+    }
+
+    for target_type in normalize_target_types(target_types):
+        for agent in ("recon", "exploit"):
+            pair = (agent, target_type)
+            if pair in seen_pairs:
+                continue
+            tool_candidates = mapped_tool_names_for_target_type(
+                role=agent,
+                target_type=target_type,
+            )
+            if not tool_candidates:
+                continue
+            out.append(
+                {
+                    "agent": agent,
+                    "target_type": target_type,
+                    "tool_candidates": tool_candidates,
+                    "reason": (
+                        "Auto-added by target surface routing. "
+                        "If this surface is no longer relevant, mark it blocked in planner rationale."
+                    ),
+                }
+            )
+            seen_pairs.add(pair)
+    return out
 
 
 def _extract_action_plan_from_text(raw: str) -> dict[str, Any] | None:
@@ -1935,6 +2009,11 @@ class PlannerAgent:
         total_tools = state["total_tool_calls"]
         rounds = state["round_count"]
         action_plan = _extract_action_plan_from_text(content) or {}
+        previous_target_types = normalize_target_types(
+            _current_plan.get("target_types", [])
+            if isinstance(_current_plan, dict)
+            else []
+        )
 
         if state.get("error"):
             self._cb.on_warn(f"Planning failed: {state['error']}")
@@ -1977,6 +2056,38 @@ class PlannerAgent:
         action_plan_payload = (
             result.action_plan if isinstance(result.action_plan, dict) else {}
         )
+        action_plan_payload = _normalize_action_plan(action_plan_payload)
+        effective_target_types = normalize_target_types(
+            _current_plan.get("target_types", [])
+            if isinstance(_current_plan, dict)
+            else []
+        )
+        if not effective_target_types and plan_payload and isinstance(plan_payload, dict):
+            effective_target_types = normalize_target_types(plan_payload.get("target_types", []))
+
+        discovered_additions = [
+            tt for tt in effective_target_types
+            if tt not in set(previous_target_types)
+        ]
+        existing_additions = normalize_target_types(
+            action_plan_payload.get("target_type_additions", [])
+            if isinstance(action_plan_payload, dict)
+            else []
+        )
+        action_plan_payload["target_type_additions"] = normalize_target_types(
+            [*existing_additions, *discovered_additions]
+        )
+
+        dispatch = _normalize_dispatch_items(
+            action_plan_payload.get("dispatch", [])
+            if isinstance(action_plan_payload.get("dispatch", []), list)
+            else []
+        )
+        action_plan_payload["dispatch"] = _auto_dispatch_for_target_types(
+            dispatch=dispatch,
+            target_types=effective_target_types,
+        )
+        action_plan_payload["target_types"] = effective_target_types
 
         # Planner runs in plan-only mode: never return scenario batches here.
         result.scenarios = []

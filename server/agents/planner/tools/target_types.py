@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import structlog
 
+from server.agents.executer.target_tool_routing import normalize_target_type
 from server.core.tool import tool
 from .pentest_plan import VALID_TARGET_TYPES, _current_plan
 
@@ -23,17 +24,18 @@ async def get_target_types() -> str:
     description="Add one target type to plan. Only for NEW surfaces.",
 )
 async def add_target_type(target_type: str) -> str:
-    if target_type not in VALID_TARGET_TYPES:
+    normalized = normalize_target_type(target_type) or str(target_type or "").strip().lower().replace("-", "_")
+    if normalized not in VALID_TARGET_TYPES:
         return f"Invalid: '{target_type}'."
 
     current = set(_current_plan.get("target_types", []))
-    if target_type in current:
-        return f"Already present: '{target_type}'. Types: {sorted(current)}"
+    if normalized in current:
+        return f"Already present: '{normalized}'. Types: {sorted(current)}"
 
-    current.add(target_type)
+    current.add(normalized)
     _current_plan["target_types"] = sorted(current)
-    logger.info("target_type_added", target_type=target_type)
-    return f"Added '{target_type}'. Types: {_current_plan['target_types']}"
+    logger.info("target_type_added", target_type=normalized)
+    return f"Added '{normalized}'. Types: {_current_plan['target_types']}"
 
 
 @tool(
@@ -41,11 +43,12 @@ async def add_target_type(target_type: str) -> str:
     description="Remove one target type from plan.",
 )
 async def remove_target_type(target_type: str) -> str:
+    normalized = normalize_target_type(target_type) or str(target_type or "").strip().lower().replace("-", "_")
     current = set(_current_plan.get("target_types", []))
-    if target_type not in current:
-        return f"Not present: '{target_type}'. Types: {sorted(current)}"
+    if normalized not in current:
+        return f"Not present: '{normalized}'. Types: {sorted(current)}"
 
-    current.remove(target_type)
+    current.remove(normalized)
     _current_plan["target_types"] = sorted(current)
-    logger.info("target_type_removed", target_type=target_type)
-    return f"Removed '{target_type}'. Types: {_current_plan['target_types']}"
+    logger.info("target_type_removed", target_type=normalized)
+    return f"Removed '{normalized}'. Types: {_current_plan['target_types']}"

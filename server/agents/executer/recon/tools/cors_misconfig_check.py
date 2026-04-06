@@ -5,7 +5,7 @@ import time
 import requests
 import concurrent.futures
 from typing import Optional, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 # ══════════════════════════════════════════════════════════════
 # 1. SCHEMAS
@@ -19,14 +19,16 @@ class CORSCheckRequest(BaseModel):
     endpoints: list[str] = []          # optional pre-supplied endpoint list
     origins: list[str] = []            # custom origins to test
 
-    @validator("tool")
+    @field_validator("tool")
+    @classmethod
     def validate_tool(cls, v):
         allowed = {"corscanner", "curl", "manual"}
         if v not in allowed:
             raise ValueError(f"Tool '{v}' not allowed. Use: {allowed}")
         return v
 
-    @validator("target")
+    @field_validator("target")
+    @classmethod
     def validate_target(cls, v):
         blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
         if v.strip() in blocked:
@@ -42,7 +44,8 @@ class CORSCheckRequest(BaseModel):
             raise ValueError(f"Invalid target: {v}")
         return v.strip()
 
-    @validator("args")
+    @field_validator("args")
+    @classmethod
     def validate_args(cls, v):
         dangerous_chars = [";", "&&", "||", "|", "`", "$(", ">>", "'", '"']
         blocked_flags   = ["-o", "--output", "-O"]

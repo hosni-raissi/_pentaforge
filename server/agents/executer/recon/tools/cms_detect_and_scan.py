@@ -3,11 +3,10 @@ import json
 import re
 import os
 import time
-import tempfile
 from pathlib import Path
 from typing import Optional, Any
 from urllib.parse import urlparse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ══════════════════════════════════════════════════════════════
@@ -81,19 +80,22 @@ class CmsScanRequest(BaseModel):
     args: list[str] = []
     timeout: int = Field(default=900, ge=10, le=3600)
 
-    @validator("tool")
+    @field_validator("tool")
+    @classmethod
     def validate_tool(cls, v):
         if v not in {"cmseek", "wpscan", "joomscan", "droopescan"}: 
             raise ValueError("Tool must be 'cmseek', 'wpscan', 'joomscan', or 'droopescan'")
         return v
 
-    @validator("target")
+    @field_validator("target")
+    @classmethod
     def validate_target(cls, v):
         if not v.startswith("http"): 
             raise ValueError("Target must be a URL (e.g. https://example.com/)")
         return v.strip()
 
-    @validator("args")
+    @field_validator("args")
+    @classmethod
     def validate_args(cls, v):
         for arg in v:
             for char in [";", "&&", "||", "|", "`", "$(", ">"]:
@@ -155,14 +157,14 @@ def _build_cmseek_cmd(args: list[str], target: str) -> list[str]:
     return cmd
 
 
-def _build_wpscan_cmd(args: list[str], target: str) -> tuple[list[str], Path]:
+def _build_wpscan_cmd(args: list[str], target: str) -> list[str]:
     cmd = ["wpscan"]
     final_args = list(args)
 
-    tmp_file = ProjectConfig.get_temp_dir() / f"wpscan_{int(time.time())}.json"
-    
+    if _has_flag(final_args, ["-o", "--output"]):
+        raise ValueError("Output file flags are blocked. Use stdout output only.")
     if not _has_flag(final_args, ["-f", "--format"]):
-        final_args.extend(["-f", "json", "-o", str(tmp_file)])
+        final_args.extend(["-f", "json"])
 
     # Avoid updating locally on every run unless requested
     if not _has_flag(final_args, ["--update"]):
@@ -176,7 +178,7 @@ def _build_wpscan_cmd(args: list[str], target: str) -> tuple[list[str], Path]:
         final_args.extend(["--url", target])
 
     cmd.extend(final_args)
-    return cmd, tmp_file
+    return cmd
 
 
 def _build_joomscan_cmd(args: list[str], target: str) -> list[str]:
@@ -191,7 +193,7 @@ def _build_joomscan_cmd(args: list[str], target: str) -> list[str]:
     return cmd
 
 
-def _build_droopescan_cmd(args: list[str], target: str) -> tuple[list[str], Path]:
+def _build_droopescan_cmd(args: list[str], target: str) -> list[str]:
     cmd = ["droopescan"]
     final_args = list(args)
     
@@ -202,8 +204,6 @@ def _build_droopescan_cmd(args: list[str], target: str) -> tuple[list[str], Path
         scan_idx = final_args.index("scan")
         final_args.insert(scan_idx + 1, "drupal")
 
-    tmp_file = ProjectConfig.get_temp_dir() / f"droopescan_{int(time.time())}.json"
-    
     if not _has_flag(final_args, ["-o", "--output"]):
         final_args.extend(["-o", "json"])
         
@@ -211,7 +211,7 @@ def _build_droopescan_cmd(args: list[str], target: str) -> tuple[list[str], Path
         final_args.extend(["-u", target])
 
     cmd.extend(final_args)
-    return cmd, tmp_file
+    return cmd
 
 
 # ══════════════════════════════════════════════════════════════
@@ -240,18 +240,36 @@ def parse_cmseek(stdout: str) -> tuple[Optional[str], Optional[str]]:
     return cms_name, cms_version
 
 
-def parse_wpscan(tmp_file: Path) -> tuple[Optional[str], list[CmsComponent], list[CmsFinding], list[str]]:
-    """Parse WPScan JSON output"""
+def _extract_json_value(raw: str) -> Optional[Any]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    decoder = json.JSONDecoder()
+    starts: list[int] = []
+    for marker in ("{", "["):
+        idx = text.find(marker)
+        if idx != -1:
+            starts.append(idx)
+    for idx in sorted(starts):
+        try:
+            value, _ = decoder.raw_decode(text[idx:])
+            return value
+        except Exception:
+            continue
+    return None
+
+
+def parse_wpscan(raw_json: str) -> tuple[Optional[str], list[CmsComponent], list[CmsFinding], list[str]]:
+    """Parse WPScan JSON output from stdout."""
     cms_version = None
     components = []
     findings = []
     users = []
-
-    if not tmp_file.exists(): return cms_version, components, findings, users
+    data = _extract_json_value(raw_json)
+    if not isinstance(data, dict):
+        return cms_version, components, findings, users
 
     try:
-        data = json.loads(tmp_file.read_text())
-        
         # 1. Core Version & Vulns
         version_data = data.get("version", {})
         if version_data:
@@ -295,9 +313,6 @@ def parse_wpscan(tmp_file: Path) -> tuple[Optional[str], list[CmsComponent], lis
 
     except Exception:
         pass
-    finally:
-        try: tmp_file.unlink()
-        except OSError: pass
 
     return cms_version, components, findings, users
 
@@ -336,19 +351,16 @@ def parse_joomscan(stdout: str) -> tuple[Optional[str], list[CmsComponent], list
     return cms_version, components, findings
 
 
-def parse_droopescan(stdout: str, tmp_file: Optional[Path] = None) -> tuple[Optional[str], list[CmsComponent]]:
-    """Parse Droopescan JSON output. (Sometimes droopescan prints JSON to stdout if -o json is used without file)"""
+def parse_droopescan(stdout: str) -> tuple[Optional[str], list[CmsComponent]]:
+    """Parse Droopescan JSON output from stdout."""
     cms_version = None
     components = []
-    
+
     raw = stdout
-    if tmp_file and tmp_file.exists():
-        raw = tmp_file.read_text()
-        try: tmp_file.unlink()
-        except OSError: pass
-        
     try:
-        data = json.loads(raw)
+        data = _extract_json_value(raw)
+        if not isinstance(data, dict):
+            return cms_version, components
         
         # Version
         version_data = data.get("version", [])
@@ -381,11 +393,12 @@ def parse_droopescan(stdout: str, tmp_file: Optional[Path] = None) -> tuple[Opti
 # 5. MAIN TOOL FUNCTION
 # ══════════════════════════════════════════════════════════════
 
-def cms_detect_and_scan(tool: str, target: str, args: list[str] = []) -> dict:
+def cms_detect_and_scan(tool: str, target: str, args: Optional[list[str]] = None) -> dict:
     """
     🔧 Agent Tool: CMS Detection & Scanning
     """
     start = time.time()
+    args = list(args or [])
     
     try:
         req = CmsScanRequest(tool=tool, target=target, args=args)
@@ -393,15 +406,14 @@ def cms_detect_and_scan(tool: str, target: str, args: list[str] = []) -> dict:
         return CmsResult(success=False, tool=tool, target=target, command="", working_dir="", error=str(e)).model_dump()
 
     # ── BUILD COMMAND ──
-    tmp_file = None
     if tool == "cmseek":
         cmd = _build_cmseek_cmd(args, target)
     elif tool == "wpscan":
-        cmd, tmp_file = _build_wpscan_cmd(args, target)
+        cmd = _build_wpscan_cmd(args, target)
     elif tool == "joomscan":
         cmd = _build_joomscan_cmd(args, target)
     elif tool == "droopescan":
-        cmd, tmp_file = _build_droopescan_cmd(args, target)
+        cmd = _build_droopescan_cmd(args, target)
 
     command_str = " ".join(cmd)
     
@@ -419,13 +431,13 @@ def cms_detect_and_scan(tool: str, target: str, args: list[str] = []) -> dict:
         cms_name, cms_version = parse_cmseek(stdout)
     elif tool == "wpscan":
         cms_name = "WordPress"
-        cms_version, components, findings, users = parse_wpscan(tmp_file)
+        cms_version, components, findings, users = parse_wpscan(stdout)
     elif tool == "joomscan":
         cms_name = "Joomla"
         cms_version, components, findings = parse_joomscan(stdout)
     elif tool == "droopescan":
         cms_name = "Drupal" # Default for droopescan
-        cms_version, components = parse_droopescan(stdout, tmp_file)
+        cms_version, components = parse_droopescan(stdout)
 
     has_data = bool(cms_name or cms_version or components or findings or users)
 

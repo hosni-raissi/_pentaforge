@@ -13,6 +13,7 @@ from typing import Any, Protocol
 
 import structlog
 
+from server.agents.executer.target_tool_routing import extract_discovered_target_types
 from server.config.agent import (
     LocalLLMConfig,
     PublicLLMConfig,
@@ -32,6 +33,14 @@ class ExecuterCallback(Protocol):
     def on_step(self, message: str) -> None: ...
     def on_done(self, message: str) -> None: ...
     def on_warn(self, message: str) -> None: ...
+    def request_tool_approval(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool | dict[str, Any] | str | Any: ...
 
 
 class _NoOpCallback:
@@ -44,6 +53,17 @@ class _NoOpCallback:
     def on_warn(self, message: str) -> None:
         pass
 
+    def request_tool_approval(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        # Secure-by-default: explicit approval integration is required.
+        return False
+
 
 @dataclass
 class ExecuterResult:
@@ -54,6 +74,7 @@ class ExecuterResult:
     summary: str = ""
     next_hypotheses: list[str] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
+    discovered_target_types: list[str] = field(default_factory=list)
 
 
 def _dict_to_msg(d: dict[str, Any]) -> ChatMessage:
@@ -211,12 +232,130 @@ class BaseExecuterAgent:
             lines.append("")
         return "\n".join(lines).strip()
 
+    def _is_allowed_output_sink(self, value: str) -> bool:
+        lowered = value.strip().lower()
+        return lowered in {
+            "-",
+            "json",
+            "jsonl",
+            "xml",
+            "csv",
+            "yaml",
+            "yml",
+            "cli",
+            "stdout",
+            "/dev/stdout",
+            "/dev/fd/1",
+        }
+
+    def _looks_like_file_sink(self, value: str) -> bool:
+        val = str(value or "").strip()
+        if not val:
+            return True
+        if self._is_allowed_output_sink(val):
+            return False
+        lowered = val.lower()
+        if lowered.startswith(("http://", "https://")):
+            return False
+        if val.startswith("-"):
+            return False
+        if "/" in val or "\\" in val:
+            return True
+        if re.search(
+            r"\.(txt|json|jsonl|xml|csv|log|out|html|yaml|yml|cap|pcap)$",
+            lowered,
+        ):
+            return True
+        return True
+
+    def _scan_args_for_file_output(self, tokens: list[str]) -> str | None:
+        file_output_flags = {
+            "-o",
+            "-oJ",
+            "-oX",
+            "--output",
+            "--output-file",
+            "--out",
+            "--outfile",
+            "--report",
+            "--report-file",
+            "--report-dir",
+            "--outdir",
+            "--jsonfile",
+            "--json_out",
+            "--log-json",
+            "--xml",
+            "--xml-output",
+            "--save-report",
+            "--write-report",
+        }
+        equals_prefixes = (
+            "--output=",
+            "--output-file=",
+            "--out=",
+            "--outfile=",
+            "--report=",
+            "--report-file=",
+            "--report-dir=",
+            "--outdir=",
+            "--jsonfile=",
+            "--json_out=",
+            "--log-json=",
+            "--xml=",
+            "--xml-output=",
+            "--save-report=",
+            "--write-report=",
+            "-oX",
+        )
+
+        for idx, raw in enumerate(tokens):
+            token = str(raw or "").strip()
+            if not token:
+                continue
+            if token in file_output_flags:
+                next_value = str(tokens[idx + 1]).strip() if idx + 1 < len(tokens) else ""
+                if self._looks_like_file_sink(next_value):
+                    return f"{token} {next_value}".strip()
+                continue
+            if any(token.startswith(prefix) for prefix in equals_prefixes):
+                if "=" in token:
+                    _, value = token.split("=", 1)
+                elif token.startswith("-oX"):
+                    value = token[3:]
+                else:
+                    value = ""
+                if self._looks_like_file_sink(value):
+                    return token
+        return None
+
+    def _detect_disallowed_file_output(self, args: dict[str, Any]) -> str | None:
+        if not isinstance(args, dict):
+            return None
+
+        tool_args = args.get("args")
+        if isinstance(tool_args, list):
+            reason = self._scan_args_for_file_output([str(x) for x in tool_args])
+            if reason:
+                return reason
+
+        extra_args = args.get("extra_args")
+        if isinstance(extra_args, dict):
+            for maybe_list in extra_args.values():
+                if isinstance(maybe_list, list):
+                    reason = self._scan_args_for_file_output([str(x) for x in maybe_list])
+                    if reason:
+                        return reason
+
+        return None
+
     async def _run_tools(
         self,
         tool_calls: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], bool]:
         tool_messages: list[dict[str, Any]] = []
         tool_results: list[dict[str, Any]] = []
+        discovered_target_types: set[str] = set()
+        halted_for_approval = False
 
         for tc in tool_calls:
             tool_name = tc.get("function", {}).get("name", "")
@@ -231,26 +370,101 @@ class BaseExecuterAgent:
                 args = {}
 
             args = self._filter_tool_args(tool_name, args)
+            output_arg_issue = self._detect_disallowed_file_output(args)
+            if output_arg_issue:
+                result = json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "File output arguments are blocked by policy. "
+                            "Return results via stdout/stdin only."
+                        ),
+                        "blocked_arg": output_arg_issue,
+                        "role": self._role,
+                        "tool": tool_name,
+                    },
+                    ensure_ascii=True,
+                )
+                self._cb.on_warn(
+                    f"[{self._role}] blocked output-file arg for {tool_name}: {output_arg_issue}"
+                )
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "content": result,
+                        "tool_call_id": call_id,
+                        "name": tool_name,
+                    },
+                )
+                tool_results.append(
+                    {
+                        "tool_call_id": call_id,
+                        "name": tool_name,
+                        "args": args,
+                        "result": result,
+                        "discovered_target_types": extract_discovered_target_types(result),
+                        "approval_required": False,
+                    },
+                )
+                continue
+
             tool = self._tools.get(tool_name)
             if tool is None:
                 result = f"Error: unknown tool '{tool_name}'"
                 self._cb.on_warn(f"[{self._role}] unknown tool: {tool_name}")
             else:
-                self._cb.on_step(f"[{self._role}] tool call: {tool_name}")
-                try:
-                    result = await tool.execute(**args)
-                    self._cb.on_done(
-                        f"[{self._role}] {tool_name} completed ({len(result)} chars)"
+                result = ""
+                if self._tool_requires_user_approval(tool_name):
+                    approved = await self._request_tool_approval(
+                        tool_name=tool_name,
+                        args=args,
+                        call_id=str(call_id),
                     )
-                except Exception as exc:
-                    logger.error(
-                        "executer_tool_error",
-                        role=self._role,
-                        tool=tool_name,
-                        error=repr(exc),
-                    )
-                    result = f"Error executing {tool_name}: {exc}"
-                    self._cb.on_warn(f"[{self._role}] tool error: {exc}")
+                    if not approved:
+                        result = json.dumps(
+                            {
+                                "success": False,
+                                "error": "User approval required before executing tool",
+                                "approval_required": True,
+                                "role": self._role,
+                                "tool": tool_name,
+                                "call_id": call_id,
+                                "args": args,
+                            },
+                            ensure_ascii=True,
+                        )
+                        self._cb.on_warn(
+                            f"[{self._role}] blocked pending user approval: {tool_name}"
+                        )
+                        halted_for_approval = True
+                    else:
+                        self._cb.on_step(
+                            f"[{self._role}] user approved tool: {tool_name}"
+                        )
+
+                if halted_for_approval:
+                    pass
+                elif result:
+                    pass
+                else:
+                    self._cb.on_step(f"[{self._role}] tool call: {tool_name}")
+                    try:
+                        result = await tool.execute(**args)
+                        self._cb.on_done(
+                            f"[{self._role}] {tool_name} completed ({len(result)} chars)"
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "executer_tool_error",
+                            role=self._role,
+                            tool=tool_name,
+                            error=repr(exc),
+                        )
+                        result = f"Error executing {tool_name}: {exc}"
+                        self._cb.on_warn(f"[{self._role}] tool error: {exc}")
+
+            for discovered in extract_discovered_target_types(result):
+                discovered_target_types.add(discovered)
 
             tool_messages.append(
                 {
@@ -266,10 +480,65 @@ class BaseExecuterAgent:
                     "name": tool_name,
                     "args": args,
                     "result": result,
+                    "discovered_target_types": extract_discovered_target_types(result),
+                    "approval_required": bool(
+                        isinstance(result, str)
+                        and '"approval_required": true' in result.lower()
+                    ),
                 },
             )
 
-        return tool_messages, tool_results
+            if halted_for_approval:
+                break
+
+        return (
+            tool_messages,
+            tool_results,
+            sorted(discovered_target_types),
+            halted_for_approval,
+        )
+
+    def _tool_requires_user_approval(self, tool_name: str) -> bool:
+        # Any Exploit execution requires explicit approval.
+        if self._role == "exploit":
+            return True
+        # run_custom is powerful even in recon and must be explicitly approved.
+        return tool_name == "run_custom"
+
+    async def _request_tool_approval(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        callback_fn = getattr(self._cb, "request_tool_approval", None)
+        if not callable(callback_fn):
+            return False
+
+        try:
+            decision = callback_fn(
+                role=self._role,
+                tool_name=tool_name,
+                args=args,
+                call_id=call_id,
+            )
+        except TypeError:
+            # Backward-compatible fallback if callback signature is positional.
+            decision = callback_fn(self._role, tool_name, args, call_id)
+
+        if inspect.isawaitable(decision):
+            decision = await decision
+
+        if isinstance(decision, dict):
+            if "approved" in decision:
+                return bool(decision.get("approved"))
+            if "allow" in decision:
+                return bool(decision.get("allow"))
+            return False
+        if isinstance(decision, str):
+            return decision.strip().lower() in {"approve", "approved", "allow", "yes", "true", "1"}
+        return bool(decision)
 
     async def run(self, user_message: str) -> ExecuterResult:
         self._cb.on_step(f"[{self._role}] starting run")
@@ -285,6 +554,7 @@ class BaseExecuterAgent:
 
         last_content = ""
         all_tool_results: list[dict[str, Any]] = []
+        all_discovered_target_types: set[str] = set()
 
         for round_index in range(1, self._max_tool_rounds + 1):
             self._cb.on_step(
@@ -325,14 +595,25 @@ class BaseExecuterAgent:
             if not tool_calls:
                 result = _parse_executer_output(last_content)
                 result.tool_results = all_tool_results
+                if all_discovered_target_types:
+                    result.discovered_target_types = sorted(all_discovered_target_types)
                 self._cb.on_done(
                     f"[{self._role}] completed with status={result.status}"
                 )
                 return result
 
-            tool_messages, tool_results = await self._run_tools(tool_calls)
+            tool_messages, tool_results, discovered, halted_for_approval = await self._run_tools(tool_calls)
             messages.extend(tool_messages)
             all_tool_results.extend(tool_results)
+            all_discovered_target_types.update(discovered)
+
+            if halted_for_approval:
+                return ExecuterResult(
+                    status="awaiting_user_approval",
+                    summary="Execution paused awaiting user approval for a tool call.",
+                    tool_results=all_tool_results,
+                    discovered_target_types=sorted(all_discovered_target_types),
+                )
 
             # If we consumed the final allowed round, return the aggregated tool output.
             if round_index >= self._max_tool_rounds:
@@ -346,8 +627,11 @@ class BaseExecuterAgent:
                 status="incomplete",
                 summary=self._format_tool_results(all_tool_results),
                 tool_results=all_tool_results,
+                discovered_target_types=sorted(all_discovered_target_types),
             )
-        return _parse_executer_output(last_content)
+        result = _parse_executer_output(last_content)
+        result.discovered_target_types = extract_discovered_target_types(last_content)
+        return result
 
     async def close(self) -> None:
         await self._llm.close()

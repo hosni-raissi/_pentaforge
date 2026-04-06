@@ -31,6 +31,11 @@ class StopScanPayload(BaseModel):
     mode: str = Field(default="pause", max_length=20)
 
 
+class ApproveToolPayload(BaseModel):
+    approval_id: str = Field(min_length=1, max_length=200)
+    action: str = Field(default="approve", max_length=20)
+
+
 def _sse_message(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
@@ -86,6 +91,24 @@ async def approve_planner(project_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to approve planner: {exc}") from exc
+
+    return result
+
+
+@router.post("/api/scans/{project_id}/approve-tool")
+async def approve_tool(project_id: str, payload: ApproveToolPayload) -> dict[str, Any]:
+    try:
+        result = await scan_orchestrator.approve_executer_tool(
+            project_id,
+            approval_id=payload.approval_id,
+            action=payload.action,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to approve tool: {exc}") from exc
 
     return result
 

@@ -6,7 +6,7 @@ import time
 import tempfile
 from pathlib import Path
 from typing import Optional, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ══════════════════════════════════════════════════════════════
@@ -132,32 +132,43 @@ class DirFileFuzzRequest(BaseModel):
     tool: str
     target: str
     args: list[str] = []
-    list_type: str = "mine"
+    list_type: str = "user"
     inline_wordlist: Optional[list[str]] = None
     builtin_list: Optional[str] = None
     timeout: int = Field(default=1800, ge=10, le=7200)
 
-    @validator("tool")
+    @field_validator("tool")
+    @classmethod
     def validate_tool(cls, v):
         if v not in {"ffuf", "feroxbuster"}: raise ValueError("Tool must be 'ffuf' or 'feroxbuster'")
         return v
 
-    @validator("target")
+    @field_validator("target")
+    @classmethod
     def validate_target(cls, v):
         if not v.startswith("http"): raise ValueError("Target must be a URL (e.g. https://example.com/)")
         return v.strip()
 
-    @validator("args")
+    @field_validator("args")
+    @classmethod
     def validate_args(cls, v):
         for arg in v:
             for char in [";", "&&", "||", "|", "`", "$(", ">"]:
                 if char in arg: raise ValueError(f"Dangerous char '{char}' in arg")
         return v
 
-    @validator("builtin_list")
+    @field_validator("builtin_list")
+    @classmethod
     def validate_builtin(cls, v):
         if v is not None and v not in _get_web_wordlists():
             raise ValueError(f"Unknown wordlist: {v}")
+        return v
+
+    @field_validator("list_type")
+    @classmethod
+    def validate_list_type(cls, v):
+        if v not in {"user", "ia"}:
+            raise ValueError("list_type must be 'user' or 'ia'")
         return v
 
 
@@ -189,14 +200,15 @@ class DirFileFuzzResult(BaseModel):
 # 4. COMMAND BUILDERS
 # ══════════════════════════════════════════════════════════════
 
-def _build_ffuf_cmd(args: list[str], target: str, wordlist_path: str) -> tuple[list[str], Path]:
+def _build_ffuf_cmd(args: list[str], target: str, wordlist_path: str) -> list[str]:
     cmd = ["ffuf"]
     final_args = list(args)
 
-    # Output to JSON
-    tmp_file = ProjectConfig.get_temp_dir() / f"ffuf_dir_{int(time.time())}.json"
-    if not _has_flag(final_args, ["-o"]):
-        final_args.extend(["-o", str(tmp_file), "-of", "json"])
+    # File outputs are blocked; require stdout JSON lines.
+    if _has_flag(final_args, ["-o", "--output"]):
+        raise ValueError("Output file flags are blocked. Use stdout output only.")
+    if not _has_flag(final_args, ["-json"]):
+        final_args.append("-json")
 
     # Ensure FUZZ is in target
     clean_target = target
@@ -214,22 +226,21 @@ def _build_ffuf_cmd(args: list[str], target: str, wordlist_path: str) -> tuple[l
         final_args.extend(["-mc", "200,204,301,302,307,401,403"])
 
     cmd.extend(final_args)
-    return cmd, tmp_file
+    return cmd
 
 
-def _build_feroxbuster_cmd(args: list[str], target: str, wordlist_path: str) -> tuple[list[str], Path]:
+def _build_feroxbuster_cmd(args: list[str], target: str, wordlist_path: str) -> list[str]:
     cmd = ["feroxbuster"]
     final_args = list(args)
 
-    # Feroxbuster outputs JSON lines
-    tmp_file = ProjectConfig.get_temp_dir() / f"ferox_{int(time.time())}.jsonl"
-    
+    # File outputs are blocked; require stdout JSON lines.
+    if _has_flag(final_args, ["-o", "--output"]):
+        raise ValueError("Output file flags are blocked. Use stdout output only.")
+
     if not _has_flag(final_args, ["--json"]):
         final_args.append("--json")
-    if not _has_flag(final_args, ["-o", "--output"]):
-        final_args.extend(["-o", str(tmp_file)])
 
-    # Add silent mode to keep terminal clean (we only want the file)
+    # Keep output mostly JSON lines.
     if not _has_flag(final_args, ["-q", "--quiet"]):
         final_args.append("-q")
 
@@ -242,20 +253,28 @@ def _build_feroxbuster_cmd(args: list[str], target: str, wordlist_path: str) -> 
         final_args.extend(["-w", wordlist_path])
 
     cmd.extend(final_args)
-    return cmd, tmp_file
+    return cmd
 
 
 # ══════════════════════════════════════════════════════════════
 # 5. PARSERS
 # ══════════════════════════════════════════════════════════════
 
-def parse_ffuf(tmp_file: Path) -> list[DirFileResultItem]:
+def parse_ffuf(stdout: str) -> list[DirFileResultItem]:
     results = []
-    if not tmp_file.exists(): return results
+    raw = (stdout or "").strip()
+    if not raw:
+        return results
 
     try:
-        data = json.loads(tmp_file.read_text())
-        for item in data.get("results", []):
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            item = json.loads(line)
+            # ffuf -json prints one JSON object per result line.
+            if "url" not in item:
+                continue
             results.append(DirFileResultItem(
                 url=item.get("url", ""),
                 path=item.get("input", {}).get("FFUF", ""),
@@ -264,51 +283,64 @@ def parse_ffuf(tmp_file: Path) -> list[DirFileResultItem]:
                 words=item.get("words", 0),
                 lines=item.get("lines", 0),
                 content_type=item.get("content-type", ""),
-                redirect_location=item.get("redirectlocation", "")
+                redirect_location=item.get("redirectlocation", ""),
             ))
     except Exception:
-        pass
-    finally:
-        try: tmp_file.unlink()
-        except OSError: pass
+        # Backward-compatible fallback for full JSON payload.
+        try:
+            data = json.loads(raw)
+            for item in data.get("results", []):
+                results.append(DirFileResultItem(
+                    url=item.get("url", ""),
+                    path=item.get("input", {}).get("FFUF", ""),
+                    status=item.get("status", 0),
+                    content_length=item.get("length", 0),
+                    words=item.get("words", 0),
+                    lines=item.get("lines", 0),
+                    content_type=item.get("content-type", ""),
+                    redirect_location=item.get("redirectlocation", ""),
+                ))
+        except Exception:
+            pass
 
     return results
 
 
-def parse_feroxbuster(tmp_file: Path) -> list[DirFileResultItem]:
+def parse_feroxbuster(stdout: str) -> list[DirFileResultItem]:
     results = []
-    if not tmp_file.exists(): return results
+    raw = (stdout or "").strip()
+    if not raw:
+        return results
 
     try:
-        with open(tmp_file, 'r') as f:
-            for line in f:
-                if not line.strip(): continue
-                try:
-                    data = json.loads(line)
-                    # Feroxbuster writes config and error lines too. We only want 'response'
-                    if data.get("type") == "response":
-                        # Extract headers
-                        headers = data.get("headers", {})
-                        content_type = headers.get("content-type", "")
-                        redirect_loc = headers.get("location", "")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Feroxbuster writes config and error lines too. We only want 'response'
+            if data.get("type") != "response":
+                continue
 
-                        results.append(DirFileResultItem(
-                            url=data.get("url", ""),
-                            path=data.get("path", ""),
-                            status=data.get("status", 0),
-                            content_length=data.get("content_length", 0),
-                            words=data.get("word_count", 0),
-                            lines=data.get("line_count", 0),
-                            content_type=content_type,
-                            redirect_location=redirect_loc
-                        ))
-                except json.JSONDecodeError:
-                    continue
+            headers = data.get("headers", {})
+            content_type = headers.get("content-type", "")
+            redirect_loc = headers.get("location", "")
+
+            results.append(DirFileResultItem(
+                url=data.get("url", ""),
+                path=data.get("path", ""),
+                status=data.get("status", 0),
+                content_length=data.get("content_length", 0),
+                words=data.get("word_count", 0),
+                lines=data.get("line_count", 0),
+                content_type=content_type,
+                redirect_location=redirect_loc
+            ))
     except Exception:
         pass
-    finally:
-        try: tmp_file.unlink()
-        except OSError: pass
 
     # Deduplicate Feroxbuster outputs (sometimes repeats due to recursive finds)
     seen = set()
@@ -328,8 +360,8 @@ def parse_feroxbuster(tmp_file: Path) -> list[DirFileResultItem]:
 def directory_file_fuzzing(
     tool: str,
     target: str,
-    args: list[str] = [],
-    list_type: str = "mine",
+    args: Optional[list[str]] = None,
+    list_type: str = "user",
     inline_wordlist: Optional[list[str]] = None,
     builtin_list: Optional[str] = None,
 ) -> dict:
@@ -340,6 +372,7 @@ def directory_file_fuzzing(
     ffuf (highly customizable) or feroxbuster (fast, recursive).
     """
     start = time.time()
+    args = list(args or [])
     
     try:
         req = DirFileFuzzRequest(
@@ -353,9 +386,9 @@ def directory_file_fuzzing(
     wordlist_path = None
     tmp_wl = None
 
-    if list_type == "mine" and builtin_list:
+    if list_type == "user" and builtin_list:
         wordlist_path = _get_web_wordlists().get(builtin_list)
-    elif list_type == "yours" and inline_wordlist:
+    elif list_type == "ia" and inline_wordlist:
         tmp_wl = tempfile.NamedTemporaryFile(mode="w", delete=False, dir=ProjectConfig.get_temp_dir())
         tmp_wl.write("\n".join(inline_wordlist))
         tmp_wl.close()
@@ -366,18 +399,18 @@ def directory_file_fuzzing(
 
     # ── BUILD & EXECUTE ──
     if tool == "ffuf":
-        cmd, json_out_file = _build_ffuf_cmd(args, target, wordlist_path)
+        cmd = _build_ffuf_cmd(args, target, wordlist_path)
     elif tool == "feroxbuster":
-        cmd, json_out_file = _build_feroxbuster_cmd(args, target, wordlist_path)
+        cmd = _build_feroxbuster_cmd(args, target, wordlist_path)
 
     command_str = " ".join(cmd)
-    _, stderr, rc, cwd = safe_execute(cmd, req.timeout)
+    stdout, stderr, rc, cwd = safe_execute(cmd, req.timeout)
 
     # ── PARSE ──
     if tool == "ffuf":
-        results = parse_ffuf(json_out_file)
+        results = parse_ffuf(stdout)
     elif tool == "feroxbuster":
-        results = parse_feroxbuster(json_out_file)
+        results = parse_feroxbuster(stdout)
 
     # Cleanup inline wordlist
     if tmp_wl:
@@ -431,18 +464,18 @@ DIRECTORY_FILE_FUZZING_TOOL_DEFINITION = {
             },
             "list_type": {
                 "type": "string",
-                "enum": ["mine", "yours"],
-                "description": "'mine' = use built-in SecLists | 'yours' = provide inline list"
+                "enum": ["user", "ia"],
+                "description": "'user' = use built-in SecLists | 'ia' = provide inline list"
             },
             "inline_wordlist": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Inline paths (only if list_type='yours'). e.g. ['admin', 'backup.zip']"
+                "description": "Inline paths (only if list_type='ia'). e.g. ['admin', 'backup.zip']"
             },
             "builtin_list": {
                 "type": "string",
                 "enum": ["common", "raft_large_dirs", "raft_large_files", "raft_medium_dirs", "raft_medium_files", "big", "dirbuster_medium"],
-                "description": "Built-in SecLists wordlist (only if list_type='mine')"
+                "description": "Built-in SecLists wordlist (only if list_type='user')"
             }
         },
         "required": ["tool", "target"]
@@ -464,7 +497,7 @@ if __name__ == "__main__":
         tool="ffuf",
         target="https://hackerone.com/FUZZ",
         args=["-e", ".php,.bak,.zip", "-t", "50", "-mc", "200,301,403"],
-        list_type="mine",
+        list_type="user",
         builtin_list="raft_small_files"
     )
     print("\n=== FFUF: FILE EXTENSIONS ===")
@@ -479,7 +512,7 @@ if __name__ == "__main__":
         tool="feroxbuster",
         target="https://hackerone.com/",
         args=["--depth", "2", "-t", "50"],
-        list_type="mine",
+        list_type="user",
         builtin_list="raft_small_dirs"
     )
     print("\n=== FEROXBUSTER: RECURSIVE ===")

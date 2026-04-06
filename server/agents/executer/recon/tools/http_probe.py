@@ -6,7 +6,7 @@ import time
 import tempfile
 from pathlib import Path
 from typing import Optional, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ══════════════════════════════════════════════════════════════
@@ -90,14 +90,16 @@ class HttpProbeRequest(BaseModel):
     args: list[str] = []
     timeout: int = Field(default=600, ge=10, le=3600)
 
-    @validator("args")
+    @field_validator("args")
+    @classmethod
     def validate_args(cls, v):
         for arg in v:
             for char in [";", "&&", "||", "|", "`", "$(", ">"]:
                 if char in arg: raise ValueError(f"Dangerous char '{char}' in arg")
         return v
 
-    @validator("target_list")
+    @field_validator("target_list")
+    @classmethod
     def validate_list(cls, v):
         if v and len(v) > 100000:
             raise ValueError("Target list too large. Max 100,000 targets.")

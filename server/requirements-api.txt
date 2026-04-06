@@ -7,3 +7,4 @@ fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 structlog>=23.1,<25.0
 httpx>=0.25,<1.0
+dnspython>=2.6,<3.0

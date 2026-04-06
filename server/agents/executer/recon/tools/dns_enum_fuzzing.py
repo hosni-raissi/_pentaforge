@@ -6,7 +6,7 @@ import time
 import tempfile
 from pathlib import Path
 from typing import Optional, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ══════════════════════════════════════════════════════════════
@@ -162,21 +162,23 @@ class DNSEnumRequest(BaseModel):
     tool: str
     args: list[str] = []
     target: str
-    list_type: str = "mine"
+    list_type: str = "user"
     subdomain_wordlist: Optional[list[str]] = None
     resolver_list: Optional[list[str]] = None
     builtin_subdomain_list: Optional[str] = None
     builtin_resolver_list: Optional[str] = None
     timeout: int = Field(default=600, ge=30, le=7200)
 
-    @validator("tool")
+    @field_validator("tool")
+    @classmethod
     def validate_tool(cls, v):
         allowed = {"dig", "dnsrecon", "dnsenum", "fierce", "massdns", "puredns"}
         if v not in allowed:
             raise ValueError(f"Tool '{v}' not allowed. Use: {allowed}")
         return v
 
-    @validator("target")
+    @field_validator("target")
+    @classmethod
     def validate_target(cls, v):
         v = v.strip().lower()
         
@@ -194,13 +196,15 @@ class DNSEnumRequest(BaseModel):
         
         return v
 
-    @validator("list_type")
+    @field_validator("list_type")
+    @classmethod
     def validate_list_type(cls, v):
-        if v not in ("mine", "yours"):
-            raise ValueError("list_type must be 'mine' or 'yours'")
+        if v not in ("user", "ia"):
+            raise ValueError("list_type must be 'user' or 'ia'")
         return v
 
-    @validator("args")
+    @field_validator("args")
+    @classmethod
     def validate_args(cls, v):
         dangerous = [";", "&&", "||", "|", "`", "$(", ">>", "'", '"']
         for arg in v:
@@ -209,13 +213,15 @@ class DNSEnumRequest(BaseModel):
                     raise ValueError(f"Dangerous character '{char}' in: {arg}")
         return v
 
-    @validator("subdomain_wordlist", "resolver_list")
+    @field_validator("subdomain_wordlist", "resolver_list")
+    @classmethod
     def validate_inline_list(cls, v):
         if v is not None and len(v) > 100000:
             raise ValueError("Inline wordlist too large. Max 100,000 entries.")
         return v
 
-    @validator("builtin_subdomain_list")
+    @field_validator("builtin_subdomain_list")
+    @classmethod
     def validate_builtin_subdomain(cls, v):
         if v is not None:
             valid_keys = [k for k in get_dns_wordlists().keys() if k.startswith("subdomain") or k in ("dns_names", "deepmagic", "fierce_default")]
@@ -223,7 +229,8 @@ class DNSEnumRequest(BaseModel):
                 raise ValueError(f"Unknown subdomain list '{v}'. Available: {valid_keys}")
         return v
 
-    @validator("builtin_resolver_list")
+    @field_validator("builtin_resolver_list")
+    @classmethod
     def validate_builtin_resolver(cls, v):
         if v is not None:
             valid_keys = [k for k in get_dns_wordlists().keys() if k.startswith("resolver")]
@@ -364,10 +371,10 @@ class DNSWordlistManager:
     ) -> Optional[str]:
         """Returns file path to wordlist"""
         
-        if list_type == "yours" and inline_words:
+        if list_type == "ia" and inline_words:
             return self._create_temp_file(inline_words, prefix)
 
-        if list_type == "mine" and builtin_key:
+        if list_type == "user" and builtin_key:
             wordlists = get_dns_wordlists()
             path = wordlists.get(builtin_key)
             if path and os.path.isfile(path):
@@ -1132,8 +1139,8 @@ def _build_puredns_cmd(
 def dns_enum_fuzzing(
     tool: str,
     target: str,
-    args: list[str] = [],
-    list_type: str = "mine",
+    args: Optional[list[str]] = None,
+    list_type: str = "user",
     subdomain_wordlist: Optional[list[str]] = None,
     resolver_list: Optional[list[str]] = None,
     builtin_subdomain_list: Optional[str] = None,
@@ -1159,9 +1166,9 @@ def dns_enum_fuzzing(
         tool:                 "dig" | "dnsrecon" | "dnsenum" | "fierce" | "massdns" | "puredns"
         target:               Domain name (e.g. "example.com")
         args:                 Raw tool arguments — agent decides
-        list_type:            "mine" (built-in) | "yours" (inline)
-        subdomain_wordlist:   Inline subdomains (if list_type="yours")
-        resolver_list:        Inline DNS resolvers (if list_type="yours")
+        list_type:            "user" (built-in) | "ia" (inline)
+        subdomain_wordlist:   Inline subdomains (if list_type="ia")
+        resolver_list:        Inline DNS resolvers (if list_type="ia")
         builtin_subdomain_list: Key for built-in subdomain wordlist
         builtin_resolver_list:  Key for built-in resolver list
 
@@ -1281,6 +1288,7 @@ def dns_enum_fuzzing(
     """
 
     start = time.time()
+    args = list(args or [])
     wl_manager = DNSWordlistManager()
 
     # ══════════════════════════════
@@ -1494,18 +1502,18 @@ DNS_ENUM_TOOL_DEFINITION = {
             },
             "list_type": {
                 "type": "string",
-                "enum": ["mine", "yours"],
-                "description": "'mine' = built-in wordlists | 'yours' = inline words"
+                "enum": ["user", "ia"],
+                "description": "'user' = built-in wordlists | 'ia' = inline words"
             },
             "subdomain_wordlist": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Inline subdomains to try (only if list_type='yours'). e.g. ['www','mail','admin','api']"
+                "description": "Inline subdomains to try (only if list_type='ia'). e.g. ['www','mail','admin','api']"
             },
             "resolver_list": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Inline DNS resolvers (only if list_type='yours'). e.g. ['8.8.8.8','1.1.1.1']"
+                "description": "Inline DNS resolvers (only if list_type='ia'). e.g. ['8.8.8.8','1.1.1.1']"
             },
             "builtin_subdomain_list": {
                 "type": "string",
@@ -1514,16 +1522,14 @@ DNS_ENUM_TOOL_DEFINITION = {
                     "subdomains_full", "subdomains_common", "subdomains_bitquark",
                     "fierce_default", "dns_names", "deepmagic"
                 ],
-                "description": "Built-in subdomain wordlist (only if list_type='mine')"
+                "description": "Built-in subdomain wordlist (only if list_type='user')"
             },
             "builtin_resolver_list": {
                 "type": "string",
                 "enum": ["resolvers", "resolvers_trusted"],
-                "description": "Built-in resolver list (only if list_type='mine')"
+                "description": "Built-in resolver list (only if list_type='user')"
             },
         },
         "required": ["tool", "target"]
     }
 }
-
-

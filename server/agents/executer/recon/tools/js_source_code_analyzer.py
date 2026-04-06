@@ -8,7 +8,7 @@ import urllib.request
 import ssl
 from pathlib import Path
 from typing import Optional, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ══════════════════════════════════════════════════════════════
@@ -100,13 +100,15 @@ class JsAnalyzerRequest(BaseModel):
     args: list[str] = []
     timeout: int = Field(default=300, ge=10, le=1200)
 
-    @validator("tool")
+    @field_validator("tool")
+    @classmethod
     def validate_tool(cls, v):
         if v not in {"getjs", "linkfinder", "secretfinder", "js-beautify"}: 
             raise ValueError("Tool must be 'getjs', 'linkfinder', 'secretfinder', or 'js-beautify'")
         return v
 
-    @validator("target")
+    @field_validator("target")
+    @classmethod
     def validate_target(cls, v):
         blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
         clean_v = re.sub(r"^\w+://", "", v.strip()).split('/')[0]
