@@ -38,7 +38,6 @@ def test_recon_target_type_coverage_minimums():
         "network",
         "cloud",
         "container",
-        "database",
         "mobile",
         "iot",
         "repository",
@@ -67,7 +66,7 @@ def test_recon_has_critical_capabilities_per_surface():
         "mobile": {"mobile_static_analysis", "mobile_dynamic_analysis"},
         "iot": {"iot_protocol_scan", "firmware_analysis"},
         "repository": {"secret_scan", "dependency_scan"},
-        "database": {"db_enum_and_audit"},
+        "infra": {"db_enum_and_audit"},
     }
 
     missing: dict[str, list[str]] = {}

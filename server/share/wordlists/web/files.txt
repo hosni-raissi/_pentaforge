@@ -1,0 +1,10 @@
+index.php
+index.html
+robots.txt
+sitemap.xml
+.env
+.git/HEAD
+backup.zip
+config.php.bak
+web.config
+phpinfo.php

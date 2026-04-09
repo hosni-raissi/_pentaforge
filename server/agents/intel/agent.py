@@ -65,6 +65,8 @@ _TARGET_TYPE_ALIASES: dict[str, str] = {
     "web3": "web_app",
     "infrastructure": "infra",
     "infra": "infra",
+    "database": "infra",
+    "db": "infra",
     "binary": "desktop",
     "identity": "linux_server",
     "supply_chain": "repository",
@@ -76,7 +78,6 @@ _TARGET_TYPE_ALIASES: dict[str, str] = {
 _TARGET_TO_RAG_DOMAIN: dict[str, str] = {
     "infra": "linux_server",
     "container": "cloud",
-    "database": "linux_server",
 }
 
 
@@ -107,7 +108,6 @@ def _target_query_text(target_type: str) -> str:
         "desktop": "desktop application",
         "cloud": "cloud environment",
         "container": "container platform",
-        "database": "database",
         "repository": "source code repository",
         "shared": "shared security knowledge",
     }

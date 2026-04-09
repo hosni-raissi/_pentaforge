@@ -854,8 +854,8 @@ _ALIASES: dict[str, str] = {
     "desktop_application": "desktop",
     "cloud": "cloud",
     "container": "container",
-    "database": "database",
-    "db": "database",
+    "database": "infra",
+    "db": "infra",
     "repository": "repository",
     "repo": "repository",
 }
@@ -871,7 +871,6 @@ _PROFILE: dict[str, str] = {
     "desktop": "web",
     "cloud": "cloud",
     "container": "container",
-    "database": "database",
     "repository": "repository",
 }
 
@@ -879,43 +878,7 @@ _RAG: dict[str, str] = {
     "infra": "linux_server",
     "container": "cloud",
     "repository": "linux_server",
-    "database": "linux_server",
 }
-
-_DB_KEEP_IDS = frozenset({
-    "WSTG-ATHN-02",
-    "WSTG-ATHN-07",
-    "WSTG-ATHN-08",
-    "WSTG-ATHN-09",
-    "WSTG-ATHZ-02",
-    "WSTG-ATHZ-03",
-    "WSTG-ATHZ-04",
-    "WSTG-CONF-02",
-    "WSTG-CONF-03",
-    "WSTG-CONF-04",
-    "WSTG-CONF-05",
-    "WSTG-CONF-09",
-    "WSTG-CRYP-03",
-    "WSTG-CRYP-04",
-    "WSTG-ERRH-01",
-    "WSTG-ERRH-02",
-    "WSTG-IDNT-04",
-    "WSTG-IDNT-05",
-    "WSTG-INPV-05",
-    "WSTG-INPV-13",
-})
-_DB_KEEP_KW = (
-    "sql", "database", "query", "stored procedure", "credential", "password",
-    "privilege escalation", "authorization schema", "sensitive information",
-    "admin interfaces", "file permission", "backup", "unreferenced files",
-    "stack traces", "weak cryptographic primitives", "unencrypted channels",
-    "account enumeration", "username policy", "format string",
-)
-_DB_EXCLUDE_KW = (
-    "xss", "cross site", "cross-site", "css injection", "clickjacking", "websocket",
-    "web messaging", "browser", "dom ", "flash", "graphql", "csrf", "cors",
-    "host header", "template injection", "ssrf",
-)
 
 _REPO_KEEP_IDS = frozenset({
     "WSTG-INFO-01",
@@ -1061,16 +1024,6 @@ async def _collect_mitre_from_urls(
 
 
 def _filter_for_target(target: str, items: list[ChecklistItem]) -> list[ChecklistItem]:
-    if target == "database":
-        out: list[ChecklistItem] = []
-        for it in items:
-            low = f"{it.test_id} {it.test_name} {it.category} {it.cat_name}".lower()
-            if any(x in low for x in _DB_EXCLUDE_KW):
-                continue
-            if it.test_id in _DB_KEEP_IDS or any(k in low for k in _DB_KEEP_KW):
-                out.append(it)
-        return out
-
     if target == "repository":
         out = []
         for it in items:
@@ -1621,5 +1574,5 @@ async def _get_checklists_impl(target_type: str, n_items: int = 0, info: str = "
 
 _ALL = [
     "web_app", "api", "mobile", "network", "iot",
-    "linux_server", "infra", "desktop", "cloud", "container", "database", "repository",
+    "linux_server", "infra", "desktop", "cloud", "container", "repository",
 ]

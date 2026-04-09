@@ -178,15 +178,30 @@ def load_tools_from_module_names(module_names: Iterable[str]) -> tuple[list[Tool
     return tools, errors
 
 
-def discover_module_names(package_name: str, package_dir: Path, *, exclude: set[str] | None = None) -> list[str]:
+def discover_module_names(
+    package_name: str,
+    package_dir: Path,
+    *,
+    exclude: set[str] | None = None,
+    recursive: bool = False,
+) -> list[str]:
     """Discover module names from a directory of .py files."""
     excluded = set(exclude or set())
     names: list[str] = []
+    pattern = "**/*.py" if recursive else "*.py"
 
-    for file_path in sorted(package_dir.glob("*.py")):
+    for file_path in sorted(package_dir.glob(pattern)):
+        rel = file_path.relative_to(package_dir)
+        module_path = rel.with_suffix("").as_posix().replace("/", ".")
         stem = file_path.stem
-        if stem == "__init__" or stem in excluded:
+        if stem == "__init__":
             continue
-        names.append(f"{package_name}.{stem}")
+        if (
+            stem in excluded
+            or module_path in excluded
+            or f"{package_name}.{module_path}" in excluded
+        ):
+            continue
+        names.append(f"{package_name}.{module_path}")
 
     return names

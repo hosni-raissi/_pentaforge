@@ -1,0 +1,15 @@
+www
+mail
+api
+admin
+dev
+staging
+test
+blog
+cdn
+portal
+dashboard
+auth
+app
+vpn
+status

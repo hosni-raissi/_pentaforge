@@ -12,7 +12,6 @@ from .scan_request.linux_server    import LinuxServerScanRequest
 from .scan_request.desktop         import DesktopScanRequest
 from .scan_request.cloud           import CloudScanRequest
 from .scan_request.container       import ContainerScanRequest
-from .scan_request.database        import DatabaseScanRequest
 from .scan_request.infra           import InfraScanRequest
 from .scan_request.repository      import RepositoryScanRequest
 
@@ -28,7 +27,6 @@ class TargetType(str, Enum):
     desktop          = "desktop"
     cloud            = "cloud"
     container        = "container"
-    database         = "database"
     repository       = "repository"
 
 
@@ -54,7 +52,6 @@ TargetConfig = Union[
     DesktopScanRequest,
     CloudScanRequest,
     ContainerScanRequest,
-    DatabaseScanRequest,
     RepositoryScanRequest,
 ]
 

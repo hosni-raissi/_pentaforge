@@ -37,3 +37,21 @@ netcat
 pip install arjun
 sudo dnf install cargo --> cargo install x8
 pip install git+https://github.com/devanshbatham/ParamSpider.git
+which dig dnsrecon massdns puredns dnsenum fierce
+curl -sL https://raw.githubusercontent.com/epi052/feroxbuster/main/install-nix.sh | bash
+sudo dnf install ruby ruby-devel gcc gcc-c++ make libcurl-devel
+
+# Install WPScan gem
+gem install wpscan
+"cmseek": "cmseek",
+        "wpscan": "wpscan",
+        "joomscan": "joomscan",
+        "droopescan": "droopescan",
+crimeflare,cloudflair
+getjs,linkfinder,secretfinder,js-beautify
+tcpdump tshark ngrep
+audit de conf (cloud (aws) app web  sass, mobile), pentest saas (audit), 
+database ---> not ytpe is on all 
+penetst sass
+api pist (akto)
+passive active

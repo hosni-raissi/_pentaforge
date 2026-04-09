@@ -22,7 +22,6 @@ def _target_query_text(target_type: str) -> str:
         "desktop": "desktop application",
         "cloud": "cloud environment",
         "container": "container platform",
-        "database": "database",
         "repository": "source code repository",
     }
     return labels.get(normalized, normalized.replace("_", " "))

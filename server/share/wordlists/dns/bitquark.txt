@@ -1,0 +1,6 @@
+www
+mail
+api
+admin
+dev
+staging

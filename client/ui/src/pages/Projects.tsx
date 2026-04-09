@@ -29,7 +29,6 @@ const FALLBACK_TARGET_TYPES: ProjectTargetTypeOption[] = [
   { value: 'desktop', label: 'Desktop App' },
   { value: 'cloud', label: 'Cloud' },
   { value: 'container', label: 'Container' },
-  { value: 'database', label: 'Database' },
   { value: 'repository', label: 'Repository' },
 ];
 

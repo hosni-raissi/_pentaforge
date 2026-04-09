@@ -12,7 +12,7 @@ _DOMAIN_ALIASES: dict[str, str] = {
     "web": "web_app",
     "web3": "web_app",
     "infrastructure": "infra",
-    "infra": "linux_server",
+    "infra": "infra",
     "identity": "linux_server",
     "binary": "desktop",
     "supply_chain": "repository",
@@ -20,11 +20,13 @@ _DOMAIN_ALIASES: dict[str, str] = {
     "red_team": "shared",
     "cve_exploit": "shared",
     "container": "cloud",
-    "database": "linux_server",
+    "database": "infra",
+    "db": "infra",
 }
 
 _DOMAIN_SEARCH_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "web_app": ("web_app", "web"),
+    "infra": ("infra", "linux_server", "infrastructure", "identity", "database"),
     "linux_server": ("linux_server", "infra", "infrastructure", "identity", "database"),
     "cloud": ("cloud", "container"),
     "repository": ("repository", "supply_chain"),

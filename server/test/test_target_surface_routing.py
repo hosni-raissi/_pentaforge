@@ -16,7 +16,7 @@ from server.agents.planner.tools.target_types import add_target_type
 def test_normalize_target_types_aliases():
     values = normalize_target_types(["web", "db", "infra", "mobile", "unknown"])
     assert "web_app" in values
-    assert "database" in values
+    assert "infra" in values
     assert "infra" in values
     assert "mobile" in values
     assert "unknown" not in values

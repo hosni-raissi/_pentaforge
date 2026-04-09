@@ -60,12 +60,15 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
         ],
     },
     "infra": {
-        "owasp": [],
+        "owasp": [
+            "https://raw.githubusercontent.com/OWASP/wstg/master/checklists/checklist.md",
+        ],
         "mitre": [
             "https://attack.mitre.org/tactics/TA0003/",
             "https://attack.mitre.org/tactics/TA0004/",
             "https://attack.mitre.org/tactics/TA0008/",
             "https://attack.mitre.org/tactics/TA0006/",
+            "https://attack.mitre.org/tactics/TA0009/",
         ],
         "nist": [
             #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
@@ -115,21 +118,6 @@ CHECKLIST_SOURCES: dict[str, dict[str, list[str]]] = {
             #"https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-77r1.pdf",
             #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-113.pdf",
             "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
-        ],
-    },
-    "database": {
-        "owasp": [
-            "https://raw.githubusercontent.com/OWASP/wstg/master/checklists/checklist.md",
-        ],
-        "mitre": [
-            "https://attack.mitre.org/tactics/TA0006/",
-            "https://attack.mitre.org/tactics/TA0009/",
-        ],
-        "nist": [
-            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf",
-            "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
-            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-123.pdf",
-            #"https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-92.pdf",
         ],
     },
     "linux_server": {

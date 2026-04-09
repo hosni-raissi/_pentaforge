@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from server.schemas.scan_request.api import ApiScanRequest
 from server.schemas.scan_request.cloud import CloudScanRequest
 from server.schemas.scan_request.container import ContainerScanRequest
-from server.schemas.scan_request.database import DatabaseScanRequest
 from server.schemas.scan_request.desktop import DesktopScanRequest
 from server.schemas.scan_request.infra import InfraScanRequest
 from server.schemas.scan_request.iot import IotScanRequest
@@ -32,7 +31,6 @@ _TYPE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {"value": "desktop", "label": "Desktop App", "schema": DesktopScanRequest},
     {"value": "cloud", "label": "Cloud", "schema": CloudScanRequest},
     {"value": "container", "label": "Container", "schema": ContainerScanRequest},
-    {"value": "database", "label": "Database", "schema": DatabaseScanRequest},
     {"value": "repository", "label": "Repository", "schema": RepositoryScanRequest},
 )
 

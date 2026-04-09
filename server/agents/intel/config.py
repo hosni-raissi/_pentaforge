@@ -24,9 +24,8 @@ VERIFY_SOURCES: dict[str, list[str]] = {
     "desktop": ["PayloadsAllTheThings", "MITRE-ATTACK-Enterprise", "HackTricks"],
     "cloud": ["HackingTheCloud", "MITRE-ATTACK-Enterprise", "PayloadsAllTheThings"],
     "container": ["OWASP-K8sTop10", "HackingTheCloud", "MITRE-ATTACK-Enterprise"],
-    "database": ["DatabaseSecurityAudit", "OWASP-ASVS", "PayloadsAllTheThings", "HackTricks"],
     "repository": ["OWASP-CICDTop10", "OSSFScorecard", "PayloadsAllTheThings"],
-    "shared": ["PayloadsAllTheThings", "HackTricks", "CISA-KEV", "Vulhub", "MITRE-ATTACK-Enterprise"],
+    "shared": ["PayloadsAllTheThings", "HackTricks", "CISA-KEV", "Vulhub", "MITRE-ATTACK-Enterprise", "DatabaseSecurityAudit"],
 }
 
 DEFAULT_VERIFY_SOURCES: list[str] = [

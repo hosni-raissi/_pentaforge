@@ -2502,8 +2502,8 @@ export default function Dashboard() {
           agents={activeProject.agents}
           agentInsights={agentInsights}
           showHeader
-          subtitle="Intel → Planner → Executor Layer (parallel) → Perceptor"
-          graphHeightClassName="h-[430px]"
+          subtitle="Intel ↓ Planner ↓ Executor Layer (parallel) ↓ Perceptor ↺ Planner"
+          graphHeightClassName="h-[580px]"
         />
       </div>
 

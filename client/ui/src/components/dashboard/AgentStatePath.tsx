@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import ReactFlow, {
   Background,
   EdgeLabelRenderer,
@@ -75,8 +75,8 @@ interface ExecutorLayerData {
 interface FeedbackEdgeData {
   color: string;
   animated: boolean;
-  // absolute Y coordinate the path should travel along (below executor layer)
-  belowY: number;
+  // absolute X coordinate the path travels along (right side rail)
+  railX: number;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -111,29 +111,36 @@ const EDGE_COLOR: Record<AgentState, string> = {
   waiting: '#f59e0b',
 };
 
-// ─── Layout ───────────────────────────────────────────────────────────────────
+// ─── Vertical Layout Constants ────────────────────────────────────────────────
+// Flow: Intel (top) → Planner → Executor Layer (horizontal) → Perceptor (bottom)
 
-const LAYER_X      = 490;
-const LAYER_Y      = 10;
-const LAYER_HEIGHT = 610; // 5 agents × 100px + 10px gap + 60/30 padding
+const CENTER_X = 400;
 
-const EXECUTOR_X       = 530;
-const EXECUTOR_Y_START = 55;
-const EXECUTOR_Y_GAP   = 100; // 100px node height + ~0px gap (tight but spaced)
+// Y positions for the main vertical flow
+const INTEL_Y    = 20;
+const PLANNER_Y  = 155;
+const LAYER_Y    = 275;
+const PERCEPTOR_Y = 500;
 
-// Circle is h-16 = 64px. Handles must be at its vertical centre (32px)
-// so edges connect to the middle of the circle, not the node wrapper edge.
+// Executor layer dimensions (wide horizontal band)
+const LAYER_X      = 60;
+const LAYER_WIDTH  = 680;
+const LAYER_HEIGHT = 155;
+
+// Executor agents spread horizontally inside the layer
+const EXECUTOR_Y        = LAYER_Y + 48;  // inside the layer
+const EXECUTOR_X_START  = 110;
+const EXECUTOR_X_GAP    = 130;
+
+// Circle is h-16 = 64px
 const CIRCLE_HALF = 32;
 
-// The feedback loop horizontal rail sits this many px below the layer bottom
-const FEEDBACK_RAIL_OFFSET = 55;
-const FEEDBACK_RAIL_Y      = LAYER_Y + LAYER_HEIGHT + FEEDBACK_RAIL_OFFSET;
+// Feedback loop rail on the right side
+const FEEDBACK_RAIL_X = LAYER_X + LAYER_WIDTH + 65;
 
 // ─── Custom feedback loop edge ────────────────────────────────────────────────
-// Draws an explicit L-shaped path:
-//   Perceptor (bottom) → down to rail → left across → up into Planner (bottom)
-// This guarantees the path travels below the executor layer regardless of
-// how ReactFlow's router wants to place it.
+// Draws a path along the right side:
+//   Perceptor (right) → right to rail → up along rail → left into Planner (right)
 
 function FeedbackLoopEdge({
   sourceX, sourceY,
@@ -141,22 +148,22 @@ function FeedbackLoopEdge({
   data,
   markerEnd,
 }: EdgeProps<FeedbackEdgeData>) {
-  const railY  = data?.belowY ?? sourceY + 80;
+  const railX  = data?.railX  ?? sourceX + 80;
   const color  = data?.color  ?? '#f59e0b';
   const radius = 10;
 
-  // Path: down from source → corner → left rail → corner → up to target
+  // Path: right from source → corner → up rail → corner → left to target
   const edgePath = [
     `M ${sourceX} ${sourceY}`,
-    `L ${sourceX} ${railY - radius}`,
-    `Q ${sourceX} ${railY} ${sourceX - radius} ${railY}`,
-    `L ${targetX + radius} ${railY}`,
-    `Q ${targetX} ${railY} ${targetX} ${railY - radius}`,
+    `L ${railX - radius} ${sourceY}`,
+    `Q ${railX} ${sourceY} ${railX} ${sourceY - radius}`,
+    `L ${railX} ${targetY + radius}`,
+    `Q ${railX} ${targetY} ${railX - radius} ${targetY}`,
     `L ${targetX} ${targetY}`,
   ].join(' ');
 
-  const labelX = (sourceX + targetX) / 2;
-  const labelY = railY + 14;
+  const labelX = railX + 14;
+  const labelY = (sourceY + targetY) / 2;
 
   return (
     <>
@@ -185,12 +192,14 @@ function FeedbackLoopEdge({
         <div
           style={{
             position:  'absolute',
-            transform: `translate(-50%, 0) translate(${labelX}px, ${labelY}px)`,
+            transform: `translate(0, -50%) translate(${labelX}px, ${labelY}px)`,
             pointerEvents: 'none',
             fontSize:  10,
             color:     '#94a3b8',
             fontWeight: 600,
             whiteSpace: 'nowrap',
+            writingMode: 'vertical-rl',
+            textOrientation: 'mixed',
           }}
           className="nodrag nopan"
         >
@@ -208,10 +217,9 @@ function AgentNode({ data }: { data: AgentNodeData }) {
 
   return (
     <div className="flex flex-col items-center gap-1" style={{ minWidth: 110 }}>
-      {/* Left/Right handles pinned to circle vertical centre */}
-      <Handle type="target"   position={Position.Left}               style={{ top: CIRCLE_HALF }} className="!h-2 !w-2 !border-0 !bg-pf-500" />
-      <Handle type="target"   position={Position.Top}    id="top"    className="!h-2 !w-2 !border-0 !bg-pf-500" />
-      <Handle type="target"   position={Position.Bottom} id="bottom-target" className="!h-2 !w-2 !border-0 !bg-pf-500" />
+      {/* Top/Bottom handles for vertical flow */}
+      <Handle type="target"   position={Position.Top}    id="top"           className="!h-2 !w-2 !border-0 !bg-pf-500" />
+      <Handle type="target"   position={Position.Left}   id="left-target"   className="!h-2 !w-2 !border-0 !bg-pf-500" style={{ top: CIRCLE_HALF }} />
 
       <div
         className={cn(
@@ -246,8 +254,8 @@ function AgentNode({ data }: { data: AgentNodeData }) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Right}  id="right"         style={{ top: CIRCLE_HALF }} className="!h-2 !w-2 !border-0 !bg-pf-500" />
-      <Handle type="source" position={Position.Bottom} id="bottom-source" className="!h-2 !w-2 !border-0 !bg-pf-500" />
+      <Handle type="source" position={Position.Bottom} id="bottom"       className="!h-2 !w-2 !border-0 !bg-pf-500" />
+      <Handle type="source" position={Position.Right}  id="right-source" className="!h-2 !w-2 !border-0 !bg-pf-500" style={{ top: CIRCLE_HALF }} />
     </div>
   );
 }
@@ -255,8 +263,8 @@ function AgentNode({ data }: { data: AgentNodeData }) {
 function ExecutorLayerNode({ data }: { data: ExecutorLayerData }) {
   return (
     <div
-      className="rounded-2xl border border-pf-500/20 bg-pf-500/5 px-3 pt-3 shadow-inner"
-      style={{ width: 200, height: LAYER_HEIGHT }}
+      className="rounded-2xl border border-pf-500/20 bg-pf-500/5 px-4 pt-3 shadow-inner"
+      style={{ width: LAYER_WIDTH, height: LAYER_HEIGHT }}
     >
       <p className="text-center text-xs font-semibold uppercase tracking-widest text-pf-300">
         {data.label}
@@ -301,8 +309,8 @@ export function AgentStatePath({
   agents,
   showHeader = true,
   className,
-  graphHeightClassName = 'h-[480px]',
-  subtitle = 'Intel → Planner → Executor Layer (parallel) → Perceptor → Planner (feedback loop)',
+  graphHeightClassName = 'h-[580px]',
+  subtitle = 'Intel → Planner → Executor Layer (parallel) → Perceptor (feedback loop)',
   agentInsights,
 }: AgentStatePathProps) {
   const { nodes, edges } = useMemo(() => {
@@ -350,9 +358,10 @@ export function AgentStatePath({
       ? Math.round(progressNums.reduce((s, v) => s + v, 0) / progressNums.length)
       : undefined;
 
-    // ── Nodes ──────────────────────────────────────────────────────────────
+    // ── Nodes (vertical layout) ───────────────────────────────────────────
 
     const graphNodes: Node[] = [
+      // Executor layer background — wide horizontal band
       {
         id:         'executor-layer',
         type:       'executorLayer',
@@ -362,10 +371,11 @@ export function AgentStatePath({
         data:       { label: 'Executor Layer', subtitle: 'Parallel agents' } satisfies ExecutorLayerData,
         style:      { zIndex: 0 },
       },
+      // Intel — top center
       {
         id:       'intel',
         type:     'agent',
-        position: { x: 40, y: 273 },
+        position: { x: CENTER_X - 55, y: INTEL_Y },
         data: {
           role: 'intel',
           label: 'Intel',
@@ -373,19 +383,21 @@ export function AgentStatePath({
           currentTask: latestIntelEntry?.message || 'Context → Planner',
         } satisfies AgentNodeData,
       },
+      // Planner — below Intel
       {
         id:       'planner',
         type:     'agent',
-        position: { x: 260, y: 273 },
+        position: { x: CENTER_X - 55, y: PLANNER_Y },
         data: {
           role: 'planner', label: 'Planner', state: plannerState,
           currentTask: planner?.currentTask, progress: planner?.progress,
         } satisfies AgentNodeData,
       },
+      // 5 executor agents — horizontal row inside the layer
       ...EXECUTOR_AGENTS.map((name, i) => ({
         id:       name,
         type:     'agent',
-        position: { x: EXECUTOR_X, y: EXECUTOR_Y_START + i * EXECUTOR_Y_GAP },
+        position: { x: EXECUTOR_X_START + i * EXECUTOR_X_GAP, y: EXECUTOR_Y },
         data: {
           role:        name,
           label:       name.charAt(0).toUpperCase() + name.slice(1),
@@ -395,10 +407,11 @@ export function AgentStatePath({
         } satisfies AgentNodeData,
         style: { zIndex: 1 },
       })),
+      // Perceptor — bottom center
       {
         id:       'perceptor',
         type:     'agent',
-        position: { x: 780, y: 273 },
+        position: { x: CENTER_X - 55, y: PERCEPTOR_Y },
         data: {
           role: 'perceptor', label: 'Perceptor', state: perceptorState,
           currentTask: runningExecutor ? `Reading ${runningExecutor}` : 'Aggregating output',
@@ -407,7 +420,7 @@ export function AgentStatePath({
       },
     ];
 
-    // ── Edges ──────────────────────────────────────────────────────────────
+    // ── Edges (vertical flow) ─────────────────────────────────────────────
 
     const mkEdge = (
       id: string,
@@ -424,34 +437,41 @@ export function AgentStatePath({
     });
 
     const graphEdges: Edge[] = [
-      mkEdge('intel-planner', 'intel', 'planner', plannerState, { sourceHandle: 'right' }),
+      // Intel → Planner (vertical)
+      mkEdge('intel-planner', 'intel', 'planner', plannerState, {
+        sourceHandle: 'bottom',
+        targetHandle: 'top',
+      }),
 
+      // Planner → each executor (fan out from bottom to top of each executor)
       ...EXECUTOR_AGENTS.map((name) =>
         mkEdge(`planner-${name}`, 'planner', name, byName.get(name)?.state ?? 'waiting', {
-          sourceHandle: 'right',
+          sourceHandle: 'bottom',
+          targetHandle: 'top',
         }),
       ),
 
+      // Each executor → Perceptor (fan in from bottom to top)
       ...EXECUTOR_AGENTS.map((name) =>
         mkEdge(`${name}-perceptor`, name, 'perceptor', byName.get(name)?.state ?? 'waiting', {
-          sourceHandle: 'right',
+          sourceHandle: 'bottom',
+          targetHandle: 'top',
         }),
       ),
 
-      // Feedback loop — custom edge type draws an explicit path below the
-      // executor layer. The `belowY` value is passed as data so the edge
-      // component knows exactly where to draw the horizontal rail.
+      // Feedback loop — custom edge arcing along the right side
+      // Perceptor (right) → up the right rail → into Planner (right)
       {
         id:           'perceptor-planner-loop',
         source:       'perceptor',
         target:       'planner',
-        sourceHandle: 'bottom-source',
-        targetHandle: 'bottom-target',
+        sourceHandle: 'right-source',
+        targetHandle: 'right-source', // using right handle as target too
         type:         'feedbackLoop',
         data: {
           color:    EDGE_COLOR[perceptorState],
           animated: perceptorState === 'running',
-          belowY:   FEEDBACK_RAIL_Y,
+          railX:    FEEDBACK_RAIL_X,
         } satisfies FeedbackEdgeData,
       },
     ];
@@ -596,9 +616,9 @@ export function AgentStatePath({
               }
               setSelectedRole(node.id as AgentGraphRole);
             }}
+            onInit={(instance) => instance.fitView({ padding: 0.18 })}
             fitView
-            fitViewOptions={{ padding: 0.15 }}
-            defaultViewport={{ x: 0, y: 0, zoom: 0.7 }}
+            fitViewOptions={{ padding: 0.18 }}
             minZoom={0.25}
             maxZoom={1.6}
             nodesDraggable={!locked}
@@ -646,7 +666,7 @@ function CustomControls({
       </button>
 
       {/* Fit view */}
-      <button onClick={() => fitView({ padding: 0.15, duration: 300 })} title="Fit view">
+      <button onClick={() => fitView({ padding: 0.18, duration: 300 })} title="Fit view">
         <svg viewBox="0 0 24 24">
           <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
           <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>

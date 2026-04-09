@@ -5,7 +5,7 @@ from enum import Enum
 from .credentials import Credential
 
 class NetworkType(str, Enum):
-    ethernet = "ethernet"  
+    ethernet            = "ethernet"  
     wifi                = "wifi"                 # wireless network
     voip                = "voip"                 # VoIP / SIP
     firewall            = "firewall"             # firewall / ACL rules

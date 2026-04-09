@@ -101,7 +101,6 @@ const RESOURCE_TARGET_SCOPE: Record<string, Set<string>> = {
   desktop: new Set(["desktop"]),
   cloud: new Set(["cloud"]),
   container: new Set(["container", "cloud"]),
-  database: new Set(["database"]),
   repository: new Set(["repository"]),
   shared: new Set(["shared"]),
 };
@@ -118,7 +117,6 @@ const EXPECTED_TARGET_FILTERS = [
   "desktop",
   "cloud",
   "container",
-  "database",
   "repository",
   "shared",
 ];
