@@ -1,5 +1,8 @@
 """Configuration for the Recon executer agent."""
 
+import os
+import socket
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  LLM Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -91,3 +94,68 @@ TOOL_PATHS = {
     "httpx": "httpx",
     "nuclei": "nuclei",
 }
+
+# Optional Burp launcher overrides for web tooling.
+# Set these directly in recon config (no .env dependency).
+BURP_SUITE_CMD = "burpsuite"
+BURP_SUITE_JAR = ""
+
+# Global auto-capture via Burp proxy (applies to HTTP clients that honor env vars).
+BURP_AUTO_CAPTURE = True
+BURP_PROXY_HOST = "127.0.0.1"
+BURP_PROXY_PORT = 8080
+BURP_PROXY_URL = f"http://{BURP_PROXY_HOST}:{BURP_PROXY_PORT}"
+BURP_CAPTURE_CLEAR_NO_PROXY = True
+
+
+def _port_accepting_connections(host: str, port: int, timeout: float = 0.6) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _enable_burp_auto_capture() -> bool:
+    if not BURP_AUTO_CAPTURE:
+        return False
+
+    if not _port_accepting_connections(BURP_PROXY_HOST, BURP_PROXY_PORT):
+        return False
+
+    os.environ["HTTP_PROXY"] = BURP_PROXY_URL
+    os.environ["HTTPS_PROXY"] = BURP_PROXY_URL
+    os.environ["http_proxy"] = BURP_PROXY_URL
+    os.environ["https_proxy"] = BURP_PROXY_URL
+
+    if BURP_CAPTURE_CLEAR_NO_PROXY:
+        os.environ["NO_PROXY"] = ""
+        os.environ["no_proxy"] = ""
+
+    return True
+
+
+BURP_AUTO_CAPTURE_ACTIVE = _enable_burp_auto_capture()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Security Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import ipaddress
+
+# List of ipaddress.IPv4Network or IPv6Network objects to block (e.g. 10.0.0.0/8)
+BLOCKED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("255.255.255.255/32"),
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+BLOCKED_HOSTNAMES: list[str] = [
+    "localhost", "broadcasthost", "local"
+]
+

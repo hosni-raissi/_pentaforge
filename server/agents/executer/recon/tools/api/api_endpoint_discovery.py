@@ -1,11 +1,19 @@
+#/+
 import subprocess
 import json
 import re
 import time
+import hashlib
+import os
+import shutil
 import requests
 import concurrent.futures
 from typing import Optional, Any
+from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel, Field, field_validator
+from server.agents.executer.recon.tools.api._common import (
+    extract_host,
+)
 
 # ══════════════════════════════════════════════════════════════
 # 1. SCHEMAS
@@ -19,6 +27,7 @@ class APIDiscoveryRequest(BaseModel):
     endpoints: list[str] = []
     wordlist: Optional[str] = None
     headers: dict[str, str] = {}
+    compact_output: bool = True
 
     @field_validator("tool")
     @classmethod
@@ -31,25 +40,31 @@ class APIDiscoveryRequest(BaseModel):
     @field_validator("target")
     @classmethod
     def validate_target(cls, v):
+        cleaned = v.strip()
+        host = extract_host(cleaned)
         blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
-        if v.strip() in blocked:
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            if not re.match(r"^https?://[a-zA-Z0-9]", cleaned):
+                raise ValueError(f"Invalid target: {v}")
+            return cleaned
+        if host in blocked:
             raise ValueError(f"Target '{v}' is blocked")
 
         domain_pattern = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"
         bare_domain    = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$"
         ip_with_scheme = r"^https?://(\d{1,3}\.){3}\d{1,3}"
 
-        if not (re.match(domain_pattern, v) or
-                re.match(bare_domain, v)    or
-                re.match(ip_with_scheme, v)):
+        if not (re.match(domain_pattern, cleaned) or
+                re.match(bare_domain, cleaned)    or
+                re.match(ip_with_scheme, cleaned)):
             raise ValueError(f"Invalid target: {v}")
-        return v.strip()
+        return cleaned
 
     @field_validator("args")
     @classmethod
     def validate_args(cls, v):
         dangerous_chars = [";", "&&", "||", "|", "`", "$(", ">>", "'", '"']
-        blocked_flags   = ["-o", "--output", "-O", "-od"]
+        blocked_flags   = ["--output", "-O", "-od"]  # Allow -o for kiterunner output format
 
         for arg in v:
             for char in dangerous_chars:
@@ -130,6 +145,7 @@ class APIDiscoveryResult(BaseModel):
     error: Optional[str] = None
     execution_time: float = 0.0
     techniques_used: list[str] = []
+    llm_brief: dict[str, Any] = Field(default_factory=dict)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -461,6 +477,400 @@ METHODS_TO_TRY: dict[str, list[str]] = {
 # Status codes that indicate something interesting
 INTERESTING_CODES = {200, 201, 204, 301, 302, 307, 308,
                      400, 401, 403, 405, 422, 500, 501, 503}
+
+
+def _extract_kiterunner_wordlist(args: list[str]) -> Optional[str]:
+    """Extract kiterunner wordlist path from args if provided."""
+    for i, arg in enumerate(args):
+        if arg in ("-w", "--wordlist") and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--wordlist="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _replace_kiterunner_wordlist(args: list[str], resolved_path: str) -> list[str]:
+    """Replace wordlist argument in kiterunner args with a resolved path."""
+    updated = list(args)
+    for i, arg in enumerate(updated):
+        if arg in ("-w", "--wordlist") and i + 1 < len(updated):
+            updated[i + 1] = resolved_path
+            return updated
+        if arg.startswith("--wordlist="):
+            updated[i] = f"--wordlist={resolved_path}"
+            return updated
+    return updated
+
+
+def _resolve_kiterunner_wordlist(wordlist: str) -> Optional[str]:
+    """
+    Resolve a kiterunner wordlist path from common locations.
+    Returns an absolute/usable path if found, else None.
+    """
+    if not wordlist:
+        return None
+
+    candidates: list[str] = []
+    basename = os.path.basename(wordlist)
+
+    if os.path.isabs(wordlist):
+        candidates.append(wordlist)
+    else:
+        module_dir = os.path.dirname(__file__)
+        repo_root = os.path.abspath(
+            os.path.join(module_dir, "..", "..", "..", "..", "..", "..")
+        )
+        candidates.extend([
+            wordlist,
+            os.path.join(os.getcwd(), wordlist),
+            os.path.join(repo_root, wordlist),
+            os.path.join(repo_root, "server", "share", "seclists", wordlist),
+        ])
+
+        common_dirs = [
+            "/usr/share/kiterunner/wordlists",
+            "/usr/local/share/kiterunner/wordlists",
+            "/opt/kiterunner/wordlists",
+            "/usr/share/seclists/Discovery/Web-Content/kiterunner",
+        ]
+        for cdir in common_dirs:
+            candidates.append(os.path.join(cdir, wordlist))
+            candidates.append(os.path.join(cdir, basename))
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _build_probe_url(base_url: str, path: str) -> str:
+    """
+    Join a target base URL with a candidate path without accidentally creating
+    duplicate prefixes like `/api/api/...` when the target already includes `/api`.
+    """
+    parsed = urlparse(base_url.rstrip("/"))
+    base_path = parsed.path.rstrip("/")
+    normalized_path = "/" + path.lstrip("/")
+
+    if base_path and (
+        normalized_path == base_path
+        or normalized_path.startswith(base_path + "/")
+    ):
+        final_path = normalized_path
+    else:
+        final_path = f"{base_path}{normalized_path}" if base_path else normalized_path
+
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            final_path,
+            "",
+            "",
+            "",
+        )
+    )
+
+
+def _response_fingerprint(
+    *,
+    status_code: int,
+    content_type: str,
+    body: str,
+    content: bytes,
+) -> dict[str, Any]:
+    normalized_body = re.sub(r"\s+", " ", (body or "").lower())
+    normalized_body = re.sub(r"[0-9a-f]{8,}", "<hex>", normalized_body)
+    normalized_body = re.sub(r"\d+", "0", normalized_body)
+    return {
+        "status_code": status_code,
+        "content_type": (content_type or "").split(";", 1)[0].strip().lower(),
+        "content_length": len(content or b""),
+        "body_hash": hashlib.sha256(content or b"").hexdigest() if content else "",
+        "looks_like_html": "<html" in (body or "").lower(),
+        "body_signature": normalized_body[:220],
+    }
+
+
+def _is_probable_fallback_match(
+    candidate: dict[str, Any],
+    baseline: Optional[dict[str, Any]],
+) -> bool:
+    if not baseline:
+        return False
+    if candidate.get("status_code") != baseline.get("status_code"):
+        return False
+    if candidate.get("content_type") != baseline.get("content_type"):
+        return False
+
+    # Exact match: strong fallback indicator.
+    if (
+        candidate.get("content_length") == baseline.get("content_length")
+        and candidate.get("body_hash") == baseline.get("body_hash")
+    ):
+        return bool(candidate.get("looks_like_html"))
+
+    # Soft match for dynamic SPAs (nonce/hash changes but same shell body).
+    c_len = int(candidate.get("content_length") or 0)
+    b_len = int(baseline.get("content_length") or 0)
+    if abs(c_len - b_len) > 48:
+        return False
+
+    if candidate.get("body_signature") != baseline.get("body_signature"):
+        return False
+
+    return bool(candidate.get("looks_like_html"))
+
+
+def _suppress_generic_html_shell(
+    endpoints: list[APIEndpoint],
+) -> tuple[list[APIEndpoint], int]:
+    """
+    Suppress repeated HTML-shell responses (soft-404/catch-all SPA behavior)
+    that can inflate endpoint discovery results.
+    """
+    html_candidates: list[APIEndpoint] = []
+    for ep in endpoints:
+        if (
+            ep.status_code == 200
+            and (ep.content_type or "").lower().startswith("text/html")
+            and ep.method == "GET"
+        ):
+            html_candidates.append(ep)
+
+    if len(html_candidates) < 12:
+        return endpoints, 0
+
+    sig_counts: dict[str, int] = {}
+    ep_sig: dict[str, str] = {}
+    for ep in html_candidates:
+        snippet = (ep.response_snippet or "").lower()
+        norm = re.sub(r"\s+", " ", snippet)
+        norm = re.sub(r"\d+", "0", norm)
+        sig = f"{ep.content_length}:{norm[:180]}"
+        key = f"{ep.method}:{ep.url}"
+        ep_sig[key] = sig
+        sig_counts[sig] = sig_counts.get(sig, 0) + 1
+
+    dominant = max(sig_counts.values()) if sig_counts else 0
+    if dominant < 10:
+        return endpoints, 0
+
+    kept: list[APIEndpoint] = []
+    suppressed = 0
+    for ep in endpoints:
+        key = f"{ep.method}:{ep.url}"
+        sig = ep_sig.get(key)
+        is_shell = bool(sig and sig_counts.get(sig, 0) >= dominant)
+
+        if is_shell and not ep.auth_required and not ep.issues:
+            suppressed += 1
+            continue
+        kept.append(ep)
+
+    return kept, suppressed
+
+
+def _build_llm_brief(
+    *,
+    endpoints: list[APIEndpoint],
+    interesting: list[APIEndpoint],
+    graphql_infos: list[GraphQLInfo],
+    swagger_specs: list[SwaggerSpec],
+    suppressed_html_shell_count: int,
+) -> dict[str, Any]:
+    def _compact(ep: APIEndpoint) -> dict[str, Any]:
+        signal = "candidate"
+        if ep.status_code in (401, 403):
+            signal = "protected_endpoint_exists"
+        elif ep.status_code == 405:
+            signal = "endpoint_exists_method_gated"
+        elif ep.issues:
+            signal = "security_finding"
+
+        return {
+            "url": ep.url,
+            "method": ep.method,
+            "status": ep.status_code,
+            "type": ep.endpoint_type,
+            "auth_required": ep.auth_required,
+            "tags": ep.tags[:5],
+            "issues": ep.issues[:3],
+            "source": ep.source,
+            "confidence": ep.confidence,
+            "signal": signal,
+        }
+
+    high_signal: list[APIEndpoint] = []
+    for ep in interesting:
+        is_method_gated_signal = (
+            ep.status_code == 405
+            and any(
+                t in ep.tags
+                for t in ("auth", "admin", "graphql", "swagger", "actuator", "config", "debug")
+            )
+        )
+        if ep.issues or ep.auth_required or ep.status_code in (401, 403, 500) or is_method_gated_signal:
+            high_signal.append(ep)
+
+    if not high_signal:
+        for ep in endpoints:
+            if ep.status_code in (401, 403, 500):
+                high_signal.append(ep)
+            elif ep.status_code == 405 and any(
+                t in ep.tags
+                for t in ("auth", "admin", "graphql", "swagger", "actuator", "config", "debug")
+            ):
+                high_signal.append(ep)
+
+    gql_targets = [
+        {
+            "endpoint_url": g.endpoint_url,
+            "introspection_enabled": g.introspection_enabled,
+            "sensitive_fields": g.sensitive_fields[:5],
+            "issues": g.introspection_issues[:3],
+        }
+        for g in graphql_infos[:15]
+    ]
+
+    swagger_targets = [
+        {
+            "url": s.url,
+            "version": s.version,
+            "security_schemes": s.security_schemes[:5],
+            "auth_types": s.auth_types[:5],
+            "issues": s.issues[:3],
+            "path_count": len(s.endpoints_defined),
+        }
+        for s in swagger_specs[:15]
+    ]
+
+    return {
+        "attack_surface_count": len(endpoints),
+        "high_signal_count": len(high_signal),
+        "suppressed_html_shell_count": suppressed_html_shell_count,
+        "next_targets": [_compact(ep) for ep in high_signal[:12]],
+        "graphql_targets": gql_targets,
+        "swagger_targets": swagger_targets,
+    }
+
+
+def _prioritize_for_pentest(
+    endpoints: list[APIEndpoint],
+    limit: int,
+) -> list[APIEndpoint]:
+    def _score(ep: APIEndpoint) -> int:
+        score = 0
+        if ep.auth_required:
+            score += 50
+        if ep.status_code in (401, 403):
+            score += 40
+        if ep.status_code == 405 and any(
+            t in ep.tags for t in ("auth", "admin", "graphql", "swagger", "actuator", "config", "debug")
+        ):
+            score += 28
+        if ep.status_code and ep.status_code >= 500:
+            score += 35
+        if ep.endpoint_type in ("graphql", "swagger", "actuator"):
+            score += 20
+        score += min(len(ep.issues), 3) * 15
+        if "admin" in ep.tags:
+            score += 15
+        if "config" in ep.tags:
+            score += 12
+        if "debug" in ep.tags:
+            score += 10
+        return score
+
+    def _family(ep: APIEndpoint) -> str:
+        if ep.issues:
+            return ep.issues[0]
+        tags = ",".join(sorted(ep.tags[:3]))
+        return f"{ep.endpoint_type}:{tags}:{ep.status_code}"
+
+    ranked = sorted(endpoints, key=_score, reverse=True)
+    selected: list[APIEndpoint] = []
+    used_families: set[str] = set()
+
+    for ep in ranked:
+        fam = _family(ep)
+        if fam in used_families:
+            continue
+        used_families.add(fam)
+        selected.append(ep)
+        if len(selected) >= limit:
+            return selected
+
+    for ep in ranked:
+        if ep not in selected:
+            selected.append(ep)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _is_generic_html_shell(content_type: str, body: str) -> bool:
+    ct = (content_type or "").lower()
+    if "html" not in ct:
+        return False
+
+    b = (body or "").lower()
+    if "<html" not in b:
+        return False
+
+    shell_markers = [
+        "<!doctype html",
+        "<meta charset=",
+        "<meta name=\"viewport\"",
+        "<meta name=\"theme-color\"",
+    ]
+    app_root_markers = [
+        "id=\"root\"",
+        "id='root'",
+        "id=\"app\"",
+        "id='app'",
+    ]
+    return (
+        sum(1 for m in shell_markers if m in b) >= 2
+        and any(m in b for m in app_root_markers)
+    )
+
+
+def _probe_fallback_signature(
+    target: str,
+    headers: dict[str, str],
+    timeout: int,
+) -> Optional[dict[str, Any]]:
+    """
+    Fetch one clearly-nonexistent path. If the app returns a generic SPA shell
+    or catch-all page with HTTP 200, we use it as a baseline to suppress false
+    positives from path wordlists.
+    """
+    probe_url = _build_probe_url(
+        target,
+        f"/__pentaforge_nonexistent__{int(time.time() * 1000)}__",
+    )
+    try:
+        resp = requests.get(
+            probe_url,
+            headers={**{"User-Agent": "APIDiscovery/1.0"}, **headers},
+            timeout=timeout,
+            verify=False,
+            allow_redirects=False,
+        )
+    except Exception:
+        return None
+
+    body = resp.text[:3000]
+    fingerprint = _response_fingerprint(
+        status_code=resp.status_code,
+        content_type=resp.headers.get("content-type", ""),
+        body=body,
+        content=resp.content,
+    )
+    if resp.status_code == 200 and fingerprint["looks_like_html"]:
+        return fingerprint
+    return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -798,9 +1208,26 @@ def probe_graphql(url: str, headers: dict[str, str] = {},
     # ── Step 4: Debug playground detection ──
     for scheme in ("https", "http"):
         base = re.sub(r"^https?://", f"{scheme}://", url)
+        parsed_base = urlparse(base)
+        base_path = parsed_base.path.rstrip("/")
+        for suffix in ("/graphql", "/query"):
+            if base_path.endswith(suffix):
+                base_path = base_path[: -len(suffix)]
+        base_path = base_path.rstrip("/")
+
         for path in ["/graphiql", "/playground", "/altair", "/voyager"]:
             try:
-                test_url = base.rstrip("/graphql").rstrip("/") + path
+                test_path = f"{base_path}{path}" if base_path else path
+                test_url = urlunparse(
+                    (
+                        parsed_base.scheme,
+                        parsed_base.netloc,
+                        test_path,
+                        "",
+                        "",
+                        "",
+                    )
+                )
                 resp = requests.get(
                     test_url,
                     timeout=5,
@@ -838,6 +1265,7 @@ def classify_endpoint(url: str, status: int,
     ct           = headers.get("content-type", "").lower()
     issues: list[str] = []
     tags:   list[str] = []
+    is_shell_html = _is_generic_html_shell(ct, body_lower)
 
     # ── Type detection ──
     etype = "rest"
@@ -875,7 +1303,10 @@ def classify_endpoint(url: str, status: int,
 
     # Auth check
     if status in (200, 201, 204):
-        if any(t in tags for t in ("admin", "debug", "config", "data", "actuator")):
+        if (
+            any(t in tags for t in ("admin", "debug", "config", "data", "actuator"))
+            and not is_shell_html
+        ):
             issues.append(
                 f"Sensitive endpoint ({','.join(tags)}) "
                 f"accessible without authentication (HTTP {status})"
@@ -947,11 +1378,12 @@ def probe_endpoint(
     method:     str = "GET",
     headers:    dict[str, str] = {},
     timeout:    int = 8,
+    fallback_signature: Optional[dict[str, Any]] = None,
 ) -> Optional[APIEndpoint]:
     """
     Probe a single API path and return an APIEndpoint if interesting.
     """
-    url = base_url.rstrip("/") + "/" + path.lstrip("/")
+    url = _build_probe_url(base_url, path)
     req_headers = {
         "User-Agent": "APIDiscovery/1.0",
         "Accept":     "application/json, text/html, */*",
@@ -976,6 +1408,26 @@ def probe_endpoint(
         body         = resp.text[:3000]
         resp_headers = {k.lower(): v for k, v in resp.headers.items()}
         ct           = resp_headers.get("content-type", "")
+        fingerprint  = _response_fingerprint(
+            status_code=resp.status_code,
+            content_type=ct,
+            body=body,
+            content=resp.content,
+        )
+
+        # Suppress SPA/catch-all fallback pages that make every guessed path
+        # look like a real API endpoint.
+        if _is_probable_fallback_match(fingerprint, fallback_signature):
+            return None
+
+        # Ignore generic app shell pages unless the path itself indicates
+        # docs/graphql entrypoints worth further probing.
+        if _is_generic_html_shell(ct, body):
+            if not any(kw in url.lower() for kw in [
+                "swagger", "openapi", "api-docs", "redoc",
+                "graphql", "graphiql", "playground", "voyager",
+            ]):
+                return None
 
         etype, tags, issues = classify_endpoint(url, resp.status_code, resp_headers, body)
 
@@ -1031,11 +1483,20 @@ def manual_api_discovery(
     swagger_specs: list[SwaggerSpec]  = []
     graphql_infos: list[GraphQLInfo]  = []
     seen_urls:     set[str]           = set()
+    fallback_signature = _probe_fallback_signature(target, headers, http_timeout)
 
     # ── Phase 1: Probe all paths ──
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as ex:
         futures = {
-            ex.submit(probe_endpoint, target, path, "GET", headers, http_timeout): path
+            ex.submit(
+                probe_endpoint,
+                target,
+                path,
+                "GET",
+                headers,
+                http_timeout,
+                fallback_signature,
+            ): path
             for path in paths
         }
         for future in concurrent.futures.as_completed(futures):
@@ -1054,7 +1515,15 @@ def manual_api_discovery(
     ]
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as ex:
         futures = {
-            ex.submit(probe_endpoint, target, path, "POST", headers, http_timeout): path
+            ex.submit(
+                probe_endpoint,
+                target,
+                path,
+                "POST",
+                headers,
+                http_timeout,
+                fallback_signature,
+            ): path
             for path in post_paths
         }
         for future in concurrent.futures.as_completed(futures):
@@ -1085,7 +1554,7 @@ def manual_api_discovery(
                         for method in ["GET", "POST"]:
                             futures2[ex.submit(
                                 probe_endpoint, target, epath,
-                                method, headers, http_timeout
+                                method, headers, http_timeout, fallback_signature
                             )] = epath
                     for future in concurrent.futures.as_completed(futures2):
                         result = future.result()
@@ -1108,7 +1577,7 @@ def manual_api_discovery(
         # Also test common GQL paths
         gql_paths_to_try = [ep.url]
         for gp in ["/graphql", "/api/graphql", "/query", "/graphiql"]:
-            gql_paths_to_try.append(target.rstrip("/") + gp)
+            gql_paths_to_try.append(_build_probe_url(target, gp))
 
         for gql_url in gql_paths_to_try:
             if gql_url in gql_urls_checked:
@@ -1157,10 +1626,10 @@ def parse_kiterunner(stdout: str, stderr: str,
                      target: str) -> list[APIEndpoint]:
     """
     Parse kiterunner output.
-    kr scan outputs lines like:
+    kiterunner  scan outputs lines like:
       POST    403 [   287,   8,  1] https://example.com/api/v1/users
       GET     200 [ 12345, 120, 5] https://example.com/api/v1/health
-    Also supports JSON output (kr scan --output-format json).
+    Also supports JSON output (kiterunner scan -o json).
     """
     endpoints: list[APIEndpoint] = []
     seen:      set[str] = set()
@@ -1387,6 +1856,7 @@ def api_endpoint_discovery(
     endpoints: list[str] = [],
     wordlist:  Optional[str] = None,
     headers:   dict[str, str] = {},
+    compact_output: bool = True,
 ) -> dict:
     """
     🔧 Agent Tool: API Endpoint Discovery
@@ -1417,7 +1887,7 @@ def api_endpoint_discovery(
         Basic:  ["scan", "-w", "routes-small.kite"]
         Threads:["scan", "-w", "routes-large.kite", "-x", "20"]
         Delay:  ["scan", "-w", "routes.kite", "--delay", "100ms"]
-        Output: ["scan", "-w", "routes.kite", "--output-format", "json"]
+        Output: ["scan", "-w", "routes.kite", "-o", "json"]
 
       ffuf:
         Basic:  ["-w", "/wordlists/api.txt", "-mc", "200,201,204,301,401,403"]
@@ -1447,7 +1917,7 @@ def api_endpoint_discovery(
         req = APIDiscoveryRequest(
             tool=tool, target=target, args=args,
             endpoints=endpoints, wordlist=wordlist,
-            headers=headers,
+            headers=headers, compact_output=compact_output,
         )
     except Exception as e:
         return APIDiscoveryResult(
@@ -1456,6 +1926,7 @@ def api_endpoint_discovery(
         ).model_dump()
 
     # Normalise target
+    target = req.target
     if not target.startswith("http"):
         target = f"https://{target}"
     target = target.rstrip("/")
@@ -1498,65 +1969,107 @@ def api_endpoint_discovery(
     # ══════════════════════════════
     elif tool == "kiterunner":
         wl = req.wordlist or "routes-small.kite"
+        requested_wl = _extract_kiterunner_wordlist(req.args) or wl
+        resolved_wl = _resolve_kiterunner_wordlist(requested_wl)
 
-        # Build default kiterunner command
-        if req.args and req.args[0] in ("scan", "brute", "replay"):
-            cmd = ["kr"] + list(req.args) + [target]
-        else:
-            cmd = [
-                "kr", "scan", target,
-                "-w", wl,
-                "--output-format", "json",
-                "--fail-status-codes", "404,400",
+        if requested_wl and not resolved_wl:
+            msg = (
+                f"Kiterunner wordlist not found: {requested_wl}. "
+                "Falling back to manual API discovery."
+            )
+            command_str = (
+                f"kiterunner(scan -w {requested_wl}) "
+                f"-> manual_api_discovery({target})"
+            )
+            raw_output = msg
+            error_msg = msg
+
+            eps, specs, gql = manual_api_discovery(
+                target=target,
+                paths=full_paths,
+                headers=req.headers,
+                threads=30,
+                http_timeout=8,
+            )
+            all_endpoints.extend(eps)
+            swagger_specs.extend(specs)
+            graphql_infos.extend(gql)
+            techniques_used += [
+                "kiterunner_scan_failed_wordlist",
+                "manual_fallback",
+                "path_bruteforce",
+                "swagger_parse",
+                "graphql_introspection",
+                "options_probe",
             ]
-            if req.args:
-                cmd += list(req.args)
+        else:
+            effective_wl = resolved_wl or requested_wl
 
-        command_str = " ".join(cmd)
-        stdout, stderr, rc = safe_execute(cmd, req.timeout)
-        raw_output = (stdout or stderr)[:5000]
+            # Build default kiterunner command
+            if req.args and req.args[0] in ("scan", "brute", "replay"):
+                args_for_cmd = _replace_kiterunner_wordlist(req.args, effective_wl)
+                has_target = any(
+                    a.startswith("http://") or a.startswith("https://")
+                    for a in args_for_cmd
+                )
+                cmd = ["kiterunner"] + list(args_for_cmd)
+                if not has_target:
+                    cmd.append(target)
+            else:
+                cmd = [
+                    "kiterunner", "scan", target,
+                    "-w", effective_wl,
+                    "-o", "json",
+                    "--fail-status-codes", "404,400",
+                ]
+                if req.args:
+                    cmd += list(req.args)
 
-        parsed = parse_kiterunner(stdout, stderr, target)
-        all_endpoints.extend(parsed)
-        techniques_used.append("kiterunner_scan")
+            command_str = " ".join(cmd)
+            stdout, stderr, rc = safe_execute(cmd, req.timeout)
+            raw_output = (stdout or stderr)[:5000]
 
-        if rc != 0 and not parsed:
-            error_msg = (stderr or stdout)[:400]
+            parsed = parse_kiterunner(stdout, stderr, target)
+            all_endpoints.extend(parsed)
+            techniques_used.append("kiterunner_scan")
 
-        # Enrich: swagger + graphql on top of kiterunner results
-        swagger_urls = [
-            e.url for e in all_endpoints
-            if e.endpoint_type == "swagger"
-        ]
-        for surl in swagger_urls:
-            try:
-                resp = requests.get(surl, timeout=8, verify=False,
-                                    headers=req.headers)
-                if resp.status_code == 200:
-                    spec = parse_swagger_spec(surl, resp.text)
-                    swagger_specs.append(spec)
+            if rc != 0 and not parsed:
+                error_msg = (stderr or stdout)[:400]
 
-                    # Probe paths from spec
-                    extra_eps, _, _ = manual_api_discovery(
-                        target=target,
-                        paths=[e["path"] for e in spec.endpoints_defined[:80]],
-                        headers=req.headers,
-                        threads=20,
-                    )
-                    for ep in extra_eps:
-                        ep.source = "swagger_spec"
-                        all_endpoints.append(ep)
-            except Exception:
-                pass
+            # Enrich: swagger + graphql on top of kiterunner results
+            swagger_urls = [
+                e.url for e in all_endpoints
+                if e.endpoint_type == "swagger"
+            ]
+            for surl in swagger_urls:
+                try:
+                    resp = requests.get(surl, timeout=8, verify=False,
+                                        headers=req.headers)
+                    if resp.status_code == 200:
+                        spec = parse_swagger_spec(surl, resp.text)
+                        swagger_specs.append(spec)
 
-        # GraphQL check on found endpoints
-        for ep in all_endpoints:
-            if ep.endpoint_type == "graphql" or "graphql" in ep.url.lower():
-                gql_info = probe_graphql(ep.url, req.headers)
-                if gql_info:
-                    graphql_infos.append(gql_info)
+                        # Probe paths from spec
+                        extra_eps, _, _ = manual_api_discovery(
+                            target=target,
+                            paths=[e["path"] for e in spec.endpoints_defined[:80]],
+                            headers=req.headers,
+                            threads=20,
+                        )
+                        for ep in extra_eps:
+                            ep.source = "swagger_spec"
+                            all_endpoints.append(ep)
+                except Exception:
+                    pass
 
-        techniques_used += ["swagger_parse", "graphql_introspection"]
+            # GraphQL check on found endpoints
+            for ep in all_endpoints:
+                if ep.endpoint_type == "graphql" or "graphql" in ep.url.lower():
+                    gql_info = probe_graphql(ep.url, req.headers)
+                    if gql_info:
+                        graphql_infos.append(gql_info)
+
+            techniques_used += ["swagger_parse", "graphql_introspection"]
 
     # ══════════════════════════════
     # TOOL: FFUF
@@ -1648,20 +2161,36 @@ def api_endpoint_discovery(
             "/v1/graphql", "/v2/graphql", "/query", "/playground",
         ]
 
-        # Try external tool first
-        external_tried = False
-        for cli in ["graphql-introspect", "gql-cli", "graphql-voyager"]:
-            cmd = [cli, target] + list(req.args)
-            command_str = " ".join(cmd)
-            stdout, stderr, rc = safe_execute(cmd, min(req.timeout, 60))
-            raw_output = (stdout or stderr)[:5000]
+        command_str = f"graphql_probe({target})"
+        external_errors: list[str] = []
+        external_output_chunks: list[str] = []
+        use_external_cli = any(
+            a.strip().lower() in ("--use-external-cli", "--external-cli")
+            for a in req.args
+        )
 
-            if rc == 0 and stdout.strip():
-                parsed_gql = parse_graphql_voyager(stdout, target)
-                graphql_infos.extend(parsed_gql)
-                external_tried = True
-                techniques_used.append(f"{cli}_scan")
-                break
+        # Try external tools only when explicitly requested.
+        if use_external_cli:
+            for cli in ["graphql-introspect", "gql-cli"]:
+                if not shutil.which(cli):
+                    continue
+
+                cmd = [cli, target] + list(req.args)
+                stdout, stderr, rc = safe_execute(cmd, min(req.timeout, 8))
+                snippet = (stdout or stderr or "").strip()
+                if snippet:
+                    external_output_chunks.append(f"[{cli}] {snippet[:400]}")
+
+                if rc == 0 and stdout.strip():
+                    parsed_gql = parse_graphql_voyager(stdout, target)
+                    if parsed_gql:
+                        graphql_infos.extend(parsed_gql)
+                        techniques_used.append(f"{cli}_scan")
+                elif rc != 0:
+                    external_errors.append(f"{cli}: {(stderr or stdout)[:180]}")
+
+        if external_output_chunks:
+            raw_output = "\n".join(external_output_chunks)[:5000]
 
         # Always run our own probe (more thorough)
         checked: set[str] = set()
@@ -1705,8 +2234,14 @@ def api_endpoint_discovery(
         techniques_used += ["graphql_introspection", "graphql_batch_test",
                              "graphql_debug_detect"]
 
-        if not command_str:
-            command_str = f"graphql_probe({target})"
+        if not graphql_infos and not all_endpoints:
+            if external_errors:
+                error_msg = (
+                    "GraphQL discovery found no endpoints. "
+                    f"External CLI probe errors: {'; '.join(external_errors[:2])}"
+                )
+            else:
+                error_msg = "GraphQL discovery found no endpoints on common paths"
 
     # ══════════════════════════════
     # POST-PROCESS ALL RESULTS
@@ -1720,6 +2255,9 @@ def api_endpoint_discovery(
         if key not in seen_keys:
             seen_keys.add(key)
             unique_eps.append(ep)
+
+    # Suppress repeated HTML shell false positives before final ranking.
+    unique_eps, suppressed_html_shell_count = _suppress_generic_html_shell(unique_eps)
 
     # Flag interesting endpoints
     interesting = [ep for ep in unique_eps if tag_interesting(ep)]
@@ -1740,6 +2278,122 @@ def api_endpoint_discovery(
             if gql_ep.url not in [e.url for e in interesting]:
                 interesting.append(gql_ep)
 
+    llm_brief = _build_llm_brief(
+        endpoints=unique_eps,
+        interesting=interesting,
+        graphql_infos=graphql_infos,
+        swagger_specs=swagger_specs,
+        suppressed_html_shell_count=suppressed_html_shell_count,
+    )
+
+    # Compact mode returns only pentest-relevant endpoints to keep payload short.
+    if req.compact_output:
+        compact_pool = [
+            ep for ep in interesting
+            if ep.issues
+            or ep.auth_required
+            or (
+                ep.status_code == 405
+                and any(
+                    t in ep.tags
+                    for t in ("auth", "admin", "graphql", "swagger", "actuator", "config", "debug")
+                )
+            )
+        ]
+        if not compact_pool:
+            compact_pool = interesting or unique_eps
+
+        prioritized_compact = _prioritize_for_pentest(compact_pool, limit=12)
+        llm_brief["next_targets"] = [
+            {
+                "url": ep.url,
+                "method": ep.method,
+                "status": ep.status_code,
+                "type": ep.endpoint_type,
+                "tags": ep.tags[:4],
+                "issues": ep.issues[:2],
+                "signal": (
+                    "protected_endpoint_exists"
+                    if ep.status_code in (401, 403)
+                    else "endpoint_exists_method_gated"
+                    if ep.status_code == 405
+                    else "security_finding"
+                    if ep.issues
+                    else "candidate"
+                ),
+            }
+            for ep in prioritized_compact[:10]
+        ]
+
+        # Alias llm_brief keys for compact transport to reduce tokens.
+        brief_compact: dict[str, Any] = {
+            "a": llm_brief.get("attack_surface_count", 0),
+            "t": [
+                {
+                    "u": t.get("url"),
+                    "m": t.get("method"),
+                    "c": t.get("status"),
+                    "y": t.get("type"),
+                    "g": t.get("tags", []),
+                    "i": t.get("issues", []),
+                    "s": t.get("signal"),
+                }
+                for t in llm_brief.get("next_targets", [])
+            ],
+        }
+
+        hs = int(llm_brief.get("high_signal_count", 0) or 0)
+        if hs > 0:
+            brief_compact["h"] = hs
+
+        suppressed = int(llm_brief.get("suppressed_html_shell_count", 0) or 0)
+        if suppressed > 0:
+            brief_compact["sh"] = suppressed
+
+        gql_targets = llm_brief.get("graphql_targets", [])
+        if gql_targets:
+            brief_compact["gql"] = [
+                {
+                    "u": g.get("endpoint_url"),
+                    "i": g.get("introspection_enabled", False),
+                    "f": g.get("sensitive_fields", []),
+                    "x": g.get("issues", []),
+                }
+                for g in gql_targets[:6]
+            ]
+
+        swagger_targets = llm_brief.get("swagger_targets", [])
+        if swagger_targets:
+            brief_compact["sw"] = [
+                {
+                    "u": s.get("url"),
+                    "v": s.get("version"),
+                    "sec": s.get("security_schemes", []),
+                    "a": s.get("auth_types", []),
+                    "x": s.get("issues", []),
+                    "p": s.get("path_count"),
+                }
+                for s in swagger_targets[:6]
+            ]
+
+        llm_brief = brief_compact
+
+        # In compact mode, avoid duplicate large arrays. llm_brief holds the
+        # actionable attack surface for the LLM.
+        trimmed_endpoints = []
+        trimmed_interesting = []
+        swagger_specs = []
+        graphql_infos = []
+
+        output_techniques_used: list[str] = []
+
+        # raw_output often duplicates error text and wastes tokens in compact mode.
+        raw_output = None
+    else:
+        trimmed_endpoints = unique_eps
+        trimmed_interesting = interesting
+        output_techniques_used = list(dict.fromkeys(techniques_used))
+
     # ══════════════════════════════
     # BUILD RESULT
     # ══════════════════════════════
@@ -1750,15 +2404,16 @@ def api_endpoint_discovery(
         command=command_str,
         total_endpoints=len(unique_eps),
         total_unique=len(unique_eps),
-        endpoints=unique_eps,
+        endpoints=trimmed_endpoints,
         swagger_specs=swagger_specs,
         graphql_info=graphql_infos,
-        interesting=interesting,
+        interesting=trimmed_interesting,
         raw_output=raw_output[:5000] if raw_output else None,
         error=error_msg,
         execution_time=round(time.time() - start, 2),
-        techniques_used=list(dict.fromkeys(techniques_used)),
-    ).model_dump()
+        techniques_used=output_techniques_used,
+        llm_brief=llm_brief,
+    ).model_dump(exclude_none=True, exclude_defaults=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1829,6 +2484,14 @@ API_DISCOVERY_TOOL_DEFINITION = {
                     "'X-API-Key': 'abc123', 'Cookie': 'session=xyz'}"
                 ),
             },
+            "compact_output": {
+                "type": "boolean",
+                "description": (
+                    "If true (default), return compact pentest-focused data: "
+                    "trimmed endpoint lists and llm_brief summary. "
+                    "Set false to return full endpoint structures."
+                ),
+            },
         },
         "required": ["tool", "target"],
     },
@@ -1840,15 +2503,19 @@ API_DISCOVERY_TOOL_DEFINITION = {
 # ══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    import os
     import urllib3
     urllib3.disable_warnings()
+    os.environ.setdefault("PENTAFORGE_ALLOW_LOCAL_API_TARGETS", "1")
 
+    LOCAL_CRAPI_TARGET = "http://localhost:8888/api"
+    """
     # ─────────────────────────────
     # 1. Manual — full discovery
     # ─────────────────────────────
     r = api_endpoint_discovery(
         tool="manual",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
     )
     print("=== MANUAL FULL DISCOVERY ===")
     print(json.dumps(r, indent=2))
@@ -1858,21 +2525,21 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_endpoint_discovery(
         tool="manual",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         headers={"Authorization": "Bearer your_token_here"},
-        endpoints=["/api/v1/internal", "/api/admin/users"],
+        endpoints=["/v1/internal", "/admin/users"],
     )
     print("=== MANUAL WITH AUTH ===")
     print(json.dumps(r, indent=2))
-
+    """
     # ─────────────────────────────
     # 3. Kiterunner — large routes
     # ─────────────────────────────
     r = api_endpoint_discovery(
         tool="kiterunner",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         args=["scan", "-w", "routes-large.kite", "-x", "20",
-              "--output-format", "json"],
+              "-o", "json"],
     )
     print("=== KITERUNNER ===")
     print(json.dumps(r, indent=2))
@@ -1880,31 +2547,33 @@ if __name__ == "__main__":
     # ─────────────────────────────
     # 4. ffuf — recursive
     # ─────────────────────────────
+    """
     r = api_endpoint_discovery(
         tool="ffuf",
-        target="https://example.com",
+        target=LOCAL_CRAPI_TARGET,
         args=["-rate", "100", "-recursion", "-recursion-depth", "2",
               "-fc", "404"],
     )
     print("=== FFUF RECURSIVE ===")
     print(json.dumps(r, indent=2))
-
+    """
     # ─────────────────────────────
     # 5. GraphQL only
     # ─────────────────────────────
+    """
     r = api_endpoint_discovery(
         tool="graphql",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
     )
     print("=== GRAPHQL INTROSPECTION ===")
     print(json.dumps(r, indent=2))
-
+    """
     # ─────────────────────────────
     # 6. GraphQL with auth
     # ─────────────────────────────
     r = api_endpoint_discovery(
         tool="graphql",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         headers={"Authorization": "Bearer your_token"},
     )
     print("=== GRAPHQL WITH AUTH ===")
@@ -1913,13 +2582,14 @@ if __name__ == "__main__":
     # ─────────────────────────────
     # 7. ffuf with custom wordlist
     # ─────────────────────────────
+    """
     r = api_endpoint_discovery(
         tool="ffuf",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         wordlist="/usr/share/wordlists/SecLists/Discovery/Web-Content/api"
                  "/api-endpoints.txt",
         args=["-mc", "200,201,301,401,403", "-rate", "50"],
         headers={"Cookie": "session=abc123"},
     )
     print("=== FFUF CUSTOM WORDLIST ===")
-    print(json.dumps(r, indent=2))
+    print(json.dumps(r, indent=2))"""

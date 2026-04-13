@@ -78,23 +78,8 @@ class ProjectConfig:
 # 2. SSRF GUARD
 # ══════════════════════════════════════════════════════════════════════
 
-# RFC 1918 + link-local + loopback + cloud metadata ranges to block
-_BLOCKED_NETWORKS = [
-    ipaddress.ip_network(cidr)
-    for cidr in (
-        "127.0.0.0/8",      # loopback
-        "10.0.0.0/8",       # private
-        "172.16.0.0/12",    # private
-        "192.168.0.0/16",   # private
-        "169.254.0.0/16",   # link-local / AWS metadata
-        "100.64.0.0/10",    # shared address space
-        "::1/128",          # IPv6 loopback
-        "fc00::/7",         # IPv6 unique-local
-        "fe80::/10",        # IPv6 link-local
-    )
-]
-
-_BLOCKED_HOSTNAMES = frozenset({"localhost", "metadata.google.internal"})
+from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
+from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
 
 
 def _is_ssrf_safe(hostname: str) -> tuple[bool, str]:

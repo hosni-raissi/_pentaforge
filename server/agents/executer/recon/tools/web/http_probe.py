@@ -13,6 +13,9 @@ from typing import Optional
 from functools import lru_cache
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
+from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+
 
 # ══════════════════════════════════════════════════════════════
 # 1. LOGGING CONFIGURATION
@@ -92,14 +95,7 @@ class ProjectConfig:
         return cls._project_dir
 
 
-BLOCKED_TARGETS = {
-    "127.0.0.1",
-    "localhost",
-    "0.0.0.0",
-    "::1",
-    "169.254.169.254",
-    "metadata.google.internal",
-}
+# BLOCKED_TARGETS removed in favor of centralized config.
 
 DANGEROUS_CHARS = [";", "&&", "||", "|", "`", "$(", ">", "\n", "\r", "'", '"']
 MAX_TARGETS = 100000
@@ -142,16 +138,17 @@ def extract_host_from_target(target: str) -> str:
 
 def is_blocked_target(target: str) -> bool:
     host = extract_host_from_target(target)
-    if host in BLOCKED_TARGETS:
-        return True
-    
+    host_lower = host.lower()
+    for b_host in _BLOCKED_HOSTNAMES:
+        if host_lower == b_host or host_lower.endswith(f".{b_host}"):
+            return True
     try:
         ip = ipaddress.ip_address(host)
-        if ip.is_loopback or ip.is_unspecified or ip.is_link_local:
-            return True
+        for net in _BLOCKED_NETWORKS:
+            if ip in net:
+                return True
     except ValueError:
         pass
-    
     return False
 
 

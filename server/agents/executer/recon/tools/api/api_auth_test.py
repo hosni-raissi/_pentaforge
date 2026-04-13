@@ -9,6 +9,9 @@ import requests
 import concurrent.futures
 from typing import Optional, Any
 from pydantic import BaseModel, Field, validator
+from server.agents.executer.recon.tools.api._common import (
+    extract_host,
+)
 
 # ══════════════════════════════════════════════════════════════
 # 1. SCHEMAS
@@ -36,15 +39,21 @@ class APIAuthTestRequest(BaseModel):
 
     @validator("target")
     def validate_target(cls, v):
+        cleaned = v.strip()
+        host = extract_host(cleaned)
         blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
-        if v.strip() in blocked:
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            if not re.match(r"^https?://[a-zA-Z0-9]", cleaned):
+                raise ValueError(f"Invalid target: {v}")
+            return cleaned
+        if host in blocked:
             raise ValueError(f"Target '{v}' is blocked")
         domain  = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"
         bare    = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$"
         ip_http = r"^https?://(\d{1,3}\.){3}\d{1,3}"
-        if not (re.match(domain, v) or re.match(bare, v) or re.match(ip_http, v)):
+        if not (re.match(domain, cleaned) or re.match(bare, cleaned) or re.match(ip_http, cleaned)):
             raise ValueError(f"Invalid target: {v}")
-        return v.strip()
+        return cleaned
 
     @validator("args")
     def validate_args(cls, v):
@@ -2841,8 +2850,17 @@ API_AUTH_TEST_TOOL_DEFINITION = {
 # ══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    import os
     import urllib3
     urllib3.disable_warnings()
+    os.environ.setdefault("PENTAFORGE_ALLOW_LOCAL_API_TARGETS", "1")
+
+    LOCAL_CRAPI_TARGET = "http://localhost:8888/api"
+    LOCAL_CRAPI_ME = f"{LOCAL_CRAPI_TARGET}/v1/me"
+    LOCAL_CRAPI_USERS = f"{LOCAL_CRAPI_TARGET}/users/{{id}}"
+    LOCAL_CRAPI_PROFILE = f"{LOCAL_CRAPI_TARGET}/users/{{id}}/profile"
+    LOCAL_CRAPI_ORDERS = f"{LOCAL_CRAPI_TARGET}/orders/{{id}}"
+    LOCAL_CRAPI_PAYMENTS = f"{LOCAL_CRAPI_TARGET}/payments/{{id}}"
 
     JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." \
                 "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIi" \
@@ -2854,11 +2872,11 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_auth_test(
         tool="manual",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         token=JWT_TOKEN,
         endpoints=[
-            "https://api.example.com/api/users/{id}",
-            "https://api.example.com/api/admin",
+            LOCAL_CRAPI_USERS,
+            f"{LOCAL_CRAPI_TARGET}/admin",
         ],
         user_ids=[1, 2, 3, 99, "admin"],
     )
@@ -2870,9 +2888,9 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_auth_test(
         tool="manual",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         token=JWT_TOKEN,
-        endpoints=["https://api.example.com/api/v1/me"],
+        endpoints=[LOCAL_CRAPI_ME],
         wordlist="/usr/share/wordlists/jwt-secrets.txt",
     )
     print("=== JWT ATTACKS ===")
@@ -2883,10 +2901,10 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_auth_test(
         tool="jwt_tool",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         token=JWT_TOKEN,
         args=["-M", "at", "-v"],
-        endpoints=["https://api.example.com/api/v1/me"],
+        endpoints=[LOCAL_CRAPI_ME],
     )
     print("=== JWT_TOOL ALL TESTS ===")
     print(json.dumps(r, indent=2))
@@ -2896,7 +2914,7 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_auth_test(
         tool="jwt_tool",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         token=JWT_TOKEN,
         args=["-C", "-d", "/usr/share/wordlists/rockyou.txt"],
     )
@@ -2908,7 +2926,7 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_auth_test(
         tool="manual",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         api_key="sk_live_abc123def456",
         headers={"X-API-Key": "sk_live_abc123def456"},
     )
@@ -2920,12 +2938,12 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_auth_test(
         tool="manual",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         token=JWT_TOKEN,
         endpoints=[
-            "https://api.example.com/api/users/{id}/profile",
-            "https://api.example.com/api/orders/{id}",
-            "https://api.example.com/api/payments/{id}",
+            LOCAL_CRAPI_PROFILE,
+            LOCAL_CRAPI_ORDERS,
+            LOCAL_CRAPI_PAYMENTS,
         ],
         user_ids=[1, 2, 3, 100, 999, "admin"],
     )
@@ -2937,7 +2955,7 @@ if __name__ == "__main__":
     # ─────────────────────────────
     r = api_auth_test(
         tool="burp",
-        target="https://api.example.com",
+        target=LOCAL_CRAPI_TARGET,
         token=JWT_TOKEN,
     )
     print("=== BURP INTEGRATION ===")

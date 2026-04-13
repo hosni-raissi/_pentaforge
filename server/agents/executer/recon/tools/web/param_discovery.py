@@ -104,11 +104,8 @@ class ProjectConfig:
 # Security constants
 DANGEROUS_CHARS = [";", "&&", "||", "|", "`", "$(", ">", "\n", "\r", "'", '"']
 
-BLOCKED_TARGETS = [
-    "127.0.0.1", "localhost", "0.0.0.0", "::1",
-    "169.254.169.254",  # AWS metadata
-    "metadata.google.internal",  # GCP metadata
-]
+from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
+from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
 
 # Allowed wordlist directories
 ALLOWED_WORDLIST_DIRS = [
@@ -157,19 +154,27 @@ class ParamDiscoveryRequest(BaseModel):
     @field_validator("target")
     @classmethod
     def validate_target(cls, v):
-        clean = v.strip().lower()
+        clean = v.strip()
 
-        # Check blocklist
-        for blocked in BLOCKED_TARGETS:
-            if blocked in clean:
-                raise ValueError(f"Target '{v}' is blocked")
-
-        # Basic format validation
-        domain_part = re.sub(r"^\w+://", "", clean).split('/')[0].split(':')[0]
+        domain_part = re.sub(r"^\w+://", "", clean.lower()).split('/')[0].split(':')[0]
         if not domain_part or len(domain_part) < 3:
             raise ValueError(f"Invalid target format: {v}")
 
-        return v.strip()
+        for b_host in _BLOCKED_HOSTNAMES:
+            if domain_part == b_host or domain_part.endswith(f".{b_host}"):
+                raise ValueError(f"Target '{v}' matches blocked hostname '{b_host}'")
+        
+        try:
+            import ipaddress
+            ip = ipaddress.ip_address(domain_part)
+            for net in _BLOCKED_NETWORKS:
+                if ip in net:
+                    raise ValueError(f"Target '{v}' resolves to a blocked IP space")
+        except ValueError as exc:
+            if "blocked IP space" in str(exc):
+                raise
+
+        return clean
 
     @field_validator("args")
     @classmethod

@@ -108,42 +108,79 @@ async def _extract_json_payload(request: Request) -> tuple[Request, Any | None]:
     return rebuilt_request, payload
 
 
-async def _validate_target_payload(payload: Any) -> list[dict[str, str]]:
-    errors: list[dict[str, str]] = []
-    for field, value in _iter_string_fields(payload):
-        is_target_field = _is_target_field(field)
+async def _normalize_string_target_field(field: str, value: str) -> tuple[str, dict[str, str] | None]:
+    is_target_field = _is_target_field(field)
 
-        if _is_ip_field(field):
-            ip_result = IPValidator(value).validate()
-            if not ip_result.get("valid", False):
-                errors.append(
-                    {
-                        "field": field,
-                        "value": value,
-                        "reason": ip_result.get("error", "invalid IP/CIDR"),
-                        "type": "ip",
-                    }
-                )
-            continue
+    if _is_ip_field(field):
+        ip_result = IPValidator(value).validate()
+        if not ip_result.get("valid", False):
+            return value, {
+                "field": field,
+                "value": value,
+                "reason": ip_result.get("error", "invalid IP/CIDR"),
+                "type": "ip",
+            }
+        return value, None
 
-        if is_target_field:
-            ip_result = IPValidator(value).validate()
-            if ip_result.get("valid", False):
-                continue
+    if is_target_field:
+        ip_result = IPValidator(value).validate()
+        if ip_result.get("valid", False):
+            return value, None
 
-        if _is_url_field(field) or is_target_field:
-            url_result = await UrlNormalizer(value).normalize()
-            if not bool(url_result.get("valid")):
-                errors.append(
-                    {
-                        "field": field,
-                        "value": value,
-                        "reason": "invalid or unreachable URL",
-                        "type": "url",
-                    }
-                )
+    if _is_url_field(field) or is_target_field:
+        url_result = await UrlNormalizer(value).normalize()
+        if not bool(url_result.get("valid")):
+            return value, {
+                "field": field,
+                "value": value,
+                "reason": url_result.get("error") or "invalid URL",
+                "type": "url",
+            }
+        normalized = url_result.get("normalized_url") or value
+        return normalized, None
 
-    return errors
+    return value, None
+
+
+async def _normalize_target_payload(payload: Any, prefix: str = "") -> tuple[Any, list[dict[str, str]]]:
+    if isinstance(payload, dict):
+        normalized: dict[str, Any] = {}
+        errors: list[dict[str, str]] = []
+        for key, child in payload.items():
+            key_text = str(key)
+            next_prefix = f"{prefix}.{key_text}" if prefix else key_text
+            normalized_child, child_errors = await _normalize_target_payload(child, next_prefix)
+            normalized[key] = normalized_child
+            errors.extend(child_errors)
+        return normalized, errors
+
+    if isinstance(payload, list):
+        normalized_items: list[Any] = []
+        errors: list[dict[str, str]] = []
+        for index, child in enumerate(payload):
+            next_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            normalized_child, child_errors = await _normalize_target_payload(child, next_prefix)
+            normalized_items.append(normalized_child)
+            errors.extend(child_errors)
+        return normalized_items, errors
+
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return payload, []
+        normalized, error = await _normalize_string_target_field(prefix, text)
+        return normalized, [error] if error else []
+
+    return payload, []
+
+
+def _rebuild_json_request(request: Request, payload: Any) -> Request:
+    body = json.dumps(payload).encode("utf-8")
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(request.scope, receive)
 
 
 class APISafetyMiddleware(BaseHTTPMiddleware):
@@ -196,7 +233,7 @@ class APISafetyMiddleware(BaseHTTPMiddleware):
         if request.method.upper() in _TARGET_VALIDATION_METHODS:
             request_for_next, payload = await _extract_json_payload(request)
             if payload is not None:
-                target_errors = await _validate_target_payload(payload)
+                normalized_payload, target_errors = await _normalize_target_payload(payload)
                 if target_errors:
                     return JSONResponse(
                         status_code=422,
@@ -207,6 +244,8 @@ class APISafetyMiddleware(BaseHTTPMiddleware):
                         },
                         headers={"X-PentaForge-Target-Validation": "active"},
                     )
+                if normalized_payload != payload:
+                    request_for_next = _rebuild_json_request(request, normalized_payload)
 
         response = await call_next(request_for_next)
         response.headers["X-PentaForge-Rate-Limiter"] = "active"

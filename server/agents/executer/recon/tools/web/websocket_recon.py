@@ -27,25 +27,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. CONSTANTS
 # ══════════════════════════════════════════════════════════════
 
-# Private / link-local / loopback ranges — block regardless of hostname
-_PRIVATE_RANGES = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
-    ipaddress.ip_network("100.64.0.0/10"),    # shared address space
-    ipaddress.ip_network("fc00::/7"),          # IPv6 ULA
-    ipaddress.ip_network("::1/128"),           # IPv6 loopback
-    ipaddress.ip_network("fe80::/10"),         # IPv6 link-local
-]
-
-# Hostnames that must always be blocked (regardless of DNS resolution)
-_BLOCKED_HOSTNAMES = frozenset({
-    "localhost",
-    "metadata.google.internal",
-    "169.254.169.254",  # AWS/GCP/Azure IMDS
-})
+from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
+from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
 
 # Common WebSocket paths to probe
 WS_PATHS = [
@@ -88,7 +71,7 @@ def _is_private_ip(addr: str) -> bool:
     """Return True if addr resolves to a private/reserved IP range."""
     try:
         ip = ipaddress.ip_address(addr)
-        return any(ip in net for net in _PRIVATE_RANGES)
+        return any(ip in net for net in _BLOCKED_NETWORKS)
     except ValueError:
         return False
 
@@ -98,8 +81,10 @@ def _resolve_and_check(hostname: str) -> Optional[str]:
     Resolve hostname to IP and check it is publicly routable.
     Returns error string if blocked, None if safe.
     """
-    if hostname.lower() in _BLOCKED_HOSTNAMES:
-        return f"Hostname '{hostname}' is blocked"
+    host_lower = hostname.lower()
+    for b_host in _BLOCKED_HOSTNAMES:
+        if host_lower == b_host or host_lower.endswith(f".{b_host}"):
+            return f"Hostname '{hostname}' is blocked"
 
     try:
         _, _, addrs = socket.gethostbyname_ex(hostname)

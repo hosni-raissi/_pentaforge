@@ -3,23 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from urllib.parse import urlsplit
 from .config import DEFAULT_CLIENT, DEFAULT_TIMEOUT_SECONDS
 import httpx
 import ipaddress
 
+
+_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9-]{1,63}$")
+
+
 class UrlNormalizer:
     """
-    Give it a URL (with or without scheme), it probes it and returns:
-        {"host": str, "port": int, "valid": bool}
+    Give it a URL (with or without scheme), it normalizes it and returns:
+        {
+            "host": str,
+            "port": int,
+            "valid": bool,
+            "normalized_url": str,
+            "reachable": bool,
+            "error": str,
+        }
 
     Rules:
-    - Has https://  → probe https only,  port 443
-    - Has http://   → probe http only,   port 80
+    - Has https://  → keep https only, port 443
+    - Has http://   → keep http only,  port 80
     - No scheme     → probe both concurrently:
                         · only one works  → return that one
-                        · both work       → prefer https
-                        · neither works   → valid: False
+                        · both work       → prefer configured default
+                        · neither works   → keep a syntactically valid
+                                             default URL instead of hard-failing
     """
 
     def __init__(self, url: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
@@ -28,37 +41,71 @@ class UrlNormalizer:
 
     async def normalize(self) -> dict:
         if not self.raw:
-            return {"host": "", "port": 0, "valid": False}
+            return self._result(error="empty URL")
 
         raw = self.raw
 
         # ── explicit scheme ──────────────────────────────────────────────
         if raw.startswith("https://"):
             host = self._extract_host(raw)
+            if not self._is_reasonable_host(host):
+                return self._result(host=host, error="invalid host")
             valid = await self._probe(raw)
-            return {"host": host, "port": 443, "valid": valid}
+            return self._result(
+                host=host,
+                port=urlsplit(raw).port or 443,
+                valid=True,
+                normalized_url=raw,
+                reachable=valid,
+            )
 
         if raw.startswith("http://"):
             host = self._extract_host(raw)
+            if not self._is_reasonable_host(host):
+                return self._result(host=host, error="invalid host")
             valid = await self._probe(raw)
-            return {"host": host, "port": 80, "valid": valid}
+            return self._result(
+                host=host,
+                port=urlsplit(raw).port or 80,
+                valid=True,
+                normalized_url=raw,
+                reachable=valid,
+            )
 
         # ── no scheme: try both ──────────────────────────────────────────
         https_url = f"https://{raw}"
-        http_url  = f"http://{raw}"
-        host      = self._extract_host(https_url)
+        http_url = f"http://{raw}"
+        host = self._extract_host(https_url)
+
+        if not self._is_reasonable_host(host):
+            return self._result(host=host, error="invalid host")
 
         https_ok, http_ok = await asyncio.gather(
             self._probe(https_url),
             self._probe(http_url),
         )
 
-        if https_ok and DEFAULT_CLIENT == "https":                         
-            return {"host": host, "port": 443, "valid": True}
-        if http_ok and DEFAULT_CLIENT == "http":
-            return {"host": host, "port": 80,  "valid": True}
+        preferred_scheme = "http" if DEFAULT_CLIENT == "http" else "https"
 
-        return {"host": host, "port": 0, "valid": False}
+        if https_ok and http_ok:
+            chosen_scheme = preferred_scheme
+        elif https_ok:
+            chosen_scheme = "https"
+        elif http_ok:
+            chosen_scheme = "http"
+        else:
+            chosen_scheme = preferred_scheme
+
+        normalized_url = https_url if chosen_scheme == "https" else http_url
+        port = 443 if chosen_scheme == "https" else 80
+
+        return self._result(
+            host=host,
+            port=port,
+            valid=True,
+            normalized_url=normalized_url,
+            reachable=https_ok or http_ok,
+        )
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -81,6 +128,48 @@ class UrlNormalizer:
             return (urlsplit(url).hostname or "").strip().lower()
         except ValueError:
             return ""
+
+    @staticmethod
+    def _is_reasonable_host(host: str) -> bool:
+        candidate = (host or "").strip().rstrip(".")
+        if not candidate:
+            return False
+
+        try:
+            ipaddress.ip_address(candidate)
+            return True
+        except ValueError:
+            pass
+
+        if candidate.lower() == "localhost":
+            return True
+
+        if "." not in candidate:
+            return False
+
+        labels = candidate.split(".")
+        if any(not label or not _HOST_LABEL_RE.fullmatch(label) for label in labels):
+            return False
+        return not any(label.startswith("-") or label.endswith("-") for label in labels)
+
+    @staticmethod
+    def _result(
+        *,
+        host: str = "",
+        port: int = 0,
+        valid: bool = False,
+        normalized_url: str = "",
+        reachable: bool = False,
+        error: str = "",
+    ) -> dict:
+        return {
+            "host": host,
+            "port": port,
+            "valid": valid,
+            "normalized_url": normalized_url,
+            "reachable": reachable,
+            "error": error,
+        }
 #----------------------------------------------------------------------------------------
 #                     ip validation
 #----------------------------------------------------------------------------------------
@@ -157,4 +246,3 @@ class IPValidator:
             "hosts": hosts,
             "error": error,
         }
-

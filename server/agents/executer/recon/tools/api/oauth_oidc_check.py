@@ -1,3 +1,6 @@
+#/+
+from __future__ import annotations
+
 import json
 import re
 import time
@@ -6,32 +9,53 @@ import concurrent.futures
 from typing import Optional, Any
 from pydantic import BaseModel, Field, field_validator
 from urllib.parse import urlparse, urlencode, parse_qs
+from server.agents.executer.recon.tools.api._common import (
+    extract_host,
+)
 
 
 # ══════════════════════════════════════════════════════════════
 # 1. SCHEMAS
 # ══════════════════════════════════════════════════════════════
+import os
 
-BLOCKED_TARGETS = [
-    "127.0.0.1", "localhost", "0.0.0.0", "::1",
-    "169.254.169.254", "metadata.google.internal",
-]
+from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
+from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
 
 
 class OAuthCheckRequest(BaseModel):
     target: str
     client_id: Optional[str] = None
     redirect_uri: Optional[str] = None
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = Field(default_factory=dict)
     timeout: int = Field(default=30, ge=5, le=120)
 
     @field_validator("target")
     @classmethod
-    def validate_target(cls, v):
+    def validate_target(cls, v: str) -> str:
         cleaned = v.strip()
-        for blocked in BLOCKED_TARGETS:
-            if blocked in cleaned:
-                raise ValueError(f"Target '{cleaned}' is blocked")
+        host = extract_host(cleaned)
+        
+        if host == "localhost" or host == "127.0.0.1" or host == "::1":
+            if os.getenv("PENTAFORGE_ALLOW_LOCAL_API_TARGETS") != "1":
+                raise ValueError(f"Target '{v}' is blocked. Set PENTAFORGE_ALLOW_LOCAL_API_TARGETS=1 to test localhost.")
+            if not re.match(r"^https?://[a-zA-Z0-9]", cleaned):
+                raise ValueError("Target must start with http:// or https://")
+            return cleaned
+
+        host_lower = host.lower()
+        if host_lower in _BLOCKED_HOSTNAMES or any(host_lower.endswith(f".{b}") for b in _BLOCKED_HOSTNAMES):
+             raise ValueError(f"Target '{v}' is a blocked hostname.")
+
+        try:
+            import ipaddress
+            ip = ipaddress.ip_address(host)
+            for net in _BLOCKED_NETWORKS:
+                if ip in net:
+                    raise ValueError(f"Target '{v}' is a blocked internal IP.")
+        except ValueError:
+            pass
+
         if not re.match(r"^https?://[a-zA-Z0-9]", cleaned):
             raise ValueError("Target must start with http:// or https://")
         return cleaned
@@ -89,6 +113,7 @@ class OAuthCheckResult(BaseModel):
     jwks_info: Optional[JWKSInfo] = None
     endpoint_checks: list[OAuthEndpointCheck] = []
     flow_checks: list[OAuthFlowCheck] = []
+    observations: list[str] = []
     redirect_issues: list[str] = []
     token_issues: list[str] = []
     all_issues: list[str] = []
@@ -123,7 +148,6 @@ JWKS_PATHS = [
     "/connect/jwk_uri", "/discovery/keys",
 ]
 
-# Well-known OAuth endpoints to probe
 OAUTH_ENDPOINT_PATHS = [
     "/oauth/authorize", "/oauth2/authorize", "/authorize",
     "/oauth/token", "/oauth2/token", "/token",
@@ -143,7 +167,6 @@ OAUTH_ENDPOINT_PATHS = [
 # ══════════════════════════════════════════════════════════════
 
 def _safe_get(url: str, headers: dict, timeout: int) -> Optional[requests.Response]:
-    """Safe HTTP GET request."""
     try:
         return requests.get(
             url,
@@ -160,92 +183,89 @@ def _safe_get(url: str, headers: dict, timeout: int) -> Optional[requests.Respon
         return None
 
 
-def _discover_oidc_config(base_url: str, headers: dict,
-                          timeout: int) -> tuple[Optional[OIDCConfig], Optional[str]]:
-    """Discover and parse OIDC configuration."""
-    for path in OIDC_DISCOVERY_PATHS:
-        url = base_url.rstrip("/") + path
-        resp = _safe_get(url, headers, timeout)
+def _candidate_base_urls(target: str) -> list[str]:
+    base = target.rstrip("/")
+    candidates = [base]
+    parsed = urlparse(base)
+    if parsed.path and parsed.path != "/" and parsed.scheme and parsed.netloc:
+        host_root = f"{parsed.scheme}://{parsed.netloc}"
+        if host_root not in candidates:
+            candidates.append(host_root)
+    return candidates
 
-        if resp and resp.status_code == 200:
-            try:
-                data = resp.json()
-                if "issuer" in data or "authorization_endpoint" in data:
-                    config = OIDCConfig(
-                        issuer=data.get("issuer"),
-                        authorization_endpoint=data.get("authorization_endpoint"),
-                        token_endpoint=data.get("token_endpoint"),
-                        userinfo_endpoint=data.get("userinfo_endpoint"),
-                        jwks_uri=data.get("jwks_uri"),
-                        registration_endpoint=data.get("registration_endpoint"),
-                        revocation_endpoint=data.get("revocation_endpoint"),
-                        introspection_endpoint=data.get("introspection_endpoint"),
-                        end_session_endpoint=data.get("end_session_endpoint"),
-                        scopes_supported=data.get("scopes_supported", []),
-                        response_types_supported=data.get("response_types_supported", []),
-                        grant_types_supported=data.get("grant_types_supported", []),
-                        token_endpoint_auth_methods=data.get(
-                            "token_endpoint_auth_methods_supported", []
-                        ),
-                        code_challenge_methods_supported=data.get(
-                            "code_challenge_methods_supported", []
-                        ),
-                        claims_supported=data.get("claims_supported", []),
-                        id_token_signing_alg_values=data.get(
-                            "id_token_signing_alg_values_supported", []
-                        ),
-                    )
-                    return config, url
-            except Exception:
-                pass
 
+def _discover_oidc_config(
+    base_url: str, headers: dict, timeout: int
+) -> tuple[Optional[OIDCConfig], Optional[str]]:
+    for candidate_base in _candidate_base_urls(base_url):
+        for path in OIDC_DISCOVERY_PATHS:
+            url = candidate_base + path
+            resp = _safe_get(url, headers, timeout)
+            if resp and resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if "issuer" in data or "authorization_endpoint" in data:
+                        return OIDCConfig(
+                            issuer=data.get("issuer"),
+                            authorization_endpoint=data.get("authorization_endpoint"),
+                            token_endpoint=data.get("token_endpoint"),
+                            userinfo_endpoint=data.get("userinfo_endpoint"),
+                            jwks_uri=data.get("jwks_uri"),
+                            registration_endpoint=data.get("registration_endpoint"),
+                            revocation_endpoint=data.get("revocation_endpoint"),
+                            introspection_endpoint=data.get("introspection_endpoint"),
+                            end_session_endpoint=data.get("end_session_endpoint"),
+                            scopes_supported=data.get("scopes_supported", []),
+                            response_types_supported=data.get("response_types_supported", []),
+                            grant_types_supported=data.get("grant_types_supported", []),
+                            token_endpoint_auth_methods=data.get(
+                                "token_endpoint_auth_methods_supported", []
+                            ),
+                            code_challenge_methods_supported=data.get(
+                                "code_challenge_methods_supported", []
+                            ),
+                            claims_supported=data.get("claims_supported", []),
+                            id_token_signing_alg_values=data.get(
+                                "id_token_signing_alg_values_supported", []
+                            ),
+                        ), url
+                except Exception:
+                    pass
     return None, None
 
 
-def _analyze_jwks(jwks_url: str, headers: dict,
-                  timeout: int) -> Optional[JWKSInfo]:
-    """Analyze JWKS endpoint for weak keys and misconfigurations."""
+def _analyze_jwks(jwks_url: str, headers: dict, timeout: int) -> Optional[JWKSInfo]:
     resp = _safe_get(jwks_url, headers, timeout)
     if not resp or resp.status_code != 200:
         return None
-
     try:
         data = resp.json()
     except Exception:
         return None
 
     keys = data.get("keys", [])
-    info = JWKSInfo(
-        url=jwks_url,
-        keys_count=len(keys),
-    )
+    info = JWKSInfo(url=jwks_url, keys_count=len(keys))
 
     for key in keys:
         alg = key.get("alg", "unknown")
         kty = key.get("kty", "unknown")
         kid = key.get("kid", "")
-
         if alg not in info.algorithms:
             info.algorithms.append(alg)
         if kty not in info.key_types:
             info.key_types.append(kty)
         if kid:
             info.key_ids.append(kid)
-
-        # Check for weak keys
         if kty == "RSA":
             n = key.get("n", "")
-            # Rough check: RSA key size < 2048 bits
-            if n and len(n) < 342:  # base64url of 2048-bit modulus
+            if n and len(n) < 342:
                 info.weak_keys.append(f"RSA key '{kid}' may be < 2048 bits")
                 info.issues.append(f"Weak RSA key size detected (kid: {kid})")
-
         if alg in ("HS256", "HS384", "HS512"):
             info.issues.append(
                 f"Symmetric algorithm '{alg}' in JWKS — "
                 f"verify shared secret is not exposed"
             )
-
         if alg == "none":
             info.issues.append(
                 "CRITICAL: 'none' algorithm found in JWKS — "
@@ -258,93 +278,66 @@ def _analyze_jwks(jwks_url: str, headers: dict,
     return info
 
 
-def _discover_jwks(base_url: str, oidc_config: Optional[OIDCConfig],
-                   headers: dict, timeout: int) -> Optional[JWKSInfo]:
-    """Find and analyze JWKS."""
-    # Try from OIDC config first
+def _discover_jwks(
+    base_url: str, oidc_config: Optional[OIDCConfig], headers: dict, timeout: int
+) -> Optional[JWKSInfo]:
     if oidc_config and oidc_config.jwks_uri:
         result = _analyze_jwks(oidc_config.jwks_uri, headers, timeout)
         if result:
             return result
-
-    # Brute-force JWKS paths
-    for path in JWKS_PATHS:
-        url = base_url.rstrip("/") + path
-        result = _analyze_jwks(url, headers, timeout)
-        if result:
-            return result
-
+    for candidate_base in _candidate_base_urls(base_url):
+        for path in JWKS_PATHS:
+            result = _analyze_jwks(candidate_base + path, headers, timeout)
+            if result:
+                return result
     return None
 
 
-def _check_endpoints(base_url: str, oidc_config: Optional[OIDCConfig],
-                     headers: dict, timeout: int) -> list[OAuthEndpointCheck]:
-    """Check accessibility and security of OAuth endpoints."""
-    checks = []
-
-    # Collect endpoints from OIDC config + brute force
-    endpoints_to_check = set()
-
+def _check_endpoints(
+    base_url: str, oidc_config: Optional[OIDCConfig], headers: dict, timeout: int
+) -> list[OAuthEndpointCheck]:
+    endpoints_to_check: set[str] = set()
     if oidc_config:
-        for attr in [
-            "authorization_endpoint", "token_endpoint",
-            "userinfo_endpoint", "registration_endpoint",
-            "revocation_endpoint", "introspection_endpoint",
-        ]:
+        for attr in (
+            "authorization_endpoint", "token_endpoint", "userinfo_endpoint",
+            "registration_endpoint", "revocation_endpoint", "introspection_endpoint",
+        ):
             val = getattr(oidc_config, attr, None)
             if val:
                 endpoints_to_check.add(val)
-
-    for path in OAUTH_ENDPOINT_PATHS:
-        endpoints_to_check.add(base_url.rstrip("/") + path)
+    for candidate_base in _candidate_base_urls(base_url):
+        for path in OAUTH_ENDPOINT_PATHS:
+            endpoints_to_check.add(candidate_base + path)
 
     def _check_one(url: str) -> OAuthEndpointCheck:
         check = OAuthEndpointCheck(url=url)
         resp = _safe_get(url, headers, timeout)
-
         if resp is None:
             return check
-
         check.status_code = resp.status_code
         check.accessible = resp.status_code in (200, 301, 302, 400, 401, 403, 405)
-
         if resp.status_code in (401, 403):
             check.requires_auth = True
-
-        # CORS check
-        cors_headers = {
-            **headers,
-            "Origin": "https://evil.com",
-        }
-        cors_resp = _safe_get(url, cors_headers, timeout)
+        cors_resp = _safe_get(url, {**headers, "Origin": "https://evil.com"}, timeout)
         if cors_resp:
             acao = cors_resp.headers.get("Access-Control-Allow-Origin", "")
             if acao == "*" or "evil.com" in acao:
                 check.supports_cors = True
-                check.issues.append(
-                    f"Permissive CORS on OAuth endpoint: {acao}"
-                )
-
-        # Check for open registration
+                check.issues.append(f"Permissive CORS on OAuth endpoint: {acao}")
         if "/register" in url and resp.status_code in (200, 201):
             check.issues.append(
                 "Dynamic client registration may be open — "
                 "attackers could register malicious clients"
             )
-
-        # Check for token endpoint without TLS
         if "/token" in url and url.startswith("http://"):
             check.issues.append(
                 "Token endpoint served over HTTP — credentials exposed in transit"
             )
-
         return check
 
+    checks: list[OAuthEndpointCheck] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(_check_one, url): url
-            for url in endpoints_to_check
-        }
+        futures = {executor.submit(_check_one, url): url for url in endpoints_to_check}
         for future in concurrent.futures.as_completed(futures, timeout=timeout * 3):
             try:
                 result = future.result()
@@ -352,21 +345,17 @@ def _check_endpoints(base_url: str, oidc_config: Optional[OIDCConfig],
                     checks.append(result)
             except Exception:
                 pass
-
     return checks
 
 
 def _check_oauth_flows(oidc_config: Optional[OIDCConfig]) -> list[OAuthFlowCheck]:
-    """Analyze supported OAuth flows for security issues."""
-    flows = []
-
     if not oidc_config:
-        return flows
+        return []
 
+    flows: list[OAuthFlowCheck] = []
     response_types = set(oidc_config.response_types_supported)
     grant_types = set(oidc_config.grant_types_supported)
 
-    # Implicit flow
     implicit = OAuthFlowCheck(flow_type="implicit")
     if "token" in response_types or "id_token token" in response_types:
         implicit.supported = True
@@ -376,7 +365,6 @@ def _check_oauth_flows(oidc_config: Optional[OIDCConfig]) -> list[OAuthFlowCheck
         )
     flows.append(implicit)
 
-    # Resource Owner Password Credentials
     ropc = OAuthFlowCheck(flow_type="resource_owner_password")
     if "password" in grant_types:
         ropc.supported = True
@@ -386,14 +374,11 @@ def _check_oauth_flows(oidc_config: Optional[OIDCConfig]) -> list[OAuthFlowCheck
         )
     flows.append(ropc)
 
-    # Client Credentials
     client_creds = OAuthFlowCheck(flow_type="client_credentials")
     if "client_credentials" in grant_types:
         client_creds.supported = True
-        # Not necessarily a vulnerability, just noting it
     flows.append(client_creds)
 
-    # Authorization Code without PKCE
     auth_code = OAuthFlowCheck(flow_type="authorization_code")
     if "code" in response_types or "authorization_code" in grant_types:
         auth_code.supported = True
@@ -410,7 +395,6 @@ def _check_oauth_flows(oidc_config: Optional[OIDCConfig]) -> list[OAuthFlowCheck
             )
     flows.append(auth_code)
 
-    # Device Code
     device = OAuthFlowCheck(flow_type="device_code")
     if "urn:ietf:params:oauth:grant-type:device_code" in grant_types:
         device.supported = True
@@ -419,19 +403,20 @@ def _check_oauth_flows(oidc_config: Optional[OIDCConfig]) -> list[OAuthFlowCheck
     return flows
 
 
-def _check_redirect_issues(base_url: str, oidc_config: Optional[OIDCConfig],
-                           client_id: Optional[str],
-                           redirect_uri: Optional[str],
-                           headers: dict, timeout: int) -> list[str]:
-    """Check for open redirect vulnerabilities in OAuth flow."""
-    issues = []
-
+def _check_redirect_issues(
+    base_url: str,
+    oidc_config: Optional[OIDCConfig],
+    client_id: Optional[str],
+    redirect_uri: Optional[str],
+    headers: dict,
+    timeout: int,
+) -> list[str]:
+    issues: list[str] = []
     if not oidc_config or not oidc_config.authorization_endpoint:
         return issues
 
     auth_url = oidc_config.authorization_endpoint
-
-    # Test payloads for redirect_uri manipulation
+    test_client_id = client_id or "test_client"
     test_redirects = [
         "https://evil.com",
         "https://evil.com/callback",
@@ -443,8 +428,6 @@ def _check_redirect_issues(base_url: str, oidc_config: Optional[OIDCConfig],
         "https://legitimate.com/..;/evil",
     ]
 
-    test_client_id = client_id or "test_client"
-
     for redirect in test_redirects:
         params = {
             "response_type": "code",
@@ -452,22 +435,14 @@ def _check_redirect_issues(base_url: str, oidc_config: Optional[OIDCConfig],
             "redirect_uri": redirect,
             "scope": "openid",
         }
-
-        test_url = f"{auth_url}?{urlencode(params)}"
-
         try:
             resp = requests.get(
-                test_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    **headers,
-                },
+                f"{auth_url}?{urlencode(params)}",
+                headers={"User-Agent": "Mozilla/5.0", **headers},
                 timeout=timeout,
                 verify=False,
                 allow_redirects=False,
             )
-
-            # If server redirects to our evil URL, it's vulnerable
             location = resp.headers.get("Location", "")
             if resp.status_code in (301, 302, 303, 307, 308):
                 if "evil.com" in location or "localhost" in location:
@@ -475,14 +450,8 @@ def _check_redirect_issues(base_url: str, oidc_config: Optional[OIDCConfig],
                         f"Open redirect via redirect_uri: "
                         f"'{redirect}' → server redirected to '{location[:100]}'"
                     )
-
-            # If server returns 200 with the redirect in the page
-            elif resp.status_code == 200:
-                if "evil.com" in resp.text[:2000]:
-                    issues.append(
-                        f"Redirect URI reflected in page: '{redirect}'"
-                    )
-
+            elif resp.status_code == 200 and "evil.com" in resp.text[:2000]:
+                issues.append(f"Redirect URI reflected in page: '{redirect}'")
         except Exception:
             pass
 
@@ -490,13 +459,10 @@ def _check_redirect_issues(base_url: str, oidc_config: Optional[OIDCConfig],
 
 
 def _check_token_issues(oidc_config: Optional[OIDCConfig]) -> list[str]:
-    """Analyze token configuration for security issues."""
-    issues = []
-
     if not oidc_config:
-        return issues
+        return []
 
-    # Weak signing algorithms
+    issues: list[str] = []
     algs = oidc_config.id_token_signing_alg_values
     if "none" in algs:
         issues.append(
@@ -509,7 +475,6 @@ def _check_token_issues(oidc_config: Optional[OIDCConfig]) -> list[str]:
             "shared secret must be kept secure"
         )
 
-    # Weak auth methods
     auth_methods = oidc_config.token_endpoint_auth_methods
     if "none" in auth_methods:
         issues.append(
@@ -522,32 +487,19 @@ def _check_token_issues(oidc_config: Optional[OIDCConfig]) -> list[str]:
             "credentials in body (less secure than client_secret_basic)"
         )
 
-    # Excessive scopes
     sensitive_scopes = [
         s for s in oidc_config.scopes_supported
-        if any(kw in s.lower() for kw in [
-            "admin", "write", "delete", "manage", "all",
-            "root", "superuser",
-        ])
+        if any(kw in s.lower() for kw in ["admin", "write", "delete", "manage", "all", "root", "superuser"])
     ]
     if sensitive_scopes:
-        issues.append(
-            f"Potentially over-privileged scopes available: "
-            f"{', '.join(sensitive_scopes[:5])}"
-        )
+        issues.append(f"Potentially over-privileged scopes available: {', '.join(sensitive_scopes[:5])}")
 
-    # Sensitive claims
     sensitive_claims = [
         c for c in oidc_config.claims_supported
-        if any(kw in c.lower() for kw in [
-            "password", "secret", "key", "token", "credential",
-            "ssn", "credit", "phone",
-        ])
+        if any(kw in c.lower() for kw in ["password", "secret", "key", "token", "credential", "ssn", "credit", "phone"])
     ]
     if sensitive_claims:
-        issues.append(
-            f"Sensitive claims available: {', '.join(sensitive_claims[:5])}"
-        )
+        issues.append(f"Sensitive claims available: {', '.join(sensitive_claims[:5])}")
 
     return issues
 
@@ -560,84 +512,79 @@ def oauth_oidc_check(
     target: str,
     client_id: Optional[str] = None,
     redirect_uri: Optional[str] = None,
-    headers: dict[str, str] = {},
+    headers: Optional[dict[str, str]] = None,
     timeout: int = 30,
 ) -> dict:
     """
-    🔍 Agent Tool: OAuth/OIDC Misconfiguration Scanner
-
     Non-intrusive analysis of OAuth 2.0 and OpenID Connect implementations.
     Discovers OIDC configuration, analyzes JWKS, checks endpoint security,
     evaluates supported flows, and tests for redirect vulnerabilities.
-
-    Args:
-        target:       Base URL (e.g., "https://auth.example.com")
-        client_id:    Known OAuth client ID for deeper testing
-        redirect_uri: Known redirect URI for comparison
-        headers:      Custom HTTP headers
-        timeout:      Timeout per request in seconds
-
-    Returns:
-        Structured JSON with OIDC config, JWKS analysis, flow checks, issues.
     """
-    start = time.time()
+    start = time.monotonic()
 
-    # Validate
     try:
         req = OAuthCheckRequest(
-            target=target, client_id=client_id,
-            redirect_uri=redirect_uri, headers=headers,
+            target=target,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            headers=headers or {},
             timeout=timeout,
         )
-    except Exception as e:
+    except Exception as exc:
         return OAuthCheckResult(
-            success=False, target=target,
-            error=f"Validation: {e}",
+            success=False,
+            target=target,
+            error=f"Validation: {exc}",
         ).model_dump()
 
-    all_issues = []
+    all_issues: list[str] = []
+    observations: list[str] = []
 
-    # 1. Discover OIDC configuration
-    oidc_config, oidc_url = _discover_oidc_config(
-        req.target, req.headers, req.timeout
-    )
-
+    oidc_config, oidc_url = _discover_oidc_config(req.target, req.headers, req.timeout)
     if oidc_config:
-        all_issues.append(
-            f"OIDC discovery endpoint found: {oidc_url}"
-        )
+        observations.append(f"OIDC discovery endpoint found: {oidc_url}")
+    else:
+        observations.append("No OIDC discovery document found on base or host-root fallback paths")
 
-    # 2. Analyze JWKS
-    jwks_info = _discover_jwks(
-        req.target, oidc_config, req.headers, req.timeout
-    )
+    jwks_info = _discover_jwks(req.target, oidc_config, req.headers, req.timeout)
     if jwks_info:
+        observations.append(
+            f"JWKS endpoint discovered: {jwks_info.url} ({jwks_info.keys_count} keys)"
+        )
         all_issues.extend(jwks_info.issues)
+        if not oidc_config:
+            observations.append(
+                "JWKS is exposed without matching OIDC discovery metadata; verify this key endpoint is intentional"
+            )
+    else:
+        observations.append("No JWKS endpoint discovered on base or host-root fallback paths")
 
-    # 3. Check endpoints
-    endpoint_checks = _check_endpoints(
-        req.target, oidc_config, req.headers, req.timeout
-    )
+    endpoint_checks = _check_endpoints(req.target, oidc_config, req.headers, req.timeout)
     for check in endpoint_checks:
         all_issues.extend(check.issues)
+    if endpoint_checks:
+        observations.append(f"OAuth endpoint candidates accessible: {len(endpoint_checks)}")
+    else:
+        observations.append("No OAuth authorization/token/etc. endpoints responded with expected statuses")
 
-    # 4. Analyze OAuth flows
     flow_checks = _check_oauth_flows(oidc_config)
     for flow in flow_checks:
         all_issues.extend(flow.issues)
 
-    # 5. Check redirect issues
     redirect_issues = _check_redirect_issues(
-        req.target, oidc_config, req.client_id,
-        req.redirect_uri, req.headers, req.timeout,
+        req.target, oidc_config, req.client_id, req.redirect_uri, req.headers, req.timeout
     )
     all_issues.extend(redirect_issues)
 
-    # 6. Token configuration issues
     token_issues = _check_token_issues(oidc_config)
     all_issues.extend(token_issues)
 
-    # Determine severity
+    if not oidc_config and not jwks_info and not endpoint_checks:
+        all_issues.append(
+            "No OAuth/OIDC discovery endpoints, JWKS, or OAuth routes were found on base and host-root paths. "
+            "Likely not an OAuth/OIDC provider at this target."
+        )
+
     severity = "info"
     for issue in all_issues:
         lower = issue.lower()
@@ -659,11 +606,12 @@ def oauth_oidc_check(
         jwks_info=jwks_info,
         endpoint_checks=endpoint_checks,
         flow_checks=flow_checks,
+        observations=observations,
         redirect_issues=redirect_issues,
         token_issues=token_issues,
         all_issues=all_issues,
         severity=severity,
-        execution_time=round(time.time() - start, 2),
+        execution_time=round(time.monotonic() - start, 2),
     ).model_dump()
 
 
@@ -707,3 +655,84 @@ OAUTH_OIDC_CHECK_TOOL_DEFINITION = {
         "required": ["target"],
     },
 }
+
+
+# ══════════════════════════════════════════════════════════════
+# 6. ENTRY POINT
+# ══════════════════════════════════════════════════════════════
+
+# ── Configure your scan here ─────────────────────────────────────────────────
+TARGET       = "http://localhost:8888/api"   # base URL of the OAuth/OIDC provider
+CLIENT_ID    = None                         # known client ID, or None
+REDIRECT_URI = None                         # known redirect URI, or None
+HEADERS      = {}                           # e.g. {"Authorization": "Bearer ..."}
+TIMEOUT      = 30                           # per-request timeout in seconds (5–120)
+EMIT_JSON    = False                        # True → raw JSON output, False → summary
+ALLOW_LOCAL_TARGETS_IN_MAIN = True         # convenience for local lab runs
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    if ALLOW_LOCAL_TARGETS_IN_MAIN and os.getenv("PENTAFORGE_ALLOW_LOCAL_API_TARGETS") is None:
+        os.environ["PENTAFORGE_ALLOW_LOCAL_API_TARGETS"] = "1"
+
+    result = oauth_oidc_check(
+        target=TARGET,
+        client_id=CLIENT_ID,
+        redirect_uri=REDIRECT_URI,
+        headers=HEADERS,
+        timeout=TIMEOUT,
+    )
+
+    if EMIT_JSON:
+        print(json.dumps(result, indent=2))
+        return
+
+    status = "OK" if result["success"] else "FAILED"
+    sev = result["severity"].upper()
+    print(f"\n[{status}] {result['target']}  severity={sev}  ({result['execution_time']}s)\n")
+
+    if result.get("error"):
+        print(f"  Error: {result['error']}\n")
+        return
+
+    if result.get("oidc_config_url"):
+        print(f"  OIDC config : {result['oidc_config_url']}")
+
+    if result.get("jwks_info"):
+        jwks = result["jwks_info"]
+        print(f"  JWKS        : {jwks['url']}  ({jwks['keys_count']} keys, algs: {', '.join(jwks['algorithms'])})")
+
+    accessible = [c for c in result["endpoint_checks"] if c["accessible"]]
+    print(f"  Endpoints   : {len(accessible)} accessible\n")
+
+    observations = result.get("observations") or []
+    if observations:
+        print("  Observations:")
+        for note in observations:
+            print(f"    - {note}")
+        print()
+
+    flows = [f for f in result["flow_checks"] if f["supported"]]
+    if flows:
+        print("  Supported flows:")
+        for flow in flows:
+            print(f"    {flow['flow_type']}")
+        print()
+
+    if result["all_issues"]:
+        print("  Issues:")
+        for issue in result["all_issues"]:
+            prefix = "  [!!!]" if "CRITICAL" in issue else "  [!]  "
+            print(f"{prefix} {issue}")
+    else:
+        if observations:
+            print("  No security issues found. Review observations above for context.")
+        else:
+            print("  No issues found.")
+
+    print()
+
+
+if __name__ == "__main__":
+    main()
