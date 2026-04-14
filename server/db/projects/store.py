@@ -439,6 +439,97 @@ class ProjectsStore:
             )
             conn.commit()
 
+    def get_project_context_windows(self, project_id: str) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        if not isinstance(project, dict):
+            return {}
+        windows = project.get("contextWindows", {})
+        return dict(windows) if isinstance(windows, dict) else {}
+
+    def upsert_project_context_window(
+        self,
+        project_id: str,
+        agent_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        safe_project_id = str(project_id or "").strip()
+        safe_agent_key = str(agent_key or "").strip()
+        if not safe_project_id:
+            raise ValueError("project_id is required")
+        if not safe_agent_key:
+            raise ValueError("agent_key is required")
+
+        project = self.get_project(safe_project_id)
+        if not isinstance(project, dict):
+            raise ValueError("project not found")
+
+        context_windows = project.get("contextWindows", {})
+        if not isinstance(context_windows, dict):
+            context_windows = {}
+        context_windows[safe_agent_key] = dict(payload)
+        project["contextWindows"] = context_windows
+        project["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+        last_scan = project.get("lastScan")
+        if isinstance(last_scan, dict):
+            result = last_scan.get("result", {})
+            if not isinstance(result, dict):
+                result = {}
+            result_windows = result.get("contextWindows", {})
+            if not isinstance(result_windows, dict):
+                result_windows = {}
+            result_windows[safe_agent_key] = dict(payload)
+            result["contextWindows"] = result_windows
+            last_scan["result"] = result
+            project["lastScan"] = last_scan
+
+        self.upsert_project(project)
+
+    def clear_project_context_windows(
+        self,
+        project_id: str,
+        agent_key: str | None = None,
+    ) -> int:
+        safe_project_id = str(project_id or "").strip()
+        safe_agent_key = str(agent_key or "").strip()
+        if not safe_project_id:
+            return 0
+
+        project = self.get_project(safe_project_id)
+        if not isinstance(project, dict):
+            return 0
+
+        removed = 0
+        context_windows = project.get("contextWindows", {})
+        if isinstance(context_windows, dict):
+            if safe_agent_key:
+                if safe_agent_key in context_windows:
+                    context_windows.pop(safe_agent_key, None)
+                    removed += 1
+            elif context_windows:
+                removed += len(context_windows)
+                context_windows = {}
+            project["contextWindows"] = context_windows
+
+        last_scan = project.get("lastScan")
+        if isinstance(last_scan, dict):
+            result = last_scan.get("result", {})
+            if isinstance(result, dict):
+                result_windows = result.get("contextWindows", {})
+                if isinstance(result_windows, dict):
+                    if safe_agent_key:
+                        result_windows.pop(safe_agent_key, None)
+                    else:
+                        result_windows = {}
+                    result["contextWindows"] = result_windows
+                    last_scan["result"] = result
+                    project["lastScan"] = last_scan
+
+        if removed > 0:
+            project["updatedAt"] = datetime.now(timezone.utc).isoformat()
+            self.upsert_project(project)
+        return removed
+
     def delete_project(self, project_id: str) -> None:
         with self._connect() as conn:
             cur = conn.cursor()

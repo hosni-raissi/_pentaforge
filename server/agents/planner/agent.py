@@ -55,6 +55,7 @@ from .config import (
     _RETRY_JITTER_MAX,
     _TRANSIENT_EXCEPTIONS,
 )
+from .context_window import build_planner_context_window
 from .prompts import INITIAL_SYSTEM_PROMPT, LOOP_SYSTEM_PROMPT
 from .tools import ALL_PLANNER_TOOLS
 from .tools.pentest_plan import _current_plan, update_pentest_plan
@@ -1520,6 +1521,7 @@ class PlannerAgent:
         local_config: LocalLLMConfig | None = None,
         mode: str | None = None,
         callback: PlannerCallback | None = None,
+        project_id: str | None = None,
     ) -> None:
         self._mode = mode or llm_mode.mode
         self._cb = callback or _NoOpCallback()
@@ -1542,6 +1544,11 @@ class PlannerAgent:
             self._config = config or public_llm_config
             self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
+
+        self._context_window = build_planner_context_window(
+            project_id=project_id,
+            llm=self._llm,
+        )
 
         logger.info("planner_initialized", mode=self._mode, model=self._model_name)
         self._graph = self._build_graph()
@@ -1690,6 +1697,18 @@ class PlannerAgent:
 
         raw_content = response.content or ""
         tool_calls = response.tool_calls or []
+        if self._context_window is not None:
+            await self._context_window.record_llm_turn(
+                prompt_excerpt=messages[-1].content if messages else f"planner round {round_count}",
+                response_excerpt=raw_content or f"tool_calls={len(tool_calls)}",
+                usage=response.usage if isinstance(response.usage, dict) else {},
+                metadata={
+                    "agent": "planner",
+                    "round": round_count,
+                    "is_loop": bool(state.get("is_loop")),
+                    "tool_calls": len(tool_calls),
+                },
+            )
 
         # Recover inline function calls from content text.
         if not tool_calls and raw_content:
@@ -2357,6 +2376,16 @@ class PlannerAgent:
     ) -> PlannerResult:
         mode_label = "loop re-entry" if is_loop else "initial plan"
         self._cb.on_step(f"Planner Agent starting ({mode_label})")
+        if self._context_window is not None:
+            await self._context_window.record(
+                kind="run_input",
+                role="user",
+                content=user_message,
+                metadata={
+                    "agent": "planner",
+                    "mode": mode_label,
+                },
+            )
 
         system_content = LOOP_SYSTEM_PROMPT if is_loop else INITIAL_SYSTEM_PROMPT
         if _needs_nothink(self._model_name):
@@ -2433,6 +2462,18 @@ class PlannerAgent:
             tool_results=plan_data.get("tool_results", []),
             action_plan=plan_data.get("action_plan", {}),
         )
+        if self._context_window is not None:
+            await self._context_window.record(
+                kind="run_result",
+                role="assistant",
+                content=result.summary or json.dumps(result.action_plan, ensure_ascii=True),
+                metadata={
+                    "agent": "planner",
+                    "mode": mode_label,
+                    "scenario_count": len(result.scenarios),
+                    "needs_count": len(result.needs),
+                },
+            )
         self._last_state_hash = world_state_hash
         self._last_plan_result = result
         return result

@@ -13,6 +13,7 @@ from typing import Any, Protocol
 
 import structlog
 
+from server.agents.context_window_manager import ContextWindowManager
 from server.agents.executer.target_tool_routing import extract_discovered_target_types
 from server.config.agent import (
     LocalLLMConfig,
@@ -181,6 +182,9 @@ class BaseExecuterAgent:
         callback: ExecuterCallback | None = None,
         config: PublicLLMConfig | None = None,
         local_config: LocalLLMConfig | None = None,
+        project_id: str | None = None,
+        context_window_key: str | None = None,
+        context_window_max_tokens: int = 0,
     ) -> None:
         self._role = role
         self._system_prompt = system_prompt
@@ -201,6 +205,15 @@ class BaseExecuterAgent:
             self._config = config or public_llm_config
             self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
+
+        self._context_window: ContextWindowManager | None = None
+        if str(project_id or "").strip() and str(context_window_key or "").strip():
+            self._context_window = ContextWindowManager(
+                project_id=str(project_id),
+                agent_key=str(context_window_key),
+                max_tokens=max(512, int(context_window_max_tokens or 0)),
+                llm=self._llm,
+            )
 
         logger.info(
             "executer_initialized",
@@ -542,6 +555,13 @@ class BaseExecuterAgent:
 
     async def run(self, user_message: str) -> ExecuterResult:
         self._cb.on_step(f"[{self._role}] starting run")
+        if self._context_window is not None:
+            await self._context_window.record(
+                kind="run_input",
+                role="user",
+                content=user_message,
+                metadata={"role": self._role},
+            )
 
         system_prompt = self._system_prompt
         if _needs_nothink(self._model_name):
@@ -584,6 +604,17 @@ class BaseExecuterAgent:
 
             last_content = response.content or ""
             tool_calls = response.tool_calls or []
+            if self._context_window is not None:
+                await self._context_window.record_llm_turn(
+                    prompt_excerpt=user_message if round_index == 1 else f"{self._role} round {round_index}",
+                    response_excerpt=last_content or f"tool_calls={len(tool_calls)}",
+                    usage=response.usage if isinstance(response.usage, dict) else {},
+                    metadata={
+                        "role": self._role,
+                        "round": round_index,
+                        "tool_calls": len(tool_calls),
+                    },
+                )
             messages.append(
                 {
                     "role": "assistant",
@@ -597,6 +628,17 @@ class BaseExecuterAgent:
                 result.tool_results = all_tool_results
                 if all_discovered_target_types:
                     result.discovered_target_types = sorted(all_discovered_target_types)
+                if self._context_window is not None:
+                    await self._context_window.record(
+                        kind="run_result",
+                        role="assistant",
+                        content=result.summary or last_content or result.status,
+                        metadata={
+                            "role": self._role,
+                            "status": result.status,
+                            "tool_results": len(all_tool_results),
+                        },
+                    )
                 self._cb.on_done(
                     f"[{self._role}] completed with status={result.status}"
                 )
@@ -608,6 +650,13 @@ class BaseExecuterAgent:
             all_discovered_target_types.update(discovered)
 
             if halted_for_approval:
+                if self._context_window is not None:
+                    await self._context_window.record(
+                        kind="run_result",
+                        role="assistant",
+                        content="Execution paused awaiting user approval for a tool call.",
+                        metadata={"role": self._role, "status": "awaiting_user_approval"},
+                    )
                 return ExecuterResult(
                     status="awaiting_user_approval",
                     summary="Execution paused awaiting user approval for a tool call.",
@@ -623,6 +672,13 @@ class BaseExecuterAgent:
             f"[{self._role}] reached max rounds ({self._max_tool_rounds})"
         )
         if all_tool_results:
+            if self._context_window is not None:
+                await self._context_window.record(
+                    kind="run_result",
+                    role="assistant",
+                    content=self._format_tool_results(all_tool_results),
+                    metadata={"role": self._role, "status": "incomplete"},
+                )
             return ExecuterResult(
                 status="incomplete",
                 summary=self._format_tool_results(all_tool_results),
@@ -631,6 +687,13 @@ class BaseExecuterAgent:
             )
         result = _parse_executer_output(last_content)
         result.discovered_target_types = extract_discovered_target_types(last_content)
+        if self._context_window is not None:
+            await self._context_window.record(
+                kind="run_result",
+                role="assistant",
+                content=result.summary or last_content or result.status,
+                metadata={"role": self._role, "status": result.status},
+            )
         return result
 
     async def close(self) -> None:

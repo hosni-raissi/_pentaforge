@@ -748,12 +748,6 @@ def main() -> None:
     else:
         _print_report(result, max_endpoint_rows=MAX_ENDPOINT_ROWS, show_snippets=SHOW_SNIPPETS)
 
-    # Also dump raw JSON for inspection / piping
-    out_path = "api_analysis_result.json"
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(result, fh, indent=2, default=str)
-    print(f"[*] Raw JSON result saved → {out_path}")
-
 
 if __name__ == "__main__":
     main()

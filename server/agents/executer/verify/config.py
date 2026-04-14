@@ -6,6 +6,7 @@
 
 MAX_TOOL_ROUNDS = 8
 LLM_CALL_TIMEOUT_SECONDS = 300
+VERIFY_CONTEXT_WINDOW_MAX_TOKENS = 10000
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Screenshot Configuration (Playwright)

@@ -5,7 +5,12 @@ from __future__ import annotations
 from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
-from .config import LLM_CALL_TIMEOUT_SECONDS, MAX_TOOL_ROUNDS
+from .config import (
+    LLM_CALL_TIMEOUT_SECONDS,
+    MAX_TOOL_ROUNDS,
+    REPORT_CONTEXT_WINDOW_MAX_TOKENS,
+)
+from .context_window import REPORT_CONTEXT_WINDOW_KEY
 from .prompts import SYSTEM_PROMPT
 from .tools import ALL_REPORT_TOOLS
 
@@ -35,6 +40,7 @@ class ReportExecuterAgent(BaseExecuterAgent):
         callback: ExecuterCallback | None = None,
         config: PublicLLMConfig | None = None,
         local_config: LocalLLMConfig | None = None,
+        project_id: str | None = None,
     ) -> None:
         super().__init__(
             role="report",
@@ -46,4 +52,7 @@ class ReportExecuterAgent(BaseExecuterAgent):
             callback=callback,
             config=config,
             local_config=local_config,
+            project_id=project_id,
+            context_window_key=REPORT_CONTEXT_WINDOW_KEY,
+            context_window_max_tokens=REPORT_CONTEXT_WINDOW_MAX_TOKENS,
         )

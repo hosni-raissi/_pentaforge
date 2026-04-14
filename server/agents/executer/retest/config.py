@@ -6,6 +6,7 @@
 
 MAX_TOOL_ROUNDS = 10
 LLM_CALL_TIMEOUT_SECONDS = 240
+RETEST_CONTEXT_WINDOW_MAX_TOKENS = 10000
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Payload Replay Configuration

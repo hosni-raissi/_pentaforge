@@ -8,12 +8,16 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
-from urllib.parse import urljoin, urlparse
+from typing import Any, Optional
+from urllib.parse import urlencode, urljoin, urlparse
 
 from pydantic import BaseModel, Field, field_validator
 
 from server.agents.executer.recon.config import BURP_SUITE_CMD, BURP_SUITE_JAR
+
+
+DEFAULT_CAPTURE_PATHS = ["/", "/api", "/openapi.json", "/swagger", "/graphql"]
+ALLOWED_CAPTURE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
 
 try:
     import requests
@@ -30,9 +34,8 @@ class BurpSuiteRequest(BaseModel):
     timeout: int = Field(default=10, ge=2, le=120)
     send_test_request: bool = True
     capture_traffic: bool = True
-    capture_paths: list[str] = Field(
-        default_factory=lambda: ["/", "/api", "/openapi.json", "/swagger", "/graphql"]
-    )
+    capture_paths: list[str] = Field(default_factory=lambda: DEFAULT_CAPTURE_PATHS.copy())
+    capture_requests: list[dict[str, Any]] = Field(default_factory=list)
     max_capture_flows: int = Field(default=8, ge=1, le=50)
     response_body_limit: int = Field(default=1000, ge=100, le=20000)
     auto_start_burp: bool = False
@@ -81,9 +84,16 @@ class BurpSuiteResult(BaseModel):
     test_request_error: Optional[str] = None
     capture_traffic: bool = False
     captured_count: int = 0
-    captured_flows: list[dict] = []
-    capture_errors: list[str] = []
-    usage_instructions: list[str] = []
+    captured_flows: list[dict] = Field(default_factory=list)
+    capture_errors: list[str] = Field(default_factory=list)
+    proxy_self_response_detected: bool = False
+    proxy_self_response_count: int = 0
+    direct_target_reachable: Optional[bool] = None
+    direct_target_status: Optional[int] = None
+    direct_target_error: Optional[str] = None
+    direct_target_looks_like_burp_page: Optional[bool] = None
+    target_suggestions: list[str] = Field(default_factory=list)
+    usage_instructions: list[str] = Field(default_factory=list)
     error: Optional[str] = None
     execution_time: float = 0.0
 
@@ -110,7 +120,7 @@ def build_usage_instructions(proxy_url: str, host: str) -> list[str]:
         f"Set your browser/client proxy to {proxy_url}",
         "Trust Burp CA certificate in your client for HTTPS interception.",
         f"Then browse or send requests to target host: {host}",
-        "Optional env vars for project tools: HTTP_PROXY and HTTPS_PROXY",
+        "Burp behavior is controlled from recon config settings.",
     ]
 
 
@@ -264,6 +274,76 @@ def _truncate_text(value: str, limit: int) -> str:
     return value[:limit] + "... [truncated]"
 
 
+def _looks_like_burp_self_page(content_type: str, body_text: str) -> bool:
+    ct = (content_type or "").lower()
+    body = (body_text or "").lower()
+    if "text/html" not in ct:
+        return False
+    if "<title>burp suite" in body:
+        return True
+    if "burp suite community edition" in body:
+        return True
+    if "portswigger" in body and "burp suite" in body:
+        return True
+    return False
+
+
+def _probe_target_direct(target: str, timeout: int) -> tuple[bool, Optional[int], Optional[str], bool]:
+    """Probe target without proxy to diagnose Burp self-page captures."""
+    url = target if "://" in target else f"http://{target}"
+
+    if REQUESTS_AVAILABLE:
+        try:
+            resp = requests.get(
+                url,
+                headers={"User-Agent": "PentaForgeBurpSuite/1.0"},
+                timeout=timeout,
+                verify=False,
+                allow_redirects=True,
+                proxies={"http": None, "https": None},
+            )
+            body = resp.text or ""
+            looks_like_burp = _looks_like_burp_self_page(resp.headers.get("Content-Type", ""), body)
+            return True, resp.status_code, None, looks_like_burp
+        except requests.exceptions.RequestException as exc:
+            return False, None, str(exc), False
+
+    req = urllib.request.Request(url, headers={"User-Agent": "PentaForgeBurpSuite/1.0"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            looks_like_burp = _looks_like_burp_self_page(resp.headers.get("Content-Type", ""), body)
+            return True, getattr(resp, "status", None), None, looks_like_burp
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        looks_like_burp = _looks_like_burp_self_page(exc.headers.get("Content-Type", "") if exc.headers else "", body)
+        return True, exc.code, None, looks_like_burp
+    except Exception as exc:
+        return False, None, str(exc), False
+
+
+def _discover_local_target_suggestions(timeout: int, max_suggestions: int = 5) -> list[str]:
+    """Find likely live local web targets when the configured target is down."""
+    candidate_ports = [80, 3000, 5000, 5173, 8000, 8080, 8081, 8888, 9000]
+    suggestions: list[str] = []
+
+    for port in candidate_ports:
+        candidate = f"http://localhost:{port}"
+        reachable, status, _, looks_like_burp = _probe_target_direct(candidate, timeout)
+        if not reachable:
+            continue
+        if looks_like_burp:
+            continue
+        if status is None:
+            continue
+        suggestions.append(f"{candidate} (status {status})")
+        if len(suggestions) >= max_suggestions:
+            break
+
+    return suggestions
+
+
 def _capture_urls(target: str, paths: list[str], max_flows: int) -> list[str]:
     normalized = target if "://" in target else f"http://{target}"
     parsed = urlparse(normalized)
@@ -281,15 +361,134 @@ def _capture_urls(target: str, paths: list[str], max_flows: int) -> list[str]:
             item = "/" + item
         urls.append(urljoin(base_root + "/", item.lstrip("/")))
 
+    def _canon(url: str) -> str:
+        parsed_url = urlparse(url)
+        path = parsed_url.path or "/"
+        if path == "/":
+            path = ""
+        normalized = f"{parsed_url.scheme}://{parsed_url.netloc}{path}"
+        if parsed_url.query:
+            normalized += f"?{parsed_url.query}"
+        return normalized
+
     deduped: list[str] = []
     seen: set[str] = set()
     for url in urls:
-        if url not in seen:
-            seen.add(url)
+        key = _canon(url)
+        if key not in seen:
+            seen.add(key)
             deduped.append(url)
         if len(deduped) >= max_flows:
             break
     return deduped
+
+
+def _normalize_capture_plan(
+    target: str,
+    capture_paths: list[str],
+    capture_requests: list[dict[str, Any]],
+    max_flows: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    plan: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    def _canonical_url(url: str) -> str:
+        parsed_url = urlparse(url)
+        path = parsed_url.path or "/"
+        if path == "/":
+            path = ""
+        normalized = f"{parsed_url.scheme}://{parsed_url.netloc}{path}"
+        if parsed_url.query:
+            normalized += f"?{parsed_url.query}"
+        return normalized
+
+    base_urls = _capture_urls(target, capture_paths, max_flows)
+    for url in base_urls:
+        plan.append({
+            "method": "GET",
+            "url": url,
+            "headers": {},
+            "params": None,
+            "json": None,
+            "body": None,
+        })
+
+    normalized = target if "://" in target else f"http://{target}"
+    parsed = urlparse(normalized)
+    base_root = f"{parsed.scheme}://{parsed.netloc}"
+
+    for idx, raw in enumerate(capture_requests or [], start=1):
+        if not isinstance(raw, dict):
+            errors.append(f"capture_requests[{idx}] must be an object")
+            continue
+
+        method = str(raw.get("method", "GET")).upper().strip()
+        if method not in ALLOWED_CAPTURE_METHODS:
+            errors.append(f"capture_requests[{idx}] invalid method '{method}'")
+            continue
+
+        raw_url = str(raw.get("url", "")).strip()
+        raw_path = str(raw.get("path", "")).strip()
+        if raw_url:
+            url = raw_url if "://" in raw_url else f"http://{raw_url}"
+        elif raw_path:
+            if not raw_path.startswith("/"):
+                raw_path = "/" + raw_path
+            url = urljoin(base_root + "/", raw_path.lstrip("/"))
+        else:
+            url = normalized
+
+        headers = raw.get("headers")
+        if headers is None:
+            headers = {}
+        if not isinstance(headers, dict):
+            errors.append(f"capture_requests[{idx}].headers must be an object")
+            headers = {}
+
+        params = raw.get("params")
+        if params is not None and not isinstance(params, dict):
+            errors.append(f"capture_requests[{idx}].params must be an object")
+            params = None
+
+        body_json = raw.get("json")
+        body_text = raw.get("body")
+        if body_json is not None and body_text is not None:
+            errors.append(f"capture_requests[{idx}] uses both json and body; json takes precedence")
+            body_text = None
+
+        plan.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "params": params,
+                "json": body_json,
+                "body": body_text,
+            }
+        )
+
+    deduped_plan: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in plan:
+        key = json.dumps(
+            {
+                "method": item.get("method", "GET"),
+                "url": _canonical_url(str(item.get("url", ""))),
+                "params": item.get("params"),
+                "json": item.get("json"),
+                "body": item.get("body"),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_plan.append(item)
+        if len(deduped_plan) >= max_flows:
+            break
+
+    return deduped_plan, errors
 
 
 def _capture_flows_via_burp(
@@ -298,36 +497,53 @@ def _capture_flows_via_burp(
     burp_port: int,
     timeout: int,
     paths: list[str],
+    capture_requests: list[dict[str, Any]],
     max_flows: int,
     response_body_limit: int,
 ) -> tuple[list[dict], list[str]]:
     proxy_url = f"http://{burp_host}:{burp_port}"
-    urls = _capture_urls(target, paths, max_flows)
+    plan, plan_errors = _normalize_capture_plan(target, paths, capture_requests, max_flows)
     flows: list[dict] = []
-    errors: list[str] = []
+    errors: list[str] = list(plan_errors)
 
     if REQUESTS_AVAILABLE:
         proxies = {"http": proxy_url, "https": proxy_url}
-        headers = {"User-Agent": "PentaForgeBurpSuite/1.0"}
 
-        for url in urls:
+        for req_plan in plan:
             start = time.time()
+            request_headers = {"User-Agent": "PentaForgeBurpSuite/1.0"}
+            request_headers.update({str(k): str(v) for k, v in (req_plan.get("headers") or {}).items()})
+            request_body = req_plan.get("body")
+            request_json = req_plan.get("json")
+            request_params = req_plan.get("params")
+
             request_meta = {
-                "method": "GET",
-                "url": url,
+                "method": req_plan["method"],
+                "url": req_plan["url"],
                 "proxy": proxy_url,
-                "headers": headers,
+                "headers": request_headers,
+                "params": request_params,
+                "json": request_json,
+                "body": request_body,
             }
             try:
-                resp = requests.get(
-                    url,
+                resp = requests.request(
+                    method=req_plan["method"],
+                    url=req_plan["url"],
                     proxies=proxies,
-                    headers=headers,
+                    headers=request_headers,
+                    params=request_params,
+                    json=request_json,
+                    data=request_body,
                     timeout=timeout,
                     verify=False,
                     allow_redirects=True,
                 )
                 body_text = resp.text or ""
+                looks_like_burp = _looks_like_burp_self_page(
+                    resp.headers.get("Content-Type", ""),
+                    body_text,
+                )
                 flows.append(
                     {
                         "request": request_meta,
@@ -338,12 +554,13 @@ def _capture_flows_via_burp(
                             "headers": dict(resp.headers),
                             "body_snippet": _truncate_text(body_text, response_body_limit),
                             "body_length": len(body_text),
+                            "looks_like_burp_self_page": looks_like_burp,
                             "elapsed_ms": round((time.time() - start) * 1000, 2),
                         },
                     }
                 )
             except requests.exceptions.RequestException as exc:
-                errors.append(f"{url} -> {exc}")
+                errors.append(f"{req_plan['method']} {req_plan['url']} -> {exc}")
                 flows.append(
                     {
                         "request": request_meta,
@@ -353,21 +570,47 @@ def _capture_flows_via_burp(
                 )
         return flows, errors
 
-    for url in urls:
+    for req_plan in plan:
+        method = req_plan.get("method", "GET")
+        url = req_plan.get("url", "")
+        params = req_plan.get("params")
+        if isinstance(params, dict) and params:
+            query = urlencode(params, doseq=True)
+            join_char = "&" if "?" in url else "?"
+            url = f"{url}{join_char}{query}"
+
+        request_headers = {"User-Agent": "PentaForgeBurpSuite/1.0"}
+        request_headers.update({str(k): str(v) for k, v in (req_plan.get("headers") or {}).items()})
+
+        data_bytes = None
+        if req_plan.get("json") is not None:
+            data_bytes = json.dumps(req_plan["json"]).encode("utf-8")
+            if "Content-Type" not in request_headers:
+                request_headers["Content-Type"] = "application/json"
+        elif req_plan.get("body") is not None:
+            data_bytes = str(req_plan.get("body", "")).encode("utf-8")
+
         request_meta = {
-            "method": "GET",
+            "method": method,
             "url": url,
             "proxy": proxy_url,
-            "headers": {"User-Agent": "PentaForgeBurpSuite/1.0"},
+            "headers": request_headers,
+            "params": req_plan.get("params"),
+            "json": req_plan.get("json"),
+            "body": req_plan.get("body"),
         }
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
         )
-        req = urllib.request.Request(url, headers=request_meta["headers"])
+        req = urllib.request.Request(url, headers=request_meta["headers"], data=data_bytes, method=method)
         start = time.time()
         try:
             with opener.open(req, timeout=timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
+                looks_like_burp = _looks_like_burp_self_page(
+                    resp.headers.get("Content-Type", ""),
+                    body,
+                )
                 flow = {
                     "request": request_meta,
                     "response": {
@@ -377,12 +620,17 @@ def _capture_flows_via_burp(
                         "headers": dict(resp.headers),
                         "body_snippet": _truncate_text(body, response_body_limit),
                         "body_length": len(body),
+                        "looks_like_burp_self_page": looks_like_burp,
                         "elapsed_ms": round((time.time() - start) * 1000, 2),
                     },
                 }
                 flows.append(flow)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
+            looks_like_burp = _looks_like_burp_self_page(
+                exc.headers.get("Content-Type", "") if exc.headers else "",
+                body,
+            )
             flow = {
                 "request": request_meta,
                 "response": {
@@ -392,12 +640,13 @@ def _capture_flows_via_burp(
                     "headers": dict(exc.headers) if exc.headers else {},
                     "body_snippet": _truncate_text(body, response_body_limit),
                     "body_length": len(body),
+                    "looks_like_burp_self_page": looks_like_burp,
                     "elapsed_ms": round((time.time() - start) * 1000, 2),
                 },
             }
             flows.append(flow)
         except Exception as exc:
-            errors.append(f"{url} -> {exc}")
+            errors.append(f"{method} {url} -> {exc}")
             flows.append(
                 {
                     "request": request_meta,
@@ -417,6 +666,7 @@ def burp_suite(
     send_test_request: bool = True,
     capture_traffic: bool = True,
     capture_paths: Optional[list[str]] = None,
+    capture_requests: Optional[list[dict[str, Any]]] = None,
     max_capture_flows: int = 8,
     response_body_limit: int = 1000,
     auto_start_burp: bool = False,
@@ -432,7 +682,8 @@ def burp_suite(
             timeout=timeout,
             send_test_request=send_test_request,
             capture_traffic=capture_traffic,
-            capture_paths=capture_paths or ["/", "/api", "/openapi.json", "/swagger", "/graphql"],
+            capture_paths=capture_paths or DEFAULT_CAPTURE_PATHS.copy(),
+            capture_requests=capture_requests or [],
             max_capture_flows=max_capture_flows,
             response_body_limit=response_body_limit,
             auto_start_burp=auto_start_burp,
@@ -492,11 +743,25 @@ def burp_suite(
             req.burp_port,
             req.timeout,
             req.capture_paths,
+            req.capture_requests,
             req.max_capture_flows,
             req.response_body_limit,
         )
 
     error = None
+    burp_self_response_count = sum(
+        1
+        for flow in captured_flows
+        if isinstance(flow.get("response"), dict)
+        and bool((flow.get("response") or {}).get("looks_like_burp_self_page"))
+    )
+    burp_self_response_detected = burp_self_response_count > 0
+    direct_target_reachable: Optional[bool] = None
+    direct_target_status: Optional[int] = None
+    direct_target_error: Optional[str] = None
+    direct_target_looks_like_burp_page: Optional[bool] = None
+    target_suggestions: list[str] = []
+
     success = listening and (not test_sent or not test_error)
     if not listening:
         error = (
@@ -508,6 +773,36 @@ def burp_suite(
         error = f"Burp reachable but test request failed: {test_error}"
     elif req.capture_traffic and not captured_flows:
         error = "Burp reachable but no flows were captured from the configured target/paths."
+        success = False
+    elif burp_self_response_detected and burp_self_response_count == len(captured_flows):
+        (
+            direct_target_reachable,
+            direct_target_status,
+            direct_target_error,
+            direct_target_looks_like_burp_page,
+        ) = _probe_target_direct(req.target, req.timeout)
+
+        if not direct_target_reachable:
+            target_suggestions = _discover_local_target_suggestions(req.timeout)
+            error = (
+                "Captured responses are Burp pages and target is not reachable directly. "
+                f"Target check failed: {direct_target_error}"
+            )
+            if target_suggestions:
+                error += (
+                    " Suggested live local targets: "
+                    + ", ".join(target_suggestions)
+                )
+        elif direct_target_looks_like_burp_page:
+            error = (
+                "Both proxied and direct responses look like Burp pages. "
+                "Target may be pointing to Burp itself; use the real app host/port as target."
+            )
+        else:
+            error = (
+                "Captured responses are Burp pages but target is reachable directly. "
+                "Burp is likely not forwarding requests (check Intercept tab and Forward/drop queue)."
+            )
         success = False
 
     return BurpSuiteResult(
@@ -526,6 +821,13 @@ def burp_suite(
         captured_count=len(captured_flows),
         captured_flows=captured_flows,
         capture_errors=capture_errors,
+        proxy_self_response_detected=burp_self_response_detected,
+        proxy_self_response_count=burp_self_response_count,
+        direct_target_reachable=direct_target_reachable,
+        direct_target_status=direct_target_status,
+        direct_target_error=direct_target_error,
+        direct_target_looks_like_burp_page=direct_target_looks_like_burp_page,
+        target_suggestions=target_suggestions,
         usage_instructions=build_usage_instructions(proxy_url, target_host),
         error=error,
         execution_time=round(time.time() - start, 2),
@@ -576,6 +878,26 @@ BURP_SUITE_TOOL_DEFINITION = {
                 "description": "Paths (or full URLs) to request through Burp for capture",
                 "default": ["/", "/api", "/openapi.json", "/swagger", "/graphql"],
             },
+            "capture_requests": {
+                "type": "array",
+                "description": (
+                    "Custom requests for capture. Each item can include method, path or url, "
+                    "headers, params, json, body."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string", "description": "GET/POST/PUT/PATCH/DELETE/OPTIONS/HEAD"},
+                        "path": {"type": "string", "description": "Path on target host, e.g. /api/login"},
+                        "url": {"type": "string", "description": "Full URL (overrides path)"},
+                        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "params": {"type": "object", "additionalProperties": True},
+                        "json": {"type": "object", "additionalProperties": True},
+                        "body": {"type": "string", "description": "Raw request body if json is not used"},
+                    },
+                },
+                "default": [],
+            },
             "max_capture_flows": {
                 "type": "integer",
                 "description": "Maximum number of capture requests to send",
@@ -610,9 +932,31 @@ def main() -> None:
     TIMEOUT = 10
     SEND_TEST_REQUEST = True
     CAPTURE_TRAFFIC = True
-    CAPTURE_PATHS = ["/", "/api", "/openapi.json", "/swagger", "/graphql"]
+    CAPTURE_PATHS = [
+        "/",
+        "/api/v1/home",
+        "/api/v1/",
+        "/api/v1/community/posts",
+        "/api/v1/vehicle/list",
+    ]
+    CAPTURE_REQUESTS = [
+        {
+            "method": "GET",
+            "path": "/",
+        },
+        {
+            "method": "GET",
+            "path": "/api/v1/home",
+        },
+        {
+            "method": "GET",
+            "path": "/api/v1/community/posts",
+        },
+    ]
     MAX_CAPTURE_FLOWS = 8
     RESPONSE_BODY_LIMIT = 1000
+    FLOW_PREVIEW_LIMIT = 3
+    PRINT_ALL_CAPTURED_FLOWS = True
     AUTO_START_BURP = True
     BURP_STARTUP_WAIT = 60
     EMIT_JSON = False
@@ -625,6 +969,7 @@ def main() -> None:
         send_test_request=SEND_TEST_REQUEST,
         capture_traffic=CAPTURE_TRAFFIC,
         capture_paths=CAPTURE_PATHS,
+        capture_requests=CAPTURE_REQUESTS,
         max_capture_flows=MAX_CAPTURE_FLOWS,
         response_body_limit=RESPONSE_BODY_LIMIT,
         auto_start_burp=AUTO_START_BURP,
@@ -651,18 +996,52 @@ def main() -> None:
     capture_errors = result.get("capture_errors") or []
     if capture_errors:
         print(f"  Capture errors   : {len(capture_errors)}")
+    if result.get("proxy_self_response_detected"):
+        print(f"  Burp self-page   : {result.get('proxy_self_response_count')} flow(s)")
+        if result.get("direct_target_reachable") is not None:
+            print(f"  Direct reachable : {result.get('direct_target_reachable')}")
+        if result.get("direct_target_status") is not None:
+            print(f"  Direct status    : {result.get('direct_target_status')}")
+        if result.get("direct_target_error"):
+            print(f"  Direct error     : {result.get('direct_target_error')}")
+    suggestions = result.get("target_suggestions") or []
+    if suggestions:
+        print("  Suggestions      :")
+        for item in suggestions:
+            print(f"    - {item}")
     if result.get("error"):
         print(f"  Error            : {result.get('error')}")
 
     flows = result.get("captured_flows") or []
     if flows:
-        print("\n  Flow preview:")
-        for idx, flow in enumerate(flows[:3], start=1):
-            req_meta = flow.get("request") or {}
-            resp_meta = flow.get("response") or {}
-            status = resp_meta.get("status_code", "-")
-            final_url = resp_meta.get("final_url") or req_meta.get("url")
-            print(f"  {idx}. {req_meta.get('method', 'GET')} {final_url} -> {status}")
+        if PRINT_ALL_CAPTURED_FLOWS:
+            print("\n  Captured flows:")
+            for idx, flow in enumerate(flows, start=1):
+                req_meta = flow.get("request") or {}
+                resp_meta = flow.get("response") or {}
+                status = resp_meta.get("status_code", "-")
+                final_url = resp_meta.get("final_url") or req_meta.get("url")
+                print(f"  {idx}. {req_meta.get('method', 'GET')} {final_url} -> {status}")
+                print(f"     Request headers: {json.dumps(req_meta.get('headers', {}), ensure_ascii=True)}")
+                if req_meta.get("params"):
+                    print(f"     Request params : {json.dumps(req_meta.get('params', {}), ensure_ascii=True)}")
+                if req_meta.get("json") is not None:
+                    print(f"     Request json   : {json.dumps(req_meta.get('json'), ensure_ascii=True)}")
+                if req_meta.get("body"):
+                    print(f"     Request body   : {_truncate_text(str(req_meta.get('body')), 200)}")
+                if resp_meta:
+                    print(f"     Content-Type   : {resp_meta.get('content_type', '')}")
+                    print(f"     Body snippet   : {_truncate_text(str(resp_meta.get('body_snippet', '')), 200)}")
+                if flow.get("error"):
+                    print(f"     Flow error     : {flow.get('error')}")
+        else:
+            print("\n  Flow preview:")
+            for idx, flow in enumerate(flows[:FLOW_PREVIEW_LIMIT], start=1):
+                req_meta = flow.get("request") or {}
+                resp_meta = flow.get("response") or {}
+                status = resp_meta.get("status_code", "-")
+                final_url = resp_meta.get("final_url") or req_meta.get("url")
+                print(f"  {idx}. {req_meta.get('method', 'GET')} {final_url} -> {status}")
 
     instructions = result.get("usage_instructions") or []
     if instructions:

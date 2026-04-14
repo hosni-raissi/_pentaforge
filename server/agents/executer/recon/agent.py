@@ -6,7 +6,12 @@ from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback
 from server.agents.executer.target_tool_routing import filter_tools_for_target_types
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
-from .config import LLM_CALL_TIMEOUT_SECONDS, MAX_TOOL_ROUNDS
+from .config import (
+    LLM_CALL_TIMEOUT_SECONDS,
+    MAX_TOOL_ROUNDS,
+    RECON_CONTEXT_WINDOW_MAX_TOKENS,
+)
+from .context_window import RECON_CONTEXT_WINDOW_KEY
 from .prompts import SYSTEM_PROMPT
 from .tools import ALL_RECON_TOOLS
 
@@ -37,6 +42,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
         config: PublicLLMConfig | None = None,
         local_config: LocalLLMConfig | None = None,
         target_types: list[str] | None = None,
+        project_id: str | None = None,
     ) -> None:
         scoped_tools = filter_tools_for_target_types(
             role="recon",
@@ -61,4 +67,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
             callback=callback,
             config=config,
             local_config=local_config,
+            project_id=project_id,
+            context_window_key=RECON_CONTEXT_WINDOW_KEY,
+            context_window_max_tokens=RECON_CONTEXT_WINDOW_MAX_TOKENS,
         )

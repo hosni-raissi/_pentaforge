@@ -81,3 +81,7 @@ amass
 massdns
 puredns
 paramiko
+hydra 
+john the ripper
+metasploit
+nuclei go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest

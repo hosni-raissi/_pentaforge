@@ -57,6 +57,7 @@ from .prompts import (
     build_priority_reprompt_prompt,
     build_user_message,
 )
+from .context_window import build_intel_context_window
 
 logger = structlog.get_logger(__name__)
 
@@ -1434,6 +1435,7 @@ class IntelAgent:
         mode: str | None = None,
         context: IntelContext | None = None,
         callback: IntelCallback | None = None,
+        project_id: str | None = None,
     ) -> None:
         self._mode = mode or llm_mode.mode
         self._cb = callback or _NoOpCallback()
@@ -1462,6 +1464,11 @@ class IntelAgent:
             self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
 
+        self._context_window = build_intel_context_window(
+            project_id=project_id,
+            llm=self._llm,
+        )
+
         logger.info("intel_initialized", mode=self._mode, model=self._model_name)
 
     # ── Public API ─────────────────────────────────────────────────────
@@ -1477,6 +1484,13 @@ class IntelAgent:
     ) -> IntelResult:
         target_type = _normalize_target_type(target_type)
         self._cb.on_step(f"Intel Agent starting for target_type='{target_type}'")
+        if self._context_window is not None:
+            await self._context_window.record(
+                kind="run_input",
+                role="user",
+                content=f"target_type={target_type}\ninfo={info}",
+                metadata={"agent": "intel", "target_type": target_type},
+            )
         await self._context.ensure_ready()
 
         # Check cooldown
@@ -1888,6 +1902,20 @@ class IntelAgent:
             # Final response
             if not response.tool_calls:
                 raw_content = response.content or ""
+                if self._context_window is not None:
+                    await self._context_window.record_llm_turn(
+                        prompt_excerpt=build_user_message(
+                            target_type,
+                            info,
+                            formatter_payload,
+                            current_round=round_num,
+                            max_rounds=FORMATTER_ROUNDS,
+                            base_checklist_text=base_checklist_text,
+                        )[:1200],
+                        response_excerpt=raw_content or "formatter final answer",
+                        usage=response.usage if isinstance(response.usage, dict) else {},
+                        metadata={"agent": "intel", "round": round_num, "stage": "formatter"},
+                    )
                 self._cb.on_done(f"LLM Round {round_num}: Final answer ({len(raw_content)} chars)")
                 logger.info("intel_complete", rounds=round_num, total_tool_calls=total_tool_calls, tools_used=total_tool_calls > 0, usage=response.usage)
 
@@ -1899,6 +1927,17 @@ class IntelAgent:
                 if not result.checklist and base_checklist_payload:
                     result.checklist = base_checklist_payload
                 result.vulnerabilities = []
+                if self._context_window is not None:
+                    await self._context_window.record(
+                        kind="run_result",
+                        role="assistant",
+                        content=result.summary or raw_content or result.status,
+                        metadata={
+                            "agent": "intel",
+                            "status": result.status,
+                            "tool_calls": total_tool_calls,
+                        },
+                    )
 
                 self._cb.on_done(f"Formatter done: {total_tool_calls} tool calls across {round_num} rounds")
                 return result
@@ -1914,6 +1953,18 @@ class IntelAgent:
 
             tool_names = [tc["function"]["name"] for tc in tool_calls_this_round]
             total_tool_calls += len(tool_calls_this_round)
+            if self._context_window is not None:
+                await self._context_window.record_llm_turn(
+                    prompt_excerpt=f"formatter round {round_num}",
+                    response_excerpt=response.content or f"tool_calls={tool_names}",
+                    usage=response.usage if isinstance(response.usage, dict) else {},
+                    metadata={
+                        "agent": "intel",
+                        "round": round_num,
+                        "stage": "formatter",
+                        "tool_calls": tool_names,
+                    },
+                )
             self._cb.on_step(f"LLM Round {round_num}: Calling tools → {tool_names}")
 
             messages.append(ChatMessage(role="assistant", content=response.content, tool_calls=tool_calls_this_round))

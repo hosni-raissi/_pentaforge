@@ -390,6 +390,14 @@ class ScanOrchestratorService:
                         project_id=project_key,
                         error=str(exc),
                     )
+                try:
+                    self._projects_store.clear_project_context_windows(project_key)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "project_context_windows_clear_failed",
+                        project_id=project_key,
+                        error=str(exc),
+                    )
 
             scan_id = str(uuid.uuid4())
             started_at = _utc_now_iso()
@@ -670,6 +678,7 @@ class ScanOrchestratorService:
         project["scanProgress"] = 0
         project["updatedAt"] = now_iso
         project.pop("lastScan", None)
+        project.pop("contextWindows", None)
         self._reset_project_runtime_state(project)
         self._projects_store.upsert_project(project)
         try:
@@ -677,6 +686,14 @@ class ScanOrchestratorService:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
                 "scan_event_cache_clear_failed",
+                project_id=project_key,
+                error=str(exc),
+            )
+        try:
+            self._projects_store.clear_project_context_windows(project_key)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "project_context_windows_clear_failed",
                 project_id=project_key,
                 error=str(exc),
             )
@@ -1011,7 +1028,7 @@ class ScanOrchestratorService:
                     raw_message=message,
                 ),
             )
-            intel_agent = IntelAgent(callback=callback)
+            intel_agent = IntelAgent(callback=callback, project_id=project_id)
             intel_result = await intel_agent.run(
                 target_type=target_type,
                 info=info,
@@ -1217,7 +1234,7 @@ class ScanOrchestratorService:
                     raw_message=message,
                 ),
             )
-            async with PlannerAgent(callback=planner_callback) as planner_agent:
+            async with PlannerAgent(callback=planner_callback, project_id=project_id) as planner_agent:
                 _reset_plan()
                 planner_result = await planner_agent.run(
                     planner_input,
@@ -1443,6 +1460,14 @@ class ScanOrchestratorService:
         project["status"] = status
         project["scanProgress"] = scan_progress
         project["updatedAt"] = _utc_now_iso()
+        if isinstance(scan_meta, dict):
+            result = scan_meta.get("result", {})
+            if not isinstance(result, dict):
+                result = {}
+            context_windows = project.get("contextWindows", {})
+            if isinstance(context_windows, dict) and context_windows:
+                result["contextWindows"] = dict(context_windows)
+            scan_meta["result"] = result
         project["lastScan"] = scan_meta
         self._projects_store.upsert_project(project)
         self._emit_event(

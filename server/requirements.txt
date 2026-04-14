@@ -37,3 +37,5 @@ bs4
 packaging
 jsbeautifier
 requests_file
+python-owasp-zap-v2.4>=0.0.20
+zaproxy

@@ -9,6 +9,7 @@ import socket
 
 MAX_TOOL_ROUNDS = 10
 LLM_CALL_TIMEOUT_SECONDS = 300
+RECON_CONTEXT_WINDOW_MAX_TOKENS = 12000
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Port Scanning Configuration
@@ -158,4 +159,3 @@ BLOCKED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
 BLOCKED_HOSTNAMES: list[str] = [
     "localhost", "broadcasthost", "local"
 ]
-

@@ -2,16 +2,25 @@ import subprocess
 import json
 import re
 import time
+import datetime
 import base64
 import hashlib
 import hmac
 import requests
 import concurrent.futures
 from typing import Optional, Any
-from pydantic import BaseModel, Field, validator
+from urllib.parse import urlparse
+from pydantic import BaseModel, Field, field_validator
 from server.agents.executer.recon.tools.api._common import (
     extract_host,
 )
+
+
+DEMO_JWT_TOKENS = {
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ."
+    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+}
 
 # ══════════════════════════════════════════════════════════════
 # 1. SCHEMAS
@@ -20,24 +29,25 @@ from server.agents.executer.recon.tools.api._common import (
 class APIAuthTestRequest(BaseModel):
     tool: str
     target: str
-    args: list[str] = []
+    args: list[str] = Field(default_factory=list)
     timeout: int = Field(default=600, ge=30, le=7200)
     token: Optional[str] = None           # JWT or Bearer token to test
     api_key: Optional[str] = None         # API key to test
-    endpoints: list[str] = []             # specific endpoints to test
-    headers: dict[str, str] = {}          # extra headers
+    endpoints: list[str] = Field(default_factory=list)             # specific endpoints to test
+    headers: dict[str, str] = Field(default_factory=dict)          # extra headers
     wordlist: Optional[str] = None        # for brute-force tests
-    user_ids: list[Any] = []              # for IDOR tests
-    credentials: dict[str, str] = {}      # {"username": "...", "password": "..."}
+    user_ids: list[Any] = Field(default_factory=list)              # for IDOR tests
+    credentials: dict[str, str] = Field(default_factory=dict)      # {"username": "...", "password": "..."}
+    verbose: bool = False
 
-    @validator("tool")
+    @field_validator("tool")
     def validate_tool(cls, v):
         allowed = {"jwt_tool", "manual", "burp"}
         if v not in allowed:
             raise ValueError(f"Tool '{v}' not allowed. Use: {allowed}")
         return v
 
-    @validator("target")
+    @field_validator("target")
     def validate_target(cls, v):
         cleaned = v.strip()
         host = extract_host(cleaned)
@@ -55,7 +65,7 @@ class APIAuthTestRequest(BaseModel):
             raise ValueError(f"Invalid target: {v}")
         return cleaned
 
-    @validator("args")
+    @field_validator("args")
     def validate_args(cls, v):
         dangerous = [";", "&&", "||", "|", "`", "$(", ">>", "'", '"']
         blocked   = ["-o", "--output", "-O"]
@@ -72,8 +82,8 @@ class APIAuthTestRequest(BaseModel):
 # ── JWT decode result ──
 class JWTInfo(BaseModel):
     raw: str
-    header: dict[str, Any] = {}
-    payload: dict[str, Any] = {}
+    header: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
     signature: Optional[str] = None
     algorithm: Optional[str] = None
     is_expired: bool = False
@@ -95,10 +105,10 @@ class AuthFinding(BaseModel):
     severity: str = "info"                 # info/low/medium/high/critical
     vulnerable: bool = False
     description: str = ""
-    evidence: list[str] = []
+    evidence: list[str] = Field(default_factory=list)
     request_snippet: Optional[str] = None
     response_snippet: Optional[str] = None
-    remediation: list[str] = []
+    remediation: list[str] = Field(default_factory=list)
     cvss: Optional[str] = None
 
 
@@ -112,7 +122,7 @@ class IDORResult(BaseModel):
     status_code: Optional[int] = None
     response_snippet: Optional[str] = None
     severity: str = "info"
-    evidence: list[str] = []
+    evidence: list[str] = Field(default_factory=list)
 
 
 # ── Rate limit test result ──
@@ -120,12 +130,12 @@ class RateLimitResult(BaseModel):
     endpoint: str
     requests_sent: int = 0
     blocked_at: Optional[int] = None       # request number where block started
-    status_codes: list[int] = []
-    rate_limit_headers: dict[str, str] = {}
+    status_codes: list[int] = Field(default_factory=list)
+    rate_limit_headers: dict[str, str] = Field(default_factory=dict)
     bypass_successful: bool = False
     bypass_technique: Optional[str] = None
     vulnerable: bool = False
-    evidence: list[str] = []
+    evidence: list[str] = Field(default_factory=list)
 
 
 # ── API key leak result ──
@@ -135,8 +145,10 @@ class APIKeyLeak(BaseModel):
     key_value: str = ""                    # first 8 chars only
     endpoint: Optional[str] = None
     valid: bool = False                    # tried to verify
-    evidence: list[str] = []
+    evidence: list[str] = Field(default_factory=list)
     severity: str = "high"
+    confidence: float = 0.0
+    confidence_label: str = "low"
 
 
 # ── Final result ──
@@ -146,11 +158,15 @@ class APIAuthTestResult(BaseModel):
     target: str
     command: str
     jwt_info: Optional[JWTInfo] = None
-    findings: list[AuthFinding] = []
-    idor_results: list[IDORResult] = []
-    rate_limit_results: list[RateLimitResult] = []
-    api_key_leaks: list[APIKeyLeak] = []
+    findings: list[AuthFinding] = Field(default_factory=list)
+    idor_results: list[IDORResult] = Field(default_factory=list)
+    rate_limit_results: list[RateLimitResult] = Field(default_factory=list)
+    api_key_leaks: list[APIKeyLeak] = Field(default_factory=list)
     total_findings: int = 0
+    total_findings_all: int = 0
+    filtered_out_findings: int = 0
+    total_api_key_leaks: int = 0
+    filtered_out_api_key_leaks: int = 0
     total_vulnerable: int = 0
     critical_count: int = 0
     high_count: int = 0
@@ -158,7 +174,7 @@ class APIAuthTestResult(BaseModel):
     raw_output: Optional[str] = None
     error: Optional[str] = None
     execution_time: float = 0.0
-    techniques_used: list[str] = []
+    techniques_used: list[str] = Field(default_factory=list)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -184,8 +200,6 @@ def jwt_decode(token: str) -> Optional[JWTInfo]:
     Decode a JWT token without verification.
     Extract header, payload, signature and all claims.
     """
-    import datetime
-
     try:
         parts = token.strip().split(".")
         if len(parts) != 3:
@@ -215,9 +229,9 @@ def jwt_decode(token: str) -> Optional[JWTInfo]:
         exp = payload.get("exp")
         if exp:
             try:
-                exp_dt = datetime.datetime.utcfromtimestamp(int(exp))
+                exp_dt = datetime.datetime.fromtimestamp(int(exp), datetime.timezone.utc)
                 info.expiry    = exp_dt.isoformat()
-                info.is_expired = exp_dt < datetime.datetime.utcnow()
+                info.is_expired = exp_dt < datetime.datetime.now(datetime.timezone.utc)
             except Exception:
                 pass
 
@@ -225,7 +239,7 @@ def jwt_decode(token: str) -> Optional[JWTInfo]:
         iat = payload.get("iat")
         if iat:
             try:
-                iat_dt = datetime.datetime.utcfromtimestamp(int(iat))
+                iat_dt = datetime.datetime.fromtimestamp(int(iat), datetime.timezone.utc)
                 info.issued_at = iat_dt.isoformat()
             except Exception:
                 pass
@@ -369,12 +383,23 @@ def scan_for_api_keys(content: str,
                 continue
             seen.add(val_key)
 
+            confidence, confidence_label, derived_severity = _score_api_key_match(
+                key_type=kp["name"],
+                matched_value=val,
+                location=location,
+                default_severity=kp["severity"],
+            )
+
+            masked_val = val[:8] + "..." if len(val) > 8 else val
+
             leaks.append(APIKeyLeak(
                 location=location,
                 key_type=kp["name"],
-                key_value=val[:8] + "..." if len(val) > 8 else val,
+                key_value=masked_val,
                 endpoint=endpoint,
-                severity=kp["severity"],
+                severity=derived_severity,
+                confidence=confidence,
+                confidence_label=confidence_label,
                 evidence=[
                     f"Pattern '{kp['name']}' matched in {location}: "
                     f"{val[:20]}..."
@@ -382,6 +407,85 @@ def scan_for_api_keys(content: str,
             ))
 
     return leaks
+
+
+def _score_api_key_match(
+    key_type: str,
+    matched_value: str,
+    location: str,
+    default_severity: str,
+) -> tuple[float, str, str]:
+    """Score regex hits to reduce false-positive API key leak noise."""
+    base_scores = {
+        "AWS Access Key": 0.95,
+        "AWS Secret Key": 0.95,
+        "GitHub Token": 0.95,
+        "GitHub OAuth": 0.9,
+        "Stripe Live Key": 0.9,
+        "Stripe Test Key": 0.75,
+        "Slack Token": 0.85,
+        "Slack Webhook": 0.85,
+        "Google API Key": 0.8,
+        "Google OAuth": 0.7,
+        "Twilio API Key": 0.8,
+        "Mailgun API Key": 0.8,
+        "SendGrid API Key": 0.9,
+        "Database URL": 0.85,
+        "Basic Auth in URL": 0.8,
+        "RSA Private Key": 0.98,
+        "Private Key": 0.98,
+        "JWT Token": 0.45,
+        "Bearer Token": 0.45,
+        "Generic API Key": 0.45,
+        "Heroku API Key": 0.55,
+    }
+
+    score = base_scores.get(key_type, 0.55)
+    low = matched_value.lower()
+
+    if location in {"response_header", "response_body", "credentials_input"}:
+        score += 0.1
+    elif location in {"javascript_file", "inline_script"}:
+        score -= 0.1
+
+    placeholder_markers = [
+        "localstorage",
+        "process.env",
+        "window.",
+        "example",
+        "sample",
+        "dummy",
+        "placeholder",
+        "changeme",
+        "your-",
+        "test_",
+        "test-key",
+    ]
+    if any(marker in low for marker in placeholder_markers):
+        score -= 0.35
+
+    if len(matched_value) >= 24 and re.search(r"[A-Za-z]", matched_value) and re.search(r"\d", matched_value):
+        score += 0.05
+
+    if key_type in {"JWT Token", "Bearer Token", "Generic API Key"} and location in {"javascript_file", "inline_script"}:
+        score -= 0.2
+
+    score = max(0.05, min(0.99, score))
+
+    if score >= 0.8:
+        confidence_label = "high"
+    elif score >= 0.55:
+        confidence_label = "medium"
+    else:
+        confidence_label = "low"
+
+    derived_severity = default_severity
+    if confidence_label == "low":
+        derived_severity = "info"
+    elif confidence_label == "medium" and default_severity in {"critical", "high"}:
+        derived_severity = "medium"
+
+    return round(score, 2), confidence_label, derived_severity
 
 
 # ══════════════════════════════════════════════════════════════
@@ -570,6 +674,13 @@ def test_jwt_weak_secret(
         )
         return finding
 
+    if token in DEMO_JWT_TOKENS:
+        finding.severity = "info"
+        finding.evidence.append(
+            "Provided JWT is a known public demo token; weak-secret result is not target-specific."
+        )
+        return finding
+
     # Common weak secrets
     common_secrets = [
         "secret", "password", "123456", "admin", "key", "jwt",
@@ -631,9 +742,17 @@ def test_jwt_weak_secret(
                 try:
                     resp = requests.get(endpoint, headers=test_hdrs,
                                         timeout=timeout, verify=False)
-                    finding.evidence.append(
-                        f"Forged token with secret accepted: HTTP {resp.status_code}"
-                    )
+                    if resp.status_code == 404:
+                        finding.vulnerable = False
+                        finding.severity = "high"
+                        finding.evidence.append(
+                            "Secret matched JWT signature, but validation endpoint returned 404; "
+                            "target impact is inconclusive."
+                        )
+                    else:
+                        finding.evidence.append(
+                            f"Forged token validation request: HTTP {resp.status_code}"
+                        )
                 except Exception:
                     pass
                 break
@@ -1398,7 +1517,7 @@ def test_idor(
                         f"ID={test_id} correctly denied: HTTP 403 ✓"
                     )
                 elif resp.status_code == 404:
-                    idor.evidence.append(f"ID={test_id}: HTTP 404")
+                    continue
 
             except Exception as e:
                 idor.evidence.append(f"Request failed: {e}")
@@ -1646,11 +1765,21 @@ def test_rate_limiting(
 
     result.status_codes = status_codes
 
+    if status_codes and all(code == 404 for code in status_codes):
+        result.vulnerable = False
+        result.evidence.append("Endpoint not found (all responses were HTTP 404); rate-limit test skipped")
+        return result
+
     if blocked_at is None:
-        result.vulnerable = True
-        result.evidence.append(
-            f"No rate limiting detected after {request_count} requests"
-        )
+        meaningful = any(code in (200, 201, 202, 204, 400, 401, 403, 405, 422) for code in status_codes)
+        if meaningful:
+            result.vulnerable = True
+            result.evidence.append(
+                f"No rate limiting detected after {request_count} requests"
+            )
+        else:
+            result.vulnerable = False
+            result.evidence.append("No conclusive responses for rate-limit evaluation")
     else:
         result.evidence.append(
             f"Rate limited at request #{blocked_at}"
@@ -2295,6 +2424,99 @@ def safe_execute(cmd: list[str], timeout: int = 600) -> tuple[str, str, int]:
         return "", str(e), -1
 
 
+def _derive_api_base(target: str) -> str:
+    parsed = urlparse(target)
+    if not parsed.scheme or not parsed.netloc:
+        return target.rstrip("/")
+
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    path = parsed.path.rstrip("/")
+    if not path:
+        return root + "/api"
+    return root + path
+
+
+def _join_target_path(base: str, path: str) -> str:
+    if path.startswith(("http://", "https://")):
+        return path
+
+    base_n = base.rstrip("/")
+    p = path if path.startswith("/") else "/" + path
+
+    if base_n.endswith("/api") and p.startswith("/api/"):
+        p = p[4:]
+    elif base_n.endswith("/api/v1") and p.startswith("/api/v1/"):
+        p = p[7:]
+
+    return base_n + p
+
+
+def _drop_404_noise_from_findings(findings: list[AuthFinding]) -> list[AuthFinding]:
+    cleaned: list[AuthFinding] = []
+    for finding in findings:
+        filtered_evidence = [e for e in finding.evidence if "HTTP 404" not in e]
+        finding.evidence = filtered_evidence
+        cleaned.append(finding)
+    return cleaned
+
+
+def _drop_404_noise_from_idor(results: list[IDORResult]) -> list[IDORResult]:
+    return [r for r in results if not (r.status_code == 404 and not r.accessible)]
+
+
+def _drop_404_noise_from_rate(results: list[RateLimitResult]) -> list[RateLimitResult]:
+    kept: list[RateLimitResult] = []
+    for r in results:
+        if r.status_codes and all(code == 404 for code in r.status_codes):
+            continue
+        kept.append(r)
+    return kept
+
+
+def _dedupe_api_key_leaks(leaks: list[APIKeyLeak]) -> list[APIKeyLeak]:
+    deduped: list[APIKeyLeak] = []
+    seen: set[str] = set()
+    for leak in leaks:
+        key = "|".join([
+            leak.location or "",
+            leak.key_type or "",
+            leak.key_value or "",
+            leak.endpoint or "",
+        ])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(leak)
+    return deduped
+
+
+def _filter_actionable_findings(findings: list[AuthFinding], verbose: bool) -> list[AuthFinding]:
+    if verbose:
+        return findings
+
+    actionable: list[AuthFinding] = []
+    for finding in findings:
+        if finding.vulnerable:
+            actionable.append(finding)
+            continue
+
+        joined_evidence = " ".join(finding.evidence or []).lower()
+        if "test error:" in joined_evidence or "tool error" in joined_evidence:
+            actionable.append(finding)
+
+    return actionable
+
+
+def _filter_actionable_api_key_leaks(leaks: list[APIKeyLeak], verbose: bool) -> list[APIKeyLeak]:
+    leaks = _dedupe_api_key_leaks(leaks)
+    leaks.sort(key=lambda l: l.confidence, reverse=True)
+
+    if verbose:
+        return leaks
+
+    return [leak for leak in leaks if leak.confidence >= 0.55]
+
+
 # ══════════════════════════════════════════════════════════════
 # 12. MAIN TOOL FUNCTION
 # ══════════════════════════════════════════════════════════════
@@ -2302,14 +2524,15 @@ def safe_execute(cmd: list[str], timeout: int = 600) -> tuple[str, str, int]:
 def api_auth_test(
     tool:        str,
     target:      str,
-    args:        list[str] = [],
+    args:        Optional[list[str]] = None,
     token:       Optional[str] = None,
     api_key:     Optional[str] = None,
-    endpoints:   list[str] = [],
-    headers:     dict[str, str] = {},
+    endpoints:   Optional[list[str]] = None,
+    headers:     Optional[dict[str, str]] = None,
     wordlist:    Optional[str] = None,
-    user_ids:    list[Any] = [],
-    credentials: dict[str, str] = {},
+    user_ids:    Optional[list[Any]] = None,
+    credentials: Optional[dict[str, str]] = None,
+    verbose: bool = False,
 ) -> dict:
     """
     🔧 Agent Tool: API Authentication & Authorization Tester
@@ -2343,6 +2566,7 @@ def api_auth_test(
         wordlist:    Wordlist for JWT secret brute-force
         user_ids:    IDs to try for IDOR tests
         credentials: {"username": "...", "password": "..."} for login tests
+        verbose:     True to return full findings/leaks/raw output (default False)
 
     Tool args reference:
       jwt_tool:
@@ -2372,10 +2596,17 @@ def api_auth_test(
     # ══════════════════════════════
     try:
         req = APIAuthTestRequest(
-            tool=tool, target=target, args=args,
-            token=token, api_key=api_key, endpoints=endpoints,
-            headers=headers, wordlist=wordlist,
-            user_ids=user_ids, credentials=credentials,
+            tool=tool,
+            target=target,
+            args=args or [],
+            token=token,
+            api_key=api_key,
+            endpoints=endpoints or [],
+            headers=headers or {},
+            wordlist=wordlist,
+            user_ids=user_ids or [],
+            credentials=credentials or {},
+            verbose=verbose,
         )
     except Exception as e:
         return APIAuthTestResult(
@@ -2387,6 +2618,7 @@ def api_auth_test(
     if not target.startswith("http"):
         target = f"https://{target}"
     target = target.rstrip("/")
+    api_base = _derive_api_base(target)
 
     all_findings:      list[AuthFinding]     = []
     idor_results:      list[IDORResult]      = []
@@ -2418,7 +2650,7 @@ def api_auth_test(
         # ── Determine test endpoint ──
         auth_endpoint = (
             req.endpoints[0] if req.endpoints
-            else target + "/api/v1/me"
+            else _join_target_path(api_base, "/api/v1/me")
         )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
@@ -2515,9 +2747,9 @@ def api_auth_test(
 
         # ── IDOR Tests ──
         idor_endpoints = req.endpoints or [
-            target + "/api/users/{id}",
-            target + "/api/v1/users/{id}",
-            target + "/api/orders/{id}",
+            _join_target_path(api_base, "/api/users/{id}"),
+            _join_target_path(api_base, "/api/v1/users/{id}"),
+            _join_target_path(api_base, "/api/orders/{id}"),
         ]
         for ep_tmpl in idor_endpoints[:3]:
             idors = test_idor(
@@ -2528,8 +2760,8 @@ def api_auth_test(
 
         # ── Rate Limit Tests ──
         rate_endpoints = req.endpoints[:2] if req.endpoints else [
-            target + "/api/login",
-            target + "/api/v1/me",
+            _join_target_path(api_base, "/api/login"),
+            _join_target_path(api_base, "/api/v1/me"),
         ]
         for ep in rate_endpoints:
             rl = test_rate_limiting(ep, base_headers, request_count=30)
@@ -2576,7 +2808,7 @@ def api_auth_test(
 
             auth_endpoint = (
                 req.endpoints[0] if req.endpoints
-                else target + "/api/v1/me"
+                else _join_target_path(api_base, "/api/v1/me")
             )
 
             # Build jwt_tool command
@@ -2666,7 +2898,7 @@ def api_auth_test(
         # Supplement with manual JWT + auth tests
         if req.token and jwt_info:
             auth_endpoint = req.endpoints[0] if req.endpoints \
-                else target + "/api/v1/me"
+                else _join_target_path(api_base, "/api/v1/me")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
                 futs = [
@@ -2701,6 +2933,16 @@ def api_auth_test(
     # ══════════════════════════════
     # POST-PROCESS
     # ══════════════════════════════
+    all_findings = _drop_404_noise_from_findings(all_findings)
+    idor_results = _drop_404_noise_from_idor(idor_results)
+    rate_limit_results = _drop_404_noise_from_rate(rate_limit_results)
+
+    all_findings_all = list(all_findings)
+    all_api_key_leaks = _dedupe_api_key_leaks(api_key_leaks)
+
+    all_findings = _filter_actionable_findings(all_findings_all, req.verbose)
+    api_key_leaks = _filter_actionable_api_key_leaks(all_api_key_leaks, req.verbose)
+
     vulnerable_findings = [f for f in all_findings if f.vulnerable]
 
     severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
@@ -2718,11 +2960,14 @@ def api_auth_test(
         reverse=True
     )
 
+    filtered_out_findings = max(0, len(all_findings_all) - len(all_findings))
+    filtered_out_api_key_leaks = max(0, len(all_api_key_leaks) - len(api_key_leaks))
+
     # ══════════════════════════════
     # BUILD RESULT
     # ══════════════════════════════
     return APIAuthTestResult(
-        success=len(all_findings) > 0,
+        success=error_msg is None,
         tool=tool,
         target=target,
         command=command_str,
@@ -2732,11 +2977,15 @@ def api_auth_test(
         rate_limit_results=rate_limit_results,
         api_key_leaks=api_key_leaks,
         total_findings=len(all_findings),
+        total_findings_all=len(all_findings_all),
+        filtered_out_findings=filtered_out_findings,
+        total_api_key_leaks=len(all_api_key_leaks),
+        filtered_out_api_key_leaks=filtered_out_api_key_leaks,
         total_vulnerable=len(vulnerable_findings),
         critical_count=critical_count,
         high_count=high_count,
         medium_count=medium_count,
-        raw_output=raw_output[:5000] if raw_output else None,
+        raw_output=raw_output[:5000] if (raw_output and req.verbose) else None,
         error=error_msg,
         execution_time=round(time.time() - start, 2),
         techniques_used=list(dict.fromkeys(techniques_used)),
@@ -2839,6 +3088,14 @@ API_AUTH_TEST_TOOL_DEFINITION = {
                     "manual:   [] (no args needed)"
                 ),
             },
+            "verbose": {
+                "type": "boolean",
+                "description": (
+                    "Return full raw findings/leaks/output including non-actionable items. "
+                    "Default false returns actionable-focused output."
+                ),
+                "default": False,
+            },
         },
         "required": ["tool", "target"],
     },
@@ -2855,12 +3112,14 @@ if __name__ == "__main__":
     urllib3.disable_warnings()
     os.environ.setdefault("PENTAFORGE_ALLOW_LOCAL_API_TARGETS", "1")
 
-    LOCAL_CRAPI_TARGET = "http://localhost:8888/api"
-    LOCAL_CRAPI_ME = f"{LOCAL_CRAPI_TARGET}/v1/me"
-    LOCAL_CRAPI_USERS = f"{LOCAL_CRAPI_TARGET}/users/{{id}}"
-    LOCAL_CRAPI_PROFILE = f"{LOCAL_CRAPI_TARGET}/users/{{id}}/profile"
-    LOCAL_CRAPI_ORDERS = f"{LOCAL_CRAPI_TARGET}/orders/{{id}}"
-    LOCAL_CRAPI_PAYMENTS = f"{LOCAL_CRAPI_TARGET}/payments/{{id}}"
+    LOCAL_CRAPI_TARGET = "http://localhost:8888"
+    LOCAL_CRAPI_API = f"{LOCAL_CRAPI_TARGET}/api/v1"
+    LOCAL_CRAPI_ME = f"{LOCAL_CRAPI_API}/user/profile"
+    LOCAL_CRAPI_USERS = f"{LOCAL_CRAPI_API}/vehicle/{{id}}"
+    LOCAL_CRAPI_PROFILE = f"{LOCAL_CRAPI_API}/vehicle/{{id}}"
+    LOCAL_CRAPI_ORDERS = f"{LOCAL_CRAPI_API}/community/posts/{{id}}"
+    LOCAL_CRAPI_PAYMENTS = f"{LOCAL_CRAPI_API}/community/posts/{{id}}"
+    RUN_ALL_EXAMPLES = os.getenv("API_AUTH_TEST_RUN_ALL_EXAMPLES", "0") == "1"
 
     JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." \
                 "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIi" \
@@ -2876,87 +3135,88 @@ if __name__ == "__main__":
         token=JWT_TOKEN,
         endpoints=[
             LOCAL_CRAPI_USERS,
-            f"{LOCAL_CRAPI_TARGET}/admin",
+            f"{LOCAL_CRAPI_API}/home",
         ],
         user_ids=[1, 2, 3, 99, "admin"],
     )
     print("=== MANUAL FULL AUTH TEST ===")
     print(json.dumps(r, indent=2))
 
-    # ─────────────────────────────
-    # 2. JWT attacks only
-    # ─────────────────────────────
-    r = api_auth_test(
-        tool="manual",
-        target=LOCAL_CRAPI_TARGET,
-        token=JWT_TOKEN,
-        endpoints=[LOCAL_CRAPI_ME],
-        wordlist="/usr/share/wordlists/jwt-secrets.txt",
-    )
-    print("=== JWT ATTACKS ===")
-    print(json.dumps(r, indent=2))
+    if RUN_ALL_EXAMPLES:
+        # ─────────────────────────────
+        # 2. JWT attacks only
+        # ─────────────────────────────
+        r = api_auth_test(
+            tool="manual",
+            target=LOCAL_CRAPI_TARGET,
+            token=JWT_TOKEN,
+            endpoints=[LOCAL_CRAPI_ME],
+            wordlist="/usr/share/wordlists/jwt-secrets.txt",
+        )
+        print("=== JWT ATTACKS ===")
+        print(json.dumps(r, indent=2))
 
-    # ─────────────────────────────
-    # 3. jwt_tool — all tests
-    # ─────────────────────────────
-    r = api_auth_test(
-        tool="jwt_tool",
-        target=LOCAL_CRAPI_TARGET,
-        token=JWT_TOKEN,
-        args=["-M", "at", "-v"],
-        endpoints=[LOCAL_CRAPI_ME],
-    )
-    print("=== JWT_TOOL ALL TESTS ===")
-    print(json.dumps(r, indent=2))
+        # ─────────────────────────────
+        # 3. jwt_tool — all tests
+        # ─────────────────────────────
+        r = api_auth_test(
+            tool="jwt_tool",
+            target=LOCAL_CRAPI_TARGET,
+            token=JWT_TOKEN,
+            args=["-M", "at", "-v"],
+            endpoints=[LOCAL_CRAPI_ME],
+        )
+        print("=== JWT_TOOL ALL TESTS ===")
+        print(json.dumps(r, indent=2))
 
-    # ─────────────────────────────
-    # 4. jwt_tool — crack secret
-    # ─────────────────────────────
-    r = api_auth_test(
-        tool="jwt_tool",
-        target=LOCAL_CRAPI_TARGET,
-        token=JWT_TOKEN,
-        args=["-C", "-d", "/usr/share/wordlists/rockyou.txt"],
-    )
-    print("=== JWT_TOOL CRACK ===")
-    print(json.dumps(r, indent=2))
+        # ─────────────────────────────
+        # 4. jwt_tool — crack secret
+        # ─────────────────────────────
+        r = api_auth_test(
+            tool="jwt_tool",
+            target=LOCAL_CRAPI_TARGET,
+            token=JWT_TOKEN,
+            args=["-C", "-d", "/usr/share/wordlists/rockyou.txt"],
+        )
+        print("=== JWT_TOOL CRACK ===")
+        print(json.dumps(r, indent=2))
 
-    # ─────────────────────────────
-    # 5. API key tests
-    # ─────────────────────────────
-    r = api_auth_test(
-        tool="manual",
-        target=LOCAL_CRAPI_TARGET,
-        api_key="sk_live_abc123def456",
-        headers={"X-API-Key": "sk_live_abc123def456"},
-    )
-    print("=== API KEY TEST ===")
-    print(json.dumps(r, indent=2))
+        # ─────────────────────────────
+        # 5. API key tests
+        # ─────────────────────────────
+        r = api_auth_test(
+            tool="manual",
+            target=LOCAL_CRAPI_TARGET,
+            api_key="sk_live_abc123def456",
+            headers={"X-API-Key": "sk_live_abc123def456"},
+        )
+        print("=== API KEY TEST ===")
+        print(json.dumps(r, indent=2))
 
-    # ─────────────────────────────
-    # 6. IDOR focused
-    # ─────────────────────────────
-    r = api_auth_test(
-        tool="manual",
-        target=LOCAL_CRAPI_TARGET,
-        token=JWT_TOKEN,
-        endpoints=[
-            LOCAL_CRAPI_PROFILE,
-            LOCAL_CRAPI_ORDERS,
-            LOCAL_CRAPI_PAYMENTS,
-        ],
-        user_ids=[1, 2, 3, 100, 999, "admin"],
-    )
-    print("=== IDOR TEST ===")
-    print(json.dumps(r, indent=2))
+        # ─────────────────────────────
+        # 6. IDOR focused
+        # ─────────────────────────────
+        r = api_auth_test(
+            tool="manual",
+            target=LOCAL_CRAPI_TARGET,
+            token=JWT_TOKEN,
+            endpoints=[
+                LOCAL_CRAPI_PROFILE,
+                LOCAL_CRAPI_ORDERS,
+                LOCAL_CRAPI_PAYMENTS,
+            ],
+            user_ids=[1, 2, 3, 100, 999, "admin"],
+        )
+        print("=== IDOR TEST ===")
+        print(json.dumps(r, indent=2))
 
-    # ─────────────────────────────
-    # 7. Burp import
-    # ─────────────────────────────
-    r = api_auth_test(
-        tool="burp",
-        target=LOCAL_CRAPI_TARGET,
-        token=JWT_TOKEN,
-    )
-    print("=== BURP INTEGRATION ===")
-    print(json.dumps(r, indent=2))
+        # ─────────────────────────────
+        # 7. Burp integration
+        # ─────────────────────────────
+        r = api_auth_test(
+            tool="burp",
+            target=LOCAL_CRAPI_TARGET,
+            token=JWT_TOKEN,
+        )
+        print("=== BURP INTEGRATION ===")
+        print(json.dumps(r, indent=2))

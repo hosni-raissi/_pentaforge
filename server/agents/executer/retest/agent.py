@@ -5,7 +5,12 @@ from __future__ import annotations
 from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
-from .config import LLM_CALL_TIMEOUT_SECONDS, MAX_TOOL_ROUNDS
+from .config import (
+    LLM_CALL_TIMEOUT_SECONDS,
+    MAX_TOOL_ROUNDS,
+    RETEST_CONTEXT_WINDOW_MAX_TOKENS,
+)
+from .context_window import RETEST_CONTEXT_WINDOW_KEY
 from .prompts import SYSTEM_PROMPT
 from .tools import ALL_RETEST_TOOLS
 
@@ -36,6 +41,7 @@ class RetestExecuterAgent(BaseExecuterAgent):
         callback: ExecuterCallback | None = None,
         config: PublicLLMConfig | None = None,
         local_config: LocalLLMConfig | None = None,
+        project_id: str | None = None,
     ) -> None:
         super().__init__(
             role="retest",
@@ -47,4 +53,7 @@ class RetestExecuterAgent(BaseExecuterAgent):
             callback=callback,
             config=config,
             local_config=local_config,
+            project_id=project_id,
+            context_window_key=RETEST_CONTEXT_WINDOW_KEY,
+            context_window_max_tokens=RETEST_CONTEXT_WINDOW_MAX_TOKENS,
         )
