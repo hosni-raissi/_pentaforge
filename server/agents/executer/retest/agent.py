@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback
+from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback, ExecuterResult
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
 from .config import (
     LLM_CALL_TIMEOUT_SECONDS,
     MAX_TOOL_ROUNDS,
     RETEST_CONTEXT_WINDOW_MAX_TOKENS,
+    RETEST_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS,
+    RETEST_MAX_TOOL_CALLS_PER_ROUND,
 )
 from .context_window import RETEST_CONTEXT_WINDOW_KEY
+from .policy import (
+    build_retest_scenario_packet,
+    format_retest_context_for_packet,
+)
 from .prompts import SYSTEM_PROMPT
 from .tools import ALL_RETEST_TOOLS
 
@@ -48,6 +54,7 @@ class RetestExecuterAgent(BaseExecuterAgent):
             system_prompt=SYSTEM_PROMPT,
             tools=ALL_RETEST_TOOLS,
             max_tool_rounds=MAX_TOOL_ROUNDS,
+            max_tool_calls_per_round=RETEST_MAX_TOOL_CALLS_PER_ROUND,
             call_timeout_seconds=LLM_CALL_TIMEOUT_SECONDS,
             mode=mode,
             callback=callback,
@@ -57,3 +64,19 @@ class RetestExecuterAgent(BaseExecuterAgent):
             context_window_key=RETEST_CONTEXT_WINDOW_KEY,
             context_window_max_tokens=RETEST_CONTEXT_WINDOW_MAX_TOKENS,
         )
+
+    async def run(self, user_message: str) -> ExecuterResult:
+        context_block = "Context window disabled (missing project_id)."
+        if self._context_window is not None:
+            await self._context_window.ensure_token_budget(
+                threshold_tokens=RETEST_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS
+            )
+            snapshot = self._context_window.snapshot()
+            context_block = format_retest_context_for_packet(snapshot)
+
+        packet = build_retest_scenario_packet(
+            scenario_and_target=user_message,
+            context_block=context_block,
+            available_tools=sorted(self._tools.keys()),
+        )
+        return await super().run(packet)

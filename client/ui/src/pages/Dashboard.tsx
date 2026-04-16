@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  Bot,
   Check,
   Clock3,
   FolderOpen,
@@ -22,13 +23,13 @@ import {
   type AgentInsightPanelData,
 } from "@/components/dashboard/AgentStatePath";
 import { FindingsTable } from "@/components/dashboard/FindingsTable";
-import { StatsGrid } from "@/components/dashboard/StatsGrid";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import {
+  approveToolForProjectScanFromDesktop,
   approvePlannerForProjectScanFromDesktop,
   listProjectScanEventsFromDesktop,
   saveProjectToDesktop,
@@ -40,6 +41,7 @@ import type { ProjectStatus } from "@/types";
 
 type InsightTab = "plan" | "checklist";
 type LogLevel = "info" | "success" | "warn" | "error";
+type DashboardSeverity = "critical" | "high" | "medium" | "low" | "info";
 
 interface StructuredChecklistItem {
   name: string;
@@ -119,6 +121,22 @@ interface DashboardLogEntry {
   message: string;
   at: string;
   source: string;
+}
+
+interface RealtimeVulnFinding {
+  id: string;
+  title: string;
+  severity: DashboardSeverity;
+  source: string;
+  at: string;
+}
+
+interface PendingToolApprovalView {
+  approvalId: string;
+  role: string;
+  toolName: string;
+  callId: string;
+  args: Record<string, unknown>;
 }
 
 const PROJECT_STATUSES: ProjectStatus[] = [
@@ -215,6 +233,92 @@ function toLogLevel(value: unknown): LogLevel {
     return value;
   }
   return "info";
+}
+
+function severityRank(value: DashboardSeverity): number {
+  if (value === "critical") return 5;
+  if (value === "high") return 4;
+  if (value === "medium") return 3;
+  if (value === "low") return 2;
+  return 1;
+}
+
+function isOperationalToolEvent(event: ScanEventPayload): boolean {
+  const message = String(event.message || "").toLowerCase();
+  return (
+    message.includes("[run tool]") ||
+    message.includes("search_rag(") ||
+    message.includes("calling tools")
+  );
+}
+
+function inferEventSeverity(event: ScanEventPayload): DashboardSeverity {
+  if (isOperationalToolEvent(event)) {
+    return "info";
+  }
+  const eventName = String(event.event || "").toLowerCase();
+  if (eventName.includes("crashed") || eventName.includes("failed")) {
+    return "high";
+  }
+  const text = `${event.event} ${event.message}`.toLowerCase();
+  if (text.includes("critical")) return "critical";
+  if (
+    text.includes("high") ||
+    text.includes("rce") ||
+    text.includes("sqli") ||
+    text.includes("exploit")
+  ) {
+    return "high";
+  }
+  if (
+    text.includes("vuln") ||
+    text.includes("finding") ||
+    text.includes("xss") ||
+    text.includes("ssrf") ||
+    text.includes("idor") ||
+    text.includes("injection")
+  ) {
+    return "medium";
+  }
+  if (event.level === "error") return "medium";
+  if (event.level === "warn") return "medium";
+  return "low";
+}
+
+function severityBadgeClass(value: DashboardSeverity): string {
+  if (value === "critical") {
+    return "border-red-500/40 bg-red-500/15 text-red-200";
+  }
+  if (value === "high") {
+    return "border-orange-500/40 bg-orange-500/15 text-orange-200";
+  }
+  if (value === "medium") {
+    return "border-amber-500/40 bg-amber-500/15 text-amber-200";
+  }
+  if (value === "low") {
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+  }
+  return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+}
+
+function buildPendingApprovalCommand(view: PendingToolApprovalView | null): string {
+  if (!view) {
+    return "";
+  }
+  const args = view.args;
+  if (view.toolName === "run_custom") {
+    const command = typeof args.command === "string" ? args.command.trim() : "";
+    const rawArgs = Array.isArray(args.args) ? args.args : [];
+    const joinedArgs = rawArgs
+      .map((entry) => String(entry ?? "").trim())
+      .filter((entry) => entry.length > 0)
+      .join(" ");
+    const full = `${command} ${joinedArgs}`.trim();
+    if (full) {
+      return full;
+    }
+  }
+  return view.toolName;
 }
 
 function formatDateTime(value: string): string {
@@ -361,7 +465,7 @@ function toStructuredChecklist(
   const targetType = normalizeText(value.target_type) || "web_app";
   const availableTotal =
     typeof value.available_total === "number" &&
-    Number.isFinite(value.available_total)
+      Number.isFinite(value.available_total)
       ? value.available_total
       : blocks.reduce((count, block) => count + block.items.length, 0);
 
@@ -856,6 +960,7 @@ export default function Dashboard() {
   const [isInsightFullscreen, setIsInsightFullscreen] = useState(false);
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
+  const [locallyAckedApprovalId, setLocallyAckedApprovalId] = useState<string | null>(null);
   const [logLevelFilter, setLogLevelFilter] = useState<"all" | LogLevel>("all");
   const [logSourceFilter, setLogSourceFilter] = useState<string>("all");
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
@@ -868,6 +973,7 @@ export default function Dashboard() {
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
   const [plannerApprovalLoading, setPlannerApprovalLoading] = useState(false);
+  const [toolApprovalLoading, setToolApprovalLoading] = useState<"approve" | "skip" | null>(null);
   const [checklistActionKey, setChecklistActionKey] = useState<string | null>(
     null,
   );
@@ -883,6 +989,7 @@ export default function Dashboard() {
   const [projectEditName, setProjectEditName] = useState("");
   const [projectEditTarget, setProjectEditTarget] = useState("");
   const [projectEditDescription, setProjectEditDescription] = useState("");
+  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
   const dashboardSelectClass =
     "h-7 rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]";
 
@@ -930,7 +1037,14 @@ export default function Dashboard() {
         seenEventKeysRef.current = pruned;
       }
 
-      setScanEvents((previous) => [event, ...previous].slice(0, 400));
+      setScanEvents((previous) => {
+        const next = [event, ...previous];
+        next.sort(
+          (a, b) =>
+            new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+        );
+        return next.slice(0, 400);
+      });
 
       setStreamLogs((previous) => {
         const nextEntry: DashboardLogEntry = {
@@ -978,6 +1092,7 @@ export default function Dashboard() {
     if (!activeProjectId) {
       setStreamLogs([]);
       setScanEvents([]);
+      setLocallyAckedApprovalId(null);
       streamRetryRef.current = 0;
       setStreamRetry(0);
       lastLiveEventAtRef.current = 0;
@@ -991,6 +1106,7 @@ export default function Dashboard() {
     setAutoScrollLogs(true);
     setStreamLogs([]);
     setScanEvents([]);
+    setLocallyAckedApprovalId(null);
     streamRetryRef.current = 0;
     setStreamRetry(0);
     lastLiveEventAtRef.current = 0;
@@ -1098,13 +1214,20 @@ export default function Dashboard() {
   // Handle Escape key to exit fullscreen mode
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && isInsightFullscreen) {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (isCopilotOpen) {
+        setIsCopilotOpen(false);
+        return;
+      }
+      if (isInsightFullscreen) {
         setIsInsightFullscreen(false);
       }
     };
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
-  }, [isInsightFullscreen]);
+  }, [isInsightFullscreen, isCopilotOpen]);
 
   if (!activeProject) {
     return (
@@ -1155,6 +1278,65 @@ export default function Dashboard() {
     return lastScan?.status === "awaiting_planner_approval";
   })();
 
+  const pendingToolApproval: PendingToolApprovalView | null = (() => {
+    for (const event of scanEvents) {
+      if (event.event === "executer_tool_waiting_approval") {
+        const data = event.data;
+        const candidate = {
+          approvalId: typeof data.approval_id === "string" ? data.approval_id : "",
+          role: typeof data.role === "string" ? data.role : "",
+          toolName: typeof data.tool_name === "string" ? data.tool_name : "",
+          callId: typeof data.call_id === "string" ? data.call_id : "",
+          args: isRecord(data.args) ? data.args : {},
+        };
+        if (
+          candidate.approvalId &&
+          locallyAckedApprovalId &&
+          candidate.approvalId === locallyAckedApprovalId
+        ) {
+          return null;
+        }
+        return candidate;
+      }
+      if (
+        event.event === "executer_tool_approval_decision" ||
+        event.event === "scan_completed" ||
+        event.event === "scan_failed" ||
+        event.event === "scan_paused" ||
+        event.event === "scan_cancelled"
+      ) {
+        return null;
+      }
+    }
+
+    const lastScan = isRecord(activeProject.lastScan)
+      ? activeProject.lastScan
+      : null;
+    const waitingFlag = lastScan?.awaitingToolApproval;
+    const pending = isRecord(lastScan?.pendingToolApproval)
+      ? lastScan.pendingToolApproval
+      : null;
+    if (waitingFlag === true && pending) {
+      const candidate = {
+        approvalId: typeof pending.approval_id === "string" ? pending.approval_id : "",
+        role: typeof pending.role === "string" ? pending.role : "",
+        toolName: typeof pending.tool_name === "string" ? pending.tool_name : "",
+        callId: typeof pending.call_id === "string" ? pending.call_id : "",
+        args: isRecord(pending.args) ? pending.args : {},
+      };
+      if (
+        candidate.approvalId &&
+        locallyAckedApprovalId &&
+        candidate.approvalId === locallyAckedApprovalId
+      ) {
+        return null;
+      }
+      return candidate;
+    }
+    return null;
+  })();
+  const pendingToolCommandPreview = buildPendingApprovalCommand(pendingToolApproval);
+
   const handleApprovePlanner = async () => {
     if (!activeProjectId || plannerApprovalLoading || !isRunning) {
       return;
@@ -1183,6 +1365,42 @@ export default function Dashboard() {
     }
   };
 
+  const handleToolApproval = async (action: "approve" | "skip") => {
+    if (!activeProjectId || !isRunning || !pendingToolApproval?.approvalId || toolApprovalLoading) {
+      return;
+    }
+    const approvalId = pendingToolApproval.approvalId;
+    setLocallyAckedApprovalId(approvalId);
+    setToolApprovalLoading(action);
+    try {
+      await approveToolForProjectScanFromDesktop(activeProjectId, {
+        approvalId,
+        action,
+      });
+    } catch (error) {
+      setLocallyAckedApprovalId(null);
+      let message = "Failed to submit tool approval.";
+      if (error instanceof Error) {
+        message =
+          error.name === "AbortError"
+            ? "Approval request timed out while waiting for server response."
+            : error.message;
+      }
+      setStreamLogs((previous) => {
+        const nextEntry: DashboardLogEntry = {
+          id: `tool-approve-error-${Math.random().toString(36).slice(2, 10)}`,
+          level: "warn",
+          message: `Tool approval failed: ${message}`,
+          at: new Date().toISOString(),
+          source: "executer",
+        };
+        return [...previous, nextEntry].slice(-120);
+      });
+    } finally {
+      setToolApprovalLoading(null);
+    }
+  };
+
   const fallbackLogs: DashboardLogEntry[] = [];
   const baseTimestamp = activeProject.updatedAt || new Date().toISOString();
   const fallbackLastScan = isRecord(activeProject.lastScan)
@@ -1206,7 +1424,7 @@ export default function Dashboard() {
       message: `Scan failed: ${fallbackLastScanError}`,
       at:
         typeof fallbackLastScan?.finishedAt === "string" &&
-        fallbackLastScan.finishedAt
+          fallbackLastScan.finishedAt
           ? fallbackLastScan.finishedAt
           : baseTimestamp,
       source: "system",
@@ -1228,8 +1446,8 @@ export default function Dashboard() {
     streamLogs.length > 0
       ? streamLogs
       : fallbackLogs
-          .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
-          .slice(-14);
+        .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+        .slice(-14);
   const sourceOptions = Array.from(
     new Set(baseLogs.map((entry) => entry.source)),
   );
@@ -1242,6 +1460,78 @@ export default function Dashboard() {
     }
     return true;
   });
+  const realtimeVulnFindings: RealtimeVulnFinding[] = (() => {
+    const feed: RealtimeVulnFinding[] = [];
+
+    for (const finding of activeProject.findings) {
+      feed.push({
+        id: `finding-${finding.id}`,
+        title: finding.title,
+        severity: finding.severity,
+        source: "finding",
+        at: finding.timestamp,
+      });
+    }
+
+    for (const event of scanEvents) {
+      if (isOperationalToolEvent(event)) {
+        continue;
+      }
+      const source = detectLogSource(event);
+      const text = `${event.event} ${event.message}`.toLowerCase();
+      const isFailureEvent =
+        event.event.toLowerCase().includes("failed") ||
+        event.event.toLowerCase().includes("crashed");
+      const looksSecurityRelevant =
+        isFailureEvent ||
+        text.includes("vuln") ||
+        text.includes("finding") ||
+        text.includes("exploit") ||
+        text.includes("injection") ||
+        text.includes("xss") ||
+        text.includes("sqli") ||
+        text.includes("ssrf") ||
+        text.includes("idor") ||
+        text.includes("misconfig");
+      const isSystemFailureSignal =
+        source === "system" && (text.includes("scan failed") || isFailureEvent);
+      if (!looksSecurityRelevant && !isSystemFailureSignal) {
+        continue;
+      }
+      if (
+        !isFailureEvent &&
+        source === "system" &&
+        !text.includes("scan failed")
+      ) {
+        continue;
+      }
+      feed.push({
+        id: `event-${eventDedupKey(event)}`,
+        title: event.message,
+        severity: inferEventSeverity(event),
+        source,
+        at: event.timestamp,
+      });
+    }
+
+    const deduped = new Map<string, RealtimeVulnFinding>();
+    for (const item of feed) {
+      const key = `${item.title.toLowerCase()}|${item.at}`;
+      if (!deduped.has(key)) {
+        deduped.set(key, item);
+      }
+    }
+
+    return Array.from(deduped.values())
+      .sort((a, b) => {
+        const severityDiff = severityRank(b.severity) - severityRank(a.severity);
+        if (severityDiff !== 0) {
+          return severityDiff;
+        }
+        return new Date(b.at).getTime() - new Date(a.at).getTime();
+      })
+      .slice(0, 24);
+  })();
 
   const handleLogsScroll = () => {
     const container = logsContainerRef.current;
@@ -1443,10 +1733,10 @@ export default function Dashboard() {
     const nextChecklist = displayChecklist
       ? cloneStructuredChecklist(displayChecklist)
       : {
-          target_type: activeProject.targetType,
-          available_total: 0,
-          checklist: [],
-        };
+        target_type: activeProject.targetType,
+        available_total: 0,
+        checklist: [],
+      };
     const duplicate = nextChecklist.checklist.some((block) =>
       block.items.some(
         (item) => item.name.trim().toLowerCase() === name.toLowerCase(),
@@ -1468,8 +1758,8 @@ export default function Dashboard() {
     const selectedIndex = Number.parseInt(addItemPhase, 10);
     const blockIndex =
       Number.isInteger(selectedIndex) &&
-      selectedIndex >= 0 &&
-      selectedIndex < nextChecklist.checklist.length
+        selectedIndex >= 0 &&
+        selectedIndex < nextChecklist.checklist.length
         ? selectedIndex
         : 0;
 
@@ -1623,10 +1913,10 @@ export default function Dashboard() {
 
     const scopedEvents = scopedScanId
       ? allEvents.filter(
-          (event) =>
-            event.scan_id === scopedScanId ||
-            event.event === "scan_status_snapshot",
-        )
+        (event) =>
+          event.scan_id === scopedScanId ||
+          event.event === "scan_status_snapshot",
+      )
       : allEvents;
 
     const filteredEvents = [...scopedEvents].reverse(); // chronological (oldest -> newest)
@@ -1829,6 +2119,34 @@ export default function Dashboard() {
                     Continue to Planner
                   </Button>
                 ) : null}
+                {pendingToolApproval ? (
+                  <>
+                    <Button
+                      size="xs"
+                      variant="primary"
+                      onClick={() => {
+                        void handleToolApproval("approve");
+                      }}
+                      loading={toolApprovalLoading === "approve"}
+                      title={`Approve ${pendingToolCommandPreview} (${pendingToolApproval.role})`}
+                    >
+                      <Check size={12} />
+                      Approve Tool
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() => {
+                        void handleToolApproval("skip");
+                      }}
+                      loading={toolApprovalLoading === "skip"}
+                      title={`Skip ${pendingToolCommandPreview} (${pendingToolApproval.role})`}
+                    >
+                      <X size={12} />
+                      Skip Tool
+                    </Button>
+                  </>
+                ) : null}
                 <Button
                   size="xs"
                   variant="danger"
@@ -1931,10 +2249,8 @@ export default function Dashboard() {
         </div>
       </Card>
 
-      <StatsGrid findings={activeProject.findings} />
-
       <div className="grid gap-4 xl:grid-cols-2">
-        <Card className="flex h-[420px] flex-col space-y-3 p-3">
+        <Card className="flex h-[560px] flex-col space-y-3 p-3">
           <div className="flex items-center justify-between">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-base font-semibold text-text-primary">
@@ -2085,15 +2401,80 @@ export default function Dashboard() {
               </Button>
             </div>
           ) : null}
+          {pendingToolApproval ? (
+            <div className="mt-2 flex flex-col items-center gap-2 pt-2">
+              <p className="text-xs text-text-muted text-center">
+                Executer requests approval: <span className="font-semibold">{pendingToolApproval.role}</span> →{" "}
+                <span className="font-semibold break-all">{pendingToolCommandPreview}</span>
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={() => {
+                    void handleToolApproval("approve");
+                  }}
+                  loading={toolApprovalLoading === "approve"}
+                >
+                  <Check size={14} />
+                  Approve Tool
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    void handleToolApproval("skip");
+                  }}
+                  loading={toolApprovalLoading === "skip"}
+                >
+                  <X size={14} />
+                  Skip Tool
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </Card>
 
-        <AIPromptPanel
-          projectId={activeProject.id}
-          projectName={activeProject.name}
-          target={activeProject.target}
-          targetType={activeProject.targetType}
-          agents={activeProject.agents}
-        />
+        <Card className="flex h-[560px] flex-col space-y-3 p-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold text-text-primary">
+              Real-Time Vulnerability Findings
+            </h2>
+            <p className="text-sm text-text-muted">
+              {realtimeVulnFindings.length} items
+            </p>
+          </div>
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
+            {realtimeVulnFindings.length === 0 ? (
+              <p className="px-1 py-2 text-sm text-text-muted">
+                No vulnerability signals yet. Findings and risk-oriented events will appear here in real time.
+              </p>
+            ) : (
+              realtimeVulnFindings.map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-md border border-border bg-surface-1/45 p-2"
+                >
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <Badge
+                      variant="default"
+                      className={`border text-xs uppercase tracking-wide ${severityBadgeClass(item.severity)}`}
+                    >
+                      {item.severity}
+                    </Badge>
+                    <span className="text-xs text-text-muted">
+                      {formatTime(item.at)}
+                    </span>
+                  </div>
+                  <p className="text-sm text-text-primary">{item.title}</p>
+                  <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">
+                    source: {formatSourceLabel(item.source)}
+                  </p>
+                </div>
+              ))
+            )}
+          </div>
+        </Card>
       </div>
 
       {/* Fullscreen overlay for Execution Notes */}
@@ -2109,7 +2490,7 @@ export default function Dashboard() {
           className={
             isInsightFullscreen
               ? "fixed inset-4 z-50 flex flex-col space-y-3 overflow-hidden p-4"
-              : "space-y-3 p-3"
+              : "flex h-[560px] flex-col space-y-3 p-3"
           }
         >
           <div className="flex items-center justify-between">
@@ -2165,7 +2546,7 @@ export default function Dashboard() {
           </div>
 
           {insightTab === "plan" ? (
-            <div className={`space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2 ${isInsightFullscreen ? "flex-1" : "max-h-[430px]"}`}>
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
               {plannerPlanView?.phases?.length ? (
                 <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
                   {plannerPlanView.phases.map((phase, phaseIndex) => (
@@ -2234,7 +2615,7 @@ export default function Dashboard() {
               )}
             </div>
           ) : (
-            <div className={`space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2 ${isInsightFullscreen ? "flex-1" : "max-h-[430px]"}`}>
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
               {isAddEditorOpen ? (
                 <div className="space-y-2 rounded-md border border-border bg-surface-1/50 p-2">
                   <div className="grid gap-2 lg:grid-cols-[1fr_auto_auto_auto]">
@@ -2503,7 +2884,8 @@ export default function Dashboard() {
           agentInsights={agentInsights}
           showHeader
           subtitle="Intel ↓ Planner ↓ Executor Layer (parallel) ↓ Perceptor ↺ Planner"
-          graphHeightClassName="h-[580px]"
+          className="flex h-[560px] flex-col"
+          graphHeightClassName="min-h-0 flex-1"
         />
       </div>
 
@@ -2647,6 +3029,36 @@ export default function Dashboard() {
 
       <FindingsTable findings={activeProject.findings} />
 
+      {isCopilotOpen ? (
+        <div
+          className="fixed inset-0 z-40 bg-surface-0/45 backdrop-blur-[1px]"
+          onClick={() => setIsCopilotOpen(false)}
+        />
+      ) : null}
+      <div
+        className={`fixed bottom-24 right-4 z-50 w-[min(460px,calc(100vw-1.5rem))] transition-all duration-300 sm:right-6 ${isCopilotOpen
+            ? "pointer-events-auto translate-y-0 opacity-100"
+            : "pointer-events-none translate-y-4 opacity-0"
+          }`}
+      >
+        <AIPromptPanel
+          projectId={activeProject.id}
+          projectName={activeProject.name}
+          target={activeProject.target}
+          targetType={activeProject.targetType}
+          agents={activeProject.agents}
+        />
+      </div>
+      <Button
+        size="sm"
+        variant="primary"
+        onClick={() => setIsCopilotOpen((open) => !open)}
+        className="fixed bottom-4 right-4 z-50 h-12 w-12 rounded-full shadow-lg sm:bottom-6 sm:right-6"
+        title={isCopilotOpen ? "Hide AI chat" : "Open AI chat"}
+      >
+        <Bot size={18} />
+      </Button>
+
       <Dialog
         open={projectEditOpen}
         onClose={() => setProjectEditOpen(false)}
@@ -2726,6 +3138,7 @@ export default function Dashboard() {
                 setStopDialogOpen(false);
                 setStreamLogs([]);
                 setScanEvents([]);
+                setLocallyAckedApprovalId(null);
                 void stopScan(activeProject.id, "cancel");
               }}
             >

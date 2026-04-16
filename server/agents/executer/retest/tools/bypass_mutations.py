@@ -10,7 +10,8 @@ from typing import Any
 import structlog
 
 from server.core.tool import tool
-from server.core.llm import call_llm
+from server.config.agent import llm_mode, local_llm_config, public_llm_config
+from server.core.llm import ChatMessage, LLMClient
 from ..config import (
     USE_LLM_MUTATIONS,
     MAX_MUTATIONS_PER_PAYLOAD,
@@ -126,12 +127,27 @@ async def llm_generate_mutations(
         num_mutations=num_mutations,
     )
 
+    llm = LLMClient(
+        local_llm_config if llm_mode.mode == "local" else public_llm_config,
+        mode=llm_mode.mode,
+    )
+
     try:
-        response = await call_llm(
-            prompt=prompt,
-            system="You are a security testing expert specializing in WAF bypass techniques. Generate creative but realistic payload mutations.",
+        response_obj = await llm.chat(
+            [
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "You are a security testing expert specializing in WAF bypass techniques. "
+                        "Return strict JSON with keys: mutations (array), reasoning (string)."
+                    ),
+                ),
+                ChatMessage(role="user", content=prompt),
+            ],
             temperature=0.7,
+            max_tokens=1500,
         )
+        response = str(response_obj.content or "").strip()
 
         # Parse LLM response
         result = json.loads(response)
@@ -153,6 +169,11 @@ async def llm_generate_mutations(
             tech_stack=tech_stack,
             num_mutations=num_mutations,
         )
+    finally:
+        try:
+            await llm.close()
+        except Exception:
+            pass
 
 
 @tool(

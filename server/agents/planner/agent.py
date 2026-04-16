@@ -34,6 +34,7 @@ from server.config.agent import (
     PublicLLMConfig,
     local_llm_config,
     public_llm_config,
+    get_public_agent_config,
     llm_mode,
 )
 from server.core.llm import ChatMessage, LLMClient
@@ -566,7 +567,13 @@ def _strip_scenario_tool_fields(scenario: dict[str, Any]) -> dict[str, Any]:
 def _normalize_scenario_agent(scenario: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(scenario)
     agent = str(normalized.get("agent", "")).strip().lower()
-    if agent in {"report", "retest"}:
+    if agent in {"verify", "retest"}:
+        normalized["agent"] = "exploit"
+        return normalized
+    if agent == "reporting":
+        normalized["agent"] = "report"
+        return normalized
+    if agent == "report":
         return normalized
 
     task = str(normalized.get("task", "")).lower()
@@ -579,7 +586,6 @@ def _normalize_scenario_agent(scenario: dict[str, Any]) -> dict[str, Any]:
     )
     text = f"{task} {details} {method_text}"
 
-    verify_cues = ("verify", "validate", "confirm", "false positive", "triage")
     recon_cues = (
         "identify",
         "enumerate",
@@ -618,14 +624,16 @@ def _normalize_scenario_agent(scenario: dict[str, Any]) -> dict[str, Any]:
     has_recon = any(cue in text for cue in recon_cues)
     has_exploit = any(cue in text for cue in exploit_cues)
 
-    if has_verify:
-        normalized["agent"] = "verify"
-    elif has_recon and not has_exploit:
+    if has_recon and not has_exploit:
         normalized["agent"] = "recon"
-    elif has_exploit and agent not in {"verify", "report", "retest"}:
+    elif has_exploit and agent not in {"report"}:
         normalized["agent"] = "exploit"
+    elif agent == "report":
+        normalized["agent"] = "report"
     elif not agent:
         normalized["agent"] = "recon"
+    elif agent not in {"recon", "exploit", "report"}:
+        normalized["agent"] = "exploit" if has_exploit else "recon"
 
     return normalized
 
@@ -710,7 +718,7 @@ def _enforce_phase_gate(
         return merged[:3]
 
     if not is_loop:
-        early_agents = {"recon", "verify"}
+        early_agents = {"recon", "exploit"}
         early = [
             s
             for s in cleaned
@@ -891,8 +899,11 @@ def _normalize_dispatch_items(dispatch_items: list[dict[str, Any]]) -> list[dict
             continue
         entry = dict(item)
         agent = str(entry.get("agent") or entry.get("role") or "").strip().lower()
-        if agent in {"recon", "exploit", "verify", "report", "retest"}:
-            entry["agent"] = agent
+        if agent == "reporting":
+            agent = "report"
+        if agent not in {"recon", "exploit", "report"}:
+            continue
+        entry["agent"] = agent
         target_type = normalize_target_type(
             entry.get("target_type") or entry.get("surface") or ""
         )
@@ -1541,7 +1552,7 @@ class PlannerAgent:
             self._llm = LLMClient(self._local_config, mode="local")
             self._model_name = self._local_config.model
         else:
-            self._config = config or public_llm_config
+            self._config = config or get_public_agent_config("planner")
             self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
 

@@ -10,11 +10,12 @@ This service is the API entrypoint for scan execution:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -130,6 +131,167 @@ def _count_checklist_items(payload: Any) -> int:
         if isinstance(items, list):
             total += len(items)
     return total
+
+
+def _coerce_priority(value: Any) -> int | None:
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= p <= 5:
+        return p
+    return None
+
+
+def _normalize_priority(value: Any) -> int:
+    parsed = _coerce_priority(value)
+    return parsed if parsed is not None else 3
+
+
+def _extract_prioritized_exec_scenarios(
+    plan_data: dict[str, Any],
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    phases = plan_data.get("phases", [])
+    if not isinstance(phases, list):
+        return []
+
+    indexed: list[tuple[int, int, int, int, dict[str, Any]]] = []
+    for phase_idx, phase in enumerate(phases):
+        if not isinstance(phase, dict):
+            continue
+        phase_name = str(phase.get("name", "")).strip()
+        steps = phase.get("steps", [])
+        if not isinstance(steps, list):
+            continue
+        for step_idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("id", "")).strip()
+            scenarios = step.get("scenarios", [])
+            if not isinstance(scenarios, list):
+                continue
+            for scen_idx, scenario in enumerate(scenarios):
+                if not isinstance(scenario, dict):
+                    continue
+                if bool(scenario.get("done", False)):
+                    continue
+                agent = str(scenario.get("agent", "")).strip().lower()
+                if agent not in {"recon", "exploit"}:
+                    continue
+                priority = _normalize_priority(scenario.get("priority", 3))
+                enriched = dict(scenario)
+                enriched["priority"] = priority
+                enriched["agent"] = agent
+                enriched["_phase"] = phase_name
+                enriched["_step_id"] = step_id
+                enriched["_phase_index"] = phase_idx
+                enriched["_step_index"] = step_idx
+                enriched["_scenario_index"] = scen_idx
+                indexed.append((priority, phase_idx, step_idx, scen_idx, enriched))
+
+    indexed.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    return [row[4] for row in indexed[: max(0, int(limit))]]
+
+
+def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pick at most one recon and one exploit scenario (highest priority each)."""
+    candidates = _extract_prioritized_exec_scenarios(plan_data, limit=50)
+    best_recon: dict[str, Any] | None = None
+    best_exploit: dict[str, Any] | None = None
+
+    for scenario in candidates:
+        role = str(scenario.get("agent", "")).strip().lower()
+        if role == "recon" and best_recon is None:
+            best_recon = scenario
+        elif role == "exploit" and best_exploit is None:
+            best_exploit = scenario
+        if best_recon is not None and best_exploit is not None:
+            break
+
+    selected = [s for s in [best_recon, best_exploit] if isinstance(s, dict)]
+    selected.sort(key=lambda s: _normalize_priority(s.get("priority", 3)))
+    return selected
+
+
+def _mark_scenario_done_in_plan(plan_data: dict[str, Any], scenario: dict[str, Any]) -> bool:
+    """Mark a scenario as done in plan_data using stored indexes (fallback to matching)."""
+    phases = plan_data.get("phases")
+    if not isinstance(phases, list):
+        return False
+
+    phase_idx = scenario.get("_phase_index")
+    step_idx = scenario.get("_step_index")
+    scen_idx = scenario.get("_scenario_index")
+    if isinstance(phase_idx, int) and isinstance(step_idx, int) and isinstance(scen_idx, int):
+        try:
+            target = phases[phase_idx]["steps"][step_idx]["scenarios"][scen_idx]
+            if isinstance(target, dict):
+                target["done"] = True
+                target["status"] = "done"
+                return True
+        except (IndexError, KeyError, TypeError):
+            pass
+
+    target_task = str(scenario.get("task", "")).strip().lower()
+    target_agent = str(scenario.get("agent", "")).strip().lower()
+    target_priority = _normalize_priority(scenario.get("priority", 3))
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        steps = phase.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            scenarios = step.get("scenarios")
+            if not isinstance(scenarios, list):
+                continue
+            for item in scenarios:
+                if not isinstance(item, dict):
+                    continue
+                if bool(item.get("done", False)):
+                    continue
+                task = str(item.get("task", "")).strip().lower()
+                agent = str(item.get("agent", "")).strip().lower()
+                priority = _normalize_priority(item.get("priority", 3))
+                if task == target_task and agent == target_agent and priority == target_priority:
+                    item["done"] = True
+                    item["status"] = "done"
+                    return True
+    return False
+
+
+def _route_followup_from_assessment(assessment: dict[str, Any]) -> str:
+    overall = assessment.get("overall", {}) if isinstance(assessment, dict) else {}
+    if not isinstance(overall, dict):
+        return "planner"
+    ssvc = str(overall.get("ssvc", "TRACK")).strip().upper()
+    confidence = str(overall.get("confidence", "low")).strip().lower()
+
+    if ssvc == "ACT":
+        return "verify"
+    if ssvc == "ATTEND" and confidence in {"medium", "high"}:
+        return "retest"
+    return "planner"
+
+
+def _extract_failed_execution_rows(
+    execution_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    failed: list[dict[str, Any]] = []
+    for row in execution_rows:
+        if not isinstance(row, dict):
+            continue
+        result = row.get("result")
+        if not isinstance(result, dict):
+            continue
+        status = str(result.get("status", "")).strip().lower()
+        if status in {"failed", "error"}:
+            failed.append(row)
+    return failed
 
 
 def _classify_intel_log_kind(message: str) -> str:
@@ -272,6 +434,80 @@ class PrintCallback:
             )
         # Secure default: deny unless orchestration layer explicitly approves.
         return False
+
+
+class ExecuterScanCallback:
+    """Executer callback bridged to scan event bus + approval workflow."""
+
+    def __init__(
+        self,
+        *,
+        service: "ScanOrchestratorService",
+        project_id: str,
+        scan_id: str,
+        enabled: bool = True,
+    ) -> None:
+        self._service = service
+        self._project_id = project_id
+        self._scan_id = scan_id
+        self._enabled = enabled
+        self._start = time.perf_counter()
+
+    def _ts(self) -> str:
+        return f"[{time.perf_counter() - self._start:.1f}s]"
+
+    def on_step(self, message: str) -> None:
+        if self._enabled:
+            print(f"  → {message} {self._ts()}", flush=True)
+        self._service._emit_event(  # noqa: SLF001
+            self._project_id,
+            event="executer_step",
+            scan_id=self._scan_id,
+            level="info",
+            message=f"Executer [step] {message}",
+            data={"stage": "executer", "kind": "step", "raw_message": message},
+        )
+
+    def on_done(self, message: str) -> None:
+        if self._enabled:
+            print(f"  ✓ {message}", flush=True)
+        self._service._emit_event(  # noqa: SLF001
+            self._project_id,
+            event="executer_done",
+            scan_id=self._scan_id,
+            level="success",
+            message=f"Executer [done] {message}",
+            data={"stage": "executer", "kind": "done", "raw_message": message},
+        )
+
+    def on_warn(self, message: str) -> None:
+        if self._enabled:
+            print(f"  ⚠ {message}", flush=True)
+        self._service._emit_event(  # noqa: SLF001
+            self._project_id,
+            event="executer_warn",
+            scan_id=self._scan_id,
+            level="warn",
+            message=f"Executer [warn] {message}",
+            data={"stage": "executer", "kind": "warn", "raw_message": message},
+        )
+
+    async def request_tool_approval(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        return await self._service.request_executer_tool_approval(
+            project_id=self._project_id,
+            scan_id=self._scan_id,
+            role=role,
+            tool_name=tool_name,
+            args=args,
+            call_id=call_id,
+        )
 
 
 @dataclass
@@ -835,8 +1071,19 @@ class ScanOrchestratorService:
 
         run_state = self._runs.get(project_key)
         if isinstance(run_state, dict):
-            run_state["awaiting_tool_approval"] = False
-            run_state["pending_tool_approval"] = None
+            if project_pending:
+                next_id, next_pending = next(iter(project_pending.items()))
+                run_state["awaiting_tool_approval"] = True
+                run_state["pending_tool_approval"] = {
+                    "approval_id": next_id,
+                    "scan_id": next_pending.scan_id,
+                    "role": next_pending.role,
+                    "tool_name": next_pending.tool_name,
+                    "call_id": next_pending.call_id,
+                }
+            else:
+                run_state["awaiting_tool_approval"] = False
+                run_state["pending_tool_approval"] = None
             run_state["updated_at"] = _utc_now_iso()
             self._runs[project_key] = run_state
 
@@ -987,6 +1234,364 @@ class ScanOrchestratorService:
             task.result()
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("scan_orchestrator_task_crashed", project_id=project_id, error=repr(exc))
+
+    def _build_executer_message(
+        self,
+        *,
+        scenario: dict[str, Any],
+        target: str,
+        target_type: str,
+        scope: str,
+        info: str,
+    ) -> str:
+        return (
+            f"Scenario: {str(scenario.get('task', '')).strip()}\n"
+            f"Agent: {str(scenario.get('agent', '')).strip()}\n"
+            f"Priority: {_normalize_priority(scenario.get('priority', 3))}\n"
+            f"Details: {str(scenario.get('details', '')).strip()}\n"
+            f"Methods: {json.dumps(scenario.get('methods', []), ensure_ascii=True)}\n"
+            f"Target: {target}\n"
+            f"Target type: {target_type}\n"
+            f"Scope: {scope}\n"
+            f"Extra info: {info}\n"
+        )
+
+    async def _execute_scenario_with_agent(
+        self,
+        *,
+        scenario: dict[str, Any],
+        recon_agent: Any,
+        exploit_agent: Any,
+        target: str,
+        target_type: str,
+        scope: str,
+        info: str,
+    ) -> dict[str, Any]:
+        message = self._build_executer_message(
+            scenario=scenario,
+            target=target,
+            target_type=target_type,
+            scope=scope,
+            info=info,
+        )
+        role = str(scenario.get("agent", "recon")).strip().lower()
+        if role == "exploit":
+            result = await exploit_agent.run(message)
+        else:
+            role = "recon"
+            result = await recon_agent.run(message)
+        return {
+            "scenario": dict(scenario),
+            "executor_agent": role,
+            "result": {
+                "status": result.status,
+                "summary": result.summary,
+                "findings": result.findings,
+                "evidence": result.evidence,
+                "needs": result.needs,
+                "tool_results": result.tool_results,
+                "discovered_target_types": result.discovered_target_types,
+            },
+        }
+
+    async def _run_execution_cycle(
+        self,
+        *,
+        plan_data: dict[str, Any],
+        recon_agent: Any,
+        exploit_agent: Any,
+        verify_agent: Any,
+        retest_agent: Any,
+        perceptor_agent: Any,
+        loop_planner: Any,
+        target: str,
+        target_type: str,
+        scope: str,
+        info: str,
+        intel_checklist: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        """
+        Execute one full cycle: select scenarios → run parallel → perceptor decides → verify/retest/plan.
+
+        Returns: (should_continue, updated_plan_data)
+            should_continue=False means Planner said "done"
+        """
+        # Select at most 1 recon + 1 exploit from pending scenarios
+        selected = _select_recon_exploit_parallel_scenarios(plan_data)
+        if not selected:
+            # No more scenarios - ask planner if done
+            return await self._check_planner_completion(
+                loop_planner=loop_planner,
+                plan_data=plan_data,
+                target=target,
+                target_type=target_type,
+                scope=scope,
+                info=info,
+                intel_checklist=intel_checklist,
+            )
+
+        # Run selected scenarios in parallel (true async with asyncio.gather)
+        execution_rows: list[dict[str, Any]] = []
+        if selected:
+            results = await asyncio.gather(*[
+                self._execute_scenario_with_agent(
+                    scenario=scenario,
+                    recon_agent=recon_agent,
+                    exploit_agent=exploit_agent,
+                    target=target,
+                    target_type=target_type,
+                    scope=scope,
+                    info=info,
+                )
+                for scenario in selected
+            ])
+            execution_rows.extend(results)
+
+        # Process results through Perceptor (make decisions as findings arrive)
+        perceptor_rows: list[dict[str, Any]] = []
+        planner_loop_rows: list[dict[str, Any]] = []
+
+        for idx, row in enumerate(execution_rows, start=1):
+            row_result = row.get("result", {}) if isinstance(row, dict) else {}
+            row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
+            if row_status in {"failed", "error"}:
+                continue
+
+            scenario = row.get("scenario", {})
+            tool_results = (
+                row.get("result", {}).get("tool_results", [])
+                if isinstance(row.get("result"), dict)
+                else []
+            )
+
+            # Perceptor analyzes findings
+            assessment = await perceptor_agent.assess_tool_results(
+                scenario=scenario if isinstance(scenario, dict) else {},
+                tool_results=tool_results if isinstance(tool_results, list) else [],
+                asset_context={
+                    "criticality": (
+                        "high"
+                        if _normalize_priority((scenario or {}).get("priority", 3)) <= 2
+                        else "medium"
+                    ),
+                    "internet_exposed": target_type in {"web_app", "api"},
+                },
+            )
+            perceptor_rows.append(assessment)
+
+            compact_summary = str(assessment.get("compact_summary", "")).strip()
+            followup_route = _route_followup_from_assessment(assessment)
+            assessment["followup_route"] = followup_route
+
+            self._emit_event(
+                scenario.get("_project_id", ""),  # Placeholder
+                event="perceptor_classified",
+                scan_id="",  # Placeholder
+                level="info",
+                message=(
+                    f"Perceptor [classified] scenario #{idx} → "
+                    f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
+                    f"(route={followup_route})"
+                ),
+                data={
+                    "stage": "perceptor",
+                    "kind": "classified",
+                    "iteration": idx,
+                    "assessment": assessment,
+                },
+            )
+
+            # Verify-Driven Chain: Finding → Verify → [Real Vuln → Planner + Retest] OR [False Positive → Planner]
+            finding_type = str(assessment.get("finding_type", "info")).strip().lower()
+
+            if finding_type == "vulnerability":
+                # Step 1: Route to VERIFY to confirm (filter false positives)
+                verify_message = (
+                    f"Target: {target}\n"
+                    f"Target type: {target_type}\n"
+                    f"Scope: {scope}\n"
+                    f"Original scenario: {json.dumps(scenario, ensure_ascii=True)}\n\n"
+                    "Finding to verify:\n"
+                    f"{compact_summary}\n\n"
+                    "Execution row:\n"
+                    f"{json.dumps(row, ensure_ascii=True)}"
+                )
+                verify_result = await verify_agent.run(verify_message)
+                # Convert ExecuterResult to dict for easier access
+                verify_data = asdict(verify_result) if hasattr(verify_result, '__dataclass_fields__') else verify_result
+                verdict = str(verify_data.get("verdict", verify_data.get("summary", "inconclusive"))).strip().lower()
+
+                if verdict == "real_vulnerability":
+                    # Step 2a: Real vulnerability found - route to both PLANNER and RETEST
+                    verify_summary = str(verify_data.get("summary", "")).strip()
+
+                    # Send to Planner for plan update
+                    planner_message = (
+                        f"Target: {target}\n"
+                        f"Target type: {target_type}\n"
+                        f"Scope: {scope}\n\n"
+                        "Verified Vulnerability (confirmed by Verify agent):\n"
+                        f"{verify_summary}"
+                    )
+                    planner_loop_result = await loop_planner.run(
+                        planner_message,
+                        is_loop=True,
+                        intel_checklist=intel_checklist,
+                    )
+
+                    # Send to Retest to build report entry
+                    retest_message = (
+                        f"Target: {target}\n"
+                        f"Target type: {target_type}\n"
+                        f"Scope: {scope}\n\n"
+                        "Confirmed Vulnerability - Build Report Entry:\n"
+                        f"{verify_summary}\n\n"
+                        "Verify Evidence:\n"
+                        f"{json.dumps(verify_data.get('evidence', {}), ensure_ascii=True)}"
+                    )
+                    retest_result = await retest_agent.run(retest_message)
+
+                    planner_loop_rows.append(
+                        {
+                            "iteration": idx,
+                            "route": "verify->planner+retest",
+                            "verdict": verdict,
+                            "verify_summary": verify_summary,
+                            "planner_summary": str(planner_loop_result.summary or "").strip(),
+                            "retest_summary": str(retest_result.summary or "").strip(),
+                            "compact_bridge": compact_summary,
+                        }
+                    )
+
+                elif verdict == "false_positive":
+                    # Step 2b: False positive - route to PLANNER only with short report
+                    false_positive_report = str(verify_data.get("summary", "Not a real vulnerability")).strip()
+
+                    planner_message = (
+                        f"Target: {target}\n"
+                        f"Target type: {target_type}\n"
+                        f"Scope: {scope}\n\n"
+                        "False Positive Report (not a real vulnerability):\n"
+                        f"{false_positive_report}"
+                    )
+                    planner_loop_result = await loop_planner.run(
+                        planner_message,
+                        is_loop=True,
+                        intel_checklist=intel_checklist,
+                    )
+
+                    planner_loop_rows.append(
+                        {
+                            "iteration": idx,
+                            "route": "verify->planner(false_positive)",
+                            "verdict": verdict,
+                            "false_positive_reason": false_positive_report,
+                            "planner_summary": str(planner_loop_result.summary or "").strip(),
+                            "compact_bridge": compact_summary,
+                        }
+                    )
+                else:
+                    # Inconclusive - route to planner for decision
+                    planner_message = (
+                        f"Target: {target}\n"
+                        f"Target type: {target_type}\n"
+                        f"Scope: {scope}\n\n"
+                        "Verification Inconclusive (needs manual review):\n"
+                        f"{compact_summary}"
+                    )
+                    planner_loop_result = await loop_planner.run(
+                        planner_message,
+                        is_loop=True,
+                        intel_checklist=intel_checklist,
+                    )
+
+                    planner_loop_rows.append(
+                        {
+                            "iteration": idx,
+                            "route": "verify->planner(inconclusive)",
+                            "verdict": verdict,
+                            "planner_summary": str(planner_loop_result.summary or "").strip(),
+                            "compact_bridge": compact_summary,
+                        }
+                    )
+
+            else:
+                # INFO only - route directly to PLANNER without verification
+                loop_message = (
+                    f"Target: {target}\n"
+                    f"Target type: {target_type}\n"
+                    f"Scope: {scope}\n\n"
+                    "Reconnaissance Finding (no vulnerability, informational):\n"
+                    f"{compact_summary}\n\n"
+                    "Update plan based on this evidence and continue scanning."
+                )
+                loop_result = await loop_planner.run(
+                    loop_message,
+                    is_loop=True,
+                    intel_checklist=intel_checklist,
+                )
+                loop_summary = str(loop_result.summary or "").strip()
+                if loop_summary.lower().startswith("planning failed:"):
+                    raise RuntimeError(f"planner loop failed: {loop_summary}")
+
+                # Update plan data from planner
+                loop_plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
+                if loop_plan_data:
+                    plan_data = loop_plan_data
+
+                planner_loop_rows.append(
+                    {
+                        "iteration": idx,
+                        "route": "perceptor->planner(info_only)",
+                        "summary": loop_summary,
+                        "needs": list(loop_result.needs),
+                        "action_plan": (
+                            dict(loop_result.action_plan)
+                            if isinstance(loop_result.action_plan, dict)
+                            else {}
+                        ),
+                        "compact_bridge": compact_summary,
+                    }
+                )
+
+            # Mark scenario as done in plan
+            if isinstance(scenario, dict):
+                _mark_scenario_done_in_plan(plan_data, scenario)
+
+        # Continue to next cycle
+        return True, plan_data
+
+    async def _check_planner_completion(
+        self,
+        *,
+        loop_planner: Any,
+        plan_data: dict[str, Any],
+        target: str,
+        target_type: str,
+        scope: str,
+        info: str,
+        intel_checklist: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        """Ask planner if pentest is complete."""
+        completion_message = (
+            f"Target: {target}\n"
+            f"Target type: {target_type}\n"
+            f"Scope: {scope}\n\n"
+            "No more pending scenarios. Review plan:\n"
+            "- If any critical P1-P2 items remain untested, return updated plan with new scenarios\n"
+            "- If all critical items tested, return summary: 'Pentest complete.'"
+        )
+
+        plan_result = await loop_planner.run(
+            completion_message,
+            is_loop=True,
+            intel_checklist=intel_checklist,
+        )
+
+        summary = str(plan_result.summary or "").strip()
+        is_done = "complete" in summary.lower()
+
+        return not is_done, plan_data
 
     async def _run_scan(
         self,
@@ -1337,6 +1942,178 @@ class ScanOrchestratorService:
             },
         )
 
+        execution_rows: list[dict[str, Any]] = []
+        perceptor_rows: list[dict[str, Any]] = []
+        planner_loop_rows: list[dict[str, Any]] = []
+        exec_scope = scope_text
+        executer_error: str = ""
+
+        self._emit_event(
+            project_id,
+            event="executer_started",
+            scan_id=scan_id,
+            level="info",
+            message="Executer [start] starting first prioritized scenario wave.",
+            data={"stage": "executer", "kind": "start"},
+        )
+
+        try:
+            from server.agents.executer.recon.agent import ReconExecuterAgent
+            from server.agents.executer.exploit.agent import ExploitExecuterAgent
+            from server.agents.executer.verify.agent import VerifyExecuterAgent
+            from server.agents.executer.retest.agent import RetestExecuterAgent
+            from server.agents.perceptor.agent import PerceptorAgent
+            from server.agents.planner.agent import PlannerAgent
+            from server.agents.planner.tools.pentest_plan import _current_plan
+
+            executer_callback = ExecuterScanCallback(
+                service=self,
+                project_id=project_id,
+                scan_id=scan_id,
+                enabled=print_steps,
+            )
+
+            recon_agent = ReconExecuterAgent(
+                callback=executer_callback,
+                target_types=[target_type],
+                project_id=project_id,
+            )
+            exploit_agent = ExploitExecuterAgent(
+                callback=executer_callback,
+                target_types=[target_type],
+                project_id=project_id,
+            )
+            verify_agent = VerifyExecuterAgent(
+                callback=executer_callback,
+                project_id=project_id,
+            )
+            retest_agent = RetestExecuterAgent(
+                callback=executer_callback,
+                project_id=project_id,
+            )
+            perceptor_agent = PerceptorAgent(project_id=project_id)
+            loop_planner_callback = PrintCallback(
+                enabled=print_steps,
+                on_log=lambda level, message: self._emit_planner_callback_event(
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    level=level,
+                    raw_message=message,
+                ),
+            )
+            loop_planner = PlannerAgent(
+                callback=loop_planner_callback,
+                project_id=project_id,
+            )
+
+            try:
+                execution_rows: list[dict[str, Any]] = []
+                perceptor_rows: list[dict[str, Any]] = []
+                planner_loop_rows: list[dict[str, Any]] = []
+                exec_scope = scope_text
+
+                self._emit_event(
+                    project_id,
+                    event="executer_started",
+                    scan_id=scan_id,
+                    level="info",
+                    message="Executer [start] entering cyclic execution loop.",
+                    data={"stage": "executer", "kind": "start"},
+                )
+
+                # CYCLIC EXECUTION LOOP
+                cycle_count = 0
+                max_cycles = 20  # Safety limit
+                while cycle_count < max_cycles:
+                    cycle_count += 1
+                    self._emit_event(
+                        project_id,
+                        event="executer_cycle_start",
+                        scan_id=scan_id,
+                        level="info",
+                        message=f"Executer [cycle {cycle_count}] starting scenario selection.",
+                        data={
+                            "stage": "executer",
+                            "kind": "cycle_start",
+                            "cycle": cycle_count,
+                        },
+                    )
+
+                    should_continue, updated_plan = await self._run_execution_cycle(
+                        plan_data=plan_data,
+                        recon_agent=recon_agent,
+                        exploit_agent=exploit_agent,
+                        verify_agent=verify_agent,
+                        retest_agent=retest_agent,
+                        perceptor_agent=perceptor_agent,
+                        loop_planner=loop_planner,
+                        target=target,
+                        target_type=target_type,
+                        scope=exec_scope,
+                        info=info,
+                        intel_checklist=intel_checklist,
+                    )
+                    plan_data = updated_plan
+
+                    if not should_continue:
+                        self._emit_event(
+                            project_id,
+                            event="executer_planner_says_done",
+                            scan_id=scan_id,
+                            level="success",
+                            message="Executer [done signal] Planner returned completion.",
+                            data={
+                                "stage": "executer",
+                                "kind": "planner_done",
+                                "cycle": cycle_count,
+                            },
+                        )
+                        break
+
+                self._emit_event(
+                    project_id,
+                    event="executer_complete",
+                    scan_id=scan_id,
+                    level="success",
+                    message=f"Executer [completed] finished after {cycle_count} cycle(s).",
+                    data={
+                        "stage": "executer",
+                        "kind": "completed",
+                        "cycle_count": cycle_count,
+                        "execution_count": len(execution_rows),
+                        "perceptor_count": len(perceptor_rows),
+                        "planner_loop_count": len(planner_loop_rows),
+                    },
+                )
+            finally:
+                await recon_agent.close()
+                await exploit_agent.close()
+                await verify_agent.close()
+                await retest_agent.close()
+                await perceptor_agent.close()
+                await loop_planner.close()
+        except Exception as exc:
+            executer_error = str(exc)
+            self._emit_event(
+                project_id,
+                event="executer_crashed",
+                scan_id=scan_id,
+                level="warn",
+                message=f"Executer [crashed] {exc}",
+                data={
+                    "stage": "executer",
+                    "kind": "crashed",
+                    "error": str(exc),
+                },
+            )
+        if executer_error:
+            self._mark_failed(
+                project_id,
+                scan_id,
+                f"executer runtime error: {executer_error}",
+            )
+            return
+
         finished_at = _utc_now_iso()
 
         scan_meta = {
@@ -1365,6 +2142,9 @@ class ScanOrchestratorService:
                     ),
                     "plan_data": plan_data,
                 },
+                "execution": execution_rows,
+                "perceptor": perceptor_rows,
+                "plannerLoops": planner_loop_rows,
             },
         }
 

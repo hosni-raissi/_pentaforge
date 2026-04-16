@@ -7,9 +7,11 @@ import socket
 #  LLM Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MAX_TOOL_ROUNDS = 10
-LLM_CALL_TIMEOUT_SECONDS = 300
-RECON_CONTEXT_WINDOW_MAX_TOKENS = 12000
+MAX_TOOL_ROUNDS = 3
+LLM_CALL_TIMEOUT_SECONDS = 60
+RECON_CONTEXT_WINDOW_MAX_TOKENS = 15000
+RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000
+RECON_MAX_TOOL_CALLS_PER_ROUND = 2
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Port Scanning Configuration
@@ -18,14 +20,14 @@ RECON_CONTEXT_WINDOW_MAX_TOKENS = 12000
 NMAP_DEFAULT_PORTS = "21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5432,5900,8080,8443"
 NMAP_FULL_PORTS = "1-65535"
 NMAP_TOP_PORTS = 1000
-NMAP_SCAN_TIMEOUT = 600  # 10 minutes
+NMAP_SCAN_TIMEOUT = 240  # 4 minutes max per tool execution
 MASSCAN_RATE = 1000  # packets per second
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Subdomain Enumeration Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-AMASS_TIMEOUT = 300  # 5 minutes
+AMASS_TIMEOUT = 240  # 4 minutes max per tool
 SUBDOMAIN_WORDLIST_SIZE = 10000  # top subdomains to check
 MAX_SUBDOMAINS_RETURN = 500
 
@@ -41,8 +43,8 @@ SHODAN_LIMIT = 100
 #  Secret Discovery Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-TRUFFLEHOG_TIMEOUT = 300
-GITLEAKS_TIMEOUT = 300
+TRUFFLEHOG_TIMEOUT = 240  # 4 minutes max
+GITLEAKS_TIMEOUT = 240  # 4 minutes max
 MAX_SECRETS_RETURN = 100
 
 # ═══════════════════════════════════════════════════════════════════════════════

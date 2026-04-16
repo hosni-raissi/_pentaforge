@@ -59,7 +59,77 @@ _LLM_DEBUG_LOGS = os.getenv("LLM_DEBUG_LOGS", "").strip().lower() in {"1", "true
 
 # ── LLM Configuration ─────────────────────────────────────────────────────────
 
-LLMProvider = Literal["cerebras", "mistral", "groq", "openai", "together", "ollama", "custom"]
+LLMProvider = Literal["cerebras", "mistral", "groq", "openai", "together", "ollama", "nvidia", "custom"]
+
+_PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
+    "cerebras": {
+        "model": "qwen-3-235b-a22b-instruct-2507",
+        "api_url": "https://api.cerebras.ai/v1",
+        "max_tokens": 9000,
+    },
+    "mistral": {
+        "model": "mistral-large-latest",
+        "api_url": "https://api.mistral.ai/v1",
+        "max_tokens": 8096,
+    },
+    "groq": {
+        "model": "llama-3.3-70b-versatile",
+        "api_url": "https://api.groq.com/openai/v1",
+        "max_tokens": 8096,
+    },
+    "openai": {
+        "model": "gpt-4o",
+        "api_url": "https://api.openai.com/v1",
+        "max_tokens": 4096,
+    },
+    "together": {
+        "model": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+        "api_url": "https://api.together.xyz/v1",
+        "max_tokens": 4096,
+    },
+    "ollama": {
+        "model": "qwen3:4b",
+        "api_url": "http://localhost:11434/v1",
+        "max_tokens": 8192,
+    },
+    "nvidia": {
+        "model": "meta/llama-3.1-70b-instruct",
+        "api_url": "https://integrate.api.nvidia.com/v1",
+        "max_tokens": 4096,
+    },
+}
+
+
+def _env_first(*keys: str, default: str = "") -> str:
+    for key in keys:
+        value = os.getenv(key)
+        if value is not None and str(value).strip() != "":
+            return str(value).strip()
+    return default
+
+
+def _provider_defaults(provider: str) -> dict[str, Any]:
+    return _PROVIDER_DEFAULTS.get(provider, _PROVIDER_DEFAULTS["cerebras"])
+
+
+def _agent_role_token(agent_role: str | None) -> str:
+    return str(agent_role or "").strip().lower().replace("-", "_")
+
+
+_ROLE_ALIASES: dict[str, str] = {
+    "reporting": "report",
+}
+
+
+_ROLE_GROUPS: dict[str, str] = {
+    "intel": "INTEL_REPORT",
+    "report": "INTEL_REPORT",
+    "planner": "PLANNER",
+    "recon": "RECON",
+    "exploit": "EXPLOIT",
+    "retest": "RETEST_VERIFY",
+    "verify": "RETEST_VERIFY",
+}
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -76,42 +146,7 @@ class LLMConfig:
     def from_env(cls, prefix: str = "AGENT_LLM_") -> LLMConfig:
         """Load configuration from environment variables."""
         provider = os.getenv(f"{prefix}API_PROVIDER", "cerebras").strip().lower()
-
-        # Provider-specific defaults
-        defaults: dict[str, dict[str, Any]] = {
-            "cerebras": {
-                "model": "qwen-3-235b-a22b-instruct-2507",
-                "api_url": "https://api.cerebras.ai/v1",
-                "max_tokens": 9000,
-            },
-            "mistral": {
-                "model": "mistral-large-latest",
-                "api_url": "https://api.mistral.ai/v1",
-                "max_tokens": 8096,
-            },
-            "groq": {
-                "model": "llama-3.3-70b-versatile",
-                "api_url": "https://api.groq.com/openai/v1",
-                "max_tokens": 8096,
-            },
-            "openai": {
-                "model": "gpt-4o",
-                "api_url": "https://api.openai.com/v1",
-                "max_tokens": 4096,
-            },
-            "together": {
-                "model": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-                "api_url": "https://api.together.xyz/v1",
-                "max_tokens": 4096,
-            },
-            "ollama": {
-                "model": "qwen3:4b",
-                "api_url": "http://localhost:11434/v1",
-                "max_tokens": 8192,
-            },
-        }
-
-        provider_defaults = defaults.get(provider, defaults["cerebras"])
+        provider_defaults = _provider_defaults(provider)
 
         return cls(
             provider=provider,
@@ -148,6 +183,92 @@ def get_config() -> LLMConfig:
     if mode == "local":
         return LLMConfig.local()
     return LLMConfig.from_env()
+
+
+def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
+    """Resolve public LLM config with optional role-specific overrides.
+
+    Resolution order for each field:
+    1) AGENT_LLM_<ROLE>_* override
+    2) AGENT_LLM_GROUP_<GROUP>_* override (optional shared profile)
+    3) AGENT_LLM_* global setting
+    4) Provider defaults
+
+    NVIDIA compatibility:
+    - Accepts both NVIDIA_* and legacy misspelled NVIDEA_* variables.
+    - If provider is nvidia and role-specific API key is unset, uses NVIDIA_API_KEY/NVIDEA_API_KEY.
+    """
+    base = LLMConfig.from_env("AGENT_LLM_")
+    role_token = _agent_role_token(agent_role)
+    role_token = _ROLE_ALIASES.get(role_token, role_token)
+    if not role_token:
+        return base
+
+    role_prefix = f"AGENT_LLM_{role_token.upper()}_"
+    group_name = _ROLE_GROUPS.get(role_token, "")
+    group_prefix = f"AGENT_LLM_GROUP_{group_name}_" if group_name else ""
+
+    provider = _env_first(
+        f"{role_prefix}API_PROVIDER",
+        *((f"{group_prefix}API_PROVIDER",) if group_prefix else ()),
+        default=base.provider,
+    ).lower()
+    defaults = _provider_defaults(provider)
+
+    if provider == "nvidia":
+        default_model = _env_first("NVIDIA_MODEL", "NVIDEA_MODEL", default=str(defaults["model"]))
+        default_url = _env_first("NVIDIA_API_URL", "NVIDEA_API_URL", default=str(defaults["api_url"]))
+        default_key = _env_first("NVIDIA_API_KEY", "NVIDEA_API_KEY", default=base.api_key)
+    else:
+        default_model = str(defaults["model"])
+        default_url = str(defaults["api_url"])
+        default_key = base.api_key
+
+    model = _env_first(
+        f"{role_prefix}MODEL",
+        *((f"{group_prefix}MODEL",) if group_prefix else ()),
+        default=base.model or default_model,
+    )
+    api_url = _env_first(
+        f"{role_prefix}API_URL",
+        *((f"{group_prefix}API_URL",) if group_prefix else ()),
+        default=base.api_url or default_url,
+    )
+    api_key = _env_first(
+        f"{role_prefix}API_KEY",
+        *((f"{group_prefix}API_KEY",) if group_prefix else ()),
+        default=default_key,
+    )
+
+    temperature_raw = _env_first(
+        f"{role_prefix}TEMPERATURE",
+        *((f"{group_prefix}TEMPERATURE",) if group_prefix else ()),
+        default=str(base.temperature),
+    )
+    max_tokens_raw = _env_first(
+        f"{role_prefix}MAX_TOKENS",
+        *((f"{group_prefix}MAX_TOKENS",) if group_prefix else ()),
+        default=str(base.max_tokens),
+    )
+
+    try:
+        temperature = float(temperature_raw)
+    except (TypeError, ValueError):
+        temperature = float(base.temperature)
+
+    try:
+        max_tokens = int(max_tokens_raw)
+    except (TypeError, ValueError):
+        max_tokens = int(base.max_tokens)
+
+    return LLMConfig(
+        provider=provider,
+        model=model or default_model,
+        api_url=api_url or default_url,
+        api_key=api_key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
 
 # ── Chat message ──────────────────────────────────────────────────────────────
@@ -284,27 +405,25 @@ class LLMClient:
         self._provider = self._config.provider
         self._is_local = self._provider == "ollama"
 
-        # Use Mistral SDK for native support
-        self._use_mistral_sdk = self._provider == "mistral"
+        # Use Mistral SDK for native support (if available)
+        self._use_mistral_sdk = False
         self._mistral: _MistralClient | None = None
         self._http: httpx.AsyncClient | None = None
 
-        if self._use_mistral_sdk:
-            self._mistral = _MistralClient(self._config)
-        else:
-            headers = {"Content-Type": "application/json"}
-            api_key = self._config.api_key.strip()
-            if api_key and not self._is_local:
-                headers["Authorization"] = f"Bearer {api_key}"
+        if self._provider == "mistral":
+            try:
+                # Validate the symbol we actually use later; some environments
+                # have mismatched mistralai builds that import but lack Mistral.
+                from mistralai import Mistral  # noqa: F401
+                self._use_mistral_sdk = True
+                self._mistral = _MistralClient(self._config)
+            except Exception:
+                # Fallback to HTTP client (Mistral API is OpenAI-compatible)
+                self._use_mistral_sdk = False
+                self._mistral = None
 
-            self._http = httpx.AsyncClient(
-                base_url=self._config.api_url,
-                headers=headers,
-                timeout=httpx.Timeout(
-                    180.0 if self._is_local else 120.0,
-                    connect=10.0,
-                ),
-            )
+        if not self._use_mistral_sdk:
+            self._http = self._build_http_client()
 
         logger.debug(
             "llm_client_initialized",
@@ -333,6 +452,21 @@ class LLMClient:
         """Get the temperature setting."""
         return self._config.temperature
 
+    def _build_http_client(self) -> httpx.AsyncClient:
+        headers = {"Content-Type": "application/json"}
+        api_key = self._config.api_key.strip()
+        if api_key and not self._is_local:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        return httpx.AsyncClient(
+            base_url=self._config.api_url,
+            headers=headers,
+            timeout=httpx.Timeout(
+                180.0 if self._is_local else 120.0,
+                connect=10.0,
+            ),
+        )
+
     async def chat(
         self,
         messages: list[ChatMessage],
@@ -357,18 +491,29 @@ class LLMClient:
 
         # Use Mistral SDK if configured
         if self._use_mistral_sdk and self._mistral is not None:
-            result = await self._mistral.chat(
-                messages=[m.to_api() for m in messages],
-                tools=tools,
-                temperature=effective_temp,
-                max_tokens=payload_max_tokens,
-            )
-            return LLMResponse(
-                content=str(result.get("content", "") or ""),
-                tool_calls=list(result.get("tool_calls", []) or []),
-                finish_reason=str(result.get("finish_reason", "stop") or "stop"),
-                usage=result.get("usage", {}) if isinstance(result.get("usage"), dict) else {},
-            )
+            try:
+                result = await self._mistral.chat(
+                    messages=[m.to_api() for m in messages],
+                    tools=tools,
+                    temperature=effective_temp,
+                    max_tokens=payload_max_tokens,
+                )
+                return LLMResponse(
+                    content=str(result.get("content", "") or ""),
+                    tool_calls=list(result.get("tool_calls", []) or []),
+                    finish_reason=str(result.get("finish_reason", "stop") or "stop"),
+                    usage=result.get("usage", {}) if isinstance(result.get("usage"), dict) else {},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "mistral_sdk_fallback_http",
+                    error=repr(exc),
+                    model=self._config.model,
+                )
+                self._use_mistral_sdk = False
+                self._mistral = None
+                if self._http is None:
+                    self._http = self._build_http_client()
 
         # Use OpenAI-compatible HTTP client
         payload: dict[str, Any] = {

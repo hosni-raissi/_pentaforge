@@ -197,16 +197,40 @@ class ContextWindowManager:
             tokens=completion_tokens or estimate_tokens(response_excerpt),
         )
 
+    async def ensure_token_budget(self, *, threshold_tokens: int | None = None) -> dict[str, Any]:
+        """
+        Ensure the context window stays under the given token threshold.
+        If no threshold is provided, uses this manager's configured max.
+        """
+        await self.ensure_loaded()
+        threshold = max(512, int(threshold_tokens or self._max_tokens))
+        changed = False
+
+        while True:
+            estimated = sum(int(entry.get("tokens", 0) or 0) for entry in self._entries)
+            if estimated <= threshold:
+                break
+            compressed = await self._compress_once()
+            if not compressed:
+                break
+            changed = True
+
+        if changed:
+            await self.persist()
+        return self.snapshot()
+
     async def _compress_if_needed(self) -> None:
         estimated = sum(int(entry.get("tokens", 0) or 0) for entry in self._entries)
         if estimated <= self._max_tokens:
             return
+        await self._compress_once()
 
+    async def _compress_once(self) -> bool:
         keep_count = min(6, len(self._entries))
         keep_entries = self._entries[-keep_count:]
         old_entries = self._entries[:-keep_count]
         if not old_entries:
-            return
+            return False
 
         summary_text = await self._compress_entries(old_entries)
         summary_entry = {
@@ -221,6 +245,7 @@ class ContextWindowManager:
         }
         self._entries = [summary_entry, *keep_entries]
         self._compression_count += 1
+        return True
 
     async def _compress_entries(self, entries: list[dict[str, Any]]) -> str:
         raw = "\n".join(

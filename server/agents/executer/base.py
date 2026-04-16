@@ -21,11 +21,15 @@ from server.config.agent import (
     llm_mode,
     local_llm_config,
     public_llm_config,
+    get_public_agent_config,
 )
 from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 
 logger = structlog.get_logger(__name__)
+
+_EXECUTER_LLM_RETRY_MAX = 3
+_EXECUTER_LLM_RETRY_BASE_SECONDS = 1.5
 
 
 class ExecuterCallback(Protocol):
@@ -98,6 +102,7 @@ def _extract_json_from_text(raw: str) -> dict[str, Any]:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     json_blob = text
 
+    # Try markdown code blocks first
     if "```json" in text:
         start = text.index("```json") + 7
         end = text.index("```", start) if "```" in text[start:] else len(text)
@@ -106,6 +111,14 @@ def _extract_json_from_text(raw: str) -> dict[str, Any]:
         start = text.index("```") + 3
         end = text.index("```", start) if "```" in text[start:] else len(text)
         json_blob = text[start:end].strip()
+    else:
+        # Try to find raw JSON object (starts with { and ends with })
+        if "{" in text:
+            start = text.index("{")
+            # Find the last closing brace
+            end = text.rfind("}")
+            if end > start:
+                json_blob = text[start:end + 1].strip()
 
     try:
         parsed = json.loads(json_blob)
@@ -177,6 +190,7 @@ class BaseExecuterAgent:
         system_prompt: str,
         tools: list[Tool],
         max_tool_rounds: int,
+        max_tool_calls_per_round: int = 0,
         call_timeout_seconds: int,
         mode: str | None = None,
         callback: ExecuterCallback | None = None,
@@ -189,6 +203,7 @@ class BaseExecuterAgent:
         self._role = role
         self._system_prompt = system_prompt
         self._max_tool_rounds = max_tool_rounds
+        self._max_tool_calls_per_round = max(0, int(max_tool_calls_per_round or 0))
         self._call_timeout_seconds = call_timeout_seconds
         self._mode = mode or llm_mode.mode
         self._cb = callback or _NoOpCallback()
@@ -202,7 +217,7 @@ class BaseExecuterAgent:
             self._llm = LLMClient(self._local_config, mode="local")
             self._model_name = self._local_config.model
         else:
-            self._config = config or public_llm_config
+            self._config = config or get_public_agent_config(self._role)
             self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
 
@@ -460,12 +475,42 @@ class BaseExecuterAgent:
                 elif result:
                     pass
                 else:
-                    self._cb.on_step(f"[{self._role}] tool call: {tool_name}")
+                    cmd_preview = ""
+                    if tool_name == "run_custom":
+                        base_cmd = str(args.get("command", "")).strip()
+                        arg_list = args.get("args", [])
+                        if base_cmd:
+                            if isinstance(arg_list, list):
+                                joined_args = " ".join(str(x) for x in arg_list)
+                                cmd_preview = f"{base_cmd} {joined_args}".strip()
+                            else:
+                                cmd_preview = base_cmd
+                    if cmd_preview:
+                        self._cb.on_step(
+                            f"[{self._role}] tool call: {tool_name} -> {cmd_preview}"
+                        )
+                    else:
+                        self._cb.on_step(f"[{self._role}] tool call: {tool_name}")
                     try:
                         result = await tool.execute(**args)
-                        self._cb.on_done(
+                        done_message = (
                             f"[{self._role}] {tool_name} completed ({len(result)} chars)"
                         )
+                        if tool_name == "run_custom":
+                            try:
+                                parsed = json.loads(result) if isinstance(result, str) else {}
+                            except json.JSONDecodeError:
+                                parsed = {}
+                            full_command = (
+                                str(parsed.get("full_command", "")).strip()
+                                if isinstance(parsed, dict)
+                                else ""
+                            )
+                            if full_command:
+                                done_message = (
+                                    f"[{self._role}] run_custom completed: {full_command}"
+                                )
+                        self._cb.on_done(done_message)
                     except Exception as exc:
                         logger.error(
                             "executer_tool_error",
@@ -580,30 +625,57 @@ class BaseExecuterAgent:
             self._cb.on_step(
                 f"[{self._role}] LLM round {round_index}/{self._max_tool_rounds}"
             )
-            try:
-                response = await asyncio.wait_for(
-                    self._llm.chat(
-                        [_dict_to_msg(m) for m in messages],
-                        tools=self._tool_schemas if self._tools else None,
-                        temperature=0.2,
-                        max_tokens=4000,
-                    ),
-                    timeout=self._call_timeout_seconds,
-                )
-            except Exception as exc:
+            response = None
+            llm_exc: Exception | None = None
+            for attempt in range(1, _EXECUTER_LLM_RETRY_MAX + 1):
+                try:
+                    response = await asyncio.wait_for(
+                        self._llm.chat(
+                            [_dict_to_msg(m) for m in messages],
+                            tools=self._tool_schemas if self._tools else None,
+                            temperature=0.2,
+                            max_tokens=4000,
+                        ),
+                        timeout=self._call_timeout_seconds,
+                    )
+                    llm_exc = None
+                    break
+                except Exception as exc:
+                    llm_exc = exc
+                    text = str(exc).lower()
+                    is_rate_limited = "429" in text or "rate limit" in text
+                    if is_rate_limited and attempt < _EXECUTER_LLM_RETRY_MAX:
+                        wait_seconds = _EXECUTER_LLM_RETRY_BASE_SECONDS * (
+                            2 ** (attempt - 1)
+                        )
+                        self._cb.on_warn(
+                            f"[{self._role}] LLM rate-limited (attempt {attempt}/{_EXECUTER_LLM_RETRY_MAX}); retrying in {wait_seconds:.1f}s"
+                        )
+                        await asyncio.sleep(wait_seconds)
+                        continue
+                    break
+
+            if response is None or llm_exc is not None:
                 logger.error(
                     "executer_llm_error",
                     role=self._role,
-                    error=repr(exc),
+                    error=repr(llm_exc),
                 )
-                self._cb.on_warn(f"[{self._role}] LLM error: {exc}")
+                self._cb.on_warn(f"[{self._role}] LLM error: {llm_exc}")
                 return ExecuterResult(
                     status="failed",
-                    summary=f"LLM error: {exc}",
+                    summary=f"LLM error: {llm_exc}",
                 )
 
             last_content = response.content or ""
             tool_calls = response.tool_calls or []
+            if self._max_tool_calls_per_round > 0 and len(tool_calls) > self._max_tool_calls_per_round:
+                self._cb.on_warn(
+                    f"[{self._role}] limiting tool calls this round: "
+                    f"{len(tool_calls)} -> {self._max_tool_calls_per_round}"
+                )
+                tool_calls = tool_calls[: self._max_tool_calls_per_round]
+
             if self._context_window is not None:
                 await self._context_window.record_llm_turn(
                     prompt_excerpt=user_message if round_index == 1 else f"{self._role} round {round_index}",

@@ -140,50 +140,49 @@ def sensitive_files_scan(
                         if re.search(pattern, file_name, re.IGNORECASE) or re.search(
                             pattern, rel_path, re.IGNORECASE
                         ):
-                            try:
-                                file_size = os.path.getsize(file_path)
-                                sensitivity = "critical" if pattern_type in [
-                                    "private_keys", "env_files"
-                                ] else "high"
+                            file_size = os.path.getsize(file_path)
+                            sensitivity = "critical" if pattern_type in [
+                                "private_keys", "env_files"
+                            ] else "high"
 
-                                # Get sample (max 100 chars for non-binary files)
-                                sample = None
-                                if file_size < 10000:
-                                    try:
-                                        with open(file_path, "r", errors="ignore") as f:
-                                            content = f.read(100)
-                                            if len(content) > 0:
-                                                sample = content[:50]
-                                    except Exception:
-                                        pass
+                            # Get sample (max 100 chars for non-binary files)
+                            sample = None
+                            if file_size < 10000:
+                                try:
+                                    with open(file_path, "r", errors="ignore") as f:
+                                        content = f.read(100)
+                                        if len(content) > 0:
+                                            sample = content[:50]
+                                except Exception:
+                                    pass
 
-                                sensitive_file = SensitiveFile(
-                                    file_path=rel_path,
-                                    file_type=pattern_type,
-                                    sensitivity=sensitivity,
-                                    size=file_size,
-                                    contains_sample=sample,
-                                )
+                            sensitive_file = SensitiveFile(
+                                file_path=rel_path,
+                                file_type=pattern_type,
+                                sensitivity=sensitivity,
+                                size=file_size,
+                                contains_sample=sample,
+                            )
 
-                                result.sensitive_files.append(sensitive_file)
+                            result.sensitive_files.append(sensitive_file)
 
-                                # Categorize
-                                if pattern_type == "env_files":
-                                    result.env_files.append(rel_path)
-                                    result.critical_count += 1
-                                elif pattern_type == "private_keys":
-                                    result.private_keys.append(rel_path)
-                                    result.critical_count += 1
-                                elif pattern_type == "certificates":
-                                    result.certificates.append(rel_path)
-                                elif pattern_type == "backups":
-                                    result.backups.append(rel_path)
-                                elif pattern_type == "ide_configs":
-                                    result.ide_configs.append(rel_path)
-                                elif pattern_type == "database":
-                                    result.database_files.append(rel_path)
+                            # Categorize
+                            if pattern_type == "env_files":
+                                result.env_files.append(rel_path)
+                                result.critical_count += 1
+                            elif pattern_type == "private_keys":
+                                result.private_keys.append(rel_path)
+                                result.critical_count += 1
+                            elif pattern_type == "certificates":
+                                result.certificates.append(rel_path)
+                            elif pattern_type == "backups":
+                                result.backups.append(rel_path)
+                            elif pattern_type == "ide_configs":
+                                result.ide_configs.append(rel_path)
+                            elif pattern_type == "database":
+                                result.database_files.append(rel_path)
 
-                                break
+                            break
 
             if len(result.sensitive_files) >= 100:  # Limit to 100 files
                 break

@@ -253,9 +253,13 @@ function apiBaseUrl(): string {
   }
 }
 
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function requestJson<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = 8000,
+): Promise<T> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 8000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const headers = new Headers(init?.headers ?? undefined);
     const hasBody = init?.body !== undefined && init?.body !== null;
@@ -368,7 +372,38 @@ export async function approvePlannerForProjectScanFromDesktop(
     {
       method: "POST",
     },
+    20000,
   );
+}
+
+export async function approveToolForProjectScanFromDesktop(
+  projectId: string,
+  payload: {
+    approvalId: string;
+    action: "approve" | "skip";
+  },
+): Promise<{
+  ok: boolean;
+  project_id?: string;
+  scan_id?: string;
+  approval_id?: string;
+  action?: string;
+  role?: string;
+  tool_name?: string;
+}> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  const path = `/api/scans/${encodeURIComponent(projectId)}/approve-tool`;
+  const init: RequestInit = {
+    method: "POST",
+    body: JSON.stringify({
+      approval_id: payload.approvalId,
+      action: payload.action,
+    }),
+  };
+
+  return await requestJson(path, init, 20000);
 }
 
 export async function clearProjectScanEventsCacheFromDesktop(projectId: string): Promise<void> {

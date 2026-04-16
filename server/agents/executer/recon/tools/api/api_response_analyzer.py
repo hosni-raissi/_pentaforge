@@ -599,6 +599,27 @@ def analyze_api_response(
     return result.model_dump()
 
 
+def api_response_analyzer(
+    target: str,
+    endpoints: Optional[list[str]] = None,
+    headers: Optional[dict[str, str]] = None,
+    timeout: int = 10,
+    max_workers: int = 8,
+    probe_post: bool = True,
+    include_404_responses: bool = False,
+) -> dict[str, Any]:
+    """Compatibility wrapper for tool loader (matches tool definition name)."""
+    return analyze_api_response(
+        target=target,
+        endpoints=endpoints,
+        headers=headers,
+        timeout=timeout,
+        max_workers=max_workers,
+        probe_post=probe_post,
+        include_404_responses=include_404_responses,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool definition (for LLM/agent integration)
 # ---------------------------------------------------------------------------

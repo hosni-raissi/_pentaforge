@@ -2,7 +2,7 @@
 import asyncio
 from typing import FrozenSet
 import httpx
-MAX_LLM_REQUESTS = 10
+MAX_LLM_REQUESTS = 2
 MAX_TOOL_ROUNDS = MAX_LLM_REQUESTS
 
 PLANNER_CALL_TIMEOUT_SECONDS: int = 90

@@ -16,6 +16,7 @@ from server.core.llm import (
     llm_mode,
     get_llm_mode,
     get_config,
+    get_public_agent_config,
 )
 
 # Also export the LLMMode class for backward compat
@@ -33,4 +34,5 @@ __all__ = [
     "local_llm_config",
     "llm_mode",
     "LLMMode",
+    "get_public_agent_config",
 ]

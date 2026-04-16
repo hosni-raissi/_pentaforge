@@ -4,9 +4,11 @@
 #  LLM Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ROUNDS = 4
 LLM_CALL_TIMEOUT_SECONDS = 300
-VERIFY_CONTEXT_WINDOW_MAX_TOKENS = 10000
+VERIFY_CONTEXT_WINDOW_MAX_TOKENS = 15000
+VERIFY_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000
+VERIFY_MAX_TOOL_CALLS_PER_ROUND = 2
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Screenshot Configuration (Playwright)

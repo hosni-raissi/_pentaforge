@@ -4,9 +4,11 @@
 #  LLM Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MAX_TOOL_ROUNDS = 10
+MAX_TOOL_ROUNDS = 5
 LLM_CALL_TIMEOUT_SECONDS = 240
-RETEST_CONTEXT_WINDOW_MAX_TOKENS = 10000
+RETEST_CONTEXT_WINDOW_MAX_TOKENS = 15000
+RETEST_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000
+RETEST_MAX_TOOL_CALLS_PER_ROUND = 2
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Payload Replay Configuration

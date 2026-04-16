@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback
-from server.agents.executer.target_tool_routing import filter_tools_for_target_types
+from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback, ExecuterResult
+from server.agents.executer.target_tool_routing import (
+    filter_tools_for_target_types,
+    normalize_target_types,
+)
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
 from .config import (
     LLM_CALL_TIMEOUT_SECONDS,
     MAX_TOOL_ROUNDS,
     RECON_CONTEXT_WINDOW_MAX_TOKENS,
+    RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS,
+    RECON_MAX_TOOL_CALLS_PER_ROUND,
 )
 from .context_window import RECON_CONTEXT_WINDOW_KEY
 from .prompts import SYSTEM_PROMPT
@@ -44,6 +49,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
         target_types: list[str] | None = None,
         project_id: str | None = None,
     ) -> None:
+        self._target_types = list(target_types or [])
         scoped_tools = filter_tools_for_target_types(
             role="recon",
             tools=ALL_RECON_TOOLS,
@@ -62,6 +68,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
             system_prompt=scoped_prompt,
             tools=scoped_tools,
             max_tool_rounds=MAX_TOOL_ROUNDS,
+            max_tool_calls_per_round=RECON_MAX_TOOL_CALLS_PER_ROUND,
             call_timeout_seconds=LLM_CALL_TIMEOUT_SECONDS,
             mode=mode,
             callback=callback,
@@ -71,3 +78,68 @@ class ReconExecuterAgent(BaseExecuterAgent):
             context_window_key=RECON_CONTEXT_WINDOW_KEY,
             context_window_max_tokens=RECON_CONTEXT_WINDOW_MAX_TOKENS,
         )
+
+    async def run(self, user_message: str) -> ExecuterResult:
+        context_block = "Context window disabled (missing project_id)."
+        if self._context_window is not None:
+            await self._context_window.ensure_token_budget(
+                threshold_tokens=RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS
+            )
+            snapshot = self._context_window.snapshot()
+            context_block = format_recon_context_for_packet(snapshot)
+
+        available_tools = sorted(self._tools.keys())
+        normalized_targets = normalize_target_types(self._target_types)
+        packet = build_recon_scenario_packet(
+            scenario_and_target=user_message,
+            context_block=context_block,
+            available_tools=available_tools,
+            target_types=normalized_targets,
+        )
+        return await super().run(packet)
+
+
+def format_recon_context_for_packet(snapshot: dict[str, object], max_entries: int = 8) -> str:
+    estimated = int(snapshot.get("estimated_tokens", 0) or 0)
+    max_t = int(snapshot.get("max_tokens", RECON_CONTEXT_WINDOW_MAX_TOKENS) or RECON_CONTEXT_WINDOW_MAX_TOKENS)
+    entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
+    if not isinstance(entries, list) or not entries:
+        return f"Context window tokens: {estimated}/{max_t}\nNo stored context window entries."
+
+    lines: list[str] = [f"Context window tokens: {estimated}/{max_t}"]
+    for item in entries[-max_entries:]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", "note"))
+        role = str(item.get("role", "assistant"))
+        content = str(item.get("content", "")).strip()
+        if len(content) > 260:
+            content = content[:260] + "..."
+        if content:
+            lines.append(f"- [{kind}/{role}] {content}")
+    if len(lines) == 1:
+        lines.append("No stored context window entries.")
+    return "\n".join(lines)
+
+
+def build_recon_scenario_packet(
+    *,
+    scenario_and_target: str,
+    context_block: str,
+    available_tools: list[str],
+    target_types: list[str],
+) -> str:
+    return (
+        "Recon scenario packet:\n"
+        "1) Scenario + target info from operator follows below.\n"
+        "2) Use scoped recon tools to maximize useful recon signal for this scenario.\n"
+        "3) Max tool executions per round: 2. Max rounds per scenario: 5.\n"
+        "4) Always update context window with new findings each round.\n\n"
+        "Current context window:\n"
+        f"{context_block}\n\n"
+        f"Target surface scope for this run: {', '.join(target_types) if target_types else 'unspecified'}\n\n"
+        "Available callable tools in this run:\n"
+        f"{', '.join(available_tools)}\n\n"
+        "Scenario + target info:\n"
+        f"{scenario_and_target}"
+    )

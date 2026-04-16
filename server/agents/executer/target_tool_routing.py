@@ -17,6 +17,7 @@ _TARGET_TYPE_ALIASES: dict[str, str] = {
     "infra": "infra",
     "infrastructure": "infra",
     "linux": "linux_server",
+    "server": "linux_server",
     "linux_server": "linux_server",
     "mobile": "mobile",
     "desktop": "desktop",
@@ -131,7 +132,6 @@ EXPLOIT_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     "api_authz_matrix": {"api", "web_app"},
     "api_auth_test": {"api", "web_app"},
     "api_fuzzing": {"api", "web_app"},
-    "credential_brute": {"network", "infra", "linux_server", "iot"},
     "db_injection_test": {
         "web_app",
         "api",
@@ -169,6 +169,8 @@ EXPLOIT_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     "open_redirect_scan": {"web_app", "api"},
     "prompt_injection_test": {"api", "web_app"},
     "race_condition_test": {"api", "web_app"},
+    "run_custom": {"shared"},
+    "run_python": {"shared"},
     "script_injection_test": {"web_app", "api"},
     "sqlmap_injection": {
         "web_app",

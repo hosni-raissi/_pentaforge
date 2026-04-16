@@ -21,6 +21,7 @@ from server.config.agent import (
     PublicLLMConfig,
     local_llm_config,
     public_llm_config,
+    get_public_agent_config,
     llm_mode,
 )
 from server.core.llm import ChatMessage, LLMClient
@@ -1460,7 +1461,7 @@ class IntelAgent:
             self._llm = LLMClient(self._local_config, mode="local")
             self._model_name = self._local_config.model
         else:
-            self._config = config or public_llm_config
+            self._config = config or get_public_agent_config("intel")
             self._llm = LLMClient(self._config, mode="public")
             self._model_name = self._config.model
 
@@ -1627,10 +1628,9 @@ class IntelAgent:
 
         structured_checklist = llm_result.checklist or cleaned_payload
 
-        # ── Priority resolution (LLM-only strict mode) ─────────────────
-        # Requirement:
-        #   - Priorities must come from LLM output.
-        #   - If LLM cannot provide complete priorities, stop the scan.
+        # ── Priority resolution ─────────────────────────────────────────
+        # Prefer LLM-priority ownership, but fail open if the refinement
+        # call times out/fails so Intel can continue and unblock the flow.
         if not _is_structured_checklist_payload(structured_checklist):
             message = "Intel checklist payload is invalid; stopping scan in strict LLM-priority mode."
             self._cb.on_warn(message)
@@ -1652,16 +1652,18 @@ class IntelAgent:
                 self._cb.on_done("Checklist priorities/phases refined by LLM")
                 logger.info("intel_priority_refined_by_llm", target_type=target_type)
             else:
+                structured_checklist = _ensure_checklist_priorities(
+                    structured_checklist
+                )
                 message = (
                     "LLM priority refinement failed or timed out; "
-                    "stopping scan (no hardcoded fallback)."
+                    "used deterministic priority fallback and continuing."
                 )
                 self._cb.on_warn(message)
-                logger.error(
-                    "intel_priority_refinement_strict_failure",
+                logger.warning(
+                    "intel_priority_refinement_fallback_applied",
                     target_type=target_type,
                 )
-                raise RuntimeError(message)
 
             self._cb.on_step("Auto-normalizing checklist with set_checklist")
             checklist_names = _flatten_checklist_item_names(structured_checklist)
