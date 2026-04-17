@@ -695,7 +695,16 @@ class BaseExecuterAgent:
                 },
             )
 
-            if not tool_calls:
+            # CRITICAL: For verify/retest agents in final round, skip tool execution (consolidation only)
+            is_final_round = round_index >= self._max_tool_rounds
+            is_consolidation_role = self._role in ("verify", "retest")
+            skip_tools_this_round = is_final_round and is_consolidation_role and tool_calls
+
+            if not tool_calls or skip_tools_this_round:
+                if skip_tools_this_round:
+                    self._cb.on_warn(
+                        f"[{self._role}] Round {round_index}/{self._max_tool_rounds} is consolidation-only; skipping {len(tool_calls)} tool calls"
+                    )
                 result = _parse_executer_output(last_content)
                 result.tool_results = all_tool_results
                 if all_discovered_target_types:

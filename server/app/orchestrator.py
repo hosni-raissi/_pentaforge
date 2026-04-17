@@ -264,7 +264,48 @@ def _mark_scenario_done_in_plan(plan_data: dict[str, Any], scenario: dict[str, A
     return False
 
 
-def _route_followup_from_assessment(assessment: dict[str, Any]) -> str:
+def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[str, Any]:
+    """Remove any scenarios with forbidden agents (verify, retest, perceptor) from plan.
+
+    Returns cleaned plan_data with only recon/exploit/report scenarios.
+    """
+    if not isinstance(plan_data, dict):
+        return plan_data
+
+    FORBIDDEN_AGENTS = {"verify", "retest", "perceptor"}
+    cleaned_plan = dict(plan_data)
+    phases = cleaned_plan.get("phases", [])
+
+    if not isinstance(phases, list):
+        return cleaned_plan
+
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        steps = phase.get("steps", [])
+        if not isinstance(steps, list):
+            continue
+
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            scenarios = step.get("scenarios", [])
+            if not isinstance(scenarios, list):
+                continue
+
+            # Filter out forbidden agents
+            cleaned_scenarios = [
+                s for s in scenarios
+                if isinstance(s, dict) and s.get("agent", "").strip().lower() not in FORBIDDEN_AGENTS
+            ]
+
+            if len(cleaned_scenarios) != len(scenarios):
+                step["scenarios"] = cleaned_scenarios
+
+    return cleaned_plan
+
+
+
     overall = assessment.get("overall", {}) if isinstance(assessment, dict) else {}
     if not isinstance(overall, dict):
         return "planner"
@@ -1330,6 +1371,23 @@ class ScanOrchestratorService:
                 intel_checklist=intel_checklist,
             )
 
+        # Mark selected scenarios as working and emit state change
+        for scenario in selected:
+            self._emit_event(
+                scenario.get("_project_id", ""),
+                event="scenario_state_change",
+                scan_id="",
+                level="info",
+                message=f"Scenario started execution: {scenario.get('task', 'unknown')}",
+                data={
+                    "stage": "executer",
+                    "kind": "scenario_working",
+                    "scenario_task": scenario.get("task", ""),
+                    "agent": scenario.get("agent", ""),
+                    "state": "working",
+                },
+            )
+
         # Run selected scenarios in parallel (true async with asyncio.gather)
         execution_rows: list[dict[str, Any]] = []
         if selected:
@@ -1439,6 +1497,20 @@ class ScanOrchestratorService:
                         intel_checklist=intel_checklist,
                     )
 
+                    # Emit plan update event for UI (plan data managed by planner internally)
+                    self._emit_event(
+                        scenario.get("_project_id", ""),
+                        event="plan_updated_by_planner",
+                        scan_id="",
+                        level="success",
+                        message="Planner updated plan after verifying real vulnerability.",
+                        data={
+                            "stage": "planner",
+                            "kind": "plan_updated_after_verify",
+                            "verdict": "real_vulnerability",
+                        },
+                    )
+
                     # Send to Retest to build report entry
                     retest_message = (
                         f"Target: {target}\n"
@@ -1480,6 +1552,20 @@ class ScanOrchestratorService:
                         intel_checklist=intel_checklist,
                     )
 
+                    # Emit plan update event for UI
+                    self._emit_event(
+                        scenario.get("_project_id", ""),
+                        event="plan_updated_by_planner",
+                        scan_id="",
+                        level="info",
+                        message="Planner updated plan after filtering false positive.",
+                        data={
+                            "stage": "planner",
+                            "kind": "plan_updated_false_positive",
+                            "verdict": "false_positive",
+                        },
+                    )
+
                     planner_loop_rows.append(
                         {
                             "iteration": idx,
@@ -1503,6 +1589,20 @@ class ScanOrchestratorService:
                         planner_message,
                         is_loop=True,
                         intel_checklist=intel_checklist,
+                    )
+
+                    # Emit plan update event for UI
+                    self._emit_event(
+                        scenario.get("_project_id", ""),
+                        event="plan_updated_by_planner",
+                        scan_id="",
+                        level="warn",
+                        message="Planner updated plan after inconclusive verification result.",
+                        data={
+                            "stage": "planner",
+                            "kind": "plan_updated_inconclusive",
+                            "verdict": "inconclusive",
+                        },
                     )
 
                     planner_loop_rows.append(
@@ -1534,10 +1634,19 @@ class ScanOrchestratorService:
                 if loop_summary.lower().startswith("planning failed:"):
                     raise RuntimeError(f"planner loop failed: {loop_summary}")
 
-                # Update plan data from planner
-                loop_plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
-                if loop_plan_data:
-                    plan_data = loop_plan_data
+                # Emit plan update event for UI
+                self._emit_event(
+                    scenario.get("_project_id", ""),
+                    event="plan_updated_by_planner",
+                    scan_id="",
+                    level="info",
+                    message="Planner updated plan based on reconnaissance findings.",
+                    data={
+                        "stage": "planner",
+                        "kind": "plan_updated",
+                        "route": "recon_info",
+                    },
+                )
 
                 planner_loop_rows.append(
                     {
@@ -1557,6 +1666,21 @@ class ScanOrchestratorService:
             # Mark scenario as done in plan
             if isinstance(scenario, dict):
                 _mark_scenario_done_in_plan(plan_data, scenario)
+                self._emit_event(
+                    scenario.get("_project_id", ""),
+                    event="scenario_state_change",
+                    scan_id="",
+                    level="info",
+                    message=f"Scenario completed: {scenario.get('task', 'unknown')}",
+                    data={
+                        "stage": "executer",
+                        "kind": "scenario_done",
+                        "scenario_task": scenario.get("task", ""),
+                        "agent": scenario.get("agent", ""),
+                        "state": "done",
+                        "route": followup_route,
+                    },
+                )
 
         # Continue to next cycle
         return True, plan_data
@@ -1828,7 +1952,6 @@ class ScanOrchestratorService:
 
         try:
             from server.agents.planner.agent import PlannerAgent
-            from server.agents.planner.tools.pentest_plan import _current_plan, _reset_plan
 
             planner_callback = PrintCallback(
                 enabled=print_steps,
@@ -1840,13 +1963,16 @@ class ScanOrchestratorService:
                 ),
             )
             async with PlannerAgent(callback=planner_callback, project_id=project_id) as planner_agent:
-                _reset_plan()
                 planner_result = await planner_agent.run(
                     planner_input,
                     is_loop=False,
                     intel_checklist=intel_checklist,
                 )
+                # Plan data is maintained in pentest_plan module and retrieved via import
+                from server.agents.planner.tools.pentest_plan import _current_plan
                 plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
+                # Sanitize plan: remove any forbidden agents (verify, retest, perceptor)
+                plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
         except asyncio.CancelledError:
             current = self._runs.get(project_id, {})
             if str(current.get("status")) in {"paused", "idle"}:
@@ -1964,7 +2090,6 @@ class ScanOrchestratorService:
             from server.agents.executer.retest.agent import RetestExecuterAgent
             from server.agents.perceptor.agent import PerceptorAgent
             from server.agents.planner.agent import PlannerAgent
-            from server.agents.planner.tools.pentest_plan import _current_plan
 
             executer_callback = ExecuterScanCallback(
                 service=self,
