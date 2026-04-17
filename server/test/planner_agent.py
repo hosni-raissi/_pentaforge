@@ -205,7 +205,7 @@ async def main():
     if llm_mode.mode == "local":
         print(f"  LLM: LOCAL / {local_llm_config.model}")
     else:
-        print(f"  LLM: PUBLIC / {public_llm_config.api_provider} / {public_llm_config.model}")
+        print(f"  LLM: PUBLIC / {public_llm_config.provider} / {public_llm_config.model}")
 
     await test_initial_plan()
     await test_loop_reentry()
