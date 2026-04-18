@@ -22,6 +22,7 @@ from typing import Any, Callable
 import structlog
 
 from server.db.projects import ProjectsStore
+from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -229,7 +230,7 @@ def _mark_scenario_done_in_plan(plan_data: dict[str, Any], scenario: dict[str, A
             target = phases[phase_idx]["steps"][step_idx]["scenarios"][scen_idx]
             if isinstance(target, dict):
                 target["done"] = True
-                target["status"] = "done"
+                target["status"] = "completed"
                 return True
         except (IndexError, KeyError, TypeError):
             pass
@@ -259,9 +260,118 @@ def _mark_scenario_done_in_plan(plan_data: dict[str, Any], scenario: dict[str, A
                 priority = _normalize_priority(item.get("priority", 3))
                 if task == target_task and agent == target_agent and priority == target_priority:
                     item["done"] = True
-                    item["status"] = "done"
+                    item["status"] = "completed"
                     return True
     return False
+
+
+def _normalize_scenario_status(value: Any, *, done: bool = False) -> str:
+    if done:
+        return "completed"
+    normalized = str(value or "").strip().lower()
+    if normalized in {"completed", "complete", "done"}:
+        return "completed"
+    if normalized in {"working", "running", "in_progress", "in progress"}:
+        return "working"
+    return "not yet"
+
+
+def _normalize_round_label(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("r") and raw[1:].isdigit():
+        return raw
+    if raw.isdigit():
+        return f"r{raw}"
+    return ""
+
+
+def _locate_scenario_in_plan(plan_data: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any] | None:
+    phases = plan_data.get("phases")
+    if not isinstance(phases, list):
+        return None
+
+    phase_idx = scenario.get("_phase_index")
+    step_idx = scenario.get("_step_index")
+    scen_idx = scenario.get("_scenario_index")
+    if isinstance(phase_idx, int) and isinstance(step_idx, int) and isinstance(scen_idx, int):
+        try:
+            target = phases[phase_idx]["steps"][step_idx]["scenarios"][scen_idx]
+            if isinstance(target, dict):
+                return target
+        except (IndexError, KeyError, TypeError):
+            pass
+
+    target_task = str(scenario.get("task", "")).strip().lower()
+    target_agent = str(scenario.get("agent", "")).strip().lower()
+    target_priority = _normalize_priority(scenario.get("priority", 3))
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        steps = phase.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            scenarios = step.get("scenarios")
+            if not isinstance(scenarios, list):
+                continue
+            for item in scenarios:
+                if not isinstance(item, dict):
+                    continue
+                task = str(item.get("task", "")).strip().lower()
+                agent = str(item.get("agent", "")).strip().lower()
+                priority = _normalize_priority(item.get("priority", 3))
+                if task == target_task and agent == target_agent and priority == target_priority:
+                    return item
+    return None
+
+
+def _update_scenario_runtime_state(
+    plan_data: dict[str, Any],
+    scenario: dict[str, Any],
+    *,
+    status: str | None = None,
+    done: bool | None = None,
+    round_label: str | None = None,
+    round_labels: list[str] | None = None,
+    route: str | None = None,
+) -> bool:
+    target = _locate_scenario_in_plan(plan_data, scenario)
+    if not isinstance(target, dict):
+        return False
+
+    effective_done = bool(done) if done is not None else bool(target.get("done", False))
+    if status is not None:
+        target["status"] = _normalize_scenario_status(status, done=effective_done)
+    elif "status" not in target:
+        target["status"] = _normalize_scenario_status(target.get("status"), done=effective_done)
+
+    if done is not None:
+        target["done"] = bool(done)
+        if bool(done):
+            target["status"] = "completed"
+
+    normalized_round_label = _normalize_round_label(round_label)
+    if normalized_round_label:
+        target["last_round"] = normalized_round_label
+
+    if isinstance(round_labels, list) and round_labels:
+        normalized_rounds = [
+            label
+            for label in (_normalize_round_label(item) for item in round_labels)
+            if label
+        ]
+        if normalized_rounds:
+            target["rounds_seen"] = normalized_rounds
+            target["last_round"] = normalized_rounds[-1]
+
+    if route:
+        target["last_route"] = str(route).strip().lower()
+
+    return True
 
 
 def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[str, Any]:
@@ -305,7 +415,119 @@ def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[st
     return cleaned_plan
 
 
+async def _batch_verify_findings(
+    findings: list[dict[str, Any]],
+    verify_agent: Any,
+    target: str,
+    target_type: str,
+    scope: str,
+) -> list[dict[str, Any]]:
+    """Verify all findings in parallel (not sequential per-finding).
 
+    Returns list of dicts with verdict, verify_data, compact_summary for each finding.
+    """
+    verified = []
+
+    # Build all verify tasks
+    verify_tasks = []
+    for finding in findings:
+        scenario = finding.get("scenario", {})
+        compact_summary = str(finding.get("compact_summary", "")).strip()
+        row = finding.get("execution_row", {})
+
+        verify_message = (
+            f"Target: {target}\n"
+            f"Target type: {target_type}\n"
+            f"Scope: {scope}\n"
+            f"Original scenario: {json.dumps(scenario, ensure_ascii=True)}\n\n"
+            "Finding to verify:\n"
+            f"{compact_summary}\n\n"
+            "Execution row:\n"
+            f"{json.dumps(row, ensure_ascii=True)}"
+        )
+        verify_tasks.append((finding, verify_agent.run(verify_message)))
+
+    # Run all verify agents in parallel
+    if verify_tasks:
+        results = await asyncio.gather(
+            *[task for _, task in verify_tasks],
+            return_exceptions=True
+        )
+
+        for (finding, _), result in zip(verify_tasks, results):
+            if isinstance(result, Exception):
+                verdict = "inconclusive"
+                verify_data = {"error": str(result), "verdict": "inconclusive"}
+            else:
+                # Convert ExecuterResult to dict
+                verify_data = asdict(result) if hasattr(result, '__dataclass_fields__') else result
+                verdict = str(verify_data.get("verdict", verify_data.get("summary", "inconclusive"))).strip().lower()
+
+            verified.append({
+                "finding": finding,
+                "verdict": verdict,
+                "verify_data": verify_data,
+                "compact_summary": str(finding.get("compact_summary", "")).strip(),
+            })
+
+    return verified
+
+
+def _route_followup_from_assessment(assessment: dict[str, Any]) -> str:
+    """Route perceptor assessment to appropriate next phase: verify, planner, or skip.
+
+    Args:
+        assessment: Perceptor assessment with finding_type and overall.ssvc fields
+
+    Returns:
+        str: "verify" (gate findings), "planner" (info/recon), or "skip"
+    """
+    finding_type = assessment.get("finding_type", "").strip().lower()
+
+    # Vulnerabilities go to verify (gate to filter false positives)
+    if "vulnerability" in finding_type or finding_type in {"vuln", "vulnerability"}:
+        return "verify"
+
+    # Info-only findings go to planner (update plan with evidence)
+    if "info" in finding_type or finding_type in {"recon", "info_only", "information", "enumeration"}:
+        return "planner"
+
+    # Unknown types default to planner
+    return "planner"
+
+
+def _organize_findings_by_verdict(
+    verified_findings: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Organize findings by verdict type for routing.
+
+    Returns: {"real_vulnerability": [...], "false_positive": [...], "inconclusive": [...], "info_only": [...]}
+    """
+    organized = {
+        "real_vulnerability": [],
+        "false_positive": [],
+        "inconclusive": [],
+        "info_only": [],
+    }
+
+    for verified in verified_findings:
+        finding = verified.get("finding", {})
+        finding_type = str(finding.get("finding_type", "info")).strip().lower()
+        verdict = verified.get("verdict", "inconclusive")
+
+        # Route based on finding_type + verdict
+        if finding_type == "vulnerability":
+            if verdict == "real_vulnerability":
+                organized["real_vulnerability"].append(verified)
+            elif verdict == "false_positive":
+                organized["false_positive"].append(verified)
+            else:
+                organized["inconclusive"].append(verified)
+        else:
+            # Info findings don't go to verify, just to planner
+            organized["info_only"].append(verified)
+
+    return organized
     overall = assessment.get("overall", {}) if isinstance(assessment, dict) else {}
     if not isinstance(overall, dict):
         return "planner"
@@ -550,6 +772,22 @@ class ExecuterScanCallback:
             call_id=call_id,
         )
 
+    async def request_password(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> str | None:
+        return await self._service.request_executer_password(
+            project_id=self._project_id,
+            scan_id=self._scan_id,
+            tool_name="ssh",  # Default to ssh, can be extracted from prompt
+            prompt=prompt,
+            reason=reason,
+            call_id=call_id,
+        )
+
 
 @dataclass
 class _PendingToolApproval:
@@ -562,15 +800,29 @@ class _PendingToolApproval:
     decision: str | None = None
 
 
+@dataclass
+class _PendingPasswordRequest:
+    scan_id: str
+    tool_name: str
+    prompt: str
+    reason: str
+    call_id: str
+    event: asyncio.Event
+    password: str | None = None
+    approved: bool = False
+
+
 class ScanOrchestratorService:
     """Runs and tracks orchestrated scan executions per project."""
 
     def __init__(self, projects_store: ProjectsStore) -> None:
         self._projects_store = projects_store
+        self._vector_store = QdrantVectorStore()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._runs: dict[str, dict[str, Any]] = {}
         self._planner_approval_events: dict[str, asyncio.Event] = {}
         self._tool_approval_events: dict[str, dict[str, _PendingToolApproval]] = {}
+        self._password_request_events: dict[str, dict[str, _PendingPasswordRequest]] = {}
         self._event_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
 
@@ -1102,7 +1354,91 @@ class ScanOrchestratorService:
             },
         )
 
-        await pending.event.wait()
+        # Tools with long execution times need longer approval timeouts
+        # Tool-specific timeouts: hydra/nuclei/sqlmap can take 10-20+ minutes
+        TOOL_TIMEOUTS = {
+            "hydra_bruteforce": 1800,      # 30 minutes - brute force takes time
+            "nuclei_vuln_scan": 1200,      # 20 minutes - template scanning
+            "sqlmap": 1200,                # 20 minutes - SQL injection testing
+            "run_custom": 900,             # 15 minutes - generic CLI commands
+            "run_python": 600,             # 10 minutes - Python scripts
+        }
+        # Default to 30 minutes for any tool, but use tool-specific if available
+        APPROVAL_TIMEOUT = TOOL_TIMEOUTS.get(pending.tool_name, 1800)
+
+        try:
+            # Wait with heartbeat messages every 60 seconds to keep connection alive
+            start_time = time.time()
+            HEARTBEAT_INTERVAL = 60  # Send keepalive every 60 seconds
+            next_heartbeat = start_time + HEARTBEAT_INTERVAL
+
+            while not pending.event.is_set():
+                remaining = APPROVAL_TIMEOUT - (time.time() - start_time)
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+
+                # Wait for event or heartbeat interval, whichever is shorter
+                wait_time = min(HEARTBEAT_INTERVAL, remaining)
+                try:
+                    await asyncio.wait_for(pending.event.wait(), timeout=wait_time)
+                    break  # Event was set, exit loop
+                except asyncio.TimeoutError:
+                    # Check if total timeout exceeded
+                    if time.time() - start_time >= APPROVAL_TIMEOUT:
+                        raise
+                    # Send keepalive message
+                    elapsed = int(time.time() - start_time)
+                    self._emit_event(
+                        project_key,
+                        event="executer_tool_approval_waiting",
+                        scan_id=pending.scan_id,
+                        level="info",
+                        message=(
+                            f"Executer [approval waiting] {pending.role} tool '{pending.tool_name}' "
+                            f"waiting for approval... ({elapsed}s/{APPROVAL_TIMEOUT}s)"
+                        ),
+                        data={
+                            "stage": "executer",
+                            "kind": "tool_approval_waiting",
+                            "approval_id": approval_id,
+                            "role": pending.role,
+                            "tool_name": pending.tool_name,
+                            "elapsed_seconds": elapsed,
+                            "timeout_seconds": APPROVAL_TIMEOUT,
+                        },
+                    )
+                    continue
+
+        except asyncio.TimeoutError:
+            # Timeout - auto-skip the tool
+            pending.decision = "skip"
+            logger.warning(
+                "tool_approval_timeout",
+                project_id=project_key,
+                approval_id=approval_id,
+                tool_name=pending.tool_name,
+                timeout_seconds=APPROVAL_TIMEOUT,
+            )
+            self._emit_event(
+                project_key,
+                event="executer_tool_approval_timeout",
+                scan_id=pending.scan_id,
+                level="warn",
+                message=(
+                    f"Executer [approval timeout] {pending.role} tool '{pending.tool_name}' "
+                    f"timeout after {APPROVAL_TIMEOUT}s - skipping tool"
+                ),
+                data={
+                    "stage": "executer",
+                    "kind": "tool_approval_timeout",
+                    "approval_id": approval_id,
+                    "role": pending.role,
+                    "tool_name": pending.tool_name,
+                    "call_id": pending.call_id,
+                    "timeout_seconds": APPROVAL_TIMEOUT,
+                },
+            )
+
         approved = pending.decision == "approve"
 
         project_pending = self._tool_approval_events.get(project_key, {})
@@ -1177,6 +1513,156 @@ class ScanOrchestratorService:
             "approval_id": approval_id,
             "action": action_clean,
             "role": pending.role,
+            "tool_name": pending.tool_name,
+            "scan_id": pending.scan_id,
+        }
+
+    async def request_executer_password(
+        self,
+        *,
+        project_id: str,
+        scan_id: str,
+        tool_name: str,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> str | None:
+        """Request password from user for tools like SSH/sudo."""
+        project_key = str(project_id or "").strip()
+        if not project_key:
+            return None
+
+        password_id = str(uuid.uuid4())
+        pending = _PendingPasswordRequest(
+            scan_id=str(scan_id or ""),
+            tool_name=str(tool_name or ""),
+            prompt=str(prompt or ""),
+            reason=str(reason or ""),
+            call_id=str(call_id or ""),
+            event=asyncio.Event(),
+        )
+        project_pending = self._password_request_events.setdefault(project_key, {})
+        project_pending[password_id] = pending
+
+        # Emit password request event to frontend
+        self._emit_event(
+            project_key,
+            event="executer_password_request",
+            scan_id=pending.scan_id,
+            level="info",
+            message=f"Executer [password required] {pending.tool_name} needs authentication",
+            data={
+                "stage": "executer",
+                "kind": "password_request",
+                "tool_name": pending.tool_name,
+                "prompt": pending.prompt,
+                "reason": pending.reason,
+                "call_id": pending.call_id,
+                "password_id": password_id,
+            },
+        )
+
+        # Wait for password response with generous timeout and heartbeat
+        PASSWORD_TIMEOUT = 600  # 10 minutes - user needs time to enter password
+        try:
+            start_time = time.time()
+            HEARTBEAT_INTERVAL = 30  # Send keepalive every 30 seconds
+
+            while not pending.event.is_set():
+                remaining = PASSWORD_TIMEOUT - (time.time() - start_time)
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+
+                wait_time = min(HEARTBEAT_INTERVAL, remaining)
+                try:
+                    await asyncio.wait_for(pending.event.wait(), timeout=wait_time)
+                    break  # Event was set, exit loop
+                except asyncio.TimeoutError:
+                    # Check if total timeout exceeded
+                    if time.time() - start_time >= PASSWORD_TIMEOUT:
+                        raise
+                    # Send keepalive message
+                    elapsed = int(time.time() - start_time)
+                    self._emit_event(
+                        project_key,
+                        event="executer_password_waiting",
+                        scan_id=pending.scan_id,
+                        level="info",
+                        message=(
+                            f"Executer [password waiting] {pending.tool_name} "
+                            f"waiting for password input... ({elapsed}s/{PASSWORD_TIMEOUT}s)"
+                        ),
+                        data={
+                            "stage": "executer",
+                            "kind": "password_waiting",
+                            "password_id": password_id,
+                            "tool_name": pending.tool_name,
+                            "elapsed_seconds": elapsed,
+                            "timeout_seconds": PASSWORD_TIMEOUT,
+                        },
+                    )
+                    continue
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                "password_request_timeout",
+                project_id=project_key,
+                password_id=password_id,
+                tool_name=pending.tool_name,
+                timeout_seconds=PASSWORD_TIMEOUT,
+            )
+            self._emit_event(
+                project_key,
+                event="executer_password_timeout",
+                scan_id=pending.scan_id,
+                level="warn",
+                message=f"Password request timed out after {PASSWORD_TIMEOUT}s",
+                data={
+                    "stage": "executer",
+                    "kind": "password_timeout",
+                    "tool_name": pending.tool_name,
+                    "timeout_seconds": PASSWORD_TIMEOUT,
+                },
+            )
+            project_pending = self._password_request_events.get(project_key, {})
+            project_pending.pop(password_id, None)
+            return None
+
+        # Clean up
+        project_pending = self._password_request_events.get(project_key, {})
+        project_pending.pop(password_id, None)
+        if not project_pending:
+            self._password_request_events.pop(project_key, None)
+
+        return pending.password if pending.approved else None
+
+    async def approve_executer_password(
+        self,
+        project_id: str,
+        *,
+        password_id: str,
+        password: str,
+        approved: bool = True,
+    ) -> dict[str, Any]:
+        """Handle password response from frontend."""
+        project_key = str(project_id or "").strip()
+        if not project_key:
+            raise ValueError("project_id is required")
+
+        pending_by_id = self._password_request_events.get(project_key, {})
+        pending = pending_by_id.get(str(password_id or "").strip())
+        if pending is None:
+            raise ValueError("password request not found")
+
+        pending.approved = approved
+        pending.password = password if approved else None
+        pending.event.set()
+
+        return {
+            "ok": True,
+            "project_id": project_key,
+            "password_id": password_id,
+            "approved": approved,
             "tool_name": pending.tool_name,
             "scan_id": pending.scan_id,
         }
@@ -1297,6 +1783,113 @@ class ScanOrchestratorService:
             f"Extra info: {info}\n"
         )
 
+    async def _run_retest_background(
+        self,
+        *,
+        item: dict[str, Any],
+        retest_agent: Any,
+        retest_message: str,
+        project_id: str,
+        scan_id: str,
+        target: str,
+        target_type: str,
+    ) -> None:
+        """Run Retest agent in background and save findings to database.
+
+        This method runs independently and does NOT block other operations.
+        - Takes verified vulnerability description
+        - Executes PoC to gather evidence
+        - Saves report entry to project database
+        - Emits event for UI
+        """
+        try:
+            # Run retest agent (takes screenshot + detailed PoC)
+            retest_result = await retest_agent.run(retest_message)
+
+            # Build database entry from retest result
+            retest_summary = str(retest_result.summary or "").strip()
+            retest_data = (
+                asdict(retest_result)
+                if hasattr(retest_result, '__dataclass_fields__')
+                else retest_result
+            )
+
+            db_entry = {
+                "id": str(uuid.uuid4()),
+                "vulnerability_type": item["scenario"].get("vulnerability_type", "unknown"),
+                "endpoint": item["scenario"].get("endpoint", ""),
+                "target": target,
+                "target_type": target_type,
+                "severity": item["scenario"].get("priority", "medium"),
+                "verify_summary": item["verify_summary"],
+                "retest_summary": retest_summary,
+                "evidence": retest_data.get("evidence", {}),
+                "findings": retest_data.get("findings", []),
+                "tool_results": retest_data.get("tool_results", []),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": "verified_and_documented",
+            }
+
+            # Save to project database
+            project_key = str(project_id or "").strip()
+            current_project = self._projects_store.get_project(project_key)
+
+            if "findings" not in current_project:
+                current_project["findings"] = []
+            if "verified_vulnerabilities" not in current_project:
+                current_project["verified_vulnerabilities"] = []
+
+            current_project["findings"].append(db_entry)
+            current_project["verified_vulnerabilities"].append(db_entry)
+            current_project["findings_count"] = len(current_project.get("findings", []))
+            current_project["last_findings_updated"] = datetime.now(timezone.utc).isoformat()
+
+            self._projects_store.upsert_project(current_project)
+
+            # Emit event for UI
+            self._emit_event(
+                project_id,
+                event="retest_finding_saved",
+                scan_id=scan_id,
+                level="info",
+                message=f"Saved verified finding: {item['verify_summary'][:80]}",
+                data={
+                    "stage": "retest",
+                    "kind": "finding_saved",
+                    "finding_id": db_entry["id"],
+                    "vulnerability_type": db_entry["vulnerability_type"],
+                    "endpoint": db_entry["endpoint"],
+                    "retest_summary": retest_summary,
+                },
+            )
+
+            logger.info(
+                "retest_background_finding_saved",
+                project_id=project_id,
+                scan_id=scan_id,
+                finding_id=db_entry["id"],
+                vulnerability_type=db_entry["vulnerability_type"],
+            )
+
+        except Exception as e:
+            logger.error(
+                "retest_background_error",
+                project_id=project_id,
+                error=str(e),
+            )
+            self._emit_event(
+                project_id,
+                event="retest_finding_error",
+                scan_id=scan_id,
+                level="error",
+                message=f"Retest failed: {str(e)[:100]}",
+                data={
+                    "stage": "retest",
+                    "kind": "error",
+                    "error": str(e),
+                },
+            )
+
     async def _execute_scenario_with_agent(
         self,
         *,
@@ -1332,12 +1925,16 @@ class ScanOrchestratorService:
                 "needs": result.needs,
                 "tool_results": result.tool_results,
                 "discovered_target_types": result.discovered_target_types,
+                "rounds_executed": result.rounds_executed,
+                "round_labels": result.round_labels,
             },
         }
 
     async def _run_execution_cycle(
         self,
         *,
+        project_id: str,
+        scan_id: str,
         plan_data: dict[str, Any],
         recon_agent: Any,
         exploit_agent: Any,
@@ -1359,9 +1956,22 @@ class ScanOrchestratorService:
         """
         # Select at most 1 recon + 1 exploit from pending scenarios
         selected = _select_recon_exploit_parallel_scenarios(plan_data)
+
+        # Log what scenarios were selected for debugging
+        available_scenarios = _extract_prioritized_exec_scenarios(plan_data, limit=20)
+        logger.info(
+            "execution_cycle_selection",
+            available_count=len(available_scenarios),
+            selected_count=len(selected),
+            selected_agents=[s.get("agent") for s in selected] if selected else [],
+            available_agents=[s.get("agent") for s in available_scenarios] if available_scenarios else [],
+        )
+
         if not selected:
             # No more scenarios - ask planner if done
             return await self._check_planner_completion(
+                project_id=project_id,
+                scan_id=scan_id,
                 loop_planner=loop_planner,
                 plan_data=plan_data,
                 target=target,
@@ -1373,10 +1983,16 @@ class ScanOrchestratorService:
 
         # Mark selected scenarios as working and emit state change
         for scenario in selected:
+            _update_scenario_runtime_state(
+                plan_data,
+                scenario,
+                status="working",
+                done=False,
+            )
             self._emit_event(
-                scenario.get("_project_id", ""),
+                project_id,
                 event="scenario_state_change",
-                scan_id="",
+                scan_id=scan_id,
                 level="info",
                 message=f"Scenario started execution: {scenario.get('task', 'unknown')}",
                 data={
@@ -1385,6 +2001,7 @@ class ScanOrchestratorService:
                     "scenario_task": scenario.get("task", ""),
                     "agent": scenario.get("agent", ""),
                     "state": "working",
+                    "plan_data": plan_data,
                 },
             )
 
@@ -1405,11 +2022,389 @@ class ScanOrchestratorService:
             ])
             execution_rows.extend(results)
 
-        # Process results through Perceptor (make decisions as findings arrive)
+        # ============================================================================
+        # PHASE 1: Perceptor analyzes ALL findings (collect assessments, emit events)
+        # ============================================================================
         perceptor_rows: list[dict[str, Any]] = []
         planner_loop_rows: list[dict[str, Any]] = []
 
+        # Organize findings by assessment type as we process them
+        assessments_organized: dict[str, list[dict[str, Any]]] = {
+            "vulnerabilities": [],  # Will be verified in Phase 2
+            "info_only": [],        # Direct to planner in Phase 3
+        }
+
         for idx, row in enumerate(execution_rows, start=1):
+            row_result = row.get("result", {}) if isinstance(row, dict) else {}
+            row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
+            if row_status in {"failed", "error"}:
+                continue
+
+            scenario = row.get("scenario", {})
+            tool_results = (
+                row.get("result", {}).get("tool_results", [])
+                if isinstance(row.get("result"), dict)
+                else []
+            )
+
+            # Perceptor analyzes findings
+            assessment = await perceptor_agent.assess_tool_results(
+                scenario=scenario if isinstance(scenario, dict) else {},
+                tool_results=tool_results if isinstance(tool_results, list) else [],
+                asset_context={
+                    "criticality": (
+                        "high"
+                        if _normalize_priority((scenario or {}).get("priority", 3)) <= 2
+                        else "medium"
+                    ),
+                    "internet_exposed": target_type in {"web_app", "api"},
+                },
+            )
+            perceptor_rows.append(assessment)
+
+            compact_summary = str(assessment.get("compact_summary", "")).strip()
+            finding_type = str(assessment.get("finding_type", "info")).strip().lower()
+
+            # CRITICAL FIX: If parent agent (exploit) returned "not_vulnerable", downgrade to info
+            # This prevents Verify from being called unnecessarily
+            agent_role = str(scenario.get("agent", "")).strip().lower() if isinstance(scenario, dict) else ""
+            if agent_role == "exploit" and row_status == "not_vulnerable":
+                # Exploit agent explicitly said not vulnerable, override Perceptor classification
+                finding_type = "info"
+
+            # Emit perceptor_classified event
+            self._emit_event(
+                project_id,
+                event="perceptor_classified",
+                scan_id=scan_id,
+                level="info",
+                message=(
+                    f"Perceptor [classified] scenario #{idx} → "
+                    f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
+                    f"(type={finding_type})"
+                ),
+                data={
+                    "stage": "perceptor",
+                    "kind": "classified",
+                    "iteration": idx,
+                    "assessment": assessment,
+                },
+            )
+
+            # Organize by type for batch processing
+            if finding_type == "vulnerability":
+                assessments_organized["vulnerabilities"].append({
+                    "idx": idx,
+                    "assessment": assessment,
+                    "row": row,
+                    "scenario": scenario,
+                    "row_result": row_result,
+                    "compact_summary": compact_summary,
+                })
+            else:
+                assessments_organized["info_only"].append({
+                    "idx": idx,
+                    "assessment": assessment,
+                    "row": row,
+                    "scenario": scenario,
+                    "row_result": row_result,
+                    "compact_summary": compact_summary,
+                })
+
+        # ============================================================================
+        # PHASE 2: Batch Verify all vulnerabilities (sequentially to avoid rate limit)
+        # ============================================================================
+        verify_results_organized: dict[str, list[dict[str, Any]]] = {
+            "real_vulnerabilities": [],
+            "false_positives": [],
+            "inconclusives": [],
+        }
+
+        if assessments_organized["vulnerabilities"]:
+            # Semaphore to limit concurrent LLM requests (max 1 concurrent verify)
+            # This prevents rate limiting from overlapping API calls
+            verify_semaphore = asyncio.Semaphore(1)
+
+            async def run_verify_with_semaphore(item: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+                """Run verify agent with semaphore to prevent LLM rate limiting."""
+                verify_message = (
+                    f"Target: {target}\n"
+                    f"Target type: {target_type}\n"
+                    f"Scope: {scope}\n"
+                    f"Original scenario: {json.dumps(item['scenario'], ensure_ascii=True)}\n\n"
+                    "Finding to verify:\n"
+                    f"{item['compact_summary']}\n\n"
+                    "Execution row:\n"
+                    f"{json.dumps(item['row'], ensure_ascii=True)}"
+                )
+                async with verify_semaphore:
+                    return (item, await verify_agent.run(verify_message))
+
+            # Build verify tasks with semaphore rate limiting
+            verify_tasks = [
+                run_verify_with_semaphore(item)
+                for item in assessments_organized["vulnerabilities"]
+            ]
+
+            # Execute all verify tasks (semaphore ensures only 1 runs at a time)
+            verify_task_results = await asyncio.gather(
+                *verify_tasks,
+                return_exceptions=False
+            )
+
+            # Process results and organize by verdict
+            for item, verify_result in verify_task_results:
+                verify_data = asdict(verify_result) if hasattr(verify_result, '__dataclass_fields__') else verify_result
+                verdict = str(verify_data.get("verdict", verify_data.get("summary", "inconclusive"))).strip().lower()
+                verify_summary = str(verify_data.get("summary", "")).strip()
+
+                organized_item = {
+                    "idx": item["idx"],
+                    "assessment": item["assessment"],
+                    "row": item["row"],
+                    "scenario": item["scenario"],
+                    "row_result": item["row_result"],
+                    "compact_summary": item["compact_summary"],
+                    "verdict": verdict,
+                    "verify_summary": verify_summary,
+                    "verify_data": verify_data,
+                }
+
+                if verdict == "real_vulnerability":
+                    verify_results_organized["real_vulnerabilities"].append(organized_item)
+                elif verdict == "false_positive":
+                    verify_results_organized["false_positives"].append(organized_item)
+                else:
+                    verify_results_organized["inconclusives"].append(organized_item)
+
+        # ============================================================================
+        # PHASE 3A: Launch Retest (PARALLEL - fire and forget)
+        # PHASE 3B: Launch Planner (PARALLEL - immediate)
+        # ============================================================================
+        # Both run independently and concurrently
+
+        # Create Retest tasks (fire-and-forget, non-blocking)
+        retest_background_tasks = []
+        if verify_results_organized["real_vulnerabilities"]:
+            for item in verify_results_organized["real_vulnerabilities"]:
+                retest_message = (
+                    f"Target: {target}\n"
+                    f"Target type: {target_type}\n"
+                    f"Scope: {scope}\n\n"
+                    "VERIFIED VULNERABILITY - Build Report Entry:\n"
+                    f"{item['verify_summary']}\n\n"
+                    "Verify Evidence:\n"
+                    f"{json.dumps(item['verify_data'].get('evidence', {}), ensure_ascii=True)}\n\n"
+                    "Instructions:\n"
+                    "1. Take screenshot of vulnerability\n"
+                    "2. Capture detailed PoC proof (request/response/output)\n"
+                    "3. Build report entry with all details\n"
+                    "4. Return structured JSON for database storage"
+                )
+
+                # Create task but don't await it yet
+                retest_task = asyncio.create_task(
+                    self._run_retest_background(
+                        item=item,
+                        retest_agent=retest_agent,
+                        retest_message=retest_message,
+                        project_id=project_id,
+                        scan_id=scan_id,
+                        target=target,
+                        target_type=target_type,
+                    )
+                )
+                retest_background_tasks.append(retest_task)
+
+        # Build aggregated planner message with all findings
+        planner_sections = []
+
+        # Add real vulnerabilities section
+        if verify_results_organized["real_vulnerabilities"]:
+            real_vuln_section = "VERIFIED REAL VULNERABILITIES (confirmed by Verify agent):\n"
+            for item in verify_results_organized["real_vulnerabilities"]:
+                real_vuln_section += f"\n- [{item['idx']}] {item['verify_summary']}"
+            planner_sections.append(real_vuln_section)
+
+        # Add false positives section
+        if verify_results_organized["false_positives"]:
+            false_pos_section = "FALSE POSITIVES (filtered out):\n"
+            for item in verify_results_organized["false_positives"]:
+                false_pos_section += f"\n- [{item['idx']}] {item['verify_summary']}"
+            planner_sections.append(false_pos_section)
+
+        # Add inconclusives section
+        if verify_results_organized["inconclusives"]:
+            inconc_section = "INCONCLUSIVE FINDINGS (need manual review):\n"
+            for item in verify_results_organized["inconclusives"]:
+                inconc_section += f"\n- [{item['idx']}] {item['compact_summary']}"
+            planner_sections.append(inconc_section)
+
+        # Add info-only section
+        if assessments_organized["info_only"]:
+            info_section = "RECONNAISSANCE FINDINGS (informational only):\n"
+            for item in assessments_organized["info_only"]:
+                info_section += f"\n- [{item['idx']}] {item['compact_summary']}"
+            planner_sections.append(info_section)
+
+        # Build single aggregated message
+        aggregated_planner_message = (
+            f"Target: {target}\n"
+            f"Target type: {target_type}\n"
+            f"Scope: {scope}\n\n"
+            "BATCH FINDINGS SUMMARY:\n"
+            + "\n\n".join(planner_sections) +
+            "\n\n"
+            "Review all findings above. Update plan accordingly:\n"
+            "- For real vulnerabilities: mark as discovered and continue testing\n"
+            "- For false positives: acknowledge and move forward\n"
+            "- For inconclusives: add to review queue or continue testing\n"
+            "- For recon info: integrate into plan and continue enumeration"
+        )
+
+        # Call planner IMMEDIATELY (while Retest runs in background)
+        planner_loop_result = await loop_planner.run(
+            aggregated_planner_message,
+            is_loop=True,
+            intel_checklist=intel_checklist,
+        )
+
+        # Capture updated plan immediately after planner runs
+        from server.agents.planner.tools.pentest_plan import _current_plan as current
+        plan_data = dict(current) if isinstance(current, dict) else plan_data
+        plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+
+        # Log single planner update
+        logger.info(
+            "planner_batch_findings_processed",
+            real_vulns_count=len(verify_results_organized["real_vulnerabilities"]),
+            false_positives_count=len(verify_results_organized["false_positives"]),
+            inconclusives_count=len(verify_results_organized["inconclusives"]),
+            info_only_count=len(assessments_organized["info_only"]),
+            planner_summary=str(planner_loop_result.summary or "")[:100],
+        )
+
+        # Emit single plan update event for UI
+        self._emit_event(
+            project_id,
+            event="plan_updated_by_planner",
+            scan_id=scan_id,
+            level="success",
+            message=f"Planner processed batch: {len(verify_results_organized['real_vulnerabilities'])} real, "
+                    f"{len(verify_results_organized['false_positives'])} false pos, "
+                    f"{len(verify_results_organized['inconclusives'])} inconc, "
+                    f"{len(assessments_organized['info_only'])} info",
+            data={
+                "stage": "planner",
+                "kind": "batch_findings_processed",
+                "real_vulnerabilities_count": len(verify_results_organized["real_vulnerabilities"]),
+                "false_positives_count": len(verify_results_organized["false_positives"]),
+                "inconclusives_count": len(verify_results_organized["inconclusives"]),
+                "info_only_count": len(assessments_organized["info_only"]),
+                "summary": str(planner_loop_result.summary or "").strip(),
+                "plan_data": plan_data,
+            },
+        )
+
+        # ============================================================================
+        # PHASE 3C: Retest continues in background (already running)
+        # ============================================================================
+        # Retest tasks are already executing while Planner updates plan
+        # No need to wait for them here - they save to database independently
+
+        # Add false positives to log
+        for item in verify_results_organized["false_positives"]:
+            planner_loop_rows.append({
+                "iteration": item["idx"],
+                "route": "verify->planner(false_positive,batch)",
+                "verdict": "false_positive",
+                "false_positive_reason": item["verify_summary"],
+                "planner_summary": str(planner_loop_result.summary or "").strip(),
+                "compact_bridge": item["compact_summary"],
+            })
+
+        # Add inconclusives to log
+        for item in verify_results_organized["inconclusives"]:
+            planner_loop_rows.append({
+                "iteration": item["idx"],
+                "route": "verify->planner(inconclusive,batch)",
+                "verdict": "inconclusive",
+                "planner_summary": str(planner_loop_result.summary or "").strip(),
+                "compact_bridge": item["compact_summary"],
+            })
+
+        # Add info-only findings to log
+        for item in assessments_organized["info_only"]:
+            planner_loop_rows.append({
+                "iteration": item["idx"],
+                "route": "perceptor->planner(info_only,batch)",
+                "summary": str(planner_loop_result.summary or "").strip(),
+                "compact_bridge": item["compact_summary"],
+            })
+
+        # ============================================================================
+        # PHASE 5: Mark ALL scenarios as done
+        # ============================================================================
+        for row in execution_rows:
+            row_result = row.get("result", {}) if isinstance(row, dict) else {}
+            row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
+            if row_status in {"failed", "error"}:
+                continue
+
+            scenario = row.get("scenario", {})
+            if isinstance(scenario, dict):
+                rounds_executed = int(row_result.get("rounds_executed", 0) or 0)
+                round_labels = row_result.get("round_labels", [])
+
+                # Determine route based on what happened to this scenario's findings
+                route = "batch_processed"
+                for item in verify_results_organized["real_vulnerabilities"]:
+                    if item["scenario"] == scenario:
+                        route = "verify->planner+retest(batch)"
+                        break
+                for item in verify_results_organized["false_positives"]:
+                    if item["scenario"] == scenario:
+                        route = "verify->planner(false_positive,batch)"
+                        break
+                if route == "batch_processed":
+                    for item in verify_results_organized["inconclusives"]:
+                        if item["scenario"] == scenario:
+                            route = "verify->planner(inconclusive,batch)"
+                            break
+                if route == "batch_processed":
+                    for item in assessments_organized["info_only"]:
+                        if item["scenario"] == scenario:
+                            route = "perceptor->planner(info_only,batch)"
+                            break
+
+                _update_scenario_runtime_state(
+                    plan_data,
+                    scenario,
+                    status="completed",
+                    done=True,
+                    round_label=f"r{rounds_executed}" if rounds_executed > 0 else None,
+                    round_labels=round_labels if isinstance(round_labels, list) else None,
+                    route=route,
+                )
+                _mark_scenario_done_in_plan(plan_data, scenario)
+                self._emit_event(
+                    project_id,
+                    event="scenario_state_change",
+                    scan_id=scan_id,
+                    level="info",
+                    message=f"Scenario completed: {scenario.get('task', 'unknown')}",
+                    data={
+                        "stage": "executer",
+                        "kind": "scenario_done",
+                        "scenario_task": scenario.get("task", ""),
+                        "agent": scenario.get("agent", ""),
+                        "state": "completed",
+                        "route": route,
+                        "round_label": f"r{rounds_executed}" if rounds_executed > 0 else "",
+                        "rounds_seen": round_labels if isinstance(round_labels, list) else [],
+                        "plan_data": plan_data,
+                    },
+                )
             row_result = row.get("result", {}) if isinstance(row, dict) else {}
             row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
             if row_status in {"failed", "error"}:
@@ -1442,9 +2437,9 @@ class ScanOrchestratorService:
             assessment["followup_route"] = followup_route
 
             self._emit_event(
-                scenario.get("_project_id", ""),  # Placeholder
+                project_id,
                 event="perceptor_classified",
-                scan_id="",  # Placeholder
+                scan_id=scan_id,
                 level="info",
                 message=(
                     f"Perceptor [classified] scenario #{idx} → "
@@ -1480,10 +2475,10 @@ class ScanOrchestratorService:
                 verdict = str(verify_data.get("verdict", verify_data.get("summary", "inconclusive"))).strip().lower()
 
                 if verdict == "real_vulnerability":
-                    # Step 2a: Real vulnerability found - route to both PLANNER and RETEST
+                    # Step 2a: Real vulnerability found - route to both PLANNER and RETEST (PARALLEL)
                     verify_summary = str(verify_data.get("summary", "")).strip()
 
-                    # Send to Planner for plan update
+                    # Build planner message
                     planner_message = (
                         f"Target: {target}\n"
                         f"Target type: {target_type}\n"
@@ -1491,27 +2486,8 @@ class ScanOrchestratorService:
                         "Verified Vulnerability (confirmed by Verify agent):\n"
                         f"{verify_summary}"
                     )
-                    planner_loop_result = await loop_planner.run(
-                        planner_message,
-                        is_loop=True,
-                        intel_checklist=intel_checklist,
-                    )
 
-                    # Emit plan update event for UI (plan data managed by planner internally)
-                    self._emit_event(
-                        scenario.get("_project_id", ""),
-                        event="plan_updated_by_planner",
-                        scan_id="",
-                        level="success",
-                        message="Planner updated plan after verifying real vulnerability.",
-                        data={
-                            "stage": "planner",
-                            "kind": "plan_updated_after_verify",
-                            "verdict": "real_vulnerability",
-                        },
-                    )
-
-                    # Send to Retest to build report entry
+                    # Build retest message
                     retest_message = (
                         f"Target: {target}\n"
                         f"Target type: {target_type}\n"
@@ -1521,7 +2497,50 @@ class ScanOrchestratorService:
                         "Verify Evidence:\n"
                         f"{json.dumps(verify_data.get('evidence', {}), ensure_ascii=True)}"
                     )
-                    retest_result = await retest_agent.run(retest_message)
+
+                    # Run Planner and Retest PARALLEL (not sequential)
+                    planner_result_task = loop_planner.run(
+                        planner_message,
+                        is_loop=True,
+                        intel_checklist=intel_checklist,
+                    )
+                    retest_result_task = retest_agent.run(retest_message)
+
+                    # Wait for both to complete
+                    planner_loop_result, retest_result = await asyncio.gather(
+                        planner_result_task,
+                        retest_result_task,
+                    )
+
+                    # Capture updated plan immediately after planner completes
+                    from server.agents.planner.tools.pentest_plan import _current_plan as current
+                    plan_data = dict(current) if isinstance(current, dict) else plan_data
+                    plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+
+                    # Log real vulnerability routing
+                    logger.info(
+                        "planner_real_vulnerability",
+                        verdict="real_vulnerability",
+                        planner_summary=str(planner_loop_result.summary or "")[:100],
+                        retest_summary=str(retest_result.summary or "")[:100],
+                    )
+
+                    # Emit plan update event for UI
+                    self._emit_event(
+                        project_id,
+                        event="plan_updated_by_planner",
+                        scan_id=scan_id,
+                        level="success",
+                        message="Planner updated plan + Retest build PoC (executed in parallel).",
+                        data={
+                            "stage": "planner+retest",
+                            "kind": "real_vulnerability_routed",
+                            "verdict": "real_vulnerability",
+                            "planner_summary": str(planner_loop_result.summary or "").strip(),
+                            "retest_summary": str(retest_result.summary or "").strip(),
+                            "plan_data": plan_data,
+                        },
+                    )
 
                     planner_loop_rows.append(
                         {
@@ -1552,17 +2571,31 @@ class ScanOrchestratorService:
                         intel_checklist=intel_checklist,
                     )
 
+                    # Capture updated plan immediately after planner runs
+                    from server.agents.planner.tools.pentest_plan import _current_plan as current
+                    plan_data = dict(current) if isinstance(current, dict) else plan_data
+                    plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+
+                    # Log plan update for debugging
+                    logger.info(
+                        "planner_false_positive",
+                        verdict="false_positive",
+                        planner_summary=str(planner_loop_result.summary or "")[:100],
+                    )
+
                     # Emit plan update event for UI
                     self._emit_event(
-                        scenario.get("_project_id", ""),
+                        project_id,
                         event="plan_updated_by_planner",
-                        scan_id="",
+                        scan_id=scan_id,
                         level="info",
                         message="Planner updated plan after filtering false positive.",
                         data={
                             "stage": "planner",
                             "kind": "plan_updated_false_positive",
                             "verdict": "false_positive",
+                            "summary": str(planner_loop_result.summary or "").strip(),
+                            "plan_data": plan_data,
                         },
                     )
 
@@ -1591,17 +2624,31 @@ class ScanOrchestratorService:
                         intel_checklist=intel_checklist,
                     )
 
+                    # Capture updated plan immediately after planner runs
+                    from server.agents.planner.tools.pentest_plan import _current_plan as current
+                    plan_data = dict(current) if isinstance(current, dict) else plan_data
+                    plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+
+                    # Log plan update for debugging
+                    logger.info(
+                        "planner_inconclusive",
+                        verdict="inconclusive",
+                        planner_summary=str(planner_loop_result.summary or "")[:100],
+                    )
+
                     # Emit plan update event for UI
                     self._emit_event(
-                        scenario.get("_project_id", ""),
+                        project_id,
                         event="plan_updated_by_planner",
-                        scan_id="",
+                        scan_id=scan_id,
                         level="warn",
                         message="Planner updated plan after inconclusive verification result.",
                         data={
                             "stage": "planner",
                             "kind": "plan_updated_inconclusive",
                             "verdict": "inconclusive",
+                            "summary": str(planner_loop_result.summary or "").strip(),
+                            "plan_data": plan_data,
                         },
                     )
 
@@ -1634,17 +2681,31 @@ class ScanOrchestratorService:
                 if loop_summary.lower().startswith("planning failed:"):
                     raise RuntimeError(f"planner loop failed: {loop_summary}")
 
+                # Capture updated plan immediately after planner runs
+                from server.agents.planner.tools.pentest_plan import _current_plan as current
+                plan_data = dict(current) if isinstance(current, dict) else plan_data
+                plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+
+                # Log plan update for debugging
+                logger.info(
+                    "planner_info_only",
+                    finding_type="info",
+                    planner_summary=loop_summary[:100],
+                )
+
                 # Emit plan update event for UI
                 self._emit_event(
-                    scenario.get("_project_id", ""),
+                    project_id,
                     event="plan_updated_by_planner",
-                    scan_id="",
+                    scan_id=scan_id,
                     level="info",
                     message="Planner updated plan based on reconnaissance findings.",
                     data={
                         "stage": "planner",
                         "kind": "plan_updated",
                         "route": "recon_info",
+                        "summary": loop_summary,
+                        "plan_data": plan_data,
                     },
                 )
 
@@ -1665,11 +2726,22 @@ class ScanOrchestratorService:
 
             # Mark scenario as done in plan
             if isinstance(scenario, dict):
+                rounds_executed = int(row_result.get("rounds_executed", 0) or 0)
+                round_labels = row_result.get("round_labels", [])
+                _update_scenario_runtime_state(
+                    plan_data,
+                    scenario,
+                    status="completed",
+                    done=True,
+                    round_label=f"r{rounds_executed}" if rounds_executed > 0 else None,
+                    round_labels=round_labels if isinstance(round_labels, list) else None,
+                    route=followup_route,
+                )
                 _mark_scenario_done_in_plan(plan_data, scenario)
                 self._emit_event(
-                    scenario.get("_project_id", ""),
+                    project_id,
                     event="scenario_state_change",
-                    scan_id="",
+                    scan_id=scan_id,
                     level="info",
                     message=f"Scenario completed: {scenario.get('task', 'unknown')}",
                     data={
@@ -1677,17 +2749,37 @@ class ScanOrchestratorService:
                         "kind": "scenario_done",
                         "scenario_task": scenario.get("task", ""),
                         "agent": scenario.get("agent", ""),
-                        "state": "done",
+                        "state": "completed",
                         "route": followup_route,
+                        "round_label": f"r{rounds_executed}" if rounds_executed > 0 else "",
+                        "rounds_seen": round_labels if isinstance(round_labels, list) else [],
+                        "plan_data": plan_data,
                     },
                 )
 
-        # Continue to next cycle
-        return True, plan_data
+        # Capture updated plan from planner (scenarios may have been modified/added)
+        from server.agents.planner.tools.pentest_plan import _current_plan
+        updated_plan = dict(_current_plan) if isinstance(_current_plan, dict) else plan_data
+        updated_plan = _sanitize_plan_remove_forbidden_agents(updated_plan)
+
+        # CRITICAL FIX: Check if Planner indicated completion during batch processing
+        # If any planner result says "done" or "complete", return False to stop looping
+        should_stop = False
+        for row in planner_loop_rows:
+            summary = str(row.get("planner_summary") or row.get("summary", "")).strip().lower()
+            if summary.startswith("pentest complete") or summary == "complete":
+                should_stop = True
+                logger.info("planner_batch_stop_signal", reason="planner_said_done", summary=summary)
+                break
+
+        # Continue to next cycle, or stop if Planner indicated completion
+        return not should_stop, updated_plan
 
     async def _check_planner_completion(
         self,
         *,
+        project_id: str,
+        scan_id: str,
         loop_planner: Any,
         plan_data: dict[str, Any],
         target: str,
@@ -1712,10 +2804,30 @@ class ScanOrchestratorService:
             intel_checklist=intel_checklist,
         )
 
-        summary = str(plan_result.summary or "").strip()
-        is_done = "complete" in summary.lower()
+        from server.agents.planner.tools.pentest_plan import _current_plan as current
 
-        return not is_done, plan_data
+        updated_plan = dict(current) if isinstance(current, dict) else plan_data
+        updated_plan = _sanitize_plan_remove_forbidden_agents(updated_plan)
+        summary = str(plan_result.summary or "").strip()
+        normalized_summary = re.sub(r"\s+", " ", summary.lower()).strip()
+        is_done = normalized_summary.startswith("pentest complete") or normalized_summary == "complete"
+
+        if not is_done:
+            self._emit_event(
+                project_id,
+                event="plan_updated_by_planner",
+                scan_id=scan_id,
+                level="info",
+                message="Planner refreshed plan after empty-scenario completion check.",
+                data={
+                    "stage": "planner",
+                    "kind": "plan_updated_after_completion_check",
+                    "summary": summary,
+                    "plan_data": updated_plan,
+                },
+            )
+
+        return not is_done, updated_plan
 
     async def _run_scan(
         self,
@@ -1744,6 +2856,12 @@ class ScanOrchestratorService:
         )
 
         try:
+            project = self._projects_store.get_project(project_id) or {}
+            custom_checklist_text = (
+                str(project.get("customChecklistText", "")).strip()
+                if isinstance(project, dict)
+                else ""
+            )
             # Lazy import avoids loading heavy agent modules at app boot.
             from server.agents.intel.agent import IntelAgent
 
@@ -1761,6 +2879,7 @@ class ScanOrchestratorService:
             intel_result = await intel_agent.run(
                 target_type=target_type,
                 info=info,
+                custom_checklist_text=custom_checklist_text,
             )
         except asyncio.CancelledError:
             current = self._runs.get(project_id, {})
@@ -1962,7 +3081,12 @@ class ScanOrchestratorService:
                     raw_message=message,
                 ),
             )
-            async with PlannerAgent(callback=planner_callback, project_id=project_id) as planner_agent:
+            async with PlannerAgent(
+                callback=planner_callback,
+                project_id=project_id,
+                projects_store=self._projects_store,
+                vector_store=self._vector_store,
+            ) as planner_agent:
                 planner_result = await planner_agent.run(
                     planner_input,
                     is_loop=False,
@@ -1973,6 +3097,32 @@ class ScanOrchestratorService:
                 plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
                 # Sanitize plan: remove any forbidden agents (verify, retest, perceptor)
                 plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+
+                # Log plan structure for debugging (why 0 scenarios?)
+                phases = plan_data.get("phases", [])
+                scenario_counts = {}
+                for phase_idx, phase in enumerate(phases):
+                    if isinstance(phase, dict):
+                        steps = phase.get("steps", [])
+                        if isinstance(steps, list):
+                            for step_idx, step in enumerate(steps):
+                                if isinstance(step, dict):
+                                    scenarios = step.get("scenarios", [])
+                                    agent_counts = {}
+                                    for scen in scenarios:
+                                        if isinstance(scen, dict):
+                                            agent = scen.get("agent", "unknown")
+                                            agent_counts[agent] = agent_counts.get(agent, 0) + 1
+                                    if agent_counts:
+                                        key = f"{phase.get('name', 'Phase')}:step{step_idx}"
+                                        scenario_counts[key] = agent_counts
+
+                logger.info(
+                    "plan_loaded_from_planner",
+                    target=plan_data.get("target", ""),
+                    phases_count=len(phases),
+                    scenario_breakdown=scenario_counts if scenario_counts else "NO SCENARIOS FOUND",
+                )
         except asyncio.CancelledError:
             current = self._runs.get(project_id, {})
             if str(current.get("status")) in {"paused", "idle"}:
@@ -2129,6 +3279,8 @@ class ScanOrchestratorService:
             loop_planner = PlannerAgent(
                 callback=loop_planner_callback,
                 project_id=project_id,
+                projects_store=self._projects_store,
+                vector_store=self._vector_store,
             )
 
             try:
@@ -2165,6 +3317,8 @@ class ScanOrchestratorService:
                     )
 
                     should_continue, updated_plan = await self._run_execution_cycle(
+                        project_id=project_id,
+                        scan_id=scan_id,
                         plan_data=plan_data,
                         recon_agent=recon_agent,
                         exploit_agent=exploit_agent,

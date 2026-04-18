@@ -80,6 +80,8 @@ class ExecuterResult:
     next_hypotheses: list[str] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     discovered_target_types: list[str] = field(default_factory=list)
+    rounds_executed: int = 0
+    round_labels: list[str] = field(default_factory=list)
 
 
 def _dict_to_msg(d: dict[str, Any]) -> ChatMessage:
@@ -135,7 +137,16 @@ def _parse_executer_output(raw: str) -> ExecuterResult:
         summary = raw.strip() or "No response generated."
         return ExecuterResult(status="incomplete", summary=summary)
 
-    status = parsed.get("status", "incomplete")
+    # CRITICAL FIX: Check for "verdict" field (Verify agent) or "status" field (other agents)
+    status = parsed.get("status")
+    if not status:
+        # Verify agent uses "verdict" instead of "status"
+        status = parsed.get("verdict", "incomplete")
+    # Ensure status is a string (handle lists, dicts, etc. defensively)
+    if isinstance(status, list):
+        status = status[0] if status else "incomplete"
+    status = str(status).strip() if status else "incomplete"
+
     findings = parsed.get("findings", [])
     evidence = parsed.get("evidence", [])
     needs = parsed.get("needs", [])
@@ -151,12 +162,17 @@ def _parse_executer_output(raw: str) -> ExecuterResult:
     if not isinstance(next_hypotheses, list):
         next_hypotheses = []
 
+    # Ensure summary is a string
+    if isinstance(summary, list):
+        summary = " ".join(str(s) for s in summary) if summary else ""
+    summary = str(summary) if summary else ""
+
     return ExecuterResult(
-        status=str(status),
+        status=status,
         findings=findings,
         evidence=evidence,
         needs=needs,
-        summary=str(summary),
+        summary=summary,
         next_hypotheses=[str(item) for item in next_hypotheses],
     )
 
@@ -620,8 +636,10 @@ class BaseExecuterAgent:
         last_content = ""
         all_tool_results: list[dict[str, Any]] = []
         all_discovered_target_types: set[str] = set()
+        rounds_executed = 0
 
         for round_index in range(1, self._max_tool_rounds + 1):
+            rounds_executed = round_index
             self._cb.on_step(
                 f"[{self._role}] LLM round {round_index}/{self._max_tool_rounds}"
             )
@@ -665,6 +683,8 @@ class BaseExecuterAgent:
                 return ExecuterResult(
                     status="failed",
                     summary=f"LLM error: {llm_exc}",
+                    rounds_executed=round_index,
+                    round_labels=[f"r{n}" for n in range(1, round_index + 1)],
                 )
 
             last_content = response.content or ""
@@ -743,6 +763,8 @@ class BaseExecuterAgent:
                     summary="Execution paused awaiting user approval for a tool call.",
                     tool_results=all_tool_results,
                     discovered_target_types=sorted(all_discovered_target_types),
+                    rounds_executed=round_index,
+                    round_labels=[f"r{n}" for n in range(1, round_index + 1)],
                 )
 
             # If we consumed the final allowed round, return the aggregated tool output.
@@ -765,9 +787,13 @@ class BaseExecuterAgent:
                 summary=self._format_tool_results(all_tool_results),
                 tool_results=all_tool_results,
                 discovered_target_types=sorted(all_discovered_target_types),
+                rounds_executed=self._max_tool_rounds,
+                round_labels=[f"r{n}" for n in range(1, self._max_tool_rounds + 1)],
             )
         result = _parse_executer_output(last_content)
         result.discovered_target_types = extract_discovered_target_types(last_content)
+        result.rounds_executed = rounds_executed
+        result.round_labels = [f"r{n}" for n in range(1, rounds_executed + 1)]
         if self._context_window is not None:
             await self._context_window.record(
                 kind="run_result",

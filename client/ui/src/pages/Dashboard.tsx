@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  Bell,
+  BellOff,
   Bot,
   Check,
   Clock3,
@@ -138,6 +140,15 @@ interface PendingToolApprovalView {
   callId: string;
   args: Record<string, unknown>;
 }
+
+type ApprovalMode =
+  | "custom"
+  | "auto_all"
+  | "auto_exploit"
+  | "auto_recon"
+  | "auto_verify";
+
+const NOTIFICATION_PREF_KEY = "pentaforge_notifications_enabled";
 
 const PROJECT_STATUSES: ProjectStatus[] = [
   "idle",
@@ -961,6 +972,16 @@ export default function Dashboard() {
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [locallyAckedApprovalId, setLocallyAckedApprovalId] = useState<string | null>(null);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("custom");
+  const [showApprovalModeMenu, setShowApprovalModeMenu] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | "unsupported"
+  >(
+    typeof window !== "undefined" && "Notification" in window
+      ? Notification.permission
+      : "unsupported",
+  );
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [logLevelFilter, setLogLevelFilter] = useState<"all" | LogLevel>("all");
   const [logSourceFilter, setLogSourceFilter] = useState<string>("all");
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
@@ -990,8 +1011,18 @@ export default function Dashboard() {
   const [projectEditTarget, setProjectEditTarget] = useState("");
   const [projectEditDescription, setProjectEditDescription] = useState("");
   const [isCopilotOpen, setIsCopilotOpen] = useState(false);
+  const lastApprovalNotifiedRef = useRef<string>("");
+  const lastPlannerApprovalNotifiedRef = useRef<string>("");
   const dashboardSelectClass =
     "h-7 rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]";
+  const approvalModeLabel: Record<ApprovalMode, string> = {
+    custom: "Custom Approve",
+    auto_all: "Auto All",
+    auto_exploit: "Auto Exploit",
+    auto_recon: "Auto Recon",
+    auto_verify: "Auto Verify",
+  };
+  const notificationsUnavailable = notificationPermission === "unsupported";
 
   const handleCloseProject = () => {
     setActive(null);
@@ -1400,6 +1431,181 @@ export default function Dashboard() {
       setToolApprovalLoading(null);
     }
   };
+
+  const requestNotificationAccess = async () => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      setNotificationsEnabled(false);
+      return;
+    }
+    if (notificationsEnabled) {
+      setNotificationsEnabled(false);
+      try {
+        window.localStorage.setItem(NOTIFICATION_PREF_KEY, "0");
+      } catch {
+        // ignore storage failures
+      }
+      return;
+    }
+    if (Notification.permission === "denied") {
+      setNotificationPermission("denied");
+      setNotificationsEnabled(false);
+      try {
+        window.localStorage.setItem(NOTIFICATION_PREF_KEY, "0");
+      } catch {
+        // ignore storage failures
+      }
+      setStreamLogs((previous) => {
+        const nextEntry: DashboardLogEntry = {
+          id: `notif-denied-${Math.random().toString(36).slice(2, 10)}`,
+          level: "warn",
+          message:
+            "Notifications are blocked by browser/OS settings. Please enable notifications for this app.",
+          at: new Date().toISOString(),
+          source: "system",
+        };
+        return [...previous, nextEntry].slice(-120);
+      });
+      return;
+    }
+    try {
+      const next = await Notification.requestPermission();
+      setNotificationPermission(next);
+      if (next === "granted") {
+        setNotificationsEnabled(true);
+        try {
+          window.localStorage.setItem(NOTIFICATION_PREF_KEY, "1");
+        } catch {
+          // ignore storage failures
+        }
+        try {
+          new Notification("PentaForge Notifications Enabled", {
+            body: "You will receive approval alerts here.",
+            tag: "pentaforge-notification-enabled",
+          });
+        } catch {
+          // ignore notification display issues after permission grant
+        }
+      } else {
+        setNotificationsEnabled(false);
+        try {
+          window.localStorage.setItem(NOTIFICATION_PREF_KEY, "0");
+        } catch {
+          // ignore storage failures
+        }
+      }
+    } catch {
+      setNotificationPermission(Notification.permission);
+      const enabled = Notification.permission === "granted";
+      setNotificationsEnabled(enabled);
+      try {
+        window.localStorage.setItem(NOTIFICATION_PREF_KEY, enabled ? "1" : "0");
+      } catch {
+        // ignore storage failures
+      }
+    }
+  };
+
+  const pushDesktopNotification = useCallback(
+    (title: string, body: string) => {
+      if (
+        typeof window === "undefined"
+        || !("Notification" in window)
+        || !notificationsEnabled
+        || notificationPermission !== "granted"
+      ) {
+        return;
+      }
+      try {
+        // Desktop/webview notification for immediate operator awareness.
+        new Notification(title, { body, tag: "pentaforge-approval" });
+      } catch {
+        // Ignore notification failures and keep scan flow uninterrupted.
+      }
+    },
+    [notificationPermission, notificationsEnabled],
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      setNotificationsEnabled(false);
+      return;
+    }
+    const syncNotificationState = () => {
+      const permission = Notification.permission;
+      setNotificationPermission(permission);
+      let prefEnabled = false;
+      try {
+        prefEnabled = window.localStorage.getItem(NOTIFICATION_PREF_KEY) === "1";
+      } catch {
+        prefEnabled = false;
+      }
+      setNotificationsEnabled(permission === "granted" && prefEnabled);
+    };
+    syncNotificationState();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        syncNotificationState();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (approvalMode !== "auto_all" || !isRunning) {
+      return;
+    }
+    if (awaitingPlannerApproval && !plannerApprovalLoading) {
+      void handleApprovePlanner();
+    }
+  }, [approvalMode, isRunning, awaitingPlannerApproval, plannerApprovalLoading]);
+
+  useEffect(() => {
+    if (!isRunning || !pendingToolApproval || toolApprovalLoading) {
+      return;
+    }
+    const pendingRole = String(pendingToolApproval.role || "").trim().toLowerCase();
+    const shouldAutoApprove =
+      approvalMode === "auto_all"
+      || (approvalMode === "auto_exploit" && pendingRole === "exploit")
+      || (approvalMode === "auto_recon" && pendingRole === "recon")
+      || (approvalMode === "auto_verify" && pendingRole === "verify");
+    if (shouldAutoApprove) {
+      void handleToolApproval("approve");
+    }
+  }, [approvalMode, isRunning, pendingToolApproval, toolApprovalLoading]);
+
+  useEffect(() => {
+    if (!pendingToolApproval?.approvalId) {
+      return;
+    }
+    if (lastApprovalNotifiedRef.current === pendingToolApproval.approvalId) {
+      return;
+    }
+    lastApprovalNotifiedRef.current = pendingToolApproval.approvalId;
+    pushDesktopNotification(
+      "PentaForge Approval Needed",
+      `${pendingToolApproval.role}: ${pendingToolCommandPreview || pendingToolApproval.toolName}`,
+    );
+  }, [pendingToolApproval, pendingToolCommandPreview, pushDesktopNotification]);
+
+  useEffect(() => {
+    if (!awaitingPlannerApproval || !activeProjectId) {
+      return;
+    }
+    if (lastPlannerApprovalNotifiedRef.current === activeProjectId) {
+      return;
+    }
+    lastPlannerApprovalNotifiedRef.current = activeProjectId;
+    pushDesktopNotification(
+      "PentaForge Planner Approval Needed",
+      "Checklist is ready. Approve to continue planner.",
+    );
+  }, [awaitingPlannerApproval, activeProjectId, pushDesktopNotification]);
 
   const fallbackLogs: DashboardLogEntry[] = [];
   const baseTimestamp = activeProject.updatedAt || new Date().toISOString();
@@ -2340,6 +2546,95 @@ export default function Dashboard() {
                   </option>
                 ))}
               </select>
+
+              <div className="relative">
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  className="h-9 w-9"
+                  onClick={() => setShowApprovalModeMenu((open) => !open)}
+                  title="Approval mode"
+                >
+                  <Check size={18} />
+                </Button>
+                {showApprovalModeMenu ? (
+                  <div className="absolute left-0 top-9 z-30 w-72 rounded-md border border-border bg-surface-1 p-2 shadow-xl">
+                    <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-secondary">
+                      Approval Mode
+                    </p>
+                    <div className="grid grid-cols-2 gap-1">
+                      <Button
+                        size="xs"
+                        variant={approvalMode === "custom" ? "primary" : "secondary"}
+                        onClick={() => {
+                          setApprovalMode("custom");
+                          setShowApprovalModeMenu(false);
+                        }}
+                      >
+                        Custom
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant={approvalMode === "auto_all" ? "primary" : "secondary"}
+                        onClick={() => {
+                          setApprovalMode("auto_all");
+                          setShowApprovalModeMenu(false);
+                        }}
+                      >
+                        Auto All
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant={approvalMode === "auto_exploit" ? "primary" : "secondary"}
+                        onClick={() => {
+                          setApprovalMode("auto_exploit");
+                          setShowApprovalModeMenu(false);
+                        }}
+                      >
+                        Auto Exploit
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant={approvalMode === "auto_recon" ? "primary" : "secondary"}
+                        onClick={() => {
+                          setApprovalMode("auto_recon");
+                          setShowApprovalModeMenu(false);
+                        }}
+                      >
+                        Auto Recon
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant={approvalMode === "auto_verify" ? "primary" : "secondary"}
+                        onClick={() => {
+                          setApprovalMode("auto_verify");
+                          setShowApprovalModeMenu(false);
+                        }}
+                      >
+                        Auto Verify
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              <Button
+                size="icon"
+                variant="secondary"
+                className="h-9 w-9"
+                onClick={() => {
+                  void requestNotificationAccess();
+                }}
+                disabled={notificationsUnavailable}
+                title={
+                  notificationsUnavailable
+                    ? "Notifications unsupported in this environment"
+                    : notificationsEnabled
+                      ? "Disable desktop notifications"
+                      : `Enable desktop notifications (${notificationPermission})`
+                }
+              >
+                {notificationsUnavailable || !notificationsEnabled ? <BellOff size={18} /> : <Bell size={18} />}
+              </Button>
             </div>
             <div className="text-right">
               <p className="text-sm text-text-muted">
