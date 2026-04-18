@@ -133,7 +133,23 @@ def _extract_json_from_text(raw: str) -> dict[str, Any]:
 
 def _parse_executer_output(raw: str) -> ExecuterResult:
     parsed = _extract_json_from_text(raw)
+
+    # CRITICAL FIX: If JSON parsing failed completely, try to extract verdict field directly from raw text
+    # This handles cases where Verify agent outputs {"verdict": "..."} but JSON parsing fails
     if not parsed:
+        # Try direct regex extraction for verdict field (Verify agent Round 3)
+        verdict_match = re.search(r'"verdict"\s*:\s*"([^"]+)"', raw, re.IGNORECASE)
+        if verdict_match:
+            verdict_value = verdict_match.group(1).strip().lower()
+            if verdict_value in {"real_vulnerability", "false_positive", "inconclusive"}:
+                # Successfully extracted verdict from raw text
+                summary = raw.strip() or "No structured response."
+                return ExecuterResult(
+                    status=verdict_value,
+                    summary=summary,
+                )
+
+        # If no verdict extracted, treat as incomplete
         summary = raw.strip() or "No response generated."
         return ExecuterResult(status="incomplete", summary=summary)
 
