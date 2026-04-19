@@ -103,6 +103,13 @@ def _needs_nothink(model_name: str) -> bool:
 def _extract_json_from_text(raw: str) -> dict[str, Any]:
     text = raw.strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    # SANITIZE: Convert Unicode fancy quotes to regular ASCII quotes
+    # This fixes issues where LLM outputs « » or " " instead of "
+    text = text.replace('"', '"').replace('"', '"')  # "" → "
+    text = text.replace('«', '"').replace('»', '"')  # « » → "
+    text = text.replace(''', "'").replace(''', "'")  # '' → '
+
     json_blob = text
 
     # Try markdown code blocks first
@@ -747,6 +754,17 @@ class BaseExecuterAgent:
 
             last_content = response.content or ""
             tool_calls = response.tool_calls or []
+
+            # DEBUG: Log LLM response IMMEDIATELY after receiving
+            logger.info(
+                "llm_response_received",
+                role=self._role,
+                round=round_index,
+                content_length=len(last_content),
+                tool_calls_count=len(tool_calls),
+                timestamp="now",
+            )
+
             if self._max_tool_calls_per_round > 0 and len(tool_calls) > self._max_tool_calls_per_round:
                 self._cb.on_warn(
                     f"[{self._role}] limiting tool calls this round: "
@@ -754,7 +772,16 @@ class BaseExecuterAgent:
                 )
                 tool_calls = tool_calls[: self._max_tool_calls_per_round]
 
+            # DEBUG: Log after limiting tool calls
+            logger.info(
+                "tool_calls_prepared",
+                role=self._role,
+                round=round_index,
+                tool_calls_after_limit=len(tool_calls),
+            )
+
             if self._context_window is not None:
+                logger.info("context_window_recording_start", role=self._role, round=round_index)
                 await self._context_window.record_llm_turn(
                     prompt_excerpt=user_message if round_index == 1 else f"{self._role} round {round_index}",
                     response_excerpt=last_content or f"tool_calls={len(tool_calls)}",
@@ -765,6 +792,7 @@ class BaseExecuterAgent:
                         "tool_calls": len(tool_calls),
                     },
                 )
+                logger.info("context_window_recording_done", role=self._role, round=round_index)
             messages.append(
                 {
                     "role": "assistant",
@@ -777,6 +805,18 @@ class BaseExecuterAgent:
             is_final_round = round_index >= self._max_tool_rounds
             is_consolidation_role = self._role in ("verify", "retest")
             skip_tools_this_round = is_final_round and is_consolidation_role and tool_calls
+
+            # DEBUG: Log consolidation decision
+            logger.info(
+                "consolidation_decision",
+                role=self._role,
+                round=round_index,
+                max_rounds=self._max_tool_rounds,
+                is_final_round=is_final_round,
+                is_consolidation_role=is_consolidation_role,
+                has_tool_calls=bool(tool_calls),
+                skip_tools_this_round=skip_tools_this_round,
+            )
 
             if not tool_calls or skip_tools_this_round:
                 if skip_tools_this_round:

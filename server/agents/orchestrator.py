@@ -256,6 +256,14 @@ class OrchestratorState(TypedDict):
     plan_data: dict[str, Any]
     error: str
 
+    # EXECUTER CYCLE STATE
+    cycle_count: int
+    execution_rows: list[dict[str, Any]]
+    perceptor_rows: list[dict[str, Any]]
+    planner_loop_rows: list[dict[str, Any]]
+    selected_scenarios: list[dict[str, Any]]
+    should_continue_cycling: bool
+
 
 # ── Output dataclass ───────────────────────────────────────────────────
 

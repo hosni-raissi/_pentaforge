@@ -1960,8 +1960,26 @@ class ScanOrchestratorService:
 
         # Log what scenarios were selected for debugging
         available_scenarios = _extract_prioritized_exec_scenarios(plan_data, limit=20)
+
+        # Count total scenarios in plan
+        total_scenarios = 0
+        done_scenarios = 0
+        phases = plan_data.get("phases", [])
+        for phase in phases:
+            if isinstance(phase, dict):
+                for step in phase.get("steps", []):
+                    if isinstance(step, dict):
+                        for scenario in step.get("scenarios", []):
+                            if isinstance(scenario, dict):
+                                total_scenarios += 1
+                                if scenario.get("done"):
+                                    done_scenarios += 1
+
         logger.info(
             "execution_cycle_selection",
+            total_scenarios_in_plan=total_scenarios,
+            done_scenarios=done_scenarios,
+            pending_scenarios=total_scenarios - done_scenarios,
             available_count=len(available_scenarios),
             selected_count=len(selected),
             selected_agents=[s.get("agent") for s in selected] if selected else [],
@@ -2024,7 +2042,7 @@ class ScanOrchestratorService:
             execution_rows.extend(results)
 
         # ============================================================================
-        # PHASE 1: Perceptor analyzes findings (ASYNC - process in parallel)
+        # PHASE 1: Perceptor analyzes findings (SEQUENTIAL - Verify depends on this)
         # ============================================================================
         perceptor_rows: list[dict[str, Any]] = []
         planner_loop_rows: list[dict[str, Any]] = []
@@ -2035,14 +2053,13 @@ class ScanOrchestratorService:
             "info_only": [],        # Direct to planner in Phase 3
         }
 
-        async def process_perceptor_row(
-            idx: int, row: dict[str, Any]
-        ) -> tuple[int, dict[str, Any] | None, str | None]:
-            """Process single row through Perceptor (for parallel execution)."""
+        for idx, row in enumerate(execution_rows, start=1):
             row_result = row.get("result", {}) if isinstance(row, dict) else {}
             row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
-            if row_status in {"failed", "error"}:
-                return (idx, None, None)
+
+            # FIX: Process ALL rows including failed ones (classify failed as INFO)
+            # Previously skipped failed rows entirely, causing Perceptor to never run
+            # when both agents failed. This prevented proper assessment.
 
             scenario = row.get("scenario", {})
             tool_results = (
@@ -2051,7 +2068,7 @@ class ScanOrchestratorService:
                 else []
             )
 
-            # Perceptor analyzes findings
+            # Perceptor analyzes findings (sequential - required for Verify)
             assessment = await perceptor_agent.assess_tool_results(
                 scenario=scenario if isinstance(scenario, dict) else {},
                 tool_results=tool_results if isinstance(tool_results, list) else [],
@@ -2064,81 +2081,65 @@ class ScanOrchestratorService:
                     "internet_exposed": target_type in {"web_app", "api"},
                 },
             )
-            return (idx, assessment, row)
+            perceptor_rows.append(assessment)
 
-        # OPTIMIZATION: Process all Perceptor rows in parallel (was sequential for loop)
-        if execution_rows:
-            perceptor_tasks = [
-                process_perceptor_row(idx, row)
-                for idx, row in enumerate(execution_rows, start=1)
-            ]
+            compact_summary = str(assessment.get("compact_summary", "")).strip()
+            finding_type = str(assessment.get("finding_type", "info")).strip().lower()
 
-            perceptor_results = await asyncio.gather(
-                *perceptor_tasks,
-                return_exceptions=False,
+            # CRITICAL FIX: If status is failed/error, force to info
+            # This ensures failed execution results in info classification, not skipped
+            if row_status in {"failed", "error"}:
+                finding_type = "info"
+                compact_summary = f"[FAILED] {scenario.get('description', 'Unknown')} - {row_result.get('error', 'No error message')}"
+
+            # CRITICAL FIX: If parent agent (exploit) returned "not_vulnerable", downgrade to info
+            # This prevents Verify from being called unnecessarily
+            agent_role = str(scenario.get("agent", "")).strip().lower() if isinstance(scenario, dict) else ""
+            if agent_role == "exploit" and row_status == "not_vulnerable":
+                # Exploit agent explicitly said not vulnerable, override Perceptor classification
+                finding_type = "info"
+
+            # Emit perceptor_classified event
+            self._emit_event(
+                project_id,
+                event="perceptor_classified",
+                scan_id=scan_id,
+                level="info",
+                message=(
+                    f"Perceptor [classified] scenario #{idx} → "
+                    f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
+                    f"(type={finding_type})"
+                ),
+                data={
+                    "stage": "perceptor",
+                    "kind": "classified",
+                    "iteration": idx,
+                    "assessment": assessment,
+                },
             )
 
-            # Process results and organize by type
-            for idx, assessment, row in perceptor_results:
-                if assessment is None or row is None:
-                    continue
-
-                scenario = row.get("scenario", {})
-                row_result = row.get("result", {}) if isinstance(row.get("result"), dict) else {}
-
-                perceptor_rows.append(assessment)
-
-                compact_summary = str(assessment.get("compact_summary", "")).strip()
-                finding_type = str(assessment.get("finding_type", "info")).strip().lower()
-
-                # CRITICAL FIX: If parent agent (exploit) returned "not_vulnerable", downgrade to info
-                # This prevents Verify from being called unnecessarily
-                agent_role = str(scenario.get("agent", "")).strip().lower() if isinstance(scenario, dict) else ""
-                if agent_role == "exploit" and row_result.get("status") == "not_vulnerable":
-                    # Exploit agent explicitly said not vulnerable, override Perceptor classification
-                    finding_type = "info"
-
-                # Emit perceptor_classified event
-                self._emit_event(
-                    project_id,
-                    event="perceptor_classified",
-                    scan_id=scan_id,
-                    level="info",
-                    message=(
-                        f"Perceptor [classified] scenario #{idx} → "
-                        f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
-                        f"(type={finding_type})"
-                    ),
-                    data={
-                        "stage": "perceptor",
-                        "kind": "classified",
-                        "iteration": idx,
-                        "assessment": assessment,
-                    },
-                )
-
-                # Organize by type for batch processing
-                if finding_type == "vulnerability":
-                    assessments_organized["vulnerabilities"].append({
-                        "idx": idx,
-                        "assessment": assessment,
-                        "row": row,
-                        "scenario": scenario,
-                        "row_result": row_result,
-                        "compact_summary": compact_summary,
-                    })
-                else:
-                    assessments_organized["info_only"].append({
-                        "idx": idx,
-                        "assessment": assessment,
-                        "row": row,
-                        "scenario": scenario,
-                        "row_result": row_result,
-                        "compact_summary": compact_summary,
-                    })
+            # Organize by type for batch processing
+            if finding_type == "vulnerability":
+                assessments_organized["vulnerabilities"].append({
+                    "idx": idx,
+                    "assessment": assessment,
+                    "row": row,
+                    "scenario": scenario,
+                    "row_result": row_result,
+                    "compact_summary": compact_summary,
+                })
+            else:
+                assessments_organized["info_only"].append({
+                    "idx": idx,
+                    "assessment": assessment,
+                    "row": row,
+                    "scenario": scenario,
+                    "row_result": row_result,
+                    "compact_summary": compact_summary,
+                })
 
         # ============================================================================
-        # PHASE 2: Batch Verify all vulnerabilities (PARALLEL with semaphore to limit rate)
+        # PHASE 2-3: Verify → Planner → Retest (WRAPPED IN EXCEPTION HANDLER)
         # ============================================================================
         verify_results_organized: dict[str, list[dict[str, Any]]] = {
             "real_vulnerabilities": [],
@@ -2146,63 +2147,177 @@ class ScanOrchestratorService:
             "inconclusives": [],
         }
 
-        if assessments_organized["vulnerabilities"]:
-            # OPTIMIZATION: Increase semaphore to 3 concurrent verifications
-            # (was 1 - sequential; now 3 - parallel with Mistral rate limit buffer)
-            # Rate limiter in base.py also enforces global 3 req/min
-            verify_semaphore = asyncio.Semaphore(3)
-
-            async def run_verify_with_semaphore(item: dict[str, Any]) -> tuple[dict[str, Any], Any]:
-                """Run verify agent with semaphore to prevent LLM rate limiting."""
-                verify_message = (
-                    f"Target: {target}\n"
-                    f"Target type: {target_type}\n"
-                    f"Scope: {scope}\n"
-                    f"Original scenario: {json.dumps(item['scenario'], ensure_ascii=True)}\n\n"
-                    "Finding to verify:\n"
-                    f"{item['compact_summary']}\n\n"
-                    "Execution row:\n"
-                    f"{json.dumps(item['row'], ensure_ascii=True)}"
-                )
-                async with verify_semaphore:
-                    return (item, await verify_agent.run(verify_message))
-
-            # Build verify tasks with semaphore rate limiting
-            verify_tasks = [
-                run_verify_with_semaphore(item)
-                for item in assessments_organized["vulnerabilities"]
-            ]
-
-            # Execute all verify tasks (semaphore ensures only 1 runs at a time)
-            verify_task_results = await asyncio.gather(
-                *verify_tasks,
-                return_exceptions=False
+        try:
+            logger.info(
+                "phase2_verify_start",
+                vulnerabilities_count=len(assessments_organized["vulnerabilities"]),
             )
 
-            # Process results and organize by verdict
-            for item, verify_result in verify_task_results:
-                verify_data = asdict(verify_result) if hasattr(verify_result, '__dataclass_fields__') else verify_result
-                verdict = str(verify_data.get("verdict", verify_data.get("summary", "inconclusive"))).strip().lower()
-                verify_summary = str(verify_data.get("summary", "")).strip()
+            if assessments_organized["vulnerabilities"]:
+                for verify_index, item in enumerate(
+                    assessments_organized["vulnerabilities"],
+                    start=1,
+                ):
+                    verify_agent.reset_context_window_for_cycle()
+                    self._emit_event(
+                        project_id,
+                        event="verify_batch_progress",
+                        scan_id=scan_id,
+                        level="info",
+                        message=(
+                            f"Verify [batch] processing finding {verify_index}/"
+                            f"{len(assessments_organized['vulnerabilities'])}."
+                        ),
+                        data={
+                            "stage": "verify",
+                            "kind": "batch_progress",
+                            "current": verify_index,
+                            "total": len(assessments_organized["vulnerabilities"]),
+                            "scenario_task": str(item.get("scenario", {}).get("task", "")),
+                        },
+                    )
 
-                organized_item = {
-                    "idx": item["idx"],
-                    "assessment": item["assessment"],
-                    "row": item["row"],
-                    "scenario": item["scenario"],
-                    "row_result": item["row_result"],
-                    "compact_summary": item["compact_summary"],
-                    "verdict": verdict,
-                    "verify_summary": verify_summary,
-                    "verify_data": verify_data,
-                }
+                    verify_message = (
+                        f"Target: {target}\n"
+                        f"Target type: {target_type}\n"
+                        f"Scope: {scope}\n"
+                        f"Original scenario: {json.dumps(item['scenario'], ensure_ascii=True)}\n\n"
+                        "Finding to verify:\n"
+                        f"{item['compact_summary']}\n\n"
+                        "Execution row:\n"
+                        f"{json.dumps(item['row'], ensure_ascii=True)}"
+                    )
 
-                if verdict == "real_vulnerability":
-                    verify_results_organized["real_vulnerabilities"].append(organized_item)
-                elif verdict == "false_positive":
-                    verify_results_organized["false_positives"].append(organized_item)
-                else:
-                    verify_results_organized["inconclusives"].append(organized_item)
+                    try:
+                        verify_result = await verify_agent.run(verify_message)
+                    except Exception as verify_exc:
+                        logger.error(
+                            "verify_task_exception",
+                            task_index=verify_index - 1,
+                            error=str(verify_exc),
+                            error_type=type(verify_exc).__name__,
+                        )
+                        self._emit_event(
+                            project_id,
+                            event="verify_task_failed",
+                            scan_id=scan_id,
+                            level="warn",
+                            message=f"Verify task {verify_index} failed: {str(verify_exc)[:100]}",
+                            data={"task_index": verify_index - 1, "error": str(verify_exc)},
+                        )
+                        continue
+
+                    try:
+                        verify_data = asdict(verify_result) if hasattr(verify_result, '__dataclass_fields__') else verify_result
+
+                        # CRITICAL FIX: Defensive verdict extraction with fallback mapping
+                        # Handles: status=incomplete, verdict=..., summary=..., unknown fields
+                        verdict = str(verify_data.get("verdict", "")).strip().lower()
+                        status = str(verify_data.get("status", "")).strip().lower()
+                        summary = str(verify_data.get("summary", "")).strip()
+
+                        logger.warning(
+                            "verify_result_raw",
+                            item_idx=item["idx"],
+                            verdict_field=verdict,
+                            status_field=status,
+                            summary_field=summary,
+                            all_keys=list(verify_data.keys()) if isinstance(verify_data, dict) else [],
+                        )
+
+                        if not verdict:
+                            if status in {"real_vulnerability", "false_positive", "inconclusive"}:
+                                verdict = status
+                            elif status in {"incomplete", "not_vulnerable", "unknown", "error"}:
+                                verdict = "inconclusive"
+                            else:
+                                verdict = "inconclusive"
+
+                        if not verdict:
+                            verdict = "inconclusive"
+
+                        if verdict not in {"real_vulnerability", "false_positive", "inconclusive"}:
+                            logger.warning(
+                                "verify_invalid_verdict",
+                                item_idx=item["idx"],
+                                original_verdict=verdict,
+                                status=status,
+                            )
+                            self._emit_event(
+                                project_id,
+                                event="verify_warning",
+                                scan_id=scan_id,
+                                level="warn",
+                                message=f"Verify returned unexpected verdict: {verdict} → inconclusive",
+                                data={"original_verdict": verdict, "status": status},
+                            )
+                            verdict = "inconclusive"
+
+                        logger.info(
+                            "verify_verdict_assigned",
+                            item_idx=item["idx"],
+                            final_verdict=verdict,
+                            from_status=status,
+                        )
+
+                        verify_summary = summary if summary else f"[{status}] Verification incomplete - treating as inconclusive"
+
+                        organized_item = {
+                            "idx": item["idx"],
+                            "assessment": item["assessment"],
+                            "row": item["row"],
+                            "scenario": item["scenario"],
+                            "row_result": item["row_result"],
+                            "compact_summary": item["compact_summary"],
+                            "verdict": verdict,
+                            "verify_summary": verify_summary,
+                            "verify_data": verify_data,
+                        }
+
+                        if verdict == "real_vulnerability":
+                            verify_results_organized["real_vulnerabilities"].append(organized_item)
+                        elif verdict == "false_positive":
+                            verify_results_organized["false_positives"].append(organized_item)
+                        else:
+                            verify_results_organized["inconclusives"].append(organized_item)
+
+                    except Exception as item_error:
+                        logger.error(
+                            "verify_result_processing_error",
+                            item_idx=item.get("idx", "unknown"),
+                            error=str(item_error),
+                        )
+                        verify_results_organized["inconclusives"].append({
+                            "idx": item.get("idx", -1),
+                            "verdict": "inconclusive",
+                            "verify_summary": f"[ERROR] Verification processing failed: {str(item_error)[:100]}",
+                            "verify_data": {},
+                            "compact_summary": item.get("compact_summary", "Unknown"),
+                        })
+
+            # Log final verdict organization
+            logger.info(
+                "verify_batch_complete",
+                real_vulns=len(verify_results_organized["real_vulnerabilities"]),
+                false_positives=len(verify_results_organized["false_positives"]),
+                inconclusives=len(verify_results_organized["inconclusives"]),
+            )
+
+        except Exception as phase2_exc:
+            logger.error(
+                "phase2_verify_batch_failed",
+                error=str(phase2_exc),
+                error_type=type(phase2_exc).__name__,
+            )
+            self._emit_event(
+                project_id,
+                event="verify_batch_error",
+                scan_id=scan_id,
+                level="warn",
+                message=f"Verify batch processing failed: {str(phase2_exc)[:100]}",
+                data={"error": str(phase2_exc)},
+            )
+            # Continue with empty results
 
         # ============================================================================
         # PHASE 3A: Launch Retest (PARALLEL - fire and forget)
@@ -2280,8 +2395,8 @@ class ScanOrchestratorService:
             f"Target type: {target_type}\n"
             f"Scope: {scope}\n\n"
             "BATCH FINDINGS SUMMARY:\n"
-            + "\n\n".join(planner_sections) +
-            "\n\n"
+            + ("\n\n".join(planner_sections) if planner_sections else "No findings classified in this cycle. Continue enumeration.")
+            + "\n\n"
             "Review all findings above. Update plan accordingly:\n"
             "- For real vulnerabilities: mark as discovered and continue testing\n"
             "- For false positives: acknowledge and move forward\n"
@@ -2289,12 +2404,54 @@ class ScanOrchestratorService:
             "- For recon info: integrate into plan and continue enumeration"
         )
 
-        # Call planner IMMEDIATELY (while Retest runs in background)
-        planner_loop_result = await loop_planner.run(
-            aggregated_planner_message,
-            is_loop=True,
-            intel_checklist=intel_checklist,
+        # Log Phase 3 start
+        logger.info(
+            "phase3_planner_retest_start",
+            real_vulns=len(verify_results_organized["real_vulnerabilities"]),
+            false_positives=len(verify_results_organized["false_positives"]),
+            inconclusives=len(verify_results_organized["inconclusives"]),
+            info_only=len(assessments_organized["info_only"]),
         )
+        self._emit_event(
+            project_id,
+            event="planner_batch_handoff",
+            scan_id=scan_id,
+            level="info",
+            message="Planner [thinking] Aggregating batch findings for replanning.",
+            data={
+                "stage": "planner",
+                "kind": "batch_handoff",
+                "real_vulnerabilities_count": len(verify_results_organized["real_vulnerabilities"]),
+                "false_positives_count": len(verify_results_organized["false_positives"]),
+                "inconclusives_count": len(verify_results_organized["inconclusives"]),
+                "info_only_count": len(assessments_organized["info_only"]),
+            },
+        )
+
+        # Call planner IMMEDIATELY (while Retest runs in background)
+        # Wrapped in try/except to ensure loop continues even if planner fails
+        planner_loop_result = None
+        try:
+            logger.info("planner_calling", phase="3_aggregation")
+            planner_loop_result = await loop_planner.run(
+                aggregated_planner_message,
+                is_loop=True,
+                intel_checklist=intel_checklist,
+            )
+        except Exception as planner_exc:
+            self._emit_event(
+                project_id,
+                event="planner_error",
+                scan_id=scan_id,
+                level="warn",
+                message=f"Planner error (continuing): {str(planner_exc)[:200]}",
+                data={"error": str(planner_exc)},
+            )
+            # Create minimal planner result to continue loop
+            planner_loop_result = type('obj', (object,), {
+                'summary': 'Planner encountered error; continuing with next cycle',
+                'plan': {}
+            })()
 
         # Capture updated plan immediately after planner runs
         from server.agents.planner.tools.pentest_plan import _current_plan as current
@@ -2432,357 +2589,6 @@ class ScanOrchestratorService:
                         "plan_data": plan_data,
                     },
                 )
-            row_result = row.get("result", {}) if isinstance(row, dict) else {}
-            row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
-            if row_status in {"failed", "error"}:
-                continue
-
-            scenario = row.get("scenario", {})
-            tool_results = (
-                row.get("result", {}).get("tool_results", [])
-                if isinstance(row.get("result"), dict)
-                else []
-            )
-
-            # Perceptor analyzes findings
-            assessment = await perceptor_agent.assess_tool_results(
-                scenario=scenario if isinstance(scenario, dict) else {},
-                tool_results=tool_results if isinstance(tool_results, list) else [],
-                asset_context={
-                    "criticality": (
-                        "high"
-                        if _normalize_priority((scenario or {}).get("priority", 3)) <= 2
-                        else "medium"
-                    ),
-                    "internet_exposed": target_type in {"web_app", "api"},
-                },
-            )
-            perceptor_rows.append(assessment)
-
-            compact_summary = str(assessment.get("compact_summary", "")).strip()
-            followup_route = _route_followup_from_assessment(assessment)
-            assessment["followup_route"] = followup_route
-
-            self._emit_event(
-                project_id,
-                event="perceptor_classified",
-                scan_id=scan_id,
-                level="info",
-                message=(
-                    f"Perceptor [classified] scenario #{idx} → "
-                    f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
-                    f"(route={followup_route})"
-                ),
-                data={
-                    "stage": "perceptor",
-                    "kind": "classified",
-                    "iteration": idx,
-                    "assessment": assessment,
-                },
-            )
-
-            # Verify-Driven Chain: Finding → Verify → [Real Vuln → Planner + Retest] OR [False Positive → Planner]
-            finding_type = str(assessment.get("finding_type", "info")).strip().lower()
-
-            if finding_type == "vulnerability":
-                # Step 1: Route to VERIFY to confirm (filter false positives)
-                verify_message = (
-                    f"Target: {target}\n"
-                    f"Target type: {target_type}\n"
-                    f"Scope: {scope}\n"
-                    f"Original scenario: {json.dumps(scenario, ensure_ascii=True)}\n\n"
-                    "Finding to verify:\n"
-                    f"{compact_summary}\n\n"
-                    "Execution row:\n"
-                    f"{json.dumps(row, ensure_ascii=True)}"
-                )
-                verify_result = await verify_agent.run(verify_message)
-                # Convert ExecuterResult to dict for easier access
-                verify_data = asdict(verify_result) if hasattr(verify_result, '__dataclass_fields__') else verify_result
-                verdict = str(verify_data.get("verdict", verify_data.get("summary", "inconclusive"))).strip().lower()
-
-                if verdict == "real_vulnerability":
-                    # Step 2a: Real vulnerability found - route to both PLANNER and RETEST (PARALLEL)
-                    verify_summary = str(verify_data.get("summary", "")).strip()
-
-                    # Build planner message
-                    planner_message = (
-                        f"Target: {target}\n"
-                        f"Target type: {target_type}\n"
-                        f"Scope: {scope}\n\n"
-                        "Verified Vulnerability (confirmed by Verify agent):\n"
-                        f"{verify_summary}"
-                    )
-
-                    # Build retest message
-                    retest_message = (
-                        f"Target: {target}\n"
-                        f"Target type: {target_type}\n"
-                        f"Scope: {scope}\n\n"
-                        "Confirmed Vulnerability - Build Report Entry:\n"
-                        f"{verify_summary}\n\n"
-                        "Verify Evidence:\n"
-                        f"{json.dumps(verify_data.get('evidence', {}), ensure_ascii=True)}"
-                    )
-
-                    # Run Planner and Retest PARALLEL (not sequential)
-                    planner_result_task = loop_planner.run(
-                        planner_message,
-                        is_loop=True,
-                        intel_checklist=intel_checklist,
-                    )
-                    retest_result_task = retest_agent.run(retest_message)
-
-                    # Wait for both to complete
-                    planner_loop_result, retest_result = await asyncio.gather(
-                        planner_result_task,
-                        retest_result_task,
-                    )
-
-                    # Capture updated plan immediately after planner completes
-                    from server.agents.planner.tools.pentest_plan import _current_plan as current
-                    plan_data = dict(current) if isinstance(current, dict) else plan_data
-                    plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
-
-                    # Log real vulnerability routing
-                    logger.info(
-                        "planner_real_vulnerability",
-                        verdict="real_vulnerability",
-                        planner_summary=str(planner_loop_result.summary or "")[:100],
-                        retest_summary=str(retest_result.summary or "")[:100],
-                    )
-
-                    # Emit plan update event for UI
-                    self._emit_event(
-                        project_id,
-                        event="plan_updated_by_planner",
-                        scan_id=scan_id,
-                        level="success",
-                        message="Planner updated plan + Retest build PoC (executed in parallel).",
-                        data={
-                            "stage": "planner+retest",
-                            "kind": "real_vulnerability_routed",
-                            "verdict": "real_vulnerability",
-                            "planner_summary": str(planner_loop_result.summary or "").strip(),
-                            "retest_summary": str(retest_result.summary or "").strip(),
-                            "plan_data": plan_data,
-                        },
-                    )
-
-                    planner_loop_rows.append(
-                        {
-                            "iteration": idx,
-                            "route": "verify->planner+retest",
-                            "verdict": verdict,
-                            "verify_summary": verify_summary,
-                            "planner_summary": str(planner_loop_result.summary or "").strip(),
-                            "retest_summary": str(retest_result.summary or "").strip(),
-                            "compact_bridge": compact_summary,
-                        }
-                    )
-
-                elif verdict == "false_positive":
-                    # Step 2b: False positive - route to PLANNER only with short report
-                    false_positive_report = str(verify_data.get("summary", "Not a real vulnerability")).strip()
-
-                    planner_message = (
-                        f"Target: {target}\n"
-                        f"Target type: {target_type}\n"
-                        f"Scope: {scope}\n\n"
-                        "False Positive Report (not a real vulnerability):\n"
-                        f"{false_positive_report}"
-                    )
-                    planner_loop_result = await loop_planner.run(
-                        planner_message,
-                        is_loop=True,
-                        intel_checklist=intel_checklist,
-                    )
-
-                    # Capture updated plan immediately after planner runs
-                    from server.agents.planner.tools.pentest_plan import _current_plan as current
-                    plan_data = dict(current) if isinstance(current, dict) else plan_data
-                    plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
-
-                    # Log plan update for debugging
-                    logger.info(
-                        "planner_false_positive",
-                        verdict="false_positive",
-                        planner_summary=str(planner_loop_result.summary or "")[:100],
-                    )
-
-                    # Emit plan update event for UI
-                    self._emit_event(
-                        project_id,
-                        event="plan_updated_by_planner",
-                        scan_id=scan_id,
-                        level="info",
-                        message="Planner updated plan after filtering false positive.",
-                        data={
-                            "stage": "planner",
-                            "kind": "plan_updated_false_positive",
-                            "verdict": "false_positive",
-                            "summary": str(planner_loop_result.summary or "").strip(),
-                            "plan_data": plan_data,
-                        },
-                    )
-
-                    planner_loop_rows.append(
-                        {
-                            "iteration": idx,
-                            "route": "verify->planner(false_positive)",
-                            "verdict": verdict,
-                            "false_positive_reason": false_positive_report,
-                            "planner_summary": str(planner_loop_result.summary or "").strip(),
-                            "compact_bridge": compact_summary,
-                        }
-                    )
-                else:
-                    # Inconclusive - route to planner for decision
-                    planner_message = (
-                        f"Target: {target}\n"
-                        f"Target type: {target_type}\n"
-                        f"Scope: {scope}\n\n"
-                        "Verification Inconclusive (needs manual review):\n"
-                        f"{compact_summary}"
-                    )
-                    planner_loop_result = await loop_planner.run(
-                        planner_message,
-                        is_loop=True,
-                        intel_checklist=intel_checklist,
-                    )
-
-                    # Capture updated plan immediately after planner runs
-                    from server.agents.planner.tools.pentest_plan import _current_plan as current
-                    plan_data = dict(current) if isinstance(current, dict) else plan_data
-                    plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
-
-                    # Log plan update for debugging
-                    logger.info(
-                        "planner_inconclusive",
-                        verdict="inconclusive",
-                        planner_summary=str(planner_loop_result.summary or "")[:100],
-                    )
-
-                    # Emit plan update event for UI
-                    self._emit_event(
-                        project_id,
-                        event="plan_updated_by_planner",
-                        scan_id=scan_id,
-                        level="warn",
-                        message="Planner updated plan after inconclusive verification result.",
-                        data={
-                            "stage": "planner",
-                            "kind": "plan_updated_inconclusive",
-                            "verdict": "inconclusive",
-                            "summary": str(planner_loop_result.summary or "").strip(),
-                            "plan_data": plan_data,
-                        },
-                    )
-
-                    planner_loop_rows.append(
-                        {
-                            "iteration": idx,
-                            "route": "verify->planner(inconclusive)",
-                            "verdict": verdict,
-                            "planner_summary": str(planner_loop_result.summary or "").strip(),
-                            "compact_bridge": compact_summary,
-                        }
-                    )
-
-            else:
-                # INFO only - route directly to PLANNER without verification
-                loop_message = (
-                    f"Target: {target}\n"
-                    f"Target type: {target_type}\n"
-                    f"Scope: {scope}\n\n"
-                    "Reconnaissance Finding (no vulnerability, informational):\n"
-                    f"{compact_summary}\n\n"
-                    "Update plan based on this evidence and continue scanning."
-                )
-                loop_result = await loop_planner.run(
-                    loop_message,
-                    is_loop=True,
-                    intel_checklist=intel_checklist,
-                )
-                loop_summary = str(loop_result.summary or "").strip()
-                if loop_summary.lower().startswith("planning failed:"):
-                    raise RuntimeError(f"planner loop failed: {loop_summary}")
-
-                # Capture updated plan immediately after planner runs
-                from server.agents.planner.tools.pentest_plan import _current_plan as current
-                plan_data = dict(current) if isinstance(current, dict) else plan_data
-                plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
-
-                # Log plan update for debugging
-                logger.info(
-                    "planner_info_only",
-                    finding_type="info",
-                    planner_summary=loop_summary[:100],
-                )
-
-                # Emit plan update event for UI
-                self._emit_event(
-                    project_id,
-                    event="plan_updated_by_planner",
-                    scan_id=scan_id,
-                    level="info",
-                    message="Planner updated plan based on reconnaissance findings.",
-                    data={
-                        "stage": "planner",
-                        "kind": "plan_updated",
-                        "route": "recon_info",
-                        "summary": loop_summary,
-                        "plan_data": plan_data,
-                    },
-                )
-
-                planner_loop_rows.append(
-                    {
-                        "iteration": idx,
-                        "route": "perceptor->planner(info_only)",
-                        "summary": loop_summary,
-                        "needs": list(loop_result.needs),
-                        "action_plan": (
-                            dict(loop_result.action_plan)
-                            if isinstance(loop_result.action_plan, dict)
-                            else {}
-                        ),
-                        "compact_bridge": compact_summary,
-                    }
-                )
-
-            # Mark scenario as done in plan
-            if isinstance(scenario, dict):
-                rounds_executed = int(row_result.get("rounds_executed", 0) or 0)
-                round_labels = row_result.get("round_labels", [])
-                _update_scenario_runtime_state(
-                    plan_data,
-                    scenario,
-                    status="completed",
-                    done=True,
-                    round_label=f"r{rounds_executed}" if rounds_executed > 0 else None,
-                    round_labels=round_labels if isinstance(round_labels, list) else None,
-                    route=followup_route,
-                )
-                _mark_scenario_done_in_plan(plan_data, scenario)
-                self._emit_event(
-                    project_id,
-                    event="scenario_state_change",
-                    scan_id=scan_id,
-                    level="info",
-                    message=f"Scenario completed: {scenario.get('task', 'unknown')}",
-                    data={
-                        "stage": "executer",
-                        "kind": "scenario_done",
-                        "scenario_task": scenario.get("task", ""),
-                        "agent": scenario.get("agent", ""),
-                        "state": "completed",
-                        "route": followup_route,
-                        "round_label": f"r{rounds_executed}" if rounds_executed > 0 else "",
-                        "rounds_seen": round_labels if isinstance(round_labels, list) else [],
-                        "plan_data": plan_data,
-                    },
-                )
 
         # Capture updated plan from planner (scenarios may have been modified/added)
         from server.agents.planner.tools.pentest_plan import _current_plan
@@ -2800,7 +2606,18 @@ class ScanOrchestratorService:
                 break
 
         # Continue to next cycle, or stop if Planner indicated completion
-        return not should_stop, updated_plan
+        # Safety: Always return True by default (continue loop) unless Planner explicitly says stop
+        logger.info(
+            "execution_cycle_complete",
+            cycle_should_stop=should_stop,
+            planner_summary=str(planner_loop_result.summary if planner_loop_result else "")[:100],
+        )
+        try:
+            return not should_stop, updated_plan
+        except Exception as return_exc:
+            logger.error("execution_cycle_return_error", error=str(return_exc))
+            # Safety fallback: Continue loop on any error
+            return True, plan_data
 
     async def _check_planner_completion(
         self,
@@ -3325,9 +3142,11 @@ class ScanOrchestratorService:
                     data={"stage": "executer", "kind": "start"},
                 )
 
-                # CYCLIC EXECUTION LOOP
+                # CYCLIC EXECUTION LOOP with explicit state tracking
                 cycle_count = 0
                 max_cycles = 20  # Safety limit
+                scenario_execution_state: dict[str, int] = {}  # Track scenario task → cycle_executed
+
                 while cycle_count < max_cycles:
                     cycle_count += 1
 
@@ -3344,30 +3163,50 @@ class ScanOrchestratorService:
                         event="executer_cycle_start",
                         scan_id=scan_id,
                         level="info",
-                        message=f"Executer [cycle {cycle_count}] starting scenario selection.",
+                        message=f"Executer [cycle {cycle_count}] starting scenario selection (executed={len(scenario_execution_state)}).",
                         data={
                             "stage": "executer",
                             "kind": "cycle_start",
                             "cycle": cycle_count,
+                            "scenarios_executed_total": len(scenario_execution_state),
                         },
                     )
 
-                    should_continue, updated_plan = await self._run_execution_cycle(
-                        project_id=project_id,
-                        scan_id=scan_id,
-                        plan_data=plan_data,
-                        recon_agent=recon_agent,
-                        exploit_agent=exploit_agent,
-                        verify_agent=verify_agent,
-                        retest_agent=retest_agent,
-                        perceptor_agent=perceptor_agent,
-                        loop_planner=loop_planner,
-                        target=target,
-                        target_type=target_type,
-                        scope=exec_scope,
-                        info=info,
-                        intel_checklist=intel_checklist,
-                    )
+                    try:
+                        should_continue, updated_plan = await self._run_execution_cycle(
+                            project_id=project_id,
+                            scan_id=scan_id,
+                            plan_data=plan_data,
+                            recon_agent=recon_agent,
+                            exploit_agent=exploit_agent,
+                            verify_agent=verify_agent,
+                            retest_agent=retest_agent,
+                            perceptor_agent=perceptor_agent,
+                            loop_planner=loop_planner,
+                            target=target,
+                            target_type=target_type,
+                            scope=exec_scope,
+                            info=info,
+                            intel_checklist=intel_checklist,
+                        )
+                    except Exception as cycle_exc:
+                        # Safety: If execution cycle fails, emit warning and continue loop
+                        logger.error(
+                            "executer_cycle_exception",
+                            cycle=cycle_count,
+                            error=str(cycle_exc)[:200],
+                        )
+                        self._emit_event(
+                            project_id,
+                            event="executer_cycle_error",
+                            scan_id=scan_id,
+                            level="warn",
+                            message=f"Executer cycle error (continuing): {str(cycle_exc)[:200]}",
+                            data={"error": str(cycle_exc)},
+                        )
+                        should_continue = True  # Always continue on error
+                        updated_plan = plan_data
+
                     plan_data = updated_plan
 
                     # OPTIMIZATION: Compress Planner context window between cycles (after cycle 1)
@@ -3377,9 +3216,16 @@ class ScanOrchestratorService:
                             compress_planner_context_window,
                         )
 
-                        compress_planner_context_window(
-                            loop_planner._context_window, cycle_count
-                        )
+                        try:
+                            compress_planner_context_window(
+                                loop_planner._context_window, cycle_count
+                            )
+                        except Exception as compression_exc:
+                            logger.warning(
+                                "planner_context_compression_skipped",
+                                cycle=cycle_count,
+                                error=str(compression_exc),
+                            )
 
                     if not should_continue:
                         self._emit_event(
