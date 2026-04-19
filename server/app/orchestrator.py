@@ -2024,7 +2024,7 @@ class ScanOrchestratorService:
             execution_rows.extend(results)
 
         # ============================================================================
-        # PHASE 1: Perceptor analyzes ALL findings (collect assessments, emit events)
+        # PHASE 1: Perceptor analyzes findings (ASYNC - process in parallel)
         # ============================================================================
         perceptor_rows: list[dict[str, Any]] = []
         planner_loop_rows: list[dict[str, Any]] = []
@@ -2035,11 +2035,14 @@ class ScanOrchestratorService:
             "info_only": [],        # Direct to planner in Phase 3
         }
 
-        for idx, row in enumerate(execution_rows, start=1):
+        async def process_perceptor_row(
+            idx: int, row: dict[str, Any]
+        ) -> tuple[int, dict[str, Any] | None, str | None]:
+            """Process single row through Perceptor (for parallel execution)."""
             row_result = row.get("result", {}) if isinstance(row, dict) else {}
             row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
             if row_status in {"failed", "error"}:
-                continue
+                return (idx, None, None)
 
             scenario = row.get("scenario", {})
             tool_results = (
@@ -2061,59 +2064,81 @@ class ScanOrchestratorService:
                     "internet_exposed": target_type in {"web_app", "api"},
                 },
             )
-            perceptor_rows.append(assessment)
+            return (idx, assessment, row)
 
-            compact_summary = str(assessment.get("compact_summary", "")).strip()
-            finding_type = str(assessment.get("finding_type", "info")).strip().lower()
+        # OPTIMIZATION: Process all Perceptor rows in parallel (was sequential for loop)
+        if execution_rows:
+            perceptor_tasks = [
+                process_perceptor_row(idx, row)
+                for idx, row in enumerate(execution_rows, start=1)
+            ]
 
-            # CRITICAL FIX: If parent agent (exploit) returned "not_vulnerable", downgrade to info
-            # This prevents Verify from being called unnecessarily
-            agent_role = str(scenario.get("agent", "")).strip().lower() if isinstance(scenario, dict) else ""
-            if agent_role == "exploit" and row_status == "not_vulnerable":
-                # Exploit agent explicitly said not vulnerable, override Perceptor classification
-                finding_type = "info"
-
-            # Emit perceptor_classified event
-            self._emit_event(
-                project_id,
-                event="perceptor_classified",
-                scan_id=scan_id,
-                level="info",
-                message=(
-                    f"Perceptor [classified] scenario #{idx} → "
-                    f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
-                    f"(type={finding_type})"
-                ),
-                data={
-                    "stage": "perceptor",
-                    "kind": "classified",
-                    "iteration": idx,
-                    "assessment": assessment,
-                },
+            perceptor_results = await asyncio.gather(
+                *perceptor_tasks,
+                return_exceptions=False,
             )
 
-            # Organize by type for batch processing
-            if finding_type == "vulnerability":
-                assessments_organized["vulnerabilities"].append({
-                    "idx": idx,
-                    "assessment": assessment,
-                    "row": row,
-                    "scenario": scenario,
-                    "row_result": row_result,
-                    "compact_summary": compact_summary,
-                })
-            else:
-                assessments_organized["info_only"].append({
-                    "idx": idx,
-                    "assessment": assessment,
-                    "row": row,
-                    "scenario": scenario,
-                    "row_result": row_result,
-                    "compact_summary": compact_summary,
-                })
+            # Process results and organize by type
+            for idx, assessment, row in perceptor_results:
+                if assessment is None or row is None:
+                    continue
+
+                scenario = row.get("scenario", {})
+                row_result = row.get("result", {}) if isinstance(row.get("result"), dict) else {}
+
+                perceptor_rows.append(assessment)
+
+                compact_summary = str(assessment.get("compact_summary", "")).strip()
+                finding_type = str(assessment.get("finding_type", "info")).strip().lower()
+
+                # CRITICAL FIX: If parent agent (exploit) returned "not_vulnerable", downgrade to info
+                # This prevents Verify from being called unnecessarily
+                agent_role = str(scenario.get("agent", "")).strip().lower() if isinstance(scenario, dict) else ""
+                if agent_role == "exploit" and row_result.get("status") == "not_vulnerable":
+                    # Exploit agent explicitly said not vulnerable, override Perceptor classification
+                    finding_type = "info"
+
+                # Emit perceptor_classified event
+                self._emit_event(
+                    project_id,
+                    event="perceptor_classified",
+                    scan_id=scan_id,
+                    level="info",
+                    message=(
+                        f"Perceptor [classified] scenario #{idx} → "
+                        f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
+                        f"(type={finding_type})"
+                    ),
+                    data={
+                        "stage": "perceptor",
+                        "kind": "classified",
+                        "iteration": idx,
+                        "assessment": assessment,
+                    },
+                )
+
+                # Organize by type for batch processing
+                if finding_type == "vulnerability":
+                    assessments_organized["vulnerabilities"].append({
+                        "idx": idx,
+                        "assessment": assessment,
+                        "row": row,
+                        "scenario": scenario,
+                        "row_result": row_result,
+                        "compact_summary": compact_summary,
+                    })
+                else:
+                    assessments_organized["info_only"].append({
+                        "idx": idx,
+                        "assessment": assessment,
+                        "row": row,
+                        "scenario": scenario,
+                        "row_result": row_result,
+                        "compact_summary": compact_summary,
+                    })
 
         # ============================================================================
-        # PHASE 2: Batch Verify all vulnerabilities (sequentially to avoid rate limit)
+        # PHASE 2: Batch Verify all vulnerabilities (PARALLEL with semaphore to limit rate)
         # ============================================================================
         verify_results_organized: dict[str, list[dict[str, Any]]] = {
             "real_vulnerabilities": [],
@@ -2122,9 +2147,10 @@ class ScanOrchestratorService:
         }
 
         if assessments_organized["vulnerabilities"]:
-            # Semaphore to limit concurrent LLM requests (max 1 concurrent verify)
-            # This prevents rate limiting from overlapping API calls
-            verify_semaphore = asyncio.Semaphore(1)
+            # OPTIMIZATION: Increase semaphore to 3 concurrent verifications
+            # (was 1 - sequential; now 3 - parallel with Mistral rate limit buffer)
+            # Rate limiter in base.py also enforces global 3 req/min
+            verify_semaphore = asyncio.Semaphore(3)
 
             async def run_verify_with_semaphore(item: dict[str, Any]) -> tuple[dict[str, Any], Any]:
                 """Run verify agent with semaphore to prevent LLM rate limiting."""
@@ -3343,6 +3369,17 @@ class ScanOrchestratorService:
                         intel_checklist=intel_checklist,
                     )
                     plan_data = updated_plan
+
+                    # OPTIMIZATION: Compress Planner context window between cycles (after cycle 1)
+                    # to prevent token bloat while keeping critical plan history
+                    if cycle_count > 1 and loop_planner._context_window is not None:
+                        from server.agents.planner.context_compression import (
+                            compress_planner_context_window,
+                        )
+
+                        compress_planner_context_window(
+                            loop_planner._context_window, cycle_count
+                        )
 
                     if not should_continue:
                         self._emit_event(
