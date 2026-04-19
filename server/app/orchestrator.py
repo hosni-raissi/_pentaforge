@@ -1363,8 +1363,9 @@ class ScanOrchestratorService:
             "run_custom": 900,             # 15 minutes - generic CLI commands
             "run_python": 600,             # 10 minutes - Python scripts
         }
-        # Default to 30 minutes for any tool, but use tool-specific if available
-        APPROVAL_TIMEOUT = TOOL_TIMEOUTS.get(pending.tool_name, 1800)
+        # OPTIMIZATION: Default to 60 seconds for approval timeout (was 1800s/30min)
+        # This prevents artificial delays while keeping tool-specific longer timeouts
+        APPROVAL_TIMEOUT = TOOL_TIMEOUTS.get(pending.tool_name, 60)
 
         try:
             # Wait with heartbeat messages every 60 seconds to keep connection alive
@@ -3303,6 +3304,15 @@ class ScanOrchestratorService:
                 max_cycles = 20  # Safety limit
                 while cycle_count < max_cycles:
                     cycle_count += 1
+
+                    # FRESH CONTEXT PER CYCLE: Reset context windows for executer agents
+                    # (only Planner keeps context across cycles)
+                    recon_agent.reset_context_window_for_cycle()
+                    exploit_agent.reset_context_window_for_cycle()
+                    verify_agent.reset_context_window_for_cycle()
+                    retest_agent.reset_context_window_for_cycle()
+                    perceptor_agent.reset_context_window_for_cycle()
+
                     self._emit_event(
                         project_id,
                         event="executer_cycle_start",

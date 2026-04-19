@@ -14,6 +14,7 @@ from typing import Any, Protocol
 import structlog
 
 from server.agents.context_window_manager import ContextWindowManager
+from server.agents.rate_limiter import LLMRateLimiter
 from server.agents.executer.target_tool_routing import extract_discovered_target_types
 from server.config.agent import (
     LocalLLMConfig,
@@ -131,7 +132,7 @@ def _extract_json_from_text(raw: str) -> dict[str, Any]:
     return {}
 
 
-def _parse_executer_output(raw: str) -> ExecuterResult:
+def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
     parsed = _extract_json_from_text(raw)
 
     # CRITICAL FIX: If JSON parsing failed completely, try to extract verdict field directly from raw text
@@ -143,6 +144,12 @@ def _parse_executer_output(raw: str) -> ExecuterResult:
             verdict_value = verdict_match.group(1).strip().lower()
             if verdict_value in {"real_vulnerability", "false_positive", "inconclusive"}:
                 # Successfully extracted verdict from raw text
+                logger.info(
+                    f"executer_verdict_extracted_from_raw",
+                    role=role,
+                    verdict=verdict_value,
+                    raw_length=len(raw),
+                )
                 summary = raw.strip() or "No structured response."
                 return ExecuterResult(
                     status=verdict_value,
@@ -150,6 +157,14 @@ def _parse_executer_output(raw: str) -> ExecuterResult:
                 )
 
         # If no verdict extracted, treat as incomplete
+        logger.warning(
+            f"executer_output_parsing_failed",
+            role=role,
+            raw_output_length=len(raw),
+            raw_output_preview=raw[:300] if raw else "EMPTY",
+            has_json_markers="{" in raw and "}" in raw,
+            has_verdict_marker='"verdict"' in raw,
+        )
         summary = raw.strip() or "No response generated."
         return ExecuterResult(status="incomplete", summary=summary)
 
@@ -262,6 +277,10 @@ class BaseExecuterAgent:
                 llm=self._llm,
             )
 
+        # Initialize rate limiter to prevent Mistral 429 errors (4 req/min limit)
+        # We limit to 3 req/min to leave buffer
+        self._rate_limiter = LLMRateLimiter(max_calls_per_minute=3)
+
         logger.info(
             "executer_initialized",
             role=self._role,
@@ -269,6 +288,22 @@ class BaseExecuterAgent:
             model=self._model_name,
             tools=len(self._tools),
         )
+
+    def reset_context_window_for_cycle(self) -> None:
+        """Clear context window entries to start fresh for this cycle.
+
+        Called at the start of each execution cycle to ensure agents don't carry
+        forward stale information from previous cycles. Only Planner keeps context.
+        """
+        if self._context_window is not None:
+            # Clear the in-memory entries (don't save - let DB reset)
+            self._context_window._entries = []
+            self._context_window._compression_count = 0
+            logger.info(
+                "executer_context_reset",
+                role=self._role,
+                reason="cycle_start_fresh_context",
+            )
 
     def _filter_tool_args(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         valid_params = self._tool_valid_params.get(tool_name)
@@ -661,8 +696,14 @@ class BaseExecuterAgent:
             )
             response = None
             llm_exc: Exception | None = None
-            for attempt in range(1, _EXECUTER_LLM_RETRY_MAX + 1):
+            # CIRCUIT BREAKER: Only retry ONCE on rate limiting, then fail fast
+            # This prevents token waste from exponential backoff
+            max_attempts = 2  # 1 initial + 1 retry on rate limit
+            for attempt in range(1, max_attempts + 1):
                 try:
+                    # RATE LIMITER: Enforce Mistral 4 req/min limit (we use 3 req/min as buffer)
+                    await self._rate_limiter.wait_if_needed()
+
                     response = await asyncio.wait_for(
                         self._llm.chat(
                             [_dict_to_msg(m) for m in messages],
@@ -678,12 +719,11 @@ class BaseExecuterAgent:
                     llm_exc = exc
                     text = str(exc).lower()
                     is_rate_limited = "429" in text or "rate limit" in text
-                    if is_rate_limited and attempt < _EXECUTER_LLM_RETRY_MAX:
-                        wait_seconds = _EXECUTER_LLM_RETRY_BASE_SECONDS * (
-                            2 ** (attempt - 1)
-                        )
+                    # CIRCUIT BREAKER: Only retry once on rate limiting
+                    if is_rate_limited and attempt < max_attempts:
+                        wait_seconds = 2.0  # Fixed 2-second wait, no exponential backoff
                         self._cb.on_warn(
-                            f"[{self._role}] LLM rate-limited (attempt {attempt}/{_EXECUTER_LLM_RETRY_MAX}); retrying in {wait_seconds:.1f}s"
+                            f"[{self._role}] LLM rate-limited; retrying once in {wait_seconds:.1f}s"
                         )
                         await asyncio.sleep(wait_seconds)
                         continue
@@ -693,12 +733,14 @@ class BaseExecuterAgent:
                 logger.error(
                     "executer_llm_error",
                     role=self._role,
+                    round=round_index,
                     error=repr(llm_exc),
+                    circuit_breaker_triggered=True,
                 )
-                self._cb.on_warn(f"[{self._role}] LLM error: {llm_exc}")
+                self._cb.on_warn(f"[{self._role}] LLM error (round {round_index}); circuit breaker triggered: {llm_exc}")
                 return ExecuterResult(
                     status="failed",
-                    summary=f"LLM error: {llm_exc}",
+                    summary=f"LLM error after {max_attempts} attempt(s): {llm_exc}",
                     rounds_executed=round_index,
                     round_labels=[f"r{n}" for n in range(1, round_index + 1)],
                 )
@@ -741,7 +783,7 @@ class BaseExecuterAgent:
                     self._cb.on_warn(
                         f"[{self._role}] Round {round_index}/{self._max_tool_rounds} is consolidation-only; skipping {len(tool_calls)} tool calls"
                     )
-                result = _parse_executer_output(last_content)
+                result = _parse_executer_output(last_content, role=self._role)
                 result.tool_results = all_tool_results
                 if all_discovered_target_types:
                     result.discovered_target_types = sorted(all_discovered_target_types)
@@ -806,7 +848,7 @@ class BaseExecuterAgent:
                 rounds_executed=self._max_tool_rounds,
                 round_labels=[f"r{n}" for n in range(1, self._max_tool_rounds + 1)],
             )
-        result = _parse_executer_output(last_content)
+        result = _parse_executer_output(last_content, role=self._role)
         result.discovered_target_types = extract_discovered_target_types(last_content)
         result.rounds_executed = rounds_executed
         result.round_labels = [f"r{n}" for n in range(1, rounds_executed + 1)]

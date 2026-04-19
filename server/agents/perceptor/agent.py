@@ -90,6 +90,16 @@ class PerceptorAgent:
                 llm=llm,
             )
 
+    def reset_context_window_for_cycle(self) -> None:
+        """Clear context window entries to start fresh for this cycle."""
+        if self._context_window is not None:
+            self._context_window._entries = []
+            self._context_window._compression_count = 0
+            logger.info(
+                "perceptor_context_reset",
+                reason="cycle_start_fresh_context",
+            )
+
     async def assess_text(
         self,
         text: str,
