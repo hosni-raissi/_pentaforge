@@ -36,6 +36,12 @@ class ApproveToolPayload(BaseModel):
     action: str = Field(default="approve", max_length=20)
 
 
+class PasswordResponsePayload(BaseModel):
+    password_id: str = Field(min_length=1, max_length=200)
+    password: str = Field(max_length=512)
+    approved: bool = Field(default=True)
+
+
 def _sse_message(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
@@ -109,6 +115,25 @@ async def approve_tool(project_id: str, payload: ApproveToolPayload) -> dict[str
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to approve tool: {exc}") from exc
+
+    return result
+
+
+@router.post("/api/scans/{project_id}/password-response")
+async def approve_password(project_id: str, payload: PasswordResponsePayload) -> dict[str, Any]:
+    try:
+        result = await scan_orchestrator.approve_executer_password(
+            project_id,
+            password_id=payload.password_id,
+            password=payload.password,
+            approved=payload.approved,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to handle password response: {exc}") from exc
 
     return result
 

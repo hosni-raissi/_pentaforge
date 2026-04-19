@@ -4,11 +4,13 @@ Safe Command Executor — Open security tool execution with hardened injection p
 No command whitelist: any tool can run. Destructive system commands remain blocked.
 """
 
+import contextvars
 import subprocess
 import json
 import re
 import shlex
 import time
+import uuid
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
@@ -200,6 +202,108 @@ def validate_command_policy(command: str, args: list[str]) -> Optional[str]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 3a. OUTPUT FILE FLAG STRIPPER
+# ══════════════════════════════════════════════════════════════
+
+def strip_output_file_flags(args: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Remove output file flags from arguments.
+
+    These flags are always blocked:
+    - -o, --output, --output-file, -O, -w (per-tool variants)
+
+    Returns: (cleaned_args, stripped_flags)
+    """
+    OUTPUT_FLAGS = {
+        "-o", "--output", "--output-file",
+        "-O",              # wget -O
+        "-w",              # curl -w (write results to file)
+    }
+
+    cleaned = []
+    stripped = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+
+        # Check if this is an output flag
+        if arg in OUTPUT_FLAGS:
+            stripped.append(arg)
+            # Skip the next argument if it's the value (not a flag)
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                i += 1
+                stripped.append(args[i])
+            i += 1
+        # Check for combined flags like -ofile or -Ofile
+        elif arg.startswith("-o") and not arg.startswith("--"):
+            stripped.append(arg)
+            i += 1
+        else:
+            cleaned.append(arg)
+            i += 1
+
+    return cleaned, stripped
+
+
+# ══════════════════════════════════════════════════════════════
+# 3b. PASSWORD REQUEST HANDLING
+# ══════════════════════════════════════════════════════════════
+
+def _command_needs_password(command: str, args: list[str]) -> tuple[bool, str]:
+    """
+    Detect if command needs password input.
+
+    Returns: (needs_password, tool_name)
+    """
+    cmd_lower = str(command or "").lower().strip()
+    password_commands = {
+        "ssh": "SSH authentication",
+        "sshpass": "SSH with password",
+        "ssh-keyscan": "SSH key scanning",
+        "sudo": "Privilege escalation",
+        "mysql": "MySQL authentication",
+        "psql": "PostgreSQL authentication",
+        "sqlite3": "SQLite access",
+        "ftp": "FTP login",
+    }
+
+    if cmd_lower in password_commands:
+        return True, password_commands[cmd_lower]
+
+    return False, ""
+
+
+def _request_password_via_callback(
+    command: str,
+    tool_name: str,
+    call_id: str,
+) -> Optional[str]:
+    """Request password from callback if available."""
+    try:
+        # Import here to avoid circular imports
+        from server.agents.executer.base import _executer_callback_context
+
+        callback = _executer_callback_context.get()
+        if callback is None:
+            return None
+
+        # Check if callback has request_password method
+        if not hasattr(callback, "request_password"):
+            return None
+
+        prompt = f"{command} password: "
+        reason = f"Execute: {command}"
+        password = callback.request_password(
+            prompt=prompt,
+            reason=reason,
+            call_id=call_id,
+        )
+        return password
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════
 # 4. SAFE EXECUTOR
 # ══════════════════════════════════════════════════════════════
 
@@ -208,7 +312,18 @@ def safe_execute(
     timeout: int = 300,
     extra_env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
+    password: Optional[str] = None,
 ) -> tuple[str, str, int]:
+    """
+    Execute command safely, optionally with password input.
+
+    Args:
+        cmd: Command and arguments as list
+        timeout: Timeout in seconds
+        extra_env: Extra environment variables
+        cwd: Working directory
+        password: Password to send via stdin (for ssh, sudo, etc.)
+    """
     import os
     env = os.environ.copy()
     if extra_env:
@@ -217,6 +332,7 @@ def safe_execute(
     try:
         proc = subprocess.run(
             cmd,
+            input=password if password else None,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -295,6 +411,15 @@ def run_custom(
             execution_time=round(time.time() - start, 2),
         ).model_dump()
 
+    # ── Strip output file flags ────────────────────────────────
+    # Remove -o, --output, --output-file and similar write flags
+    # These are automatically stripped before execution
+    cleaned_args, stripped_flags = strip_output_file_flags(req.args)
+    if stripped_flags:
+        # Update args with cleaned version (no -o flags)
+        req.args = cleaned_args
+        # Note: we silently remove them, as instructed in prompts
+
     # ── Policy check ──────────────────────────────────────────
     policy_error = validate_command_policy(req.command, req.args)
     if policy_error:
@@ -320,12 +445,37 @@ def run_custom(
         full_command=full_command,
     ))
 
+    # ── Password handling ──────────────────────────────────────
+    password: Optional[str] = None
+    needs_password, password_reason = _command_needs_password(req.command, req.args)
+    if needs_password:
+        call_id = str(uuid.uuid4())
+        password = _request_password_via_callback(
+            command=req.command,
+            tool_name=password_reason,
+            call_id=call_id,
+        )
+        if password is None:
+            # Password was denied or callback not available
+            return RunCustomResult(
+                success=False,
+                command=req.command,
+                args=req.args,
+                reason=req.reason,
+                full_command=full_command,
+                error=f"Password required for {req.command} but not provided",
+                return_code=-1,
+                execution_time=round(time.time() - start, 2),
+                logged=True,
+            ).model_dump()
+
     # ── Execute ───────────────────────────────────────────────
     stdout, stderr, rc = safe_execute(
         cmd,
         timeout=req.timeout,
         extra_env=req.env or None,
         cwd=req.cwd,
+        password=password,
     )
 
     return RunCustomResult(

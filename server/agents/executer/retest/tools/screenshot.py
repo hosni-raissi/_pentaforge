@@ -14,7 +14,7 @@ from typing import Any
 import structlog
 
 from server.core.tool import tool
-from ..config import (
+from ...verify.config import (
     SCREENSHOT_TIMEOUT,
     SCREENSHOT_VIEWPORT_WIDTH,
     SCREENSHOT_VIEWPORT_HEIGHT,

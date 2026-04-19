@@ -1,10 +1,21 @@
 """Configuration for the Verify executer agent."""
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Verification Verdict Values (CRITICAL - Agent must return ONE of these)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+VERIFY_VALID_STATUSES = [
+    "real_vulnerability",  # Vulnerability confirmed to exist
+    "false_positive",      # Vulnerability doesn't exist / is protected/encoded
+    "inconclusive",        # Not enough evidence to determine conclusively
+]
+DEFAULT_VERIFY_STATUS = "inconclusive"  # Default if agent unclear
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  LLM Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MAX_TOOL_ROUNDS = 4
+MAX_TOOL_ROUNDS = 3
 LLM_CALL_TIMEOUT_SECONDS = 300
 VERIFY_CONTEXT_WINDOW_MAX_TOKENS = 15000
 VERIFY_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000

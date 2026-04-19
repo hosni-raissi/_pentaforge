@@ -40,7 +40,7 @@ def build_verify_scenario_packet(
         "Verify scenario packet:\n"
         "1) Verification target details follow below.\n"
         "2) Use scoped verify tools to confirm/reject findings with evidence.\n"
-        "3) Max tool executions per round: 2. Max rounds per scenario: 5.\n"
+        "3) Max tool executions per round: 2. Max rounds per scenario: 3.\n"
         "4) Always update context window with verification evidence each round.\n\n"
         "Current context window:\n"
         f"{context_block}\n\n"

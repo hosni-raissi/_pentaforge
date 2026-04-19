@@ -14,6 +14,7 @@ import type { Project } from '../types';
 import {
   listProjectTargetFieldsFromDesktop,
   listProjectTargetTypesFromDesktop,
+  saveProjectToDesktop,
   type ProjectTargetField,
   type ProjectTargetTypeOption,
 } from '../lib/projectBridge';
@@ -88,6 +89,36 @@ function setNestedValue(payload: Record<string, unknown>, dottedKey: string, val
   }
 }
 
+function formatProjectSaveError(error: unknown): string {
+  const fallback = 'Failed to save project. Please check the target fields and try again.';
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const jsonStart = message.indexOf('{');
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(message.slice(jsonStart)) as {
+        detail?: string;
+        errors?: Array<{ field?: string; reason?: string; value?: string }>;
+      };
+      if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+        const formatted = parsed.errors
+          .map((entry) => {
+            const field = String(entry.field || 'target');
+            const reason = String(entry.reason || 'invalid value');
+            return `${field}: ${reason}`;
+          })
+          .join(' | ');
+        return parsed.detail ? `${parsed.detail}: ${formatted}` : formatted;
+      }
+      if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+        return parsed.detail.trim();
+      }
+    } catch {
+      return message || fallback;
+    }
+  }
+  return message || fallback;
+}
+
 export default function Projects() {
   const navigate = useNavigate();
   const {
@@ -112,6 +143,10 @@ export default function Projects() {
   const [fieldsLoading, setFieldsLoading] = useState(false);
   const [typesError, setTypesError] = useState<string>('');
   const [fieldsError, setFieldsError] = useState<string>('');
+  const [customChecklistText, setCustomChecklistText] = useState('');
+  const [customChecklistName, setCustomChecklistName] = useState('');
+  const [customChecklistError, setCustomChecklistError] = useState('');
+  const [submitError, setSubmitError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
@@ -314,6 +349,10 @@ export default function Projects() {
     });
     setTargetInfo({});
     setCredentialProfiles([{}]);
+    setCustomChecklistText('');
+    setCustomChecklistName('');
+    setCustomChecklistError('');
+    setSubmitError('');
     setCreatingProject(false);
   }
 
@@ -331,8 +370,33 @@ export default function Projects() {
     });
     setTargetInfo({});
     setCredentialProfiles([{}]);
+    setCustomChecklistText(project.customChecklistText ?? '');
+    setCustomChecklistName(project.customChecklistName ?? '');
+    setCustomChecklistError('');
     setPendingEditProject(project);
     setDialogOpen(true);
+  }
+
+  async function handleChecklistFileSelected(file: File | null) {
+    if (!file) {
+      return;
+    }
+    if (!file.name.toLowerCase().endsWith('.txt')) {
+      setCustomChecklistError('Only .txt checklist files are supported.');
+      return;
+    }
+    try {
+      const text = await file.text();
+      if (!text.trim()) {
+        setCustomChecklistError('Checklist file is empty.');
+        return;
+      }
+      setCustomChecklistText(text);
+      setCustomChecklistName(file.name);
+      setCustomChecklistError('');
+    } catch {
+      setCustomChecklistError('Failed to read checklist file.');
+    }
   }
 
   function buildTargetConfigPayload(): { primaryTarget: string; payload: Record<string, unknown> } {
@@ -372,33 +436,25 @@ export default function Projects() {
     return { primaryTarget, payload: cleanedTargetInfo };
   }
 
-  function handleCreateOrUpdate() {
+  async function handleCreateOrUpdate() {
     if (creatingProject) {
       return;
     }
     setCreatingProject(true);
+    setSubmitError('');
 
     const { primaryTarget, payload } = buildTargetConfigPayload();
 
-    if (editingProjectId) {
-      updateProject(editingProjectId, {
-        name: form.name,
-        targetType: form.targetType,
-        target: primaryTarget,
-        targetConfig: payload,
-        description: form.description,
-      });
-      setDialogOpen(false);
-      resetProjectFormState();
-      return;
-    }
-
-    const project: Project = {
+    const projectPayload: Project = {
       id: crypto.randomUUID(),
       name: form.name,
       target: primaryTarget,
       targetType: form.targetType,
       targetConfig: payload,
+      customChecklistText: customChecklistText.trim() || undefined,
+      customChecklistName: customChecklistText.trim()
+        ? (customChecklistName || 'custom-checklist.txt')
+        : undefined,
       status: 'idle',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -421,10 +477,53 @@ export default function Projects() {
       ],
       scanProgress: 0,
     };
-    addProject(project);
-    setDialogOpen(false);
-    resetProjectFormState();
-    navigate('/dashboard');
+
+    if (editingProjectId) {
+      const existingProject = projects.find((project) => project.id === editingProjectId);
+      if (!existingProject) {
+        setSubmitError('Project no longer exists. Please reload and try again.');
+        setCreatingProject(false);
+        return;
+      }
+
+      const updatedProject: Project = {
+        ...existingProject,
+        name: form.name,
+        targetType: form.targetType,
+        target: primaryTarget,
+        targetConfig: payload,
+        customChecklistText: customChecklistText.trim() || undefined,
+        customChecklistName: customChecklistText.trim()
+          ? (customChecklistName || 'custom-checklist.txt')
+          : undefined,
+        description: form.description,
+        updatedAt: new Date().toISOString(),
+      };
+
+      try {
+        await saveProjectToDesktop(updatedProject);
+        updateProject(editingProjectId, updatedProject, { persist: false });
+        setDialogOpen(false);
+        resetProjectFormState();
+      } catch (error) {
+        setSubmitError(formatProjectSaveError(error));
+      } finally {
+        setCreatingProject(false);
+      }
+      return;
+    }
+
+    try {
+      await saveProjectToDesktop(projectPayload);
+      addProject(projectPayload, { persist: false });
+      setDialogOpen(false);
+      resetProjectFormState();
+      navigate('/dashboard');
+    } catch (error) {
+      setSubmitError(formatProjectSaveError(error));
+    } finally {
+      setCreatingProject(false);
+    }
   }
 
   function openProject(id: string) {
@@ -853,6 +952,60 @@ export default function Projects() {
             value={form.description}
             onChange={(e) => setForm({ ...form, description: e.target.value })}
           />
+
+          <div className="rounded-lg border border-border bg-surface-0/35 p-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold tracking-wide text-text-secondary">
+                  Custom Checklist Upload
+                </p>
+                <p className="text-sm text-text-muted">
+                  Optional `.txt` checklist. If present, Intel skips checklist generation and formats this file into the project checklist JSON.
+                </p>
+              </div>
+              {customChecklistText.trim() ? (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => {
+                    setCustomChecklistText('');
+                    setCustomChecklistName('');
+                    setCustomChecklistError('');
+                  }}
+                  title="Remove uploaded checklist"
+                >
+                  <Trash2 size={12} />
+                </Button>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              <input
+                type="file"
+                accept=".txt,text/plain"
+                className="block w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary file:mr-3 file:rounded-md file:border-0 file:bg-pf-600/15 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-pf-300"
+                onChange={(event) => {
+                  const nextFile = event.target.files?.[0] ?? null;
+                  void handleChecklistFileSelected(nextFile);
+                  event.currentTarget.value = '';
+                }}
+              />
+              {customChecklistName ? (
+                <p className="text-sm text-text-secondary">
+                  Loaded: {customChecklistName} ({customChecklistText.split(/\r?\n/).filter((line) => line.trim().length > 0).length} lines)
+                </p>
+              ) : (
+                <p className="text-sm text-text-muted">
+                  No custom checklist uploaded. Default Intel checklist generation will be used.
+                </p>
+              )}
+              {customChecklistError ? (
+                <p className="text-sm text-yellow-400">{customChecklistError}</p>
+              ) : null}
+            </div>
+          </div>
+          {submitError ? (
+            <p className="text-sm text-red-400">{submitError}</p>
+          ) : null}
           <div className="flex justify-end gap-2 pt-2">
             <Button
               variant="secondary"

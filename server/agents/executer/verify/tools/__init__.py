@@ -12,7 +12,7 @@ from server.agents.executer.exploit.tools.all.run_python import (
 )
 
 # Screenshot capture tools
-from .screenshot import (
+from ...retest.tools.screenshot import (
     capture_screenshot,
     annotate_screenshot,
     capture_before_after,
@@ -27,7 +27,7 @@ from .vision import (
 )
 
 # Legacy tool
-from .record_verification_result import record_verification_result
+from ...retest.record_verification_result import record_verification_result
 from ..catalog import VERIFY_TOOLS
 
 run_custom_tool = Tool(

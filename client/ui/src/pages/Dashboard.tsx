@@ -79,6 +79,8 @@ interface PlannerPlanSummary {
 interface PlannerScenarioView {
   scenario: string;
   agent: string;
+  status: "completed" | "working" | "not yet";
+  plannerRound: string;
 }
 
 interface PlannerStepView {
@@ -401,6 +403,46 @@ function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizeScenarioStatus(
+  value: unknown,
+  done = false,
+): "completed" | "working" | "not yet" {
+  if (done) {
+    return "completed";
+  }
+  const normalized = normalizeText(value).toLowerCase();
+  if (
+    normalized === "completed" ||
+    normalized === "complete" ||
+    normalized === "done"
+  ) {
+    return "completed";
+  }
+  if (
+    normalized === "working" ||
+    normalized === "running" ||
+    normalized === "in progress" ||
+    normalized === "in_progress"
+  ) {
+    return "working";
+  }
+  return "not yet";
+}
+
+function normalizeRoundLabel(value: unknown): string {
+  const raw = normalizeText(value).toLowerCase();
+  if (!raw) {
+    return "";
+  }
+  if (raw.startsWith("r") && /^\d+$/.test(raw.slice(1))) {
+    return raw;
+  }
+  if (/^\d+$/.test(raw)) {
+    return `r${raw}`;
+  }
+  return "";
+}
+
 function normalizePhase(value: unknown): string {
   const raw = normalizeText(value);
   if (!raw) {
@@ -672,7 +714,11 @@ function toPlannerPlanSummary(value: unknown): PlannerPlanSummary | null {
           continue;
         }
         scenarioCount += 1;
-        if (rawScenario.done === true) {
+        if (
+          rawScenario.done === true ||
+          normalizeScenarioStatus(rawScenario.status, rawScenario.done === true) ===
+            "completed"
+        ) {
           completedScenarioCount += 1;
         }
       }
@@ -817,6 +863,11 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
         scenarios.push({
           scenario: task,
           agent: normalizeText(rawScenario.agent) || "recon",
+          status: normalizeScenarioStatus(
+            rawScenario.status,
+            rawScenario.done === true,
+          ),
+          plannerRound: normalizeRoundLabel(rawScenario.planner_round_added),
         });
       }
 
@@ -1013,6 +1064,7 @@ export default function Dashboard() {
   const [isCopilotOpen, setIsCopilotOpen] = useState(false);
   const lastApprovalNotifiedRef = useRef<string>("");
   const lastPlannerApprovalNotifiedRef = useRef<string>("");
+  const autoApprovalFailedIdsRef = useRef<Set<string>>(new Set());
   const dashboardSelectClass =
     "h-7 rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]";
   const approvalModeLabel: Record<ApprovalMode, string> = {
@@ -1234,7 +1286,7 @@ export default function Dashboard() {
     void fetchRecent();
     const timer = window.setInterval(() => {
       void fetchRecent();
-    }, 3000);
+    }, 5000);  // Reduced polling frequency to 5s to avoid rate limiter
 
     return () => {
       cancelled = true;
@@ -1408,6 +1460,7 @@ export default function Dashboard() {
         approvalId,
         action,
       });
+      autoApprovalFailedIdsRef.current.delete(approvalId);
     } catch (error) {
       setLocallyAckedApprovalId(null);
       let message = "Failed to submit tool approval.";
@@ -1417,6 +1470,7 @@ export default function Dashboard() {
             ? "Approval request timed out while waiting for server response."
             : error.message;
       }
+      autoApprovalFailedIdsRef.current.add(approvalId);
       setStreamLogs((previous) => {
         const nextEntry: DashboardLogEntry = {
           id: `tool-approve-error-${Math.random().toString(36).slice(2, 10)}`,
@@ -1568,6 +1622,9 @@ export default function Dashboard() {
     if (!isRunning || !pendingToolApproval || toolApprovalLoading) {
       return;
     }
+    if (autoApprovalFailedIdsRef.current.has(pendingToolApproval.approvalId)) {
+      return;
+    }
     const pendingRole = String(pendingToolApproval.role || "").trim().toLowerCase();
     const shouldAutoApprove =
       approvalMode === "auto_all"
@@ -1578,6 +1635,21 @@ export default function Dashboard() {
       void handleToolApproval("approve");
     }
   }, [approvalMode, isRunning, pendingToolApproval, toolApprovalLoading]);
+
+  useEffect(() => {
+    const activeApprovalId = pendingToolApproval?.approvalId ?? "";
+    if (!activeApprovalId && autoApprovalFailedIdsRef.current.size > 0) {
+      autoApprovalFailedIdsRef.current.clear();
+      return;
+    }
+    if (activeApprovalId) {
+      autoApprovalFailedIdsRef.current.forEach((approvalId) => {
+        if (approvalId !== activeApprovalId) {
+          autoApprovalFailedIdsRef.current.delete(approvalId);
+        }
+      });
+    }
+  }, [pendingToolApproval?.approvalId]);
 
   useEffect(() => {
     if (!pendingToolApproval?.approvalId) {
@@ -1754,16 +1826,25 @@ export default function Dashboard() {
 
   const resolvedPlannerResult = (() => {
     let plannerError = "";
-    for (const event of scanEvents) {
+    for (let index = scanEvents.length - 1; index >= 0; index -= 1) {
+      const event = scanEvents[index];
       if (!isRecord(event.data)) {
         continue;
       }
-      if (event.event === "planner_complete") {
+      if (
+        (event.event === "scenario_state_change" ||
+          event.event === "plan_updated_by_planner" ||
+          event.event === "planner_complete") &&
+        event.data.plan_data
+      ) {
         return {
           summary: normalizeText(event.data.summary),
           needs: event.data.needs,
           planData: event.data.plan_data,
-          status: "completed",
+          status:
+            event.event === "planner_complete"
+              ? "completed"
+              : normalizeText(event.data.kind) || "running",
           error: "",
         };
       }
@@ -2879,6 +2960,14 @@ export default function Dashboard() {
                                 <div className="divide-y divide-border">
                                   {step.scenarios.map(
                                     (scenario, scenarioIndex) => (
+                                      (() => {
+                                        const statusTone =
+                                          scenario.status === "completed"
+                                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                                            : scenario.status === "working"
+                                              ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                                              : "border-border bg-surface-1/55 text-text-muted";
+                                        return (
                                       <div
                                         key={`${phase.phase}-${step.step}-scenario-${scenarioIndex}`}
                                         className={`flex items-center justify-between gap-2 ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
@@ -2886,10 +2975,24 @@ export default function Dashboard() {
                                         <p className="text-text-secondary text-[13px]">
                                           {scenario.scenario}
                                         </p>
-                                        <span className={`rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs`}>
-                                          {scenario.agent}
-                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                          {scenario.plannerRound ? (
+                                            <span className="rounded border border-pf-500/30 bg-pf-500/10 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-pf-200">
+                                              {scenario.plannerRound}
+                                            </span>
+                                          ) : null}
+                                          <span
+                                            className={`rounded border px-1.5 py-0.5 text-[11px] capitalize ${statusTone}`}
+                                          >
+                                            {scenario.status}
+                                          </span>
+                                          <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs">
+                                            {scenario.agent}
+                                          </span>
+                                        </div>
                                       </div>
+                                        );
+                                      })()
                                     ),
                                   )}
                                 </div>

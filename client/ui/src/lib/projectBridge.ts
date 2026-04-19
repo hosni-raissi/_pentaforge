@@ -223,6 +223,12 @@ function normalizeProjectRow(value: unknown): Project | null {
     targetConfig: (
       typeof row.targetConfig === "object" && row.targetConfig !== null
     ) ? (row.targetConfig as Record<string, unknown>) : undefined,
+    customChecklistText: typeof row.customChecklistText === "string"
+      ? row.customChecklistText
+      : undefined,
+    customChecklistName: typeof row.customChecklistName === "string"
+      ? row.customChecklistName
+      : undefined,
     status,
     createdAt,
     updatedAt,
@@ -372,7 +378,7 @@ export async function approvePlannerForProjectScanFromDesktop(
     {
       method: "POST",
     },
-    20000,
+    120000,
   );
 }
 
@@ -403,7 +409,7 @@ export async function approveToolForProjectScanFromDesktop(
     }),
   };
 
-  return await requestJson(path, init, 20000);
+  return await requestJson(path, init, 120000);
 }
 
 export async function clearProjectScanEventsCacheFromDesktop(projectId: string): Promise<void> {

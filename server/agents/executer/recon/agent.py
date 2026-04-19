@@ -133,7 +133,7 @@ def build_recon_scenario_packet(
         "Recon scenario packet:\n"
         "1) Scenario + target info from operator follows below.\n"
         "2) Use scoped recon tools to maximize useful recon signal for this scenario.\n"
-        "3) Max tool executions per round: 2. Max rounds per scenario: 5.\n"
+        "3) Max tool executions per round: 2. Max rounds per scenario: 3.\n"
         "4) Always update context window with new findings each round.\n\n"
         "Current context window:\n"
         f"{context_block}\n\n"

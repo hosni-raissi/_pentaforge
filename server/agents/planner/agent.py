@@ -57,6 +57,7 @@ from .config import (
     _TRANSIENT_EXCEPTIONS,
 )
 from .context_window import build_planner_context_window
+from .context_builder import PlannerContextBuilder
 from .prompts import INITIAL_SYSTEM_PROMPT, LOOP_SYSTEM_PROMPT
 from .tools import ALL_PLANNER_TOOLS
 from .tools.pentest_plan import _current_plan, update_pentest_plan
@@ -1533,9 +1534,14 @@ class PlannerAgent:
         mode: str | None = None,
         callback: PlannerCallback | None = None,
         project_id: str | None = None,
+        projects_store: Any | None = None,
+        vector_store: Any | None = None,
     ) -> None:
         self._mode = mode or llm_mode.mode
         self._cb = callback or _NoOpCallback()
+        self._project_id = project_id or ""
+        self._projects_store = projects_store
+        self._vector_store = vector_store
 
         tool_list = tools or ALL_PLANNER_TOOLS
         # Planner LLM should not call update_pentest_plan directly.
@@ -1560,6 +1566,16 @@ class PlannerAgent:
             project_id=project_id,
             llm=self._llm,
         )
+
+        # Initialize context builder if stores are available
+        if self._projects_store and self._vector_store:
+            self._context_builder = PlannerContextBuilder(
+                projects_store=self._projects_store,
+                vector_store=self._vector_store,
+                system_prompt=INITIAL_SYSTEM_PROMPT,
+            )
+        else:
+            self._context_builder = None
 
         logger.info("planner_initialized", mode=self._mode, model=self._model_name)
         self._graph = self._build_graph()
@@ -1645,19 +1661,19 @@ class PlannerAgent:
                                 {"role": "user", "content": checklist_ctx},
                             ]
 
-            if round_count >= round_cap:
-                # Final initial-planning round: do not call tools.
-                messages_raw = [
-                    *messages_raw,
-                    {
-                        "role": "user",
-                        "content": (
-                            "Final round: return strict JSON now with keys "
-                            "`summary`, `needs`, `plan`, `action_plan`. "
-                            "Do not call any tools."
-                        ),
-                    },
-                ]
+        if round_count >= round_cap:
+            # Final planning round: force a strict JSON answer and disable tools.
+            messages_raw = [
+                *messages_raw,
+                {
+                    "role": "user",
+                    "content": (
+                        "Final round: return strict JSON now with keys "
+                        "`summary`, `needs`, `plan`, `action_plan`. "
+                        "Do not call any tools."
+                    ),
+                },
+            ]
         messages = [_dict_to_msg(m) for m in messages_raw]
 
         # Adaptive token budget: allow more tokens in later rounds for plan output.
@@ -1675,7 +1691,7 @@ class PlannerAgent:
                 )
 
             tools_for_call = state.get("tool_schemas") if self._tools else None
-            if not state.get("is_loop") and round_count >= round_cap:
+            if round_count >= round_cap:
                 tools_for_call = None
 
             response = await _retry_with_backoff(
@@ -2064,7 +2080,8 @@ class PlannerAgent:
 
         if plan_payload is not None:
             persist_status = await update_pentest_plan.execute(
-                plan_json=json.dumps(plan_payload, ensure_ascii=True)
+                plan_json=json.dumps(plan_payload, ensure_ascii=True),
+                planner_round=rounds,
             )
             lowered = str(persist_status).strip().lower()
             if not lowered.startswith("plan updated"):
@@ -2122,9 +2139,22 @@ class PlannerAgent:
         # Planner runs in plan-only mode: never return scenario batches here.
         result.scenarios = []
 
+        # Calculate actual scenario count from the persisted plan (for accurate logging)
+        actual_scenario_count = sum(
+            len(step.get("scenarios", []))
+            for phase in _current_plan.get("phases", [])
+            if isinstance(phase, dict)
+            for step in (
+                phase.get("steps", [])
+                if isinstance(phase.get("steps"), list)
+                else []
+            )
+            if isinstance(step, dict)
+        )
+
         self._cb.on_done(
-            f"Planner complete: {len(result.scenarios)} scenarios, "
-            f"{total_tools} tool calls, {rounds} rounds"
+            f"Planner complete: {actual_scenario_count} scenarios persisted "
+            f"({total_tools} tool calls, {rounds} rounds)"
         )
         if result.needs:
             self._cb.on_step(f"Planner needs more data: {len(result.needs)} items")
@@ -2399,6 +2429,21 @@ class PlannerAgent:
             )
 
         system_content = LOOP_SYSTEM_PROMPT if is_loop else INITIAL_SYSTEM_PROMPT
+
+        # For loop rounds, use the 6-part context builder if available
+        if is_loop and self._context_builder:
+            try:
+                system_content = await self._context_builder.build_context(
+                    project_id=self._project_id,
+                    engagement_data={},  # TODO: Pass target/detected_tech if available
+                    user_message=None,  # User message will be appended separately
+                )
+                self._cb.on_step("Planner context built (6-part window)")
+            except Exception as exc:
+                logger.warning("context_builder_failed", error=str(exc))
+                # Fall back to static prompt if context builder fails
+                system_content = LOOP_SYSTEM_PROMPT
+
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content
 

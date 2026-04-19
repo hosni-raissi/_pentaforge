@@ -658,6 +658,108 @@ def _build_checklist_llm_input(checklist_data: dict[str, Any], info: str) -> str
     return "\n".join(lines).strip()
 
 
+_CUSTOM_CHECKLIST_PHASE_TITLES: dict[str, str] = {
+    "1": "Reconnaissance & Surface Mapping",
+    "2": "Technology & Entry Point Enumeration",
+    "3": "Authentication & Access Control Review",
+    "4": "Authentication, Authorization & Injection Testing",
+    "5": "Post-Exploitation, Impact & Reporting Follow-up",
+}
+
+
+def _parse_custom_checklist_text(
+    raw_text: str,
+    *,
+    target_type: str,
+) -> dict[str, Any]:
+    text = str(raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in text.split("\n")]
+
+    blocks: list[dict[str, Any]] = []
+    current_phase = "4"
+    current_title = _CUSTOM_CHECKLIST_PHASE_TITLES[current_phase]
+    current_items: list[dict[str, Any]] = []
+
+    def flush_block() -> None:
+        nonlocal current_items
+        seen: set[str] = set()
+        normalized_items: list[dict[str, Any]] = []
+        for item in current_items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append({"name": name})
+        if normalized_items:
+            blocks.append(
+                {
+                    "phase": current_phase,
+                    "title": current_title,
+                    "items": normalized_items,
+                }
+            )
+        current_items = []
+
+    for raw_line in lines:
+        if not raw_line:
+            continue
+
+        phase_match = re.match(
+            r"^(?:phase\s*)?([1-5])(?:\s*[-:.)]\s*|\s+)(.+)$",
+            raw_line,
+            flags=re.IGNORECASE,
+        )
+        if raw_line.lower().startswith("phase ") and phase_match:
+            flush_block()
+            current_phase = phase_match.group(1)
+            maybe_title = phase_match.group(2).strip(" -:\t")
+            current_title = maybe_title or _CUSTOM_CHECKLIST_PHASE_TITLES.get(
+                current_phase,
+                "Imported Checklist",
+            )
+            continue
+
+        heading_match = re.match(r"^(?:#+\s*|\*\*\s*)(.+?)(?:\*\*)?$", raw_line)
+        if heading_match and not raw_line.startswith(("-", "*", "[", "1.", "2.", "3.", "4.", "5.")):
+            heading_text = heading_match.group(1).strip(" -:\t")
+            if heading_text and len(heading_text.split()) <= 12:
+                flush_block()
+                current_title = heading_text
+                continue
+
+        item_text = re.sub(r"^(?:[-*•]\s+|\[\s?\]\s+|\d+\.\s+)", "", raw_line).strip()
+        if item_text:
+            current_items.append({"name": item_text})
+
+    flush_block()
+
+    return {
+        "target_type": str(target_type or "").strip(),
+        "available_total": sum(
+            len(block.get("items", []))
+            for block in blocks
+            if isinstance(block, dict) and isinstance(block.get("items", []), list)
+        ),
+        "checklist": blocks,
+    }
+
+
+def _build_custom_checklist_llm_input(raw_text: str, *, target_type: str, info: str) -> str:
+    lines = [
+        f"Target type: {target_type}",
+        f"Target info: {info or 'none'}",
+        "Operator-supplied checklist text (.txt upload):",
+        "",
+        str(raw_text or "").strip(),
+    ]
+    return "\n".join(lines).strip()
+
+
 def _format_structured_checklist_for_formatter(payload: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append(f"Target type: {payload.get('target_type', '')}")
@@ -1479,6 +1581,7 @@ class IntelAgent:
         target_type: str = "all",
         info: str = "",
         *,
+        custom_checklist_text: str = "",
         force_update: bool = False,
         refresh_days_override: int | None = None,
         update_only: bool = False,
@@ -1489,7 +1592,10 @@ class IntelAgent:
             await self._context_window.record(
                 kind="run_input",
                 role="user",
-                content=f"target_type={target_type}\ninfo={info}",
+                content=(
+                    f"target_type={target_type}\ninfo={info}\n"
+                    f"custom_checklist={'yes' if custom_checklist_text.strip() else 'no'}"
+                ),
                 metadata={"agent": "intel", "target_type": target_type},
             )
         await self._context.ensure_ready()
@@ -1579,33 +1685,58 @@ class IntelAgent:
                 refresh_days=refresh_days,
             )
 
-        # Foreground: checklist → clean → format (no static RAG fetch; formatter uses search_rag dynamically)
-        self._cb.on_step("Skipping static RAG snapshot; formatter will use search_rag tools dynamically")
-
-        self._cb.on_step("Fetching base checklist")
-        base_checklist = await self._call_tool_json("get_checklists", target_type=target_type, info=info[:250])
         cleaned_payload: dict[str, Any] = {}
-        if isinstance(base_checklist, dict):
-            try:
-                cleaned_json = await asyncio.wait_for(
-                    clean_checklists_with_llm(
-                        checklist_data=base_checklist,
-                        target_type=target_type,
-                        info=info,
-                        llm=self._llm,
-                    ),
-                    timeout=FORMATTER_CALL_TIMEOUT_SECONDS,
+        base_checklist: dict[str, Any] = {}
+        structured_checklist: dict[str, Any] = {}
+        final_status = "complete"
+        custom_checklist_clean = str(custom_checklist_text or "").strip()
+        if custom_checklist_clean:
+            self._cb.on_step(
+                "Skipping static RAG snapshot; custom checklist path will reuse uploaded checklist directly"
+            )
+            self._cb.on_step(
+                "Custom checklist detected — skipping Intel checklist generation and formatter enrichment; using uploaded .txt checklist directly"
+            )
+            cleaned_payload = _parse_custom_checklist_text(
+                custom_checklist_clean,
+                target_type=target_type,
+            )
+            if not _is_structured_checklist_payload(cleaned_payload):
+                raise RuntimeError(
+                    "Uploaded custom checklist could not be parsed into a valid checklist structure."
                 )
-                cleaned_payload = json.loads(cleaned_json)
-            except Exception as exc:
-                logger.warning("intel_clean_checklist_failed", error=str(exc), target_type=target_type)
-                cleaned_payload = build_deterministic_checklist_payload(base_checklist, info)
+            base_checklist = {
+                "target_type": target_type,
+                "source": "project_custom_checklist",
+                "raw_text_length": len(custom_checklist_clean),
+            }
+            structured_checklist = cleaned_payload
+        else:
+            # Foreground: checklist → clean → format (no static RAG fetch; formatter uses search_rag dynamically)
+            self._cb.on_step("Skipping static RAG snapshot; formatter will use search_rag tools dynamically")
+            self._cb.on_step("Fetching base checklist")
+            base_checklist = await self._call_tool_json("get_checklists", target_type=target_type, info=info[:250])
+            if isinstance(base_checklist, dict):
+                try:
+                    cleaned_json = await asyncio.wait_for(
+                        clean_checklists_with_llm(
+                            checklist_data=base_checklist,
+                            target_type=target_type,
+                            info=info,
+                            llm=self._llm,
+                        ),
+                        timeout=FORMATTER_CALL_TIMEOUT_SECONDS,
+                    )
+                    cleaned_payload = json.loads(cleaned_json)
+                except Exception as exc:
+                    logger.warning("intel_clean_checklist_failed", error=str(exc), target_type=target_type)
+                    cleaned_payload = build_deterministic_checklist_payload(base_checklist, info)
 
-        base_checklist_text = (
-            _format_structured_checklist_for_formatter(cleaned_payload)
-            if cleaned_payload
-            else _build_checklist_llm_input(base_checklist, info)
-        )
+            base_checklist_text = (
+                _format_structured_checklist_for_formatter(cleaned_payload)
+                if cleaned_payload
+                else _build_checklist_llm_input(base_checklist, info)
+            )
 
         pipeline_report: dict[str, Any] = {
             "target_type": target_type,
@@ -1618,15 +1749,16 @@ class IntelAgent:
             },
         }
 
-        llm_result = await self._run_formatter(
-            target_type=target_type,
-            info=info,
-            pipeline_report=pipeline_report,
-            base_checklist_text=base_checklist_text,
-            base_checklist_payload=cleaned_payload or None,
-        )
-
-        structured_checklist = llm_result.checklist or cleaned_payload
+        if not custom_checklist_clean:
+            llm_result = await self._run_formatter(
+                target_type=target_type,
+                info=info,
+                pipeline_report=pipeline_report,
+                base_checklist_text=base_checklist_text,
+                base_checklist_payload=cleaned_payload or None,
+            )
+            structured_checklist = llm_result.checklist or cleaned_payload
+            final_status = _normalize_intel_status(llm_result.status)
 
         # ── Priority resolution ─────────────────────────────────────────
         # Prefer LLM-priority ownership, but fail open if the refinement
@@ -1678,7 +1810,6 @@ class IntelAgent:
                 structured_checklist = set_checklist_json
                 self._cb.on_done("Checklist normalized by set_checklist")
 
-        final_status = _normalize_intel_status(llm_result.status)
         self._cb.on_done(f"Intel Agent complete — status={final_status}")
         return IntelResult(
             status=final_status,

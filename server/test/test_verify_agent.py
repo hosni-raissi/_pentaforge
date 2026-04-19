@@ -1,14 +1,14 @@
 """
-Test recon agent with step-by-step output for scanme.nmap.org
-Run with: python server/test/test_recon_agent.py
+Test verify agent with step-by-step output for vulnerability verification.
 
-Uses Mistral LLM (configured in server/.env for RECON role group)
+Uses Mistral LLM (configured in server/.env for VERIFY role group)
+Shows full 3-round flow with findings verification, false positive detection, and final verdict.
 """
 
 import asyncio
 import json
 
-from server.agents.executer.recon.agent import ReconExecuterAgent
+from server.agents.executer.verify.agent import VerifyExecuterAgent
 from server.agents.executer.base import ExecuterCallback
 from server.config.agent import get_public_agent_config
 
@@ -47,71 +47,89 @@ class DetailedCallback(ExecuterCallback):
         """Auto-approve tools for testing."""
         approval_msg = f"[AUTO-APPROVE] {role} tool '{tool_name}' (call_id={call_id})"
         print(f"  🔓 {approval_msg}")
+
+        # SHOW TOOL ARGUMENTS FOR DEBUGGING
+        if args:
+            print(f"    → Tool args: {json.dumps(args, indent=6)}")
+
         self.tool_approvals.append({
             "role": role,
             "tool": tool_name,
             "call_id": call_id,
+            "args": args,
         })
         return True  # Auto-approve
 
+    def request_password(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> str | None:
+        """No password needed for verify agent tests."""
+        return None
 
-async def test_recon_agent_port_scan():
-    """Test recon agent for port scanning on scanme.nmap.org."""
+
+async def test_verify_agent_xss():
+    """Test verify agent on XSS finding."""
 
     print("\n" + "=" * 80)
-    print("RECON AGENT TEST - PORT SCANNING")
+    print("VERIFY AGENT TEST - XSS VERIFICATION")
     print("=" * 80)
 
-    # Create callback FIRST
     callback = DetailedCallback()
+    config = get_public_agent_config(agent_role="verify")
+    verify = VerifyExecuterAgent(config=config, callback=callback)
 
-    # Initialize recon agent with role-specific config (reads from .env)
-    config = get_public_agent_config(agent_role="recon")
-    recon = ReconExecuterAgent(config=config, callback=callback)
-
-    scenario = {
-        "agent": "recon",
-        "phase": "Reconnaissance",
-        "step": 0,
-        "priority": 1,
-        "task": "Enumerate open ports and services",
-        "target": "http://scanme.nmap.org",
-        "target_type": ["web_app"],
-        "description": "Use port scanning to identify open ports and running services",
+    # Create test finding - XSS to verify
+    finding = {
+        "type": "reflected_xss",
+        "target": "GET /search?q=<script>alert('xss')</script>",
+        "parameter": "q",
+        "payload_type": "reflected",
+        "severity": "high",
+        "endpoint": "/search",
+        "description": "Reflected XSS in search parameter - payload not encoded in response",
     }
 
     user_message = f"""
-You are testing the following scenario:
+Verify this XSS finding:
 
-**Scenario:** {scenario['task']}
-**Target:** {scenario['target']}
-**Description:** {scenario['description']}
+**Finding Type:** {finding['type']}
+**Target:** {finding['target']}
+**Parameter:** {finding['parameter']}
+**Payload Type:** {finding['payload_type']}
+**Severity:** {finding['severity']}
+**Endpoint:** {finding['endpoint']}
+**Description:** {finding['description']}
 
-Scan the target to identify:
-1. Open ports
-2. Running services
-3. Service versions
-4. Operating system fingerprints
+Follow the 3-round verification process:
+- Round 1/3: Attempt to reproduce the XSS with verification tools
+- Round 2/3: Analyze Round 1 results, create summary, execute additional payload variations
+- Round 3/3: Consolidate evidence into FINAL VERDICT JSON only
 
-Use appropriate reconnaissance tools. Report all findings.
+Return verdict: real_vulnerability | false_positive | inconclusive
+Include confidence level (0.0-1.0), evidence chain, and routing information for orchestrator.
 """
 
-    print("\n📋 SCENARIO:")
-    print(f"  Task: {scenario['task']}")
-    print(f"  Target: {scenario['target']}")
+    print("\n📋 FINDING TO VERIFY:")
+    print(f"  Type: {finding['type']}")
+    print(f"  Target: {finding['target']}")
+    print(f"  Parameter: {finding['parameter']}")
+    print(f"  Severity: {finding['severity']}")
 
-    print("\n🚀 STARTING RECON AGENT RUN...")
+    print("\n🚀 STARTING VERIFY AGENT RUN (3-ROUND FLOW)...")
     print("-" * 80)
 
     try:
-        # Run the agent (callback already passed during init)
-        result = await recon.run(user_message)
+        result = await verify.run(user_message)
 
         print("\n" + "=" * 80)
-        print("✅ RECON AGENT COMPLETED")
+        print("✅ VERIFY AGENT COMPLETED")
         print("=" * 80)
 
-        print("\n📊 FINAL RESULT:")
+        print("\n📊 FINAL VERDICT:")
         print(f"  Status: {result.status}")
         print(f"  Completed Rounds: {result.rounds_executed}")
 
@@ -120,45 +138,41 @@ Use appropriate reconnaissance tools. Report all findings.
             for i, label in enumerate(result.round_labels, 1):
                 print(f"    Round {i}: {label}")
 
-        print(f"\n🔧 TOOLS USED: {len(result.tool_results) if result.tool_results else 0}")
+        print(f"\n🔧 TOOLS USED ({len(result.tool_results) if result.tool_results else 0}):")
         if result.tool_results:
             for i, tool in enumerate(result.tool_results, 1):
                 print(f"  Tool {i}: {tool.get('name', 'unknown')}")
-                if tool.get('output'):
-                    output_preview = str(tool['output'])[:150]
-                    print(f"    Output: {output_preview}...")
 
-        print(f"\n🎯 FINDINGS: {len(result.findings) if result.findings else 0}")
+        print(f"\n🎯 FINDINGS ({len(result.findings) if result.findings else 0}):")
         if result.findings:
             for i, finding in enumerate(result.findings, 1):
                 print(f"\n  Finding #{i}:")
                 print(f"    Type: {finding.get('type', 'N/A')}")
-                print(f"    Summary: {finding.get('summary', 'N/A')}")
-                if finding.get('details'):
-                    details_preview = str(finding['details'])[:200]
-                    print(f"    Details: {details_preview}")
+                print(f"    Severity: {finding.get('severity', 'N/A')}")
 
         if result.summary:
-            print(f"\n📝 SUMMARY:")
+            print(f"\n📝 VERIFICATION SUMMARY:")
             print(f"  {result.summary}")
 
-        print(f"\n📋 STEP LOG ({len(callback.steps)} steps):")
+        print(f"\n💬 CALLBACK STEPS ({len(callback.steps)}):")
         for i, step in enumerate(callback.steps, 1):
             if i <= 15:
                 print(f"  {i}. {step}")
         if len(callback.steps) > 15:
             print(f"  ... and {len(callback.steps) - 15} more steps")
 
-        print(f"\n📦 RESULT STRUCTURE:")
+        print("\n" + "=" * 80)
+        print("📦 FINAL VERDICT STRUCTURE:")
+        print("=" * 80)
+
         result_dict = {
             "status": result.status,
             "rounds_executed": result.rounds_executed,
-            "round_labels": result.round_labels,
             "findings_count": len(result.findings) if result.findings else 0,
             "evidence_count": len(result.evidence) if result.evidence else 0,
-            "tool_results_count": len(result.tool_results) if result.tool_results else 0,
-            "discovered_target_types": result.discovered_target_types,
+            "summary": result.summary,
         }
+
         print(json.dumps(result_dict, indent=2))
 
     except Exception as e:
@@ -168,16 +182,15 @@ Use appropriate reconnaissance tools. Report all findings.
 
 
 async def main():
-    """Run all recon tests."""
+    """Run all verify agent tests."""
     print("\n" + "=" * 100)
-    print("RECON AGENT UNIT TESTS")
+    print("VERIFY AGENT UNIT TESTS - FULL 3-ROUND FLOW")
     print("=" * 100)
 
-    await test_recon_agent_port_scan()
- 
+    await test_verify_agent_xss()
 
     print("\n" + "=" * 100)
-    print("ALL TESTS COMPLETED")
+    print("ALL VERIFY AGENT TESTS COMPLETED")
     print("=" * 100 + "\n")
 
 

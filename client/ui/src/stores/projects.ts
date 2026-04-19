@@ -17,7 +17,7 @@ interface ProjectStore {
   startingProjectId: string | null;
 
   // Actions
-  addProject: (project: Project) => void;
+  addProject: (project: Project, opts?: { persist?: boolean }) => void;
   removeProject: (id: string) => void;
   setActive: (id: string | null) => void;
   setRunning: (id: string | null, opts?: { triggerScan?: boolean; resume?: boolean; force?: boolean }) => void;
@@ -36,12 +36,15 @@ export const useProjects = create<ProjectStore>()(
       runningProjectId: null,
       startingProjectId: null,
 
-      addProject: (project) =>
+      addProject: (project, opts) =>
         set((s) => {
           const nextProjects = [project, ...s.projects];
-          void saveProjectToDesktop(project).catch((error) => {
-            console.error('Failed to persist project:', error);
-          });
+          const shouldPersist = opts?.persist !== false;
+          if (shouldPersist) {
+            void saveProjectToDesktop(project).catch((error) => {
+              console.error('Failed to persist project:', error);
+            });
+          }
           return {
             projects: nextProjects,
             activeProjectId: project.id,

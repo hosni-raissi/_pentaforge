@@ -12,6 +12,8 @@ export interface Project {
   target: string;
   targetType: string;
   targetConfig?: Record<string, unknown>;
+  customChecklistText?: string;
+  customChecklistName?: string;
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;
