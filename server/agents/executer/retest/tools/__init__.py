@@ -27,45 +27,7 @@ run_python_tool = Tool(
     parameters=RUN_PYTHON_TOOL_DEFINITION["parameters"],
 )
 
-screenshot_tool = Tool(
-    name="capture_screenshot",
-    description=(
-        "Capture screenshot of a web page to get visual proof of vulnerability. "
-        "Useful for documenting exploit results, alert boxes, error messages, etc."
-    ),
-    fn=capture_screenshot,
-    parameters={
-        "type": "object",
-        "properties": {
-            "url": {
-                "type": "string",
-                "description": "URL to capture (sensitive params will be redacted)",
-            },
-            "label": {
-                "type": "string",
-                "description": "Label for screenshot (e.g., 'xss_alert', 'sqli_error')",
-                "default": "screenshot",
-            },
-            "wait_for": {
-                "type": "string",
-                "enum": ["load", "domcontentloaded", "networkidle"],
-                "description": "Wait condition before capturing",
-                "default": "networkidle",
-            },
-            "cookie": {
-                "type": "string",
-                "description": "Cookie string for authenticated access (optional)",
-                "default": "",
-            },
-            "full_page": {
-                "type": "boolean",
-                "description": "Capture full scrollable page (default false = viewport only)",
-                "default": False,
-            },
-        },
-        "required": ["url"],
-    },
-)
+screenshot_tool = capture_screenshot
 
 ALL_RETEST_TOOLS: list[Tool] = [
     # Execution primitives for PoC

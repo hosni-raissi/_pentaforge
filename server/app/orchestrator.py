@@ -55,6 +55,23 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_finding_severity(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"critical", "high", "medium", "low", "info"}:
+        return raw
+    if raw in {"1", "p1", "s1"}:
+        return "critical"
+    if raw in {"2", "p2", "s2"}:
+        return "high"
+    if raw in {"3", "p3", "s3"}:
+        return "medium"
+    if raw in {"4", "p4", "s4"}:
+        return "low"
+    if raw in {"5", "p5", "s5"}:
+        return "info"
+    return "medium"
+
+
 def _normalize_target_type(value: Any) -> str:
     clean = str(value or "").strip().lower().replace("-", "_")
     if not clean:
@@ -1849,7 +1866,7 @@ class ScanOrchestratorService:
                 "endpoint": item["scenario"].get("endpoint", ""),
                 "target": target,
                 "target_type": target_type,
-                "severity": item["scenario"].get("priority", "medium"),
+                "severity": _normalize_finding_severity(item["scenario"].get("priority", "medium")),
                 "verify_summary": item["verify_summary"],
                 "retest_summary": retest_summary,
                 "evidence": retest_data.get("evidence", {}),
@@ -1886,6 +1903,8 @@ class ScanOrchestratorService:
                     "stage": "retest",
                     "kind": "finding_saved",
                     "finding_id": db_entry["id"],
+                    "title": item["verify_summary"],
+                    "severity": db_entry["severity"],
                     "vulnerability_type": db_entry["vulnerability_type"],
                     "endpoint": db_entry["endpoint"],
                     "retest_summary": retest_summary,
@@ -2289,6 +2308,9 @@ class ScanOrchestratorService:
                         )
 
                         verify_summary = summary if summary else f"[{status}] Verification incomplete - treating as inconclusive"
+                        severity = _normalize_finding_severity(
+                            item.get("scenario", {}).get("priority", "medium")
+                        )
 
                         organized_item = {
                             "idx": item["idx"],
@@ -2304,6 +2326,23 @@ class ScanOrchestratorService:
 
                         if verdict == "real_vulnerability":
                             verify_results_organized["real_vulnerabilities"].append(organized_item)
+                            self._emit_event(
+                                project_id,
+                                event="verify_real_vulnerability_confirmed",
+                                scan_id=scan_id,
+                                level="warn",
+                                message=f"Verify confirmed real vulnerability: {verify_summary[:120]}",
+                                data={
+                                    "stage": "verify",
+                                    "kind": "real_vulnerability_confirmed",
+                                    "title": verify_summary,
+                                    "summary": verify_summary,
+                                    "severity": severity,
+                                    "endpoint": str(item.get("scenario", {}).get("endpoint", "")).strip(),
+                                    "scenario_task": str(item.get("scenario", {}).get("task", "")).strip(),
+                                    "vulnerability_type": str(item.get("scenario", {}).get("vulnerability_type", "")).strip(),
+                                },
+                            )
                         elif verdict == "false_positive":
                             verify_results_organized["false_positives"].append(organized_item)
                         else:

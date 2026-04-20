@@ -133,6 +133,9 @@ interface RealtimeVulnFinding {
   severity: DashboardSeverity;
   source: string;
   at: string;
+  endpoint?: string;
+  status: string;
+  findingKey: string;
 }
 
 interface PendingToolApprovalView {
@@ -298,6 +301,26 @@ function inferEventSeverity(event: ScanEventPayload): DashboardSeverity {
   return "low";
 }
 
+function normalizeDashboardSeverity(value: unknown): DashboardSeverity {
+  const raw = normalizeText(value).toLowerCase();
+  if (
+    raw === "critical" ||
+    raw === "high" ||
+    raw === "medium" ||
+    raw === "low" ||
+    raw === "info"
+  ) {
+    return raw;
+  }
+  const priority = normalizePriority(value);
+  if (priority === 1) return "critical";
+  if (priority === 2) return "high";
+  if (priority === 3) return "medium";
+  if (priority === 4) return "low";
+  if (priority === 5) return "info";
+  return "medium";
+}
+
 function severityBadgeClass(value: DashboardSeverity): string {
   if (value === "critical") {
     return "border-red-500/40 bg-red-500/15 text-red-200";
@@ -312,6 +335,29 @@ function severityBadgeClass(value: DashboardSeverity): string {
     return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
   }
   return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+}
+
+function formatRealtimeFindingStatus(value: string): string {
+  const normalized = normalizeText(value).toLowerCase();
+  if (!normalized) {
+    return "unknown";
+  }
+  if (normalized === "possible_checking") return "possible vuln - checking";
+  if (normalized === "real_vulnerability") return "real vulnerability";
+  if (normalized === "false_positive") return "false positive";
+  if (normalized === "inconclusive") return "inconclusive";
+  if (normalized === "verified_saved") return "verified & saved";
+  return normalized.replace(/_/g, " ");
+}
+
+function realtimeStatusRank(value: string): number {
+  const normalized = normalizeText(value).toLowerCase();
+  if (normalized === "verified_saved") return 5;
+  if (normalized === "real_vulnerability") return 4;
+  if (normalized === "false_positive") return 3;
+  if (normalized === "inconclusive") return 2;
+  if (normalized === "possible_checking") return 1;
+  return 0;
 }
 
 function buildPendingApprovalCommand(view: PendingToolApprovalView | null): string {
@@ -1137,7 +1183,7 @@ export default function Dashboard() {
           at: event.timestamp,
           source: detectLogSource(event),
         };
-        return [...previous, nextEntry].slice(-120);
+        return [...previous, nextEntry];
       });
 
       const nextStatus = toProjectStatus(event.data.status);
@@ -1224,7 +1270,7 @@ export default function Dashboard() {
             at: new Date().toISOString(),
             source: "system",
           };
-          return [...previous, nextEntry].slice(-120);
+          return [...previous, nextEntry];
         });
         void hydrateFromDatabase();
         if (streamRetryRef.current < 3) {
@@ -1441,7 +1487,7 @@ export default function Dashboard() {
           at: new Date().toISOString(),
           source: "planner",
         };
-        return [...previous, nextEntry].slice(-120);
+        return [...previous, nextEntry];
       });
     } finally {
       setPlannerApprovalLoading(false);
@@ -1479,7 +1525,7 @@ export default function Dashboard() {
           at: new Date().toISOString(),
           source: "executer",
         };
-        return [...previous, nextEntry].slice(-120);
+        return [...previous, nextEntry];
       });
     } finally {
       setToolApprovalLoading(null);
@@ -1518,7 +1564,7 @@ export default function Dashboard() {
           at: new Date().toISOString(),
           source: "system",
         };
-        return [...previous, nextEntry].slice(-120);
+        return [...previous, nextEntry];
       });
       return;
     }
@@ -1738,25 +1784,141 @@ export default function Dashboard() {
     }
     return true;
   });
+  const currentCycle = (() => {
+    for (const event of scanEvents) {
+      if (event.event !== "executer_cycle_start" || !isRecord(event.data)) {
+        continue;
+      }
+      if (typeof event.data.cycle === "number" && Number.isFinite(event.data.cycle)) {
+        return Math.max(1, Math.floor(event.data.cycle));
+      }
+    }
+    return null;
+  })();
   const realtimeVulnFindings: RealtimeVulnFinding[] = (() => {
     const feed: RealtimeVulnFinding[] = [];
 
-    // ONLY show confirmed findings saved to database
-    // Do NOT include agent status events (perceptor, verify, recon, exploit, etc.)
+    // Show confirmed/persisted findings from the project store.
     for (const finding of activeProject.findings) {
+      const findingKey = `persisted-${finding.title.toLowerCase()}|${finding.target.toLowerCase()}`;
       feed.push({
         id: `finding-${finding.id}`,
         title: finding.title,
-        severity: finding.severity,
+        severity: normalizeDashboardSeverity(finding.severity),
         source: "finding",
         at: finding.timestamp,
+        endpoint: finding.target,
+        status: "verified_saved",
+        findingKey,
       });
+    }
+
+    // Track vulnerability lifecycle in real time:
+    // perceptor ATTEND -> verify verdict -> retest saved.
+    for (const event of scanEvents) {
+      if (!isRecord(event.data)) {
+        continue;
+      }
+      if (event.event === "perceptor_classified") {
+        const assessment = isRecord(event.data.assessment) ? event.data.assessment : null;
+        const overall = isRecord(assessment?.overall) ? assessment.overall : null;
+        const ssvc = normalizeText(overall?.ssvc).toUpperCase();
+        const findingType = normalizeText(assessment?.finding_type).toLowerCase();
+        if (ssvc !== "ATTEND" || findingType !== "vulnerability") {
+          continue;
+        }
+        const title =
+          normalizeText(assessment?.compact_summary) ||
+          normalizeText(event.message);
+        if (!title) {
+          continue;
+        }
+        const findingIdx =
+          typeof event.data.iteration === "number" && Number.isFinite(event.data.iteration)
+            ? Math.floor(event.data.iteration)
+            : 0;
+        feed.push({
+          id: `perceptor-${findingIdx || event.timestamp}`,
+          title,
+          severity: inferEventSeverity(event),
+          source: "perceptor",
+          at: event.timestamp,
+          endpoint: "",
+          status: "possible_checking",
+          findingKey: findingIdx > 0 ? `finding-${findingIdx}` : `perceptor-${title.toLowerCase()}`,
+        });
+        continue;
+      }
+      if (event.event === "verify_finding_resolved" || event.event === "verify_real_vulnerability_confirmed") {
+        const title =
+          normalizeText(event.data.title) ||
+          normalizeText(event.data.summary) ||
+          normalizeText(event.message);
+        if (!title) {
+          continue;
+        }
+        const idx =
+          typeof event.data.finding_idx === "number" && Number.isFinite(event.data.finding_idx)
+            ? Math.floor(event.data.finding_idx)
+            : 0;
+        const endpoint = normalizeText(event.data.endpoint);
+        const verdict =
+          normalizeText(event.data.verdict) ||
+          (event.event === "verify_real_vulnerability_confirmed" ? "real_vulnerability" : "");
+        feed.push({
+          id: `verify-${idx || event.timestamp}-${verdict || "unknown"}`,
+          title,
+          severity: normalizeDashboardSeverity(event.data.severity),
+          source: "verify",
+          at: event.timestamp,
+          endpoint,
+          status: verdict || "inconclusive",
+          findingKey: idx > 0 ? `finding-${idx}` : `verify-${title.toLowerCase()}|${endpoint.toLowerCase()}`,
+        });
+        continue;
+      }
+      if (event.event === "retest_finding_saved") {
+        const title =
+          normalizeText(event.data.title) ||
+          normalizeText(event.data.summary) ||
+          normalizeText(event.data.retest_summary) ||
+          normalizeText(event.message);
+        if (!title) {
+          continue;
+        }
+        const endpoint = normalizeText(event.data.endpoint);
+        feed.push({
+          id: `retest-${normalizeText(event.data.finding_id) || event.timestamp}`,
+          title,
+          severity: normalizeDashboardSeverity(event.data.severity),
+          source: "retest",
+          at: event.timestamp,
+          endpoint,
+          status: "verified_saved",
+          findingKey: `saved-${title.toLowerCase()}|${endpoint.toLowerCase()}`,
+        });
+      }
     }
 
     const deduped = new Map<string, RealtimeVulnFinding>();
     for (const item of feed) {
-      const key = `${item.title.toLowerCase()}|${item.at}`;
-      if (!deduped.has(key)) {
+      const fallbackKey = `${item.title.toLowerCase()}|${(item.endpoint ?? "").toLowerCase()}`;
+      const key = item.findingKey || fallbackKey;
+      const existing = deduped.get(key);
+      if (!existing) {
+        deduped.set(key, item);
+        continue;
+      }
+      const existingStatusRank = realtimeStatusRank(existing.status);
+      const itemStatusRank = realtimeStatusRank(item.status);
+      if (itemStatusRank > existingStatusRank) {
+        deduped.set(key, item);
+        continue;
+      }
+      if (
+        itemStatusRank === existingStatusRank &&
+        new Date(item.at).getTime() > new Date(existing.at).getTime()
+      ) {
         deduped.set(key, item);
       }
     }
@@ -2680,7 +2842,7 @@ export default function Dashboard() {
             </div>
             <div className="text-right">
               <p className="text-sm text-text-muted">
-                {displayedLogs.length}/{baseLogs.length} events
+                {displayedLogs.length} events{currentCycle ? ` · cycle ${currentCycle}` : ""}
               </p>
             </div>
           </div>
@@ -2804,6 +2966,9 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <p className="text-sm text-text-primary">{item.title}</p>
+                  <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">
+                    status: {formatRealtimeFindingStatus(item.status)}
+                  </p>
                   <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">
                     source: {formatSourceLabel(item.source)}
                   </p>
