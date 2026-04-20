@@ -271,6 +271,32 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
     )
 
 
+def get_backup_llm_config() -> LLMConfig | None:
+    """Get backup LLM configuration for rate limit fallback.
+
+    Returns the backup config if all required env vars are set, otherwise None.
+    This is used when the main LLM hits rate limit (429) to continue execution.
+    """
+    provider = os.getenv("BACKUP_LLM_API_PROVIDER", "").strip().lower()
+    if not provider:
+        return None
+
+    api_key = os.getenv("BACKUP_LLM_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    defaults = _provider_defaults(provider)
+
+    return LLMConfig(
+        provider=provider,
+        model=os.getenv("BACKUP_LLM_MODEL", defaults["model"]),
+        api_url=os.getenv("BACKUP_LLM_API_URL", defaults["api_url"]),
+        api_key=api_key,
+        temperature=0.2,  # Lower temperature for consistency
+        max_tokens=4000,
+    )
+
+
 # ── Chat message ──────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)

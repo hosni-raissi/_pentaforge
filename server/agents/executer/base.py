@@ -14,7 +14,7 @@ from typing import Any, Protocol
 import structlog
 
 from server.agents.context_window_manager import ContextWindowManager
-from server.agents.rate_limiter import LLMRateLimiter
+from server.agents.rate_limiter import LLMRateLimiter, get_global_llm_queue, get_backup_llm_fallback
 from server.agents.executer.target_tool_routing import extract_discovered_target_types
 from server.config.agent import (
     LocalLLMConfig,
@@ -841,29 +841,85 @@ class BaseExecuterAgent:
             # - Still limited: fail with circuit breaker
             max_attempts = 3  # 1 initial + 2 retries on rate limit
             rate_limit_attempts = 0
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    # RATE LIMITER: Enforce Mistral 4 req/min limit (we use 3 req/min as buffer)
-                    await self._rate_limiter.wait_if_needed()
+            global_queue = get_global_llm_queue()
+            backup_fallback = get_backup_llm_fallback()
 
-                    response = await asyncio.wait_for(
-                        self._llm.chat(
-                            [_dict_to_msg(m) for m in messages],
-                            tools=self._tool_schemas if self._tools else None,
-                            temperature=0.2,
-                            max_tokens=4000,
-                        ),
-                        timeout=self._call_timeout_seconds,
-                    )
+            for attempt in range(1, max_attempts + 1):
+                response = None
+                llm_exc = None
+                used_backup_llm = False
+
+                try:
+                    # GLOBAL RATE LIMITER: Coordinate across all agents (max 3 concurrent)
+                    # This prevents Recon/Exploit/Verify/Planner/Retest from hammering API simultaneously
+                    await global_queue.acquire(self._role)
+                    try:
+                        response = await asyncio.wait_for(
+                            self._llm.chat(
+                                [_dict_to_msg(m) for m in messages],
+                                tools=self._tool_schemas if self._tools else None,
+                                temperature=0.2,
+                                max_tokens=4000,
+                            ),
+                            timeout=self._call_timeout_seconds,
+                        )
+                    finally:
+                        global_queue.release(self._role)
+
                     llm_exc = None
                     break
+
                 except Exception as exc:
                     llm_exc = exc
                     text = str(exc).lower()
                     is_rate_limited = "429" in text or "rate limit" in text
 
-                    # Enhanced backoff: longer waits for rate limits
-                    if is_rate_limited and attempt < max_attempts:
+                    # BACKUP LLM FALLBACK: On 429, try backup LLM for single call
+                    if is_rate_limited and attempt <= 1:
+                        backup_llm = await backup_fallback.get_backup_llm()
+                        if backup_llm is not None:
+                            try:
+                                logger.info(
+                                    "backup_llm_fallback_attempt",
+                                    role=self._role,
+                                    round=round_index,
+                                    reason="main_llm_429",
+                                )
+                                self._cb.on_warn(
+                                    f"[{self._role}] Using backup LLM (main hit 429); "
+                                    f"single call, then return to main LLM"
+                                )
+
+                                response = await asyncio.wait_for(
+                                    backup_llm.chat(
+                                        [_dict_to_msg(m) for m in messages],
+                                        tools=self._tool_schemas if self._tools else None,
+                                        temperature=0.2,
+                                        max_tokens=4000,
+                                    ),
+                                    timeout=self._call_timeout_seconds,
+                                )
+                                used_backup_llm = True
+                                llm_exc = None
+                                logger.info(
+                                    "backup_llm_fallback_success",
+                                    role=self._role,
+                                    round=round_index,
+                                )
+                                break
+
+                            except Exception as backup_exc:
+                                # Backup LLM also failed, continue with original exception
+                                logger.warning(
+                                    "backup_llm_fallback_failed",
+                                    role=self._role,
+                                    round=round_index,
+                                    error=str(backup_exc)[:100],
+                                )
+                                llm_exc = exc  # Use original exception for retry logic
+
+                    # Regular retry logic: wait and retry main LLM
+                    if is_rate_limited and attempt < max_attempts and not used_backup_llm:
                         rate_limit_attempts += 1
                         # Progressive wait: 30s first, 60s second
                         wait_seconds = 30.0 if rate_limit_attempts == 1 else 60.0

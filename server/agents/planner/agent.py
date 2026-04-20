@@ -39,6 +39,7 @@ from server.config.agent import (
 )
 from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
+from server.agents.rate_limiter import get_global_llm_queue, get_backup_llm_fallback
 from .config import (
     PLANNER_CHECKLIST_WINDOW_MAX_ITEMS,
     PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE,
@@ -1694,16 +1695,66 @@ class PlannerAgent:
             if round_count >= round_cap:
                 tools_for_call = None
 
-            response = await _retry_with_backoff(
-                lambda: self._llm.chat(
-                    messages,
-                    tools=tools_for_call,
-                    temperature=0.3,
-                    max_tokens=token_budget,
-                ),
-                timeout=PLANNER_CALL_TIMEOUT_SECONDS,
-                on_retry=_on_retry,
-            )
+            # Global queue coordination: prevent concurrent calls from exceeding Mistral 4 req/min limit
+            global_queue = get_global_llm_queue()
+            backup_fallback = get_backup_llm_fallback()
+
+            response = None
+            try:
+                await global_queue.acquire("planner")
+                try:
+                    response = await _retry_with_backoff(
+                        lambda: self._llm.chat(
+                            messages,
+                            tools=tools_for_call,
+                            temperature=0.3,
+                            max_tokens=token_budget,
+                        ),
+                        timeout=PLANNER_CALL_TIMEOUT_SECONDS,
+                        on_retry=_on_retry,
+                    )
+                finally:
+                    global_queue.release("planner")
+
+            except Exception as exc:
+                # BACKUP LLM FALLBACK: On 429, try backup LLM for single call
+                text = str(exc).lower()
+                is_rate_limited = "429" in text or "rate limit" in text
+
+                if is_rate_limited:
+                    backup_llm = await backup_fallback.get_backup_llm()
+                    if backup_llm is not None:
+                        try:
+                            logger.info(
+                                "planner_backup_llm_fallback",
+                                reason="main_llm_429",
+                            )
+                            self._cb.on_warn(
+                                "Planner using backup LLM (main hit 429); single call, then return to main LLM"
+                            )
+
+                            response = await asyncio.wait_for(
+                                backup_llm.chat(
+                                    messages,
+                                    tools=tools_for_call,
+                                    temperature=0.3,
+                                    max_tokens=token_budget,
+                                ),
+                                timeout=PLANNER_CALL_TIMEOUT_SECONDS,
+                            )
+                            logger.info("planner_backup_llm_success")
+
+                        except Exception as backup_exc:
+                            logger.warning(
+                                "planner_backup_llm_failed",
+                                error=str(backup_exc)[:100],
+                            )
+                            raise exc  # Raise original exception to be handled below
+
+                    else:
+                        raise  # No backup LLM available, re-raise original exception
+                else:
+                    raise  # Not rate limited, re-raise as-is
 
         except httpx.HTTPStatusError as exc:
             return self._handle_http_error(exc, state, round_count)
