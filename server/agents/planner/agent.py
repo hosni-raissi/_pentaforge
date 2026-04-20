@@ -1917,12 +1917,8 @@ class PlannerAgent:
     async def _execute_tools_node(self, state: PlannerState) -> dict[str, Any]:
         tool_calls = state["last_tool_calls"]
 
-        # Loop mode: single tool per round.
-        if state.get("is_loop") and len(tool_calls) > 1:
-            self._cb.on_warn(
-                "Loop mode: executing first tool call only."
-            )
-            tool_calls = tool_calls[:1]
+        # Execute all planned tools - do NOT restrict in loop mode
+        # Planner needs full tool-calling capability in every cycle for effective replanning
 
         total = state["total_tool_calls"] + len(tool_calls)
         batch_results: list[dict[str, Any]] = []
@@ -2028,13 +2024,15 @@ class PlannerAgent:
                 }
             )
 
-            # Hard stop after update_pentest_plan.
-            if tool_name == "update_pentest_plan":
+            # In replanning cycles (loop mode), DON'T hard-stop after update_pentest_plan
+            # Continue executing all other tools for comprehensive replanning
+            # Hard stop only in initial planning phase (not loop mode)
+            if tool_name == "update_pentest_plan" and not state.get("is_loop"):
                 remaining = len(tool_calls) - (idx + 1)
                 if remaining > 0:
                     self._cb.on_warn(
                         f"Skipping {remaining} tool(s) after "
-                        f"update_pentest_plan (hard stop)."
+                        f"update_pentest_plan (hard stop in initial planning)."
                     )
                 break
 

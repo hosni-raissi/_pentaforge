@@ -1741,6 +1741,8 @@ export default function Dashboard() {
   const realtimeVulnFindings: RealtimeVulnFinding[] = (() => {
     const feed: RealtimeVulnFinding[] = [];
 
+    // ONLY show confirmed findings saved to database
+    // Do NOT include agent status events (perceptor, verify, recon, exploit, etc.)
     for (const finding of activeProject.findings) {
       feed.push({
         id: `finding-${finding.id}`,
@@ -1748,47 +1750,6 @@ export default function Dashboard() {
         severity: finding.severity,
         source: "finding",
         at: finding.timestamp,
-      });
-    }
-
-    for (const event of scanEvents) {
-      if (isOperationalToolEvent(event)) {
-        continue;
-      }
-      const source = detectLogSource(event);
-      const text = `${event.event} ${event.message}`.toLowerCase();
-      const isFailureEvent =
-        event.event.toLowerCase().includes("failed") ||
-        event.event.toLowerCase().includes("crashed");
-      const looksSecurityRelevant =
-        isFailureEvent ||
-        text.includes("vuln") ||
-        text.includes("finding") ||
-        text.includes("exploit") ||
-        text.includes("injection") ||
-        text.includes("xss") ||
-        text.includes("sqli") ||
-        text.includes("ssrf") ||
-        text.includes("idor") ||
-        text.includes("misconfig");
-      const isSystemFailureSignal =
-        source === "system" && (text.includes("scan failed") || isFailureEvent);
-      if (!looksSecurityRelevant && !isSystemFailureSignal) {
-        continue;
-      }
-      if (
-        !isFailureEvent &&
-        source === "system" &&
-        !text.includes("scan failed")
-      ) {
-        continue;
-      }
-      feed.push({
-        id: `event-${eventDedupKey(event)}`,
-        title: event.message,
-        severity: inferEventSeverity(event),
-        source,
-        at: event.timestamp,
       });
     }
 
