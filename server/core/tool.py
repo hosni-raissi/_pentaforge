@@ -14,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import re
@@ -54,9 +55,13 @@ class Tool:
 
     async def execute(self, **kwargs: Any) -> str:
         """Run the tool and return a string result."""
-        result = self.fn(**kwargs)
-        if inspect.isawaitable(result):
-            result = await result
+        if inspect.iscoroutinefunction(self.fn):
+            result = await self.fn(**kwargs)
+        else:
+            # Run sync tools off the event loop so long-lived subprocess tools
+            # (sqlmap, nuclei, hydra, etc.) do not block unrelated HTTP traffic
+            # like tool-approval responses or event streaming.
+            result = await asyncio.to_thread(self.fn, **kwargs)
         if not isinstance(result, str):
             result = json.dumps(result, default=str)
         return result

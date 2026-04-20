@@ -722,6 +722,38 @@ class BaseExecuterAgent:
             return decision.strip().lower() in {"approve", "approved", "allow", "yes", "true", "1"}
         return bool(decision)
 
+    def _build_consolidation_reminder(self, round_index: int) -> str:
+        """
+        Build an explicit reminder for consolidation-only rounds.
+        This prevents context drift after seeing tool output and reinforces the JSON-only requirement.
+        """
+        role_templates = {
+            "verify": (
+                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
+                "You have analyzed all verification results. Now output ONLY valid JSON with two fields: "
+                '"verdict" (real_vulnerability|false_positive|inconclusive) and "summary" (1-2 sentences). '
+                "NO prose before or after JSON. NO markdown. Start with { and end with }. Example:\n"
+                '{"verdict": "real_vulnerability", "summary": "The vulnerability was confirmed through payload testing."}'
+            ),
+            "recon": (
+                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
+                "You have completed reconnaissance. Now output ONLY valid JSON with three fields: "
+                '"status" (complete|blocked|failed), "findings" (array), and "summary" (1-2 sentences). '
+                "NO prose before or after JSON. NO markdown. Start with { and end with }."
+            ),
+            "exploit": (
+                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
+                "You have completed exploitation testing. Now output ONLY valid JSON with three fields: "
+                '"status" (vulnerable|not_vulnerable|blocked|inconclusive), "findings" (array), and "summary" (1-2 sentences). '
+                "NO prose before or after JSON. NO markdown. Start with { and end with }."
+            ),
+        }
+        default_msg = (
+            f"[CONSOLIDATION ROUND {round_index}] This is your FINAL consolidation round ({round_index}/{self._max_tool_rounds}). "
+            "Output ONLY valid JSON. NO tools. NO prose. NO markdown. Start with { and end with }."
+        )
+        return role_templates.get(self._role, default_msg)
+
     async def run(self, user_message: str) -> ExecuterResult:
         self._cb.on_step(f"[{self._role}] starting run")
         if self._context_window is not None:
@@ -777,6 +809,17 @@ class BaseExecuterAgent:
             self._cb.on_step(
                 f"[{self._role}] LLM round {round_index}/{self._max_tool_rounds}"
             )
+
+            # CRITICAL: Before final consolidation round, inject explicit reminder to force JSON-only output
+            # This prevents LLM context drift after seeing hundreds of lines of tool output
+            is_final_round = round_index >= self._max_tool_rounds
+            if is_final_round and len(messages) > 2:  # Only inject if we have tool results to consolidate
+                consolidation_reminder = self._build_consolidation_reminder(round_index)
+                messages.append({"role": "user", "content": consolidation_reminder})
+                self._cb.on_step(
+                    f"[{self._role}] injected Round {round_index} consolidation reminder"
+                )
+
             response = None
             llm_exc: Exception | None = None
             # CIRCUIT BREAKER: Only retry ONCE on rate limiting, then fail fast
@@ -897,13 +940,28 @@ class BaseExecuterAgent:
                 skip_tools_this_round=skip_tools_this_round,
             )
 
-            if not tool_calls or skip_tools_this_round:
-                if skip_tools_this_round:
-                    self._cb.on_warn(
-                        f"[{self._role}] Round {round_index}/{self._max_tool_rounds} is consolidation-only; skipping {len(tool_calls)} tool calls"
-                    )
+            # CRITICAL: Enforce round progression to final consolidation
+            # If skip_tools_this_round: we're on final round with tool calls → consolidate now
+            # If is_final_round + no tools: we're on final round without tools → consolidate now
+            # If NOT final round + no tools: continue to NEXT round (don't exit early)
+            if skip_tools_this_round:
+                self._cb.on_warn(
+                    f"[{self._role}] Round {round_index}/{self._max_tool_rounds} is consolidation-only; skipping {len(tool_calls)} tool calls"
+                )
                 result = _parse_executer_output(last_content, role=self._role)
                 return await _finalize_result(result)
+
+            if not tool_calls:
+                if is_final_round:
+                    # Final round with no tool calls: consolidate now
+                    result = _parse_executer_output(last_content, role=self._role)
+                    return await _finalize_result(result)
+                else:
+                    # Non-final round with no tool calls: force next iteration to reach final consolidation
+                    self._cb.on_warn(
+                        f"[{self._role}] No tool calls on non-final round {round_index}; continuing to next round"
+                    )
+                    continue
 
             tool_messages, tool_results, discovered, halted_for_approval = await self._run_tools(tool_calls)
             messages.extend(tool_messages)

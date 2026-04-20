@@ -1,0 +1,2 @@
+http://scanme.nmap.org/shared/css/?C=FUZZ
+http://scanme.nmap.org/http://blog.taddong.com/2011/10/hacking-vulnerable-web-applications.htmlhttp://www.irongeek.com/i.php?page=FUZZ

@@ -409,7 +409,10 @@ export async function approveToolForProjectScanFromDesktop(
     }),
   };
 
-  return await requestJson(path, init, 120000);
+  // Long-running security tools are capped at 5 minutes server-side.
+  // Keep the approval request alive slightly longer so the UI does not
+  // report a false timeout if the browser/network is briefly delayed.
+  return await requestJson(path, init, 310000);
 }
 
 export async function clearProjectScanEventsCacheFromDesktop(projectId: string): Promise<void> {

@@ -75,7 +75,7 @@ class RunCustomRequest(BaseModel):
     command: str
     args: list[str] = []
     reason: str
-    timeout: int = Field(default=300, ge=5, le=1800)
+    timeout: int = Field(default=300, ge=5, le=300)
     env: dict[str, str] = {}          # optional extra env vars (e.g. GOPATH, PYTHONPATH)
     cwd: Optional[str] = None         # working directory override
 
@@ -380,7 +380,7 @@ def run_custom(
         command:  Binary name (no path). E.g. 'nmap', 'sqlmap', 'ffuf', 'nikto'.
         reason:   Why this command is needed (min 8 chars).
         args:     Argument list — no shell metacharacters.
-        timeout:  Execution timeout in seconds (5–1800).
+        timeout:  Execution timeout in seconds (5–300).
         env:      Extra environment variables.
         cwd:      Working directory for the subprocess.
 
@@ -549,7 +549,7 @@ RUN_CUSTOM_TOOL_DEFINITION = {
             "timeout": {
                 "type": "integer",
                 "default": 300,
-                "description": "Execution timeout in seconds (5–1800).",
+                "description": "Execution timeout in seconds (5–300).",
             },
             "env": {
                 "type": "object",
