@@ -2024,15 +2024,13 @@ class PlannerAgent:
                 }
             )
 
-            # In replanning cycles (loop mode), DON'T hard-stop after update_pentest_plan
-            # Continue executing all other tools for comprehensive replanning
-            # Hard stop only in initial planning phase (not loop mode)
-            if tool_name == "update_pentest_plan" and not state.get("is_loop"):
+            # Hard stop after update_pentest_plan.
+            if tool_name == "update_pentest_plan":
                 remaining = len(tool_calls) - (idx + 1)
                 if remaining > 0:
                     self._cb.on_warn(
                         f"Skipping {remaining} tool(s) after "
-                        f"update_pentest_plan (hard stop in initial planning)."
+                        f"update_pentest_plan (hard stop)."
                     )
                 break
 

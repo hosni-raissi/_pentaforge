@@ -374,6 +374,34 @@ def _update_scenario_runtime_state(
     return True
 
 
+def _count_done_scenarios(plan_data: dict[str, Any]) -> int:
+    phases = plan_data.get("phases")
+    if not isinstance(phases, list):
+        return 0
+
+    total = 0
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        steps = phase.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            scenarios = step.get("scenarios")
+            if not isinstance(scenarios, list):
+                continue
+            for scenario in scenarios:
+                if not isinstance(scenario, dict):
+                    continue
+                done = bool(scenario.get("done", False))
+                status = str(scenario.get("status", "")).strip().lower()
+                if done or status in {"completed", "complete", "done"}:
+                    total += 1
+    return total
+
+
 def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[str, Any]:
     """Remove any scenarios with forbidden agents (verify, retest, perceptor) from plan.
 
@@ -3145,7 +3173,6 @@ class ScanOrchestratorService:
                 # CYCLIC EXECUTION LOOP with explicit state tracking
                 cycle_count = 0
                 max_cycles = 20  # Safety limit
-                scenario_execution_state: dict[str, int] = {}  # Track scenario task → cycle_executed
 
                 while cycle_count < max_cycles:
                     cycle_count += 1
@@ -3157,18 +3184,19 @@ class ScanOrchestratorService:
                     verify_agent.reset_context_window_for_cycle()
                     retest_agent.reset_context_window_for_cycle()
                     perceptor_agent.reset_context_window_for_cycle()
+                    executed_scenarios = _count_done_scenarios(plan_data)
 
                     self._emit_event(
                         project_id,
                         event="executer_cycle_start",
                         scan_id=scan_id,
                         level="info",
-                        message=f"Executer [cycle {cycle_count}] starting scenario selection (executed={len(scenario_execution_state)}).",
+                        message=f"Executer [cycle {cycle_count}] starting scenario selection (executed={executed_scenarios}).",
                         data={
                             "stage": "executer",
                             "kind": "cycle_start",
                             "cycle": cycle_count,
-                            "scenarios_executed_total": len(scenario_execution_state),
+                            "scenarios_executed_total": executed_scenarios,
                         },
                     )
 
@@ -3217,7 +3245,7 @@ class ScanOrchestratorService:
                         )
 
                         try:
-                            compress_planner_context_window(
+                            await compress_planner_context_window(
                                 loop_planner._context_window, cycle_count
                             )
                         except Exception as compression_exc:

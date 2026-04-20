@@ -152,7 +152,7 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
             if verdict_value in {"real_vulnerability", "false_positive", "inconclusive"}:
                 # Successfully extracted verdict from raw text
                 logger.info(
-                    f"executer_verdict_extracted_from_raw",
+                    "executer_verdict_extracted_from_raw",
                     role=role,
                     verdict=verdict_value,
                     raw_length=len(raw),
@@ -163,9 +163,25 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
                     summary=summary,
                 )
 
-        # If no verdict extracted, treat as incomplete
+        # If consolidation role (verify/retest) and no verdict found, default to inconclusive
+        # instead of incomplete (incomplete means agent still has work to do)
+        if role in {"verify", "retest"}:
+            logger.warning(
+                "executer_consolidation_no_verdict",
+                role=role,
+                raw_output_length=len(raw),
+                raw_output_preview=raw[:300] if raw else "EMPTY",
+                defaulting_to="inconclusive",
+            )
+            summary = (
+                raw.strip() or
+                "Verification inconclusive - unable to determine if vulnerability is real or false positive."
+            )
+            return ExecuterResult(status="inconclusive", summary=summary)
+
+        # For other roles, treat as incomplete
         logger.warning(
-            f"executer_output_parsing_failed",
+            "executer_output_parsing_failed",
             role=role,
             raw_output_length=len(raw),
             raw_output_preview=raw[:300] if raw else "EMPTY",
@@ -180,10 +196,44 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
     if not status:
         # Verify agent uses "verdict" instead of "status"
         status = parsed.get("verdict", "incomplete")
+
     # Ensure status is a string (handle lists, dicts, etc. defensively)
     if isinstance(status, list):
         status = status[0] if status else "incomplete"
     status = str(status).strip() if status else "incomplete"
+    status = status.lower()
+
+    # Validate status based on role
+    if role in {"verify", "retest"}:
+        # Verify/Retest: verdict field (real_vulnerability, false_positive, inconclusive)
+        if status not in {"real_vulnerability", "false_positive", "inconclusive"}:
+            logger.warning(
+                "executer_invalid_verdict_format",
+                role=role,
+                received_verdict=status,
+                valid_values=["real_vulnerability", "false_positive", "inconclusive"],
+            )
+            status = "inconclusive"
+    elif role == "recon":
+        # Recon: complete, blocked, or failed
+        if status not in {"complete", "blocked", "failed"}:
+            logger.warning(
+                "executer_invalid_recon_status",
+                role=role,
+                received_status=status,
+                valid_values=["complete", "blocked", "failed"],
+            )
+            status = "failed"
+    elif role == "exploit":
+        # Exploit: vulnerable, not_vulnerable, blocked, or inconclusive
+        if status not in {"vulnerable", "not_vulnerable", "blocked", "inconclusive"}:
+            logger.warning(
+                "executer_invalid_exploit_status",
+                role=role,
+                received_status=status,
+                valid_values=["vulnerable", "not_vulnerable", "blocked", "inconclusive"],
+            )
+            status = "inconclusive"
 
     findings = parsed.get("findings", [])
     evidence = parsed.get("evidence", [])
@@ -696,6 +746,32 @@ class BaseExecuterAgent:
         all_discovered_target_types: set[str] = set()
         rounds_executed = 0
 
+        async def _finalize_result(result: ExecuterResult) -> ExecuterResult:
+            result.tool_results = all_tool_results
+            merged_target_types = set(result.discovered_target_types or [])
+            merged_target_types.update(all_discovered_target_types)
+            if merged_target_types:
+                result.discovered_target_types = sorted(merged_target_types)
+            if result.rounds_executed <= 0:
+                result.rounds_executed = rounds_executed
+            if not result.round_labels and result.rounds_executed > 0:
+                result.round_labels = [
+                    f"r{n}" for n in range(1, result.rounds_executed + 1)
+                ]
+            if self._context_window is not None:
+                await self._context_window.record(
+                    kind="run_result",
+                    role="assistant",
+                    content=result.summary or last_content or result.status,
+                    metadata={
+                        "role": self._role,
+                        "status": result.status,
+                        "tool_results": len(all_tool_results),
+                    },
+                )
+            self._cb.on_done(f"[{self._role}] completed with status={result.status}")
+            return result
+
         for round_index in range(1, self._max_tool_rounds + 1):
             rounds_executed = round_index
             self._cb.on_step(
@@ -801,10 +877,13 @@ class BaseExecuterAgent:
                 },
             )
 
-            # CRITICAL: For verify/retest agents in final round, skip tool execution (consolidation only)
+            # CRITICAL: Round 3 consolidation is mandatory for ALL roles
+            # Final round (Round 3/3) must ONLY output JSON, not execute tools
             is_final_round = round_index >= self._max_tool_rounds
             is_consolidation_role = self._role in ("verify", "retest")
-            skip_tools_this_round = is_final_round and is_consolidation_role and tool_calls
+
+            # ALL roles skip tools in final round (consolidation-only)
+            skip_tools_this_round = bool(is_final_round and tool_calls)
 
             # DEBUG: Log consolidation decision
             logger.info(
@@ -824,24 +903,7 @@ class BaseExecuterAgent:
                         f"[{self._role}] Round {round_index}/{self._max_tool_rounds} is consolidation-only; skipping {len(tool_calls)} tool calls"
                     )
                 result = _parse_executer_output(last_content, role=self._role)
-                result.tool_results = all_tool_results
-                if all_discovered_target_types:
-                    result.discovered_target_types = sorted(all_discovered_target_types)
-                if self._context_window is not None:
-                    await self._context_window.record(
-                        kind="run_result",
-                        role="assistant",
-                        content=result.summary or last_content or result.status,
-                        metadata={
-                            "role": self._role,
-                            "status": result.status,
-                            "tool_results": len(all_tool_results),
-                        },
-                    )
-                self._cb.on_done(
-                    f"[{self._role}] completed with status={result.status}"
-                )
-                return result
+                return await _finalize_result(result)
 
             tool_messages, tool_results, discovered, halted_for_approval = await self._run_tools(tool_calls)
             messages.extend(tool_messages)
@@ -867,20 +929,14 @@ class BaseExecuterAgent:
 
             # If we consumed the final allowed round, return the aggregated tool output.
             if round_index >= self._max_tool_rounds:
-                break
+                result = _parse_executer_output(last_content, role=self._role)
+                if result.status == "incomplete" and all_tool_results:
+                    result.summary = self._format_tool_results(all_tool_results)
+                return await _finalize_result(result)
 
-        self._cb.on_warn(
-            f"[{self._role}] reached max rounds ({self._max_tool_rounds})"
-        )
         if all_tool_results:
-            if self._context_window is not None:
-                await self._context_window.record(
-                    kind="run_result",
-                    role="assistant",
-                    content=self._format_tool_results(all_tool_results),
-                    metadata={"role": self._role, "status": "incomplete"},
-                )
-            return ExecuterResult(
+            return await _finalize_result(
+                ExecuterResult(
                 status="incomplete",
                 summary=self._format_tool_results(all_tool_results),
                 tool_results=all_tool_results,
@@ -888,18 +944,10 @@ class BaseExecuterAgent:
                 rounds_executed=self._max_tool_rounds,
                 round_labels=[f"r{n}" for n in range(1, self._max_tool_rounds + 1)],
             )
+            )
         result = _parse_executer_output(last_content, role=self._role)
         result.discovered_target_types = extract_discovered_target_types(last_content)
-        result.rounds_executed = rounds_executed
-        result.round_labels = [f"r{n}" for n in range(1, rounds_executed + 1)]
-        if self._context_window is not None:
-            await self._context_window.record(
-                kind="run_result",
-                role="assistant",
-                content=result.summary or last_content or result.status,
-                metadata={"role": self._role, "status": result.status},
-            )
-        return result
+        return await _finalize_result(result)
 
     async def close(self) -> None:
         await self._llm.close()

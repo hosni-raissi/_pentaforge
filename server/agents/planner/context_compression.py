@@ -122,7 +122,7 @@ def compress_planner_findings_between_cycles(
     return result
 
 
-def compress_planner_context_window(
+async def compress_planner_context_window(
     context_window: "ContextWindowManager",
     cycle_number: int,
 ) -> None:
@@ -138,18 +138,16 @@ def compress_planner_context_window(
     if context_window is None or cycle_number <= 1:
         return
 
-    # Ensure we've loaded the current entries
-    import asyncio
-
-    try:
-        asyncio.run(context_window.ensure_loaded())
-    except RuntimeError:
-        # Already in async context, likely
-        pass
+    await context_window.ensure_loaded()
 
     # Get current entries
     snapshot = context_window.snapshot()
-    current_entries = snapshot.entries if isinstance(snapshot.entries, list) else []
+    if isinstance(snapshot, dict):
+        current_entries = snapshot.get("entries", [])
+    else:
+        current_entries = getattr(snapshot, "entries", [])
+    if not isinstance(current_entries, list):
+        current_entries = []
 
     # Compress
     compressed_entries = compress_planner_findings_between_cycles(
@@ -159,6 +157,8 @@ def compress_planner_context_window(
     # Update context window with compressed entries
     if compressed_entries != current_entries:
         context_window._entries = compressed_entries
+        context_window._compression_count += 1
+        await context_window.persist()
         logger.info(
             "planner_context_window_updated",
             cycle=cycle_number,
