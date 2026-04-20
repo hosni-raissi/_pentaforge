@@ -1468,12 +1468,20 @@ class ScanOrchestratorService:
                 },
             )
 
+
         approved = pending.decision == "approve"
 
+        # CRITICAL FIX: Don't delete approved requests until tool execution completes
+        # Only clean up unapproved requests (skipped/rejected/timed-out)
+        # Approved requests stay in context so tool execution can report back with results
+        if not approved:
+            project_pending = self._tool_approval_events.get(project_key, {})
+            project_pending.pop(approval_id, None)
+            if not project_pending:
+                self._tool_approval_events.pop(project_key, None)
+
+        # Get current pending requests for run state update
         project_pending = self._tool_approval_events.get(project_key, {})
-        project_pending.pop(approval_id, None)
-        if not project_pending:
-            self._tool_approval_events.pop(project_key, None)
 
         run_state = self._runs.get(project_key)
         if isinstance(run_state, dict):
