@@ -514,6 +514,18 @@ class BaseExecuterAgent:
             raw_args = tc.get("function", {}).get("arguments", "{}")
             call_id = tc.get("id", "")
 
+            # DEFENSE: Detect if LLM output tool spec as JSON string instead of proper tool call
+            if isinstance(tool_name, str) and tool_name.strip().startswith("{"):
+                logger.warning(
+                    "llm_output_tool_spec_as_json",
+                    role=self._role,
+                    tool_spec_preview=tool_name[:200],
+                )
+                self._cb.on_warn(
+                    f"[{self._role}] LLM output tool specification as JSON instead of calling tool. Skipping malformed tool call."
+                )
+                continue
+
             try:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
             except json.JSONDecodeError:
@@ -822,9 +834,13 @@ class BaseExecuterAgent:
 
             response = None
             llm_exc: Exception | None = None
-            # CIRCUIT BREAKER: Only retry ONCE on rate limiting, then fail fast
-            # This prevents token waste from exponential backoff
-            max_attempts = 2  # 1 initial + 1 retry on rate limit
+            # Enhanced rate limit handling: Wait longer for 429 errors
+            # - First attempt: immediate
+            # - Rate limit (429): wait 30s, retry
+            # - Still limited: wait 60s, retry
+            # - Still limited: fail with circuit breaker
+            max_attempts = 3  # 1 initial + 2 retries on rate limit
+            rate_limit_attempts = 0
             for attempt in range(1, max_attempts + 1):
                 try:
                     # RATE LIMITER: Enforce Mistral 4 req/min limit (we use 3 req/min as buffer)
@@ -845,11 +861,22 @@ class BaseExecuterAgent:
                     llm_exc = exc
                     text = str(exc).lower()
                     is_rate_limited = "429" in text or "rate limit" in text
-                    # CIRCUIT BREAKER: Only retry once on rate limiting
+
+                    # Enhanced backoff: longer waits for rate limits
                     if is_rate_limited and attempt < max_attempts:
-                        wait_seconds = 2.0  # Fixed 2-second wait, no exponential backoff
+                        rate_limit_attempts += 1
+                        # Progressive wait: 30s first, 60s second
+                        wait_seconds = 30.0 if rate_limit_attempts == 1 else 60.0
                         self._cb.on_warn(
-                            f"[{self._role}] LLM rate-limited; retrying once in {wait_seconds:.1f}s"
+                            f"[{self._role}] LLM rate-limited (attempt {attempt}/{max_attempts}); "
+                            f"retrying in {wait_seconds:.0f}s to allow quota reset"
+                        )
+                        logger.warning(
+                            "llm_rate_limit_backoff",
+                            role=self._role,
+                            round=round_index,
+                            attempt=attempt,
+                            wait_seconds=wait_seconds,
                         )
                         await asyncio.sleep(wait_seconds)
                         continue

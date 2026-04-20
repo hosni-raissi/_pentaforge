@@ -1840,19 +1840,19 @@ class ScanOrchestratorService:
         target: str,
         target_type: str,
     ) -> None:
-        """Run Retest agent in background and save findings to database.
+        """Run Retest agent in background to build PoC/report entries.
 
         This method runs independently and does NOT block other operations.
         - Takes verified vulnerability description
         - Executes PoC to gather evidence
-        - Saves report entry to project database
-        - Emits event for UI
+        - Emits event for UI (tracking purpose only)
+        - Does NOT save findings (Verify already saved them)
         """
         try:
             # Run retest agent (takes screenshot + detailed PoC)
             retest_result = await retest_agent.run(retest_message)
 
-            # Build database entry from retest result
+            # Build report entry from retest result
             retest_summary = str(retest_result.summary or "").strip()
             retest_data = (
                 asdict(retest_result)
@@ -1860,63 +1860,33 @@ class ScanOrchestratorService:
                 else retest_result
             )
 
-            db_entry = {
-                "id": str(uuid.uuid4()),
-                "vulnerability_type": item["scenario"].get("vulnerability_type", "unknown"),
-                "endpoint": item["scenario"].get("endpoint", ""),
-                "target": target,
-                "target_type": target_type,
-                "severity": _normalize_finding_severity(item["scenario"].get("priority", "medium")),
-                "verify_summary": item["verify_summary"],
-                "retest_summary": retest_summary,
-                "evidence": retest_data.get("evidence", {}),
-                "findings": retest_data.get("findings", []),
-                "tool_results": retest_data.get("tool_results", []),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "status": "verified_and_documented",
-            }
-
-            # Save to project database
-            project_key = str(project_id or "").strip()
-            current_project = self._projects_store.get_project(project_key)
-
-            if "findings" not in current_project:
-                current_project["findings"] = []
-            if "verified_vulnerabilities" not in current_project:
-                current_project["verified_vulnerabilities"] = []
-
-            current_project["findings"].append(db_entry)
-            current_project["verified_vulnerabilities"].append(db_entry)
-            current_project["findings_count"] = len(current_project.get("findings", []))
-            current_project["last_findings_updated"] = datetime.now(timezone.utc).isoformat()
-
-            self._projects_store.upsert_project(current_project)
-
-            # Emit event for UI
+            # Emit event for UI tracking (informational only)
+            # Do NOT save to findings - Verify already saved the finding
             self._emit_event(
                 project_id,
-                event="retest_finding_saved",
+                event="retest_poc_generated",
                 scan_id=scan_id,
                 level="info",
-                message=f"Saved verified finding: {item['verify_summary'][:80]}",
+                message=f"Generated PoC for verified finding: {item['verify_summary'][:80]}",
                 data={
                     "stage": "retest",
-                    "kind": "finding_saved",
-                    "finding_id": db_entry["id"],
-                    "title": item["verify_summary"],
-                    "severity": db_entry["severity"],
-                    "vulnerability_type": db_entry["vulnerability_type"],
-                    "endpoint": db_entry["endpoint"],
+                    "kind": "poc_generated",
+                    "verify_summary": item["verify_summary"],
                     "retest_summary": retest_summary,
+                    "severity": _normalize_finding_severity(item["scenario"].get("priority", "medium")),
+                    "vulnerability_type": item["scenario"].get("vulnerability_type", "unknown"),
+                    "endpoint": item["scenario"].get("endpoint", ""),
+                    "evidence_available": bool(retest_data.get("evidence")),
+                    "tools_executed": len(retest_data.get("tool_results", [])),
                 },
             )
 
             logger.info(
-                "retest_background_finding_saved",
+                "retest_background_poc_generated",
                 project_id=project_id,
                 scan_id=scan_id,
-                finding_id=db_entry["id"],
-                vulnerability_type=db_entry["vulnerability_type"],
+                vulnerability_type=item["scenario"].get("vulnerability_type", "unknown"),
+                retest_summary_length=len(retest_summary),
             )
 
         except Exception as e:
@@ -1927,10 +1897,10 @@ class ScanOrchestratorService:
             )
             self._emit_event(
                 project_id,
-                event="retest_finding_error",
+                event="retest_poc_error",
                 scan_id=scan_id,
-                level="error",
-                message=f"Retest failed: {str(e)[:100]}",
+                level="warn",
+                message=f"PoC generation failed: {str(e)[:100]}",
                 data={
                     "stage": "retest",
                     "kind": "error",
@@ -2369,6 +2339,46 @@ class ScanOrchestratorService:
                 false_positives=len(verify_results_organized["false_positives"]),
                 inconclusives=len(verify_results_organized["inconclusives"]),
             )
+
+            # CRITICAL: Save real vulnerabilities to project database (Verify's responsibility)
+            # Only real vulnerabilities are added to findings
+            if verify_results_organized["real_vulnerabilities"]:
+                project_key = str(project_id or "").strip()
+                current_project = self._projects_store.get_project(project_key)
+
+                if "findings" not in current_project:
+                    current_project["findings"] = []
+
+                for item in verify_results_organized["real_vulnerabilities"]:
+                    severity = _normalize_finding_severity(
+                        item.get("scenario", {}).get("priority", "medium")
+                    )
+                    finding_entry = {
+                        "id": str(uuid.uuid4()),
+                        "title": item["verify_summary"],
+                        "severity": severity,
+                        "category": item["scenario"].get("vulnerability_type", "unknown"),
+                        "target": target,
+                        "status": "verified",
+                        "cvss": item["scenario"].get("cvss"),
+                        "cve": item["scenario"].get("cve"),
+                        "description": item["verify_summary"],
+                        "evidence": item["verify_data"].get("evidence", {}),
+                        "remediation": item["scenario"].get("remediation", ""),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                    current_project["findings"].append(finding_entry)
+
+                current_project["findings_count"] = len(current_project.get("findings", []))
+                current_project["last_findings_updated"] = datetime.now(timezone.utc).isoformat()
+                self._projects_store.upsert_project(current_project)
+
+                logger.info(
+                    "verify_findings_saved_to_db",
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    findings_count=len(verify_results_organized["real_vulnerabilities"]),
+                )
 
         except Exception as phase2_exc:
             logger.error(

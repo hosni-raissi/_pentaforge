@@ -111,12 +111,13 @@ export function AttackGraph({ target, findings, className }: AttackGraphProps) {
 
       categoryFindings.forEach((finding, i) => {
         const findingId = `f-${finding.id}`;
+        const title = String(finding.title || finding.category || 'Finding').slice(0, 20);
         n.push({
           id: findingId,
           type: 'attack',
           position: { x: serviceX - 40 + i * 80, y: 240 },
           data: {
-            label: finding.title.slice(0, 20),
+            label: title,
             type: finding.status === 'verified' ? 'exploit' : 'vulnerability',
             severity: finding.severity,
           },

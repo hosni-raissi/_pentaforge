@@ -4,7 +4,7 @@
 #  LLM Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 3  # Standard: R1 (2 tools), R2 (2 tools), R3 (consolidate only)
 LLM_CALL_TIMEOUT_SECONDS = 240
 RETEST_CONTEXT_WINDOW_MAX_TOKENS = 15000
 RETEST_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000
