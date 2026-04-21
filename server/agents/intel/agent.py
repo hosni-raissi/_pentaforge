@@ -1664,14 +1664,22 @@ class IntelAgent:
         if needs_update:
             if force_update:
                 self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
-            self._cb.on_step("RAG update needed — starting background pipeline")
-            logger.info("intel_rag_update_start", target_type=target_type, mode="background")
-            task = asyncio.create_task(
-                self._run_update_pipeline(target_type=target_type, info=info),
-                name=f"intel_update_{target_type}",
-            )
-            self._background_tasks.add(task)
-            task.add_done_callback(self._on_background_update_done)
+            # CRITICAL FIX: RAG update MUST be await (blocking) before checklist approval
+            # Previously was background task, causing Planner to start before RAG ready
+            # Now: Intel waits for RAG → checklist ready → Planner starts with full context
+            self._cb.on_step("RAG update needed — updating knowledge base (blocking until complete)")
+            logger.info("intel_rag_update_start", target_type=target_type, mode="blocking")
+            try:
+                await self._run_update_pipeline(target_type=target_type, info=info)
+                self._cb.on_step("RAG update complete — knowledge base ready for Planner")
+                logger.info("intel_rag_update_done", target_type=target_type, mode="blocking")
+            except Exception as rag_exc:
+                logger.warning(
+                    "intel_rag_update_error",
+                    error=str(rag_exc)[:200],
+                    message="RAG update error, continuing with existing knowledge base",
+                )
+                self._cb.on_warn(f"RAG update error (continuing): {str(rag_exc)[:100]}")
         else:
             days_ago = (now - last_update).total_seconds() / 86400
             self._cb.on_done(

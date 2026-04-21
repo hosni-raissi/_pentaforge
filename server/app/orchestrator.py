@@ -2194,6 +2194,28 @@ class ScanOrchestratorService:
                         },
                     )
 
+                    # EMIT: Show finding as "working" in UI during verification
+                    severity = _normalize_finding_severity(
+                        item.get("scenario", {}).get("priority", "medium")
+                    )
+                    self._emit_event(
+                        project_id,
+                        event="verify_finding_working",
+                        scan_id=scan_id,
+                        level="info",
+                        message=f"Verifying finding: {item.get('compact_summary', 'Unknown')[:100]}",
+                        data={
+                            "stage": "verify",
+                            "kind": "finding_working",
+                            "title": item.get('compact_summary', 'Finding'),
+                            "severity": severity,
+                            "endpoint": str(item.get("scenario", {}).get("endpoint", "")).strip(),
+                            "vulnerability_type": str(item.get("scenario", {}).get("vulnerability_type", "")).strip(),
+                            "status": "working",  # UI badge shows "working" during verification
+                            "index": verify_index,
+                        },
+                    )
+
                     verify_message = (
                         f"Target: {target}\n"
                         f"Target type: {target_type}\n"
@@ -2311,12 +2333,45 @@ class ScanOrchestratorService:
                                     "endpoint": str(item.get("scenario", {}).get("endpoint", "")).strip(),
                                     "scenario_task": str(item.get("scenario", {}).get("task", "")).strip(),
                                     "vulnerability_type": str(item.get("scenario", {}).get("vulnerability_type", "")).strip(),
+                                    "status": "real_vulnerability",  # UI updates badge to confirmed
                                 },
                             )
                         elif verdict == "false_positive":
                             verify_results_organized["false_positives"].append(organized_item)
-                        else:
+                            self._emit_event(
+                                project_id,
+                                event="verify_finding_verdict",
+                                scan_id=scan_id,
+                                level="info",
+                                message=f"Verify determined false positive: {verify_summary[:120]}",
+                                data={
+                                    "stage": "verify",
+                                    "kind": "false_positive_confirmed",
+                                    "title": verify_summary,
+                                    "severity": severity,
+                                    "endpoint": str(item.get("scenario", {}).get("endpoint", "")).strip(),
+                                    "status": "false_positive",  # UI updates badge to dismissed
+                                    "verdict": "false_positive",
+                                },
+                            )
+                        else:  # inconclusive
                             verify_results_organized["inconclusives"].append(organized_item)
+                            self._emit_event(
+                                project_id,
+                                event="verify_finding_verdict",
+                                scan_id=scan_id,
+                                level="info",
+                                message=f"Verify inconclusive: {verify_summary[:120]}",
+                                data={
+                                    "stage": "verify",
+                                    "kind": "inconclusive_confirmed",
+                                    "title": verify_summary,
+                                    "severity": severity,
+                                    "endpoint": str(item.get("scenario", {}).get("endpoint", "")).strip(),
+                                    "status": "inconclusive",  # UI updates badge to inconclusive
+                                    "verdict": "inconclusive",
+                                },
+                            )
 
                     except Exception as item_error:
                         logger.error(
@@ -2353,6 +2408,32 @@ class ScanOrchestratorService:
                     severity = _normalize_finding_severity(
                         item.get("scenario", {}).get("priority", "medium")
                     )
+
+                    # Build professional finding description
+                    vuln_type = item["scenario"].get("vulnerability_type", "Security Issue")
+                    endpoint = item["scenario"].get("endpoint", "N/A")
+
+                    description_parts = [
+                        f"Vulnerability Type: {vuln_type}",
+                        f"Target Endpoint: {endpoint}",
+                        f"",
+                        "Finding Summary:",
+                        item["verify_summary"],
+                        f"",
+                        "Verification Status: CONFIRMED",
+                        f"Severity Level: {severity.upper()}",
+                    ]
+
+                    if item["verify_data"].get("evidence"):
+                        description_parts.append(f"")
+                        description_parts.append("Evidence Captured:")
+                        evidence = item["verify_data"]["evidence"]
+                        if isinstance(evidence, dict):
+                            for key, val in evidence.items():
+                                description_parts.append(f"  • {key}: {str(val)[:100]}")
+
+                    professional_description = "\n".join(description_parts)
+
                     finding_entry = {
                         "id": str(uuid.uuid4()),
                         "title": item["verify_summary"],
@@ -2362,7 +2443,7 @@ class ScanOrchestratorService:
                         "status": "verified",
                         "cvss": item["scenario"].get("cvss"),
                         "cve": item["scenario"].get("cve"),
-                        "description": item["verify_summary"],
+                        "description": professional_description,
                         "evidence": item["verify_data"].get("evidence", {}),
                         "remediation": item["scenario"].get("remediation", ""),
                         "timestamp": datetime.now(timezone.utc).isoformat(),

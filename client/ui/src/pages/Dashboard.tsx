@@ -136,6 +136,11 @@ interface RealtimeVulnFinding {
   endpoint?: string;
   status: string;
   findingKey: string;
+  cve?: string;
+  cvss?: number | string;
+  category?: string;
+  description?: string;
+  remediation?: string;
 }
 
 interface PendingToolApprovalView {
@@ -343,6 +348,7 @@ function formatRealtimeFindingStatus(value: string): string {
     return "unknown";
   }
   if (normalized === "possible_checking") return "possible vuln - checking";
+  if (normalized === "verify_working") return "verifying...";
   if (normalized === "real_vulnerability") return "real vulnerability";
   if (normalized === "false_positive") return "false positive";
   if (normalized === "inconclusive") return "inconclusive";
@@ -354,7 +360,8 @@ function realtimeStatusRank(value: string): number {
   const normalized = normalizeText(value).toLowerCase();
   if (normalized === "verified_saved") return 5;
   if (normalized === "real_vulnerability") return 4;
-  if (normalized === "false_positive") return 3;
+  if (normalized === "verify_working") return 3;
+  if (normalized === "false_positive") return 2;
   if (normalized === "inconclusive") return 2;
   if (normalized === "possible_checking") return 1;
   return 0;
@@ -763,7 +770,7 @@ function toPlannerPlanSummary(value: unknown): PlannerPlanSummary | null {
         if (
           rawScenario.done === true ||
           normalizeScenarioStatus(rawScenario.status, rawScenario.done === true) ===
-            "completed"
+          "completed"
         ) {
           completedScenarioCount += 1;
         }
@@ -1066,6 +1073,7 @@ export default function Dashboard() {
 
   const [insightTab, setInsightTab] = useState<InsightTab>("checklist");
   const [isInsightFullscreen, setIsInsightFullscreen] = useState(false);
+  const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [locallyAckedApprovalId, setLocallyAckedApprovalId] = useState<string | null>(null);
@@ -1798,7 +1806,8 @@ export default function Dashboard() {
   const realtimeVulnFindings: RealtimeVulnFinding[] = (() => {
     const feed: RealtimeVulnFinding[] = [];
 
-    // Show confirmed/persisted findings from the project store.
+    // ONLY show confirmed/persisted findings from the project store
+    // This is the source of truth for real vulnerabilities
     for (const finding of activeProject.findings) {
       const findingKey = `persisted-${finding.title.toLowerCase()}|${finding.target.toLowerCase()}`;
       feed.push({
@@ -1810,117 +1819,23 @@ export default function Dashboard() {
         endpoint: finding.target,
         status: "verified_saved",
         findingKey,
+        cve: finding.cve,
+        cvss: finding.cvss,
+        category: finding.category,
+        description: finding.description,
+        remediation: finding.remediation,
       });
     }
 
-    // Track vulnerability lifecycle in real time:
-    // perceptor ATTEND -> verify verdict -> retest saved.
-    for (const event of scanEvents) {
-      if (!isRecord(event.data)) {
-        continue;
-      }
-      if (event.event === "perceptor_classified") {
-        const assessment = isRecord(event.data.assessment) ? event.data.assessment : null;
-        const overall = isRecord(assessment?.overall) ? assessment.overall : null;
-        const ssvc = normalizeText(overall?.ssvc).toUpperCase();
-        const findingType = normalizeText(assessment?.finding_type).toLowerCase();
-        if (ssvc !== "ATTEND" || findingType !== "vulnerability") {
-          continue;
-        }
-        const title =
-          normalizeText(assessment?.compact_summary) ||
-          normalizeText(event.message);
-        if (!title) {
-          continue;
-        }
-        const findingIdx =
-          typeof event.data.iteration === "number" && Number.isFinite(event.data.iteration)
-            ? Math.floor(event.data.iteration)
-            : 0;
-        feed.push({
-          id: `perceptor-${findingIdx || event.timestamp}`,
-          title,
-          severity: inferEventSeverity(event),
-          source: "perceptor",
-          at: event.timestamp,
-          endpoint: "",
-          status: "possible_checking",
-          findingKey: findingIdx > 0 ? `finding-${findingIdx}` : `perceptor-${title.toLowerCase()}`,
-        });
-        continue;
-      }
-      if (event.event === "verify_finding_resolved" || event.event === "verify_real_vulnerability_confirmed") {
-        const title =
-          normalizeText(event.data.title) ||
-          normalizeText(event.data.summary) ||
-          normalizeText(event.message);
-        if (!title) {
-          continue;
-        }
-        const idx =
-          typeof event.data.finding_idx === "number" && Number.isFinite(event.data.finding_idx)
-            ? Math.floor(event.data.finding_idx)
-            : 0;
-        const endpoint = normalizeText(event.data.endpoint);
-        const verdict =
-          normalizeText(event.data.verdict) ||
-          (event.event === "verify_real_vulnerability_confirmed" ? "real_vulnerability" : "");
-        feed.push({
-          id: `verify-${idx || event.timestamp}-${verdict || "unknown"}`,
-          title,
-          severity: normalizeDashboardSeverity(event.data.severity),
-          source: "verify",
-          at: event.timestamp,
-          endpoint,
-          status: verdict || "inconclusive",
-          findingKey: idx > 0 ? `finding-${idx}` : `verify-${title.toLowerCase()}|${endpoint.toLowerCase()}`,
-        });
-        continue;
-      }
-      if (event.event === "retest_finding_saved") {
-        const title =
-          normalizeText(event.data.title) ||
-          normalizeText(event.data.summary) ||
-          normalizeText(event.data.retest_summary) ||
-          normalizeText(event.message);
-        if (!title) {
-          continue;
-        }
-        const endpoint = normalizeText(event.data.endpoint);
-        feed.push({
-          id: `retest-${normalizeText(event.data.finding_id) || event.timestamp}`,
-          title,
-          severity: normalizeDashboardSeverity(event.data.severity),
-          source: "retest",
-          at: event.timestamp,
-          endpoint,
-          status: "verified_saved",
-          findingKey: `saved-${title.toLowerCase()}|${endpoint.toLowerCase()}`,
-        });
-      }
-    }
+    // NO DUPLICATION - Skip Perceptor events (they're scenario status, not findings)
+    // NO DUPLICATION - Skip Verify verdict events (they become persisted findings, so we already have them above)
+    // Only show real-time status if something is currently in progress but NOT yet persisted
 
     const deduped = new Map<string, RealtimeVulnFinding>();
     for (const item of feed) {
       const fallbackKey = `${item.title.toLowerCase()}|${(item.endpoint ?? "").toLowerCase()}`;
       const key = item.findingKey || fallbackKey;
-      const existing = deduped.get(key);
-      if (!existing) {
-        deduped.set(key, item);
-        continue;
-      }
-      const existingStatusRank = realtimeStatusRank(existing.status);
-      const itemStatusRank = realtimeStatusRank(item.status);
-      if (itemStatusRank > existingStatusRank) {
-        deduped.set(key, item);
-        continue;
-      }
-      if (
-        itemStatusRank === existingStatusRank &&
-        new Date(item.at).getTime() > new Date(existing.at).getTime()
-      ) {
-        deduped.set(key, item);
-      }
+      deduped.set(key, item);
     }
 
     return Array.from(deduped.values())
@@ -2937,41 +2852,86 @@ export default function Dashboard() {
         <Card className="flex h-[560px] flex-col space-y-3 p-3">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-text-primary">
-              Real-Time Vulnerability Findings
+              ✅ Confirmed Vulnerabilities
             </h2>
             <p className="text-sm text-text-muted">
-              {realtimeVulnFindings.length} items
+              {realtimeVulnFindings.length} verified
             </p>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
             {realtimeVulnFindings.length === 0 ? (
               <p className="px-1 py-2 text-sm text-text-muted">
-                No vulnerability signals yet. Findings and risk-oriented events will appear here in real time.
+                No vulnerabilities confirmed yet. Real findings will appear here after verification.
               </p>
             ) : (
               realtimeVulnFindings.map((item) => (
                 <div
                   key={item.id}
-                  className="rounded-md border border-border bg-surface-1/45 p-2"
+                  onClick={() => {
+                    const fullFinding = activeProject.findings.find(
+                      (f: any) => f.id === item.id.replace("finding-", "")
+                    );
+                    setSelectedFinding(fullFinding || item);
+                  }}
+                  className="cursor-pointer rounded-md border border-border bg-surface-1/45 p-3 space-y-2 transition-colors hover:bg-surface-1/65"
                 >
-                  <div className="mb-1 flex items-center justify-between gap-2">
+                  {/* Header: Title + Severity Badge */}
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-sm font-bold text-text-primary leading-snug flex-1">
+                      {item.title}
+                    </h3>
                     <Badge
                       variant="default"
-                      className={`border text-xs uppercase tracking-wide ${severityBadgeClass(item.severity)}`}
+                      className={`border text-xs uppercase tracking-wide whitespace-nowrap font-semibold ${severityBadgeClass(item.severity)}`}
                     >
                       {item.severity}
                     </Badge>
-                    <span className="text-xs text-text-muted">
-                      {formatTime(item.at)}
-                    </span>
                   </div>
-                  <p className="text-sm text-text-primary">{item.title}</p>
-                  <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">
-                    status: {formatRealtimeFindingStatus(item.status)}
-                  </p>
-                  <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">
-                    source: {formatSourceLabel(item.source)}
-                  </p>
+
+                  {/* CVE + CVSS */}
+                  {(item.cve || item.cvss) && (
+                    <div className="text-xs text-text-secondary font-mono bg-surface-0/40 px-2 py-1 rounded">
+                      {item.cve && <span>{item.cve}</span>}
+                      {item.cve && item.cvss && <span> • </span>}
+                      {item.cvss && <span>CVSS {item.cvss}</span>}
+                    </div>
+                  )}
+
+                  {/* Target + Category */}
+                  <div className="space-y-1 text-xs">
+                    {item.endpoint && (
+                      <div className="flex items-start gap-2">
+                        <span className="text-text-muted min-w-fit font-semibold">Target:</span>
+                        <span className="text-text-secondary break-all font-mono">{item.endpoint}</span>
+                      </div>
+                    )}
+                    {item.category && (
+                      <div className="flex items-start gap-2">
+                        <span className="text-text-muted min-w-fit font-semibold">Type:</span>
+                        <span className="text-text-secondary">{item.category}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Quick Remediation Hint */}
+                  {item.remediation && (
+                    <div className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded italic">
+                      💡 {item.remediation.split('\n')[0].slice(0, 120)}
+                      {item.remediation.length > 120 ? "..." : ""}
+                    </div>
+                  )}
+
+                  {/* Footer: Status + Time */}
+                  <div className="flex items-center justify-between pt-1 border-t border-border/30">
+                    <span className="text-xs text-text-muted uppercase tracking-wide">
+                      ✅ Verified
+                    </span>
+                    <span className="text-xs text-text-muted">{formatTime(item.at)}</span>
+                  </div>
+
+                  <div className="text-xs text-text-muted/70 italic text-right">
+                    Click for details →
+                  </div>
                 </div>
               ))
             )}
@@ -3094,29 +3054,29 @@ export default function Dashboard() {
                                               ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
                                               : "border-border bg-surface-1/55 text-text-muted";
                                         return (
-                                      <div
-                                        key={`${phase.phase}-${step.step}-scenario-${scenarioIndex}`}
-                                        className={`flex items-center justify-between gap-2 ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
-                                      >
-                                        <p className="text-text-secondary text-[13px]">
-                                          {scenario.scenario}
-                                        </p>
-                                        <div className="flex items-center gap-1.5">
-                                          {scenario.plannerRound ? (
-                                            <span className="rounded border border-pf-500/30 bg-pf-500/10 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-pf-200">
-                                              {scenario.plannerRound}
-                                            </span>
-                                          ) : null}
-                                          <span
-                                            className={`rounded border px-1.5 py-0.5 text-[11px] capitalize ${statusTone}`}
+                                          <div
+                                            key={`${phase.phase}-${step.step}-scenario-${scenarioIndex}`}
+                                            className={`flex items-center justify-between gap-2 ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
                                           >
-                                            {scenario.status}
-                                          </span>
-                                          <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs">
-                                            {scenario.agent}
-                                          </span>
-                                        </div>
-                                      </div>
+                                            <p className="text-text-secondary text-[13px]">
+                                              {scenario.scenario}
+                                            </p>
+                                            <div className="flex items-center gap-1.5">
+                                              {scenario.plannerRound ? (
+                                                <span className="rounded border border-pf-500/30 bg-pf-500/10 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-pf-200">
+                                                  {scenario.plannerRound}
+                                                </span>
+                                              ) : null}
+                                              <span
+                                                className={`rounded border px-1.5 py-0.5 text-[11px] capitalize ${statusTone}`}
+                                              >
+                                                {scenario.status}
+                                              </span>
+                                              <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs">
+                                                {scenario.agent}
+                                              </span>
+                                            </div>
+                                          </div>
                                         );
                                       })()
                                     ),
@@ -3561,8 +3521,8 @@ export default function Dashboard() {
       ) : null}
       <div
         className={`fixed bottom-24 right-4 z-50 w-[min(460px,calc(100vw-1.5rem))] transition-all duration-300 sm:right-6 ${isCopilotOpen
-            ? "pointer-events-auto translate-y-0 opacity-100"
-            : "pointer-events-none translate-y-4 opacity-0"
+          ? "pointer-events-auto translate-y-0 opacity-100"
+          : "pointer-events-none translate-y-4 opacity-0"
           }`}
       >
         <AIPromptPanel
@@ -3670,6 +3630,111 @@ export default function Dashboard() {
             </Button>
           </div>
         </div>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(selectedFinding)}
+        onClose={() => setSelectedFinding(null)}
+        title="Vulnerability Details"
+      >
+        {selectedFinding ? (
+          <div className="space-y-4 max-h-[75vh] overflow-y-auto">
+            {/* Title + Severity */}
+            <div className="space-y-2 border-b border-border pb-3">
+              <h2 className="text-lg font-bold text-text-primary">{selectedFinding.title}</h2>
+              <div className="flex items-center gap-3">
+                <Badge
+                  variant="default"
+                  className={`border text-sm uppercase tracking-wide font-semibold ${severityBadgeClass(
+                    normalizeDashboardSeverity(selectedFinding.severity)
+                  )}`}
+                >
+                  {selectedFinding.severity}
+                </Badge>
+                {selectedFinding.category && (
+                  <span className="text-sm text-text-secondary bg-surface-0/50 px-2 py-1 rounded">
+                    {selectedFinding.category}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* CVE + CVSS */}
+            {(selectedFinding.cve || selectedFinding.cvss) && (
+              <div className="space-y-1 bg-surface-0/40 p-3 rounded border border-border">
+                <p className="text-xs font-semibold text-text-muted uppercase">Identifiers</p>
+                <div className="text-sm text-text-secondary font-mono">
+                  {selectedFinding.cve && <div>CVE: {selectedFinding.cve}</div>}
+                  {selectedFinding.cvss && <div>CVSS Score: {selectedFinding.cvss}</div>}
+                </div>
+              </div>
+            )}
+
+            {/* Target */}
+            {selectedFinding.target && (
+              <div className="space-y-1">
+                <p className="text-xs font-semibold text-text-muted uppercase">Target</p>
+                <p className="text-sm text-text-secondary font-mono bg-surface-0/40 px-3 py-2 rounded break-all">
+                  {selectedFinding.target}
+                </p>
+              </div>
+            )}
+
+            {/* Description - Professional Format */}
+            {selectedFinding.description && (
+              <div className="space-y-1">
+                <p className="text-xs font-semibold text-text-muted uppercase">Description</p>
+                <div className="text-sm text-text-secondary whitespace-pre-wrap break-words bg-surface-0/40 p-3 rounded border border-border">
+                  {selectedFinding.description}
+                </div>
+              </div>
+            )}
+
+            {/* Evidence */}
+            {selectedFinding.evidence && Object.keys(selectedFinding.evidence).length > 0 && (
+              <div className="space-y-1">
+                <p className="text-xs font-semibold text-text-muted uppercase">Verification Evidence</p>
+                <div className="text-xs text-text-secondary space-y-1 bg-surface-0/40 p-3 rounded border border-border max-h-48 overflow-y-auto">
+                  {Object.entries(selectedFinding.evidence).map(([key, value]) => (
+                    <div key={key} className="border-b border-border/30 pb-2 last:border-b-0 last:pb-0">
+                      <div className="font-semibold text-text-secondary">{key}:</div>
+                      <div className="text-text-muted break-all ml-2">{String(value).slice(0, 300)}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Remediation */}
+            {selectedFinding.remediation && (
+              <div className="space-y-1">
+                <p className="text-xs font-semibold text-text-muted uppercase">Remediation</p>
+                <div className="text-sm text-amber-100 bg-amber-500/20 border border-amber-500/40 p-3 rounded whitespace-pre-wrap break-words">
+                  {selectedFinding.remediation}
+                </div>
+              </div>
+            )}
+
+            {/* Verification Status */}
+            <div className="border-t border-border pt-3 space-y-1">
+              <p className="text-xs font-semibold text-text-muted uppercase">Status</p>
+              <p className="text-sm text-text-secondary">
+                ✅ Verified & Saved
+              </p>
+              <p className="text-xs text-text-muted">{formatTime(selectedFinding.timestamp)}</p>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setSelectedFinding(null)}
+              >
+                Close
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </Dialog>
     </div>
   );
