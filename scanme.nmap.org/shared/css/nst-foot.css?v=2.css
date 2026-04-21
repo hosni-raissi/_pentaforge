@@ -1,0 +1,37 @@
+#nst-foot {
+color: #e0f7ff;
+font-family: sans-serif;
+}
+#nst-foot-search {
+margin: 1rem 0px;
+}
+.flexlists {
+font-size: small;
+display: grid;
+grid-template-columns: repeat(auto-fit, minmax(10em,1fr));
+gap: 1rem;
+}
+.fl-unit > h2 {
+margin: 0px;
+font-size: larger;
+font-weight: bold;
+}
+.fl-unit > ul {
+display: flex;
+flex-direction: column;
+gap: 8px;
+list-style: none;
+margin: 1em 0px;
+padding: 0px;
+}
+.fl-unit li > .nlink {
+display: block;
+width: 100%;
+padding: 4px 0px;
+}
+.social-links {
+display: grid;
+grid-template-columns: repeat(auto-fit, 32px);
+gap: 2rem;
+align-content: start;
+}
