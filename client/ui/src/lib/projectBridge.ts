@@ -158,6 +158,25 @@ export interface IntelForceUpdateStatus {
   error: string;
 }
 
+export interface StaticReconScenario {
+  task: string;
+  agent: string;
+  priority: number;
+  details: string;
+  methods: string[];
+  done?: boolean;
+  status?: string;
+}
+
+export interface StaticReconPlan {
+  target_type: string;
+  max_items: number;
+  generated_from: string;
+  scenarios: StaticReconScenario[];
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface AIAssistRequest {
   prompt: string;
   projectId?: string;
@@ -561,6 +580,73 @@ export async function listProjectTargetFieldsFromDesktop(
   });
 }
 
+export async function listStaticReconPlansFromDesktop(): Promise<StaticReconPlan[]> {
+  if (!supportsDesktopProjectBridge()) {
+    return [];
+  }
+
+  const payload = await requestJson<{ plans?: unknown[] }>("/api/project-target-types/static-recon-plans");
+  const rows = Array.isArray(payload.plans) ? payload.plans : [];
+  return rows
+    .map((row) => toStaticReconPlan(row))
+    .filter((row): row is StaticReconPlan => row !== null);
+}
+
+export async function getStaticReconPlanFromDesktop(targetType: string): Promise<StaticReconPlan> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+
+  const payload = await requestJson<{ plan?: unknown }>(
+    `/api/project-target-types/${encodeURIComponent(targetType)}/static-recon-plan`,
+  );
+  const plan = toStaticReconPlan(payload.plan);
+  if (!plan) {
+    throw new Error("Invalid static recon plan response");
+  }
+  return plan;
+}
+
+export async function saveStaticReconPlanFromDesktop(
+  targetType: string,
+  payload: StaticReconPlan,
+): Promise<StaticReconPlan> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+
+  const response = await requestJson<{ plan?: unknown }>(
+    `/api/project-target-types/${encodeURIComponent(targetType)}/static-recon-plan`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
+  const plan = toStaticReconPlan(response.plan);
+  if (!plan) {
+    throw new Error("Invalid static recon plan response");
+  }
+  return plan;
+}
+
+export async function resetStaticReconPlanFromDesktop(targetType: string): Promise<StaticReconPlan> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+
+  const response = await requestJson<{ plan?: unknown }>(
+    `/api/project-target-types/${encodeURIComponent(targetType)}/static-recon-plan`,
+    {
+      method: "DELETE",
+    },
+  );
+  const plan = toStaticReconPlan(response.plan);
+  if (!plan) {
+    throw new Error("Invalid static recon plan response");
+  }
+  return plan;
+}
+
 export async function createProjectShareLinkFromDesktop(
   projectId: string,
   payload: ProjectShareLinkRequest,
@@ -579,6 +665,56 @@ export async function createProjectShareLinkFromDesktop(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function toStaticReconScenario(value: unknown): StaticReconScenario | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.task !== "string"
+    || typeof value.agent !== "string"
+    || typeof value.priority !== "number"
+    || typeof value.details !== "string"
+    || !Array.isArray(value.methods)
+  ) {
+    return null;
+  }
+
+  return {
+    task: value.task,
+    agent: value.agent,
+    priority: value.priority,
+    details: value.details,
+    methods: value.methods.filter((item): item is string => typeof item === "string"),
+    done: typeof value.done === "boolean" ? value.done : false,
+    status: typeof value.status === "string" ? value.status : "not yet",
+  };
+}
+
+function toStaticReconPlan(value: unknown): StaticReconPlan | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.target_type !== "string"
+    || typeof value.max_items !== "number"
+    || typeof value.generated_from !== "string"
+    || !Array.isArray(value.scenarios)
+  ) {
+    return null;
+  }
+
+  return {
+    target_type: value.target_type,
+    max_items: value.max_items,
+    generated_from: value.generated_from,
+    scenarios: value.scenarios
+      .map((item) => toStaticReconScenario(item))
+      .filter((item): item is StaticReconScenario => item !== null),
+    created_at: typeof value.created_at === "string" ? value.created_at : undefined,
+    updated_at: typeof value.updated_at === "string" ? value.updated_at : undefined,
+  };
 }
 
 function toIntelResource(value: unknown): IntelResource | null {

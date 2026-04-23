@@ -1,0 +1,62 @@
+{
+  "framework_name": "Core 8 API Reconnaissance Framework",
+  "version": "1.0",
+  "scenarios": [
+    {
+      "id": "A1",
+      "scenario": "Documentation & Schema Discovery",
+      "objective": "Locate technical blueprints, Swagger/OpenAPI UI, GraphQL playgrounds, or WSDL files.",
+      "methods": ["Endpoint fuzzing for docs", "Schema introspection", "Public Postman collection search"],
+      "priority": 1
+    },
+    {
+      "id": "A2",
+      "scenario": "Endpoint & Version Enumeration",
+      "objective": "Map the API tree and find deprecated or 'shadow' versions (e.g., /v1 vs /v3).",
+      "methods": ["Directory brute-forcing", "Versioning pattern analysis", "Path crawling"],
+      "priority": 1
+    },
+    {
+      "id": "A3",
+      "scenario": "Authentication & Key Analysis",
+      "objective": "Analyze how identity is handled (JWT, OAuth, API Keys) and where tokens are exposed.",
+      "methods": ["JWT inspection", "Auth header review", "Token entropy testing"],
+      "priority": 1
+    },
+    {
+      "id": "A4",
+      "scenario": "Parameter & Schema Profiling",
+      "objective": "Identify expected data types, mandatory fields, and hidden administrative parameters.",
+      "methods": ["Parameter discovery", "Type guessing", "JSON/XML structure analysis"],
+      "priority": 2
+    },
+    {
+      "id": "A5",
+      "scenario": "Resource & Relationship Mapping",
+      "objective": "Understand the object hierarchy (e.g., /users/{id}/orders) to find IDOR pivot points.",
+      "methods": ["URI structure analysis", "Resource correlation", "Object ID pattern review"],
+      "priority": 2
+    },
+    {
+      "id": "A6",
+      "scenario": "Method & Content-Type Probing",
+      "objective": "Test verbs (PUT, DELETE, PATCH) and alternative content types (XML vs JSON).",
+      "methods": ["Verb tampering", "Content-type switching", "Accept header manipulation"],
+      "priority": 2
+    },
+    {
+      "id": "A7",
+      "scenario": "Error Handling & Info Disclosure",
+      "objective": "Force errors to leak stack traces, internal IP addresses, or database types.",
+      "methods": ["Malformed input testing", "Illegal character injection", "Verbose error review"],
+      "priority": 3
+    },
+    {
+      "id": "A8",
+      "scenario": "Rate Limit & Business Logic Profiling",
+      "objective": "Identify the 'speed limit' and map sensitive workflows like password resets or exports.",
+      "methods": ["Burst testing", "Workflow sequencing", "Logic surface synthesis"],
+      "priority": 3
+    }
+  ]
+}

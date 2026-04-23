@@ -1,0 +1,62 @@
+{
+  "framework_name": "Core 8 Server (Linux) Reconnaissance Framework",
+  "version": "1.0",
+  "scenarios": [
+    {
+      "id": "L1",
+      "scenario": "OS & Distribution Fingerprinting",
+      "objective": "Identify the exact kernel version, distribution (Ubuntu, CentOS, Debian), and architecture.",
+      "methods": ["Banner grabbing", "ICMP fingerprinting", "TCP/IP stack analysis", "SSH-version string review"],
+      "priority": 1
+    },
+    {
+      "id": "L2",
+      "scenario": "Service & Daemon Inventory",
+      "objective": "Map all listening services, background daemons, and their associated versions.",
+      "methods": ["Port scanning (Nmap)", "RPCbind enumeration", "SMTP/IMAP/SSH feature probing"],
+      "priority": 1
+    },
+    {
+      "id": "L3",
+      "scenario": "Shell & Environment Probing",
+      "objective": "Identify available shells, environment variables, and pre-installed binary tools (e.g., GCC, Python, NC).",
+      "methods": ["Environment variable disclosure", "Shell-type detection", "System path mapping"],
+      "priority": 2
+    },
+    {
+      "id": "L4",
+      "scenario": "User & Group Enumeration",
+      "objective": "Identify valid system users, groups, and the presence of 'interesting' accounts like sudoers or devs.",
+      "methods": ["Finger/Ident probing", "UID/GID analysis", "Public-key/Metadata discovery"],
+      "priority": 2
+    },
+    {
+      "id": "L5",
+      "scenario": "File System & Permission Analysis",
+      "objective": "Locate world-readable configuration files, SUID/GUID binaries, and sensitive directories.",
+      "methods": ["Recursive file listing", "Sensitive path probing (/etc, /home, /var/log)", "Mount point discovery"],
+      "priority": 2
+    },
+    {
+      "id": "L6",
+      "scenario": "Package & Software Audit",
+      "objective": "Identify installed software packages and libraries that may have known CVEs.",
+      "methods": ["Version comparison", "Package manager metadata review", "Common binary version checks"],
+      "priority": 2
+    },
+    {
+      "id": "L7",
+      "scenario": "Log & History Discovery",
+      "objective": "Look for leftover command history, log files, or temporary artifacts that leak passwords/paths.",
+      "methods": ["Log path enumeration", "History file discovery (.bash_history)", "Temp file review (/tmp, /var/tmp)"],
+      "priority": 3
+    },
+    {
+      "id": "L8",
+      "scenario": "Network Trust & Inter-process Review",
+      "objective": "Analyze local-only services (127.0.0.1), cron jobs, and internal communication (IPC).",
+      "methods": ["Local-port forwarding checks", "Cron-tab schedule inference", "Trust boundary mapping"],
+      "priority": 3
+    }
+  ]
+}

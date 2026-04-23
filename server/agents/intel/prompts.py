@@ -28,14 +28,17 @@ def _target_query_text(target_type: str) -> str:
 
 
 FORMATTER_SYSTEM_PROMPT = (
-    "Role: Intel agent for aggressive pentest checklist generation.\n"
-    "Goal: maximize vulnerability coverage for the target by optimizing the provided baseline checklist.\n"
+    "Role: Intel agent for prioritized pentest checklist generation.\n"
+    "Goal: build the best target-specific checklist by combining recon evidence, target info, and OWASP checklist coverage.\n"
     "\n"
-    "Tools: search_rag.\n"
+    "Tools: get_checklists.\n"
     "Required usage:\n"
-    "1) Review the provided current checklist for the target.\n"
-    "2) In rounds 1-2, use search_rag to improve checklist coverage with vulnerabilities, methods, techniques, and gaps.\n"
-    "3) Respect explicit scope exclusions from the target info (for example: no SQL injection, do not test XSS).\n"
+    "1) Review the target info, current recon plan, latest Perceptor cache, and current checklist.\n"
+    "2) Treat the latest recon plan and Perceptor cache as the source of truth for what the target actually exposes.\n"
+    "3) Use get_checklists only for OWASP checklist coverage. Do not use RAG-style reasoning or invent off-scope work.\n"
+    "4) Respect explicit scope exclusions from the target info (for example: no SQL injection, do not test XSS).\n"
+    "5) Output a strong target-specific checklist with 15-20 items total.\n"
+    "6) Prioritize checklist items using this order of trust: Perceptor cache -> current recon plan -> target info/scope -> uploaded checklist -> OWASP checklist coverage.\n"
     "\n"
 
     f"Budget: {FORMATTER_ROUNDS} rounds total; keep last round for final JSON.\n"
@@ -79,45 +82,6 @@ def build_user_message(
     base_checklist_text: str = "",
 ) -> str:
     """Build the user message for the formatter LLM call."""
-    target_query = _target_query_text(target_type)
-
-    coverage = formatter_payload.get("coverage_counts", {})
-    if not isinstance(coverage, dict):
-        coverage = {}
-    methods_n = coverage.get("methods", 0)
-    techniques_n = coverage.get("techniques", 0)
-    vulns_n = coverage.get("vulnerabilities", 0)
-
-    rag = formatter_payload.get("rag_snapshot", {})
-    if not isinstance(rag, dict):
-        rag = {}
-    rag_domain = str(rag.get("domain", target_type) or target_type)
-    strategies = rag.get("strategies", [])
-    attack_types = rag.get("attack_types", [])
-    exploits = rag.get("exploits", [])
-
-    stats = formatter_payload.get("stats", {})
-
-    # Build search suggestions
-    search_suggestions: list[str] = []
-    search_suggestions.append(
-        f'search_rag(query="{target_query} pentest methods strategy coverage gaps", '
-        f'content_type="strategies", domain="{rag_domain}", n_results=10)'
-    )
-    search_suggestions.append(
-        f'search_rag(query="{target_query} attack techniques TTP coverage gaps", '
-        f'content_type="attack_types", domain="{rag_domain}", n_results=10)'
-    )
-    search_suggestions.append(
-        f'search_rag(query="{target_query} known vulnerability classes and exploit gaps", '
-        f'content_type="exploits", domain="{rag_domain}", n_results=10)'
-    )
-    suggestions_text = "\n".join(f"  → {s}" for s in search_suggestions[:6])
-
-    techniques_text = _format_entries(attack_types, "techniques")
-    vulns_text = _format_entries(exploits, "vulnerabilities/exploits")
-
-    # Round budget info
     rounds_remaining = max_rounds - current_round
     tool_calls_remaining = max(0, rounds_remaining - 1)
 
@@ -135,25 +99,23 @@ def build_user_message(
 
     return (
         f"Target: {target_type}\n"
-        f"Info: {info or 'none'}\n"
-        f"This is the current checklist for this target (JSON is not required in your response here):\n"
+        f"Target context:\n{info or 'none'}\n\n"
+        "Prioritization order:\n"
+        "1. Latest Perceptor cache and discovered target artifacts\n"
+        "2. Current recon plan\n"
+        "3. Target info and scope constraints\n"
+        "4. Uploaded or baseline checklist items\n"
+        "5. OWASP checklist coverage\n\n"
+        "Current checklist:\n"
         f"{base_checklist_text}\n\n"
         f"{budget_text}\n\n"
-        "Coverage snapshot:\n"
-        f"- techniques: {techniques_n + len(attack_types)}\n"
-        f"- vulnerabilities: {vulns_n + len(exploits)}\n\n"
-        "RAG techniques:\n"
-        f"{techniques_text}\n\n"
-        "RAG vulnerabilities:\n"
-        f"{vulns_text}\n\n"
-        "Recommended tool calls:\n"
-        f"{suggestions_text}\n\n"
         "Required flow:\n"
-        "1) in rounds 1-2 use search_rag to gather method/technique/vulnerability gap data.\n"
-        "2) respect explicit scope exclusions from the info.\n"
-        "3) return final JSON with keys: status, checklist.\n"
-        "Pipeline stats (copy as-is):\n"
-        f"```json\n{json.dumps(stats, ensure_ascii=True)}\n```"
+        "1) infer what the target actually exposes from the recon plan and Perceptor cache.\n"
+        "2) if you need OWASP coverage help, call get_checklists only.\n"
+        "3) keep the checklist narrow, target-specific, and strictly within scope.\n"
+        "4) produce between 15 and 20 checklist items total.\n"
+        "5) give each item concrete wording tied to observed target details where possible.\n"
+        "6) return final JSON with keys: status, checklist.\n"
     )
 
 

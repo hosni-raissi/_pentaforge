@@ -1,0 +1,62 @@
+{
+  "framework_name": "Core 8 Desktop App Reconnaissance Framework",
+  "version": "1.0",
+  "scenarios": [
+    {
+      "id": "D1",
+      "scenario": "Binary Fingerprinting & Compilation Analysis",
+      "objective": "Identify the language (C++, C#, Electron, Go), architecture (x64, ARM), and protection mechanisms (ASLR, DEP, SafeSEH).",
+      "methods": ["File command inspection", "PE/Mach-O/ELF header review", "Checking for packers/obfuscators (Detect It Easy)"],
+      "priority": 1
+    },
+    {
+      "id": "D2",
+      "scenario": "Installation & Filesystem Footprint",
+      "objective": "Map where the app stores its guts—install directories, temp files, and user-specific data folders.",
+      "methods": ["Installation mirroring", "Permission audit of install folders", "Discovery of side-loaded DLLs/libraries"],
+      "priority": 1
+    },
+    {
+      "id": "D3",
+      "scenario": "Local Storage & Secret Disclosure",
+      "objective": "Find sensitive data stored in local databases (SQLite), config files (XML/JSON), or the Windows Registry.",
+      "methods": ["Registry monitoring (Procmon)", "SQLite database extraction", "Searching for plaintext credentials in .config files"],
+      "priority": 1
+    },
+    {
+      "id": "D4",
+      "scenario": "Dynamic Traffic & API Probing",
+      "objective": "Intercept the communication between the desktop client and its backend APIs.",
+      "methods": ["Proxying traffic (Burp/Fiddler)", "Certificate pinning check", "Protocol analysis (HTTP/WebSockets/Custom)"],
+      "priority": 2
+    },
+    {
+      "id": "D5",
+      "scenario": "IPC & Endpoint Exposure",
+      "objective": "Identify Inter-Process Communication (IPC) mechanisms like Named Pipes, Unix Sockets, or local web servers.",
+      "methods": ["Named Pipe enumeration", "Localhost port scanning", "D-Bus/COM interface mapping"],
+      "priority": 2
+    },
+    {
+      "id": "D6",
+      "scenario": "Runtime Memory & String Extraction",
+      "objective": "Scan the app's RAM while it is running to find decrypted secrets or sensitive session tokens.",
+      "methods": ["Memory dumping", "Strings analysis of live process", "Environment variable inspection"],
+      "priority": 2
+    },
+    {
+      "id": "D7",
+      "scenario": "Update & Patching Mechanism Review",
+      "objective": "Analyze how the app updates itself to find vulnerabilities like unverified downloads or insecure execution.",
+      "methods": ["Update traffic interception", "Binary signature verification check", "Manifest file analysis"],
+      "priority": 3
+    },
+    {
+      "id": "D8",
+      "scenario": "Sub-process & Library Dependency Mapping",
+      "objective": "Identify third-party DLLs, framework versions (like a vulnerable Electron version), and spawned child processes.",
+      "methods": ["Dependency Walker/ldd analysis", "Process tree monitoring", "Library version auditing"],
+      "priority": 3
+    }
+  ]
+}

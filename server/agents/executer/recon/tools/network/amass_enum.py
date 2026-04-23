@@ -29,11 +29,11 @@ _MAX_FALLBACK_ASSETS = 200
 class AmassEnumRequest(BaseModel):
     target: str
     mode: str = "enum"
-    passive: bool = False
-    timeout: int = Field(default=900, ge=30, le=7200)
+    passive: bool = True
+    timeout: int = Field(default=120, ge=30, le=7200)
     args: list[str] = []
     use_fallback: bool = True
-    fallback_first: bool = False
+    fallback_first: bool = True
 
     @field_validator("target")
     @classmethod
@@ -212,11 +212,11 @@ def _fallback_crtsh(target: str, timeout: int = 20) -> list[AmassAsset]:
 def amass_enum(
     target: str,
     mode: str = "enum",
-    passive: bool = False,
-    timeout: int = 900,
+    passive: bool = True,
+    timeout: int = 120,
     args: Optional[list[str]] = None,
     use_fallback: bool = True,
-    fallback_first: bool = False,
+    fallback_first: bool = True,
 ) -> dict[str, Any]:
     start = time.monotonic()
     args = args or []
@@ -336,13 +336,13 @@ AMASS_ENUM_TOOL_DEFINITION: dict[str, Any] = {
             "target": {"type": "string", "description": "Target domain (e.g. 'example.com')"},
             "mode": {"type": "string", "enum": ["enum", "intel"], "default": "enum",
                      "description": "enum = subdomain discovery | intel = WHOIS org recon"},
-            "passive": {"type": "boolean", "default": False,
+            "passive": {"type": "boolean", "default": True,
                         "description": "Passive-only mode (no active DNS queries)"},
-            "timeout": {"type": "integer", "default": 900, "minimum": 30, "maximum": 7200,
+            "timeout": {"type": "integer", "default": 120, "minimum": 30, "maximum": 7200,
                         "description": "Max execution time in seconds"},
             "use_fallback": {"type": "boolean", "default": True,
                         "description": "Use crt.sh passive fallback when amass returns no assets"},
-            "fallback_first": {"type": "boolean", "default": False,
+            "fallback_first": {"type": "boolean", "default": True,
                         "description": "Try fallback source before running amass for faster smoke scans"},
             "args": {"type": "array", "items": {"type": "string"},
                      "description": "Extra amass flags e.g. ['-rf', '/tmp/resolvers.txt']"},

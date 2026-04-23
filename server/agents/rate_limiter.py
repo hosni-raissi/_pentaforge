@@ -101,13 +101,14 @@ class GlobalLLMQueue:
     All agents register and await through this queue before making LLM calls.
     """
 
-    def __init__(self, *, max_concurrent: int = 3):
+    def __init__(self, *, max_concurrent: int = 2, max_calls_per_minute: int = 3):
         """Initialize global queue.
 
         Args:
             max_concurrent: Maximum concurrent LLM requests allowed (default: 3, safe for Mistral 4 req/min)
         """
         self._max_concurrent = max_concurrent
+        self._max_calls_per_minute = max(1, int(max_calls_per_minute or 1))
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active_calls: int = 0
         self._lock = asyncio.Lock()
@@ -122,26 +123,35 @@ class GlobalLLMQueue:
         Args:
             agent_name: Name of the agent making the call (for logging)
         """
+        while True:
+            async with self._lock:
+                now = time.time()
+                minute_ago = now - 60.0
+                self._call_times = [t for t in self._call_times if t > minute_ago]
+                if len(self._call_times) < self._max_calls_per_minute:
+                    self._call_times.append(now)
+                    break
+                oldest = self._call_times[0]
+                wait_time = max((oldest + 60.0) - now, 0.1)
+            logger.warning(
+                "global_llm_queue_rate_wait",
+                agent=agent_name,
+                wait_seconds=round(wait_time, 2),
+                calls_in_minute=len(self._call_times),
+                max_per_minute=self._max_calls_per_minute,
+            )
+            await asyncio.sleep(wait_time)
+
         await self._semaphore.acquire()
         self._active_calls += 1
-
-        now = time.time()
-        minute_ago = now - 60.0
-
-        async with self._lock:
-            # Clean old call times
-            self._call_times = [t for t in self._call_times if t > minute_ago]
-            self._call_times.append(now)
-
-            calls_in_minute = len(self._call_times)
-            logger.info(
-                "global_llm_queue_acquired",
-                agent=agent_name,
-                active_concurrent=self._active_calls,
-                max_concurrent=self._max_concurrent,
-                calls_in_minute=calls_in_minute,
-                max_per_minute=3,
-            )
+        logger.info(
+            "global_llm_queue_acquired",
+            agent=agent_name,
+            active_concurrent=self._active_calls,
+            max_concurrent=self._max_concurrent,
+            calls_in_minute=len(self._call_times),
+            max_per_minute=self._max_calls_per_minute,
+        )
 
     def release(self, agent_name: str) -> None:
         """Release an LLM call slot.
@@ -195,7 +205,7 @@ def get_global_llm_queue() -> GlobalLLMQueue:
     """Get or create the global LLM queue singleton."""
     global _global_llm_queue
     if _global_llm_queue is None:
-        _global_llm_queue = GlobalLLMQueue(max_concurrent=3)
+        _global_llm_queue = GlobalLLMQueue(max_concurrent=2, max_calls_per_minute=3)
     return _global_llm_queue
 
 
@@ -262,13 +272,14 @@ class GlobalLLMQueue:
     All agents register and await through this queue before making LLM calls.
     """
 
-    def __init__(self, *, max_concurrent: int = 3):
+    def __init__(self, *, max_concurrent: int = 2, max_calls_per_minute: int = 3):
         """Initialize global queue.
 
         Args:
             max_concurrent: Maximum concurrent LLM requests allowed (default: 3, safe for Mistral 4 req/min)
         """
         self._max_concurrent = max_concurrent
+        self._max_calls_per_minute = max(1, int(max_calls_per_minute or 1))
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active_calls: int = 0
         self._lock = asyncio.Lock()
@@ -283,26 +294,35 @@ class GlobalLLMQueue:
         Args:
             agent_name: Name of the agent making the call (for logging)
         """
+        while True:
+            async with self._lock:
+                now = time.time()
+                minute_ago = now - 60.0
+                self._call_times = [t for t in self._call_times if t > minute_ago]
+                if len(self._call_times) < self._max_calls_per_minute:
+                    self._call_times.append(now)
+                    break
+                oldest = self._call_times[0]
+                wait_time = max((oldest + 60.0) - now, 0.1)
+            logger.warning(
+                "global_llm_queue_rate_wait",
+                agent=agent_name,
+                wait_seconds=round(wait_time, 2),
+                calls_in_minute=len(self._call_times),
+                max_per_minute=self._max_calls_per_minute,
+            )
+            await asyncio.sleep(wait_time)
+
         await self._semaphore.acquire()
         self._active_calls += 1
-
-        now = time.time()
-        minute_ago = now - 60.0
-
-        async with self._lock:
-            # Clean old call times
-            self._call_times = [t for t in self._call_times if t > minute_ago]
-            self._call_times.append(now)
-
-            calls_in_minute = len(self._call_times)
-            logger.info(
-                "global_llm_queue_acquired",
-                agent=agent_name,
-                active_concurrent=self._active_calls,
-                max_concurrent=self._max_concurrent,
-                calls_in_minute=calls_in_minute,
-                max_per_minute=3,
-            )
+        logger.info(
+            "global_llm_queue_acquired",
+            agent=agent_name,
+            active_concurrent=self._active_calls,
+            max_concurrent=self._max_concurrent,
+            calls_in_minute=len(self._call_times),
+            max_per_minute=self._max_calls_per_minute,
+        )
 
     def release(self, agent_name: str) -> None:
         """Release an LLM call slot.
@@ -356,7 +376,7 @@ def get_global_llm_queue() -> GlobalLLMQueue:
     """Get or create the global LLM queue singleton."""
     global _global_llm_queue
     if _global_llm_queue is None:
-        _global_llm_queue = GlobalLLMQueue(max_concurrent=3)
+        _global_llm_queue = GlobalLLMQueue(max_concurrent=2, max_calls_per_minute=3)
     return _global_llm_queue
 
 

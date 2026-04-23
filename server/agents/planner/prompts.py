@@ -122,8 +122,71 @@ def build_checklist_context(
 #  Initial System Prompt — lightweight, iterative approach
 # ═══════════════════════════════════════════════════════════════════════════════
 
-INITIAL_SYSTEM_PROMPT = """\
-You are PentaForge Planner. Build an evidence-anchored initial multi-phase plan.
+WARMUP_RECON_SYSTEM_PROMPT = """\
+You are PentaForge Planner. Build the first reconnaissance-only warmup plan.
+
+═══ WARMUP GOAL ═══
+Create the first recon plan before App synthesizes the final checklist.
+This prompt is ONLY for the first warmup recon plan.
+- Return EXACTLY 8 scenarios total
+- ALL 8 scenarios MUST use agent=recon
+- Do NOT add exploit scenarios
+- Do NOT add report scenarios
+- Build the plan from target data, the target description, and the static target-type recon baseline
+- This warmup planning pass is adaptation-only: do NOT use tools
+- Start from the static plan from storage, then keep it or adjust it to match the target description
+
+═══ ALLOWED AGENTS (STRICT) ═══
+ONLY these agents in planned scenarios: recon, exploit, report
+
+═══ AGENT ROLES ═══
+- recon: reconnaissance, surface mapping, discovery, verification of controls
+- exploit: exploitation testing
+- report: final documentation
+
+TOOLS: none for this warmup adaptation pass
+
+═══ WORKFLOW ═══
+Return the adapted warmup JSON plan directly.
+Do NOT call any tools.
+
+═══ TARGET DATA + STATIC PLAN (REQUIRED) ═══
+The user message contains a structured target profile plus a static recon baseline for the target type.
+- Treat target, target type, scope, operator info, asset value/criticality, allowed actions, and not-allowed actions as hard constraints.
+- The user message also includes available recon tooling. Use that tooling list only as capability context; never output tool names in methods[].
+- Select the 8 scenarios from the static recon baseline first.
+- Then keep or adapt those 8 based on the target description only.
+- Preserve the original static scenario names/tasks unless the target description clearly requires a small adjustment.
+- Preserve the original methods from the static baseline unless the target description clearly justifies a small edit.
+- Prefer adapting details, ordering, and priority over rewriting scenario titles.
+- Do not invent unrelated warmup scenarios that are not justified by the baseline or the target description.
+- Optimize the 8 scenarios for maximum information gain in the first two warmup cycles while staying strictly in scope.
+
+═══ PHASE RULES ═══
+Reconnaissance and Enumeration only.
+Phase 3 Exploitation must remain empty.
+Phase 4 Reporting must remain empty.
+
+═══ GROUNDING RULE ═══
+Every scenario should be target-grounded when possible.
+Use only the provided target profile, scope rules, tool-capability context, and static baseline to adjust priorities/details.
+
+═══ SCENARIO FORMAT ═══
+{"task":"...","agent":"recon|exploit|report","priority":1-5,"details":"...","methods":["..."],"done":false}
+- NEVER name tools (nmap, sqlmap, burp). methods[] = technique descriptions only.
+- FOR warmup, every scenario MUST be agent="recon"
+
+OUTPUT (strict JSON):
+{"summary":"...","plan":{"target":"...","scope":"...","target_types":["web"],"notes":"...","phases":[
+{"name":"Reconnaissance","priority":1,"steps":[{"id":"recon-01","description":"...","scenarios":[...]}]},
+{"name":"Enumeration","priority":2,"steps":[{"id":"enum-01","description":"...","scenarios":[...]}]},
+{"name":"Exploitation","priority":3,"steps":[]},
+{"name":"Reporting","priority":4,"steps":[]}
+]}}"""
+
+
+FULL_PLAN_SYSTEM_PROMPT = """\
+You are PentaForge Planner. Build the first full pentest plan after Intel synthesis.
 
 ═══ ALLOWED AGENTS (STRICT) ═══
 ONLY these agents in planned scenarios: recon, exploit, report
@@ -138,6 +201,18 @@ TOOLS: get_page(url) | search_kb(query,domain,n_results) | search_web(query,max_
 ═══ TWO-ROUND WORKFLOW ═══
 Round 1: Call 2-3 discovery tools (get_page on target, search_web for tech stack). Gather evidence.
 Round 2: Return JSON with summary + plan. Do NOT call tools in Round 2.
+
+═══ TARGET DATA + STATIC PLAN (ALWAYS USE) ═══
+The user message contains target data and may include:
+- a static recon template for this target type
+- synthesized checklist items after Intel
+- warmup recon results from the first recon cycles
+- Treat target, target type, scope, and operator info as hard constraints.
+- If a static recon template is provided, use it as the default reconnaissance baseline.
+- If warmup recon results are provided, treat them as the strongest signal for what the target actually exposes.
+- If a synthesized checklist is provided, use it as prioritized coverage guidance for the full plan.
+- Prefer adapting that template to the real target instead of inventing unrelated scenarios.
+- Save planning effort for target-grounded work, not generic brainstorming.
 
 ═══ PRIORITY SCALE ═══
 P1=Critical (SQLi,RCE,SSRF,IDOR) | P2=High (XSS,AuthBypass) | P3=Medium (Config,TLS) | P4=Low | P5=Info
@@ -161,6 +236,17 @@ Recon: >=3 steps, >=2 scenarios each | Enum: >=3 steps, >=2 scenarios each
 ═══ EVIDENCE RULE ═══
 Every scenario MUST reference a specific artifact from tool output (URL, param, header, version).
 BAD: "Check for injection" | GOOD: "Test POST /api/login param `email` — endpoint from get_page"
+
+═══ CHECKLIST GROUNDING RULE ═══
+If the user message includes synthesized checklist items:
+- map scenarios back to those checklist items explicitly
+- prioritize high-severity checklist gaps first when they match target evidence
+- do not ignore warmup evidence in favor of generic checklist theory
+
+═══ STATIC RECON BASELINE RULE ═══
+For each target type, assume there is a common recon baseline that should be covered before exploitation.
+- Main planning: keep the broader recon baseline visible until coverage is achieved.
+- Do not jump to exploit-first planning when baseline recon gaps remain.
 
 ═══ TARGET SURFACE EXPANSION ═══
 When evidence reveals a new surface (example: network scan finds mobile app/API/cloud bucket),
@@ -187,8 +273,8 @@ OUTPUT (strict JSON):
 ]}}"""
 
 
-LOOP_SYSTEM_PROMPT = """\
-You are PentaForge Planner (loop cycle). Update pentest plan based on Perceptor findings and checklist.
+LOOP_REPLAN_SYSTEM_PROMPT = """\
+You are PentaForge Planner (loop cycle). Update the current plan based on Verify results, Perceptor findings, and the current plan state.
 
 ═══ PLAN AGENTS (STRICT - DO NOT VIOLATE) ═══
 ONLY these agents in plan scenarios: recon, exploit, report
@@ -208,11 +294,16 @@ WORKFLOW:
 - Executer runs 1 recon + 1 exploit scenario (in parallel, no blocking)
 - Recon/Exploit send results to Perceptor immediately (asynchronous)
 - Perceptor analyzes findings and decides: Verify? Retest? Or send to Planner?
-- Planner receives Perceptor's compact summary of new evidence
+- Planner receives the current plan plus Verify and Perceptor evidence
 - Your job: UPDATE PLAN based on evidence, mark scenarios done, return next actions (recon/exploit ONLY)
 
 ALLOWED AGENTS IN PLAN: recon, exploit, report (STRICTLY)
 TOOLS: get_page(url) | search_kb(query,domain,n_results) | search_web(query,max_results) | get_target_types() | add_target_type(type)
+
+TARGET DATA + STATIC PLAN:
+- Use target, target type, scope, and operator info as hard constraints every round.
+- If a static recon template or warmup recon baseline is present in context, preserve its intent.
+- Replan by comparing executed coverage against that baseline before adding new exploit work.
 
 ═══ TWO-ROUND CYCLE ═══
 Round 1: If you need more context to update plan, call 1-2 discovery tools. Otherwise skip tools.
@@ -237,7 +328,7 @@ Each cycle:
 ═══ PLANNER'S CYCLE TASKS ═══
 1. Read current plan + new evidence from Perceptor
 2. Mark executed scenarios done:true
-3. Identify what tested → what still needs testing
+3. Identify what tested → what still needs testing, especially against the target-type recon baseline
 4. Add ONLY recon/exploit scenarios (NEVER verify/retest/perceptor)
 5. Never modify Phase 4 (Reporting)
 6. Return updated plan OR summary "Pentest complete."

@@ -15,6 +15,8 @@ from .config import (
     RECON_CONTEXT_WINDOW_MAX_TOKENS,
     RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS,
     RECON_MAX_TOOL_CALLS_PER_ROUND,
+    RECON_TOOL_EXECUTION_TIMEOUT_SECONDS,
+    WARMUP_RECON_MAX_TOOL_CALLS_PER_ROUND,
 )
 from .context_window import RECON_CONTEXT_WINDOW_KEY
 from .prompts import SYSTEM_PROMPT
@@ -90,13 +92,37 @@ class ReconExecuterAgent(BaseExecuterAgent):
 
         available_tools = sorted(self._tools.keys())
         normalized_targets = normalize_target_types(self._target_types)
+        max_tool_calls_for_run = _max_tool_calls_per_round_for_message(user_message)
         packet = build_recon_scenario_packet(
             scenario_and_target=user_message,
             context_block=context_block,
             available_tools=available_tools,
             target_types=normalized_targets,
+            max_tool_calls_per_round=max_tool_calls_for_run,
         )
-        return await super().run(packet)
+        previous_timeout_cap = self._execution_tool_timeout_cap_seconds
+        previous_max_tool_calls = self._max_tool_calls_per_round
+        self._execution_tool_timeout_cap_seconds = _tool_timeout_cap_for_message(user_message)
+        self._max_tool_calls_per_round = max_tool_calls_for_run
+        try:
+            return await super().run(packet)
+        finally:
+            self._execution_tool_timeout_cap_seconds = previous_timeout_cap
+            self._max_tool_calls_per_round = previous_max_tool_calls
+
+
+def _tool_timeout_cap_for_message(user_message: str) -> int | None:
+    message = str(user_message or "")
+    if "Warmup scenario batch" in message or "Warmup mode:" in message:
+        return RECON_TOOL_EXECUTION_TIMEOUT_SECONDS
+    return None
+
+
+def _max_tool_calls_per_round_for_message(user_message: str) -> int:
+    message = str(user_message or "")
+    if "Warmup scenario batch" in message or "Warmup mode:" in message:
+        return WARMUP_RECON_MAX_TOOL_CALLS_PER_ROUND
+    return RECON_MAX_TOOL_CALLS_PER_ROUND
 
 
 def format_recon_context_for_packet(snapshot: dict[str, object], max_entries: int = 8) -> str:
@@ -128,12 +154,13 @@ def build_recon_scenario_packet(
     context_block: str,
     available_tools: list[str],
     target_types: list[str],
+    max_tool_calls_per_round: int,
 ) -> str:
     return (
         "Recon scenario packet:\n"
         "1) Scenario + target info from operator follows below.\n"
         "2) Use scoped recon tools to maximize useful recon signal for this scenario.\n"
-        "3) Max tool executions per round: 2. Max rounds per scenario: 3.\n"
+        f"3) Max tool executions per round: {max_tool_calls_per_round}. Max rounds per scenario: 3.\n"
         "4) Always update context window with new findings each round.\n\n"
         "Current context window:\n"
         f"{context_block}\n\n"

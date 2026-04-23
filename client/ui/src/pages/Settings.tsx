@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, Clock3, Cpu, Palette, Pencil, Plus, RefreshCcw, Server, Trash2 } from "lucide-react";
+import { Bot, Clock3, Cpu, ListTree, Palette, Pencil, Plus, RefreshCcw, Server, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Tabs } from "@/components/ui/Tabs";
 import { Toggle } from "@/components/ui/Toggle";
+import { StaticReconPlanSettings } from "@/components/settings/StaticReconPlanSettings";
 import {
   addIntelResourceFromDesktop,
   cancelForceIntelUpdateFromDesktop,
@@ -1020,6 +1021,27 @@ export default function Settings() {
                     )}
                   </div>
                 )}
+              </div>
+            )
+          },
+          {
+            id: "static-recon",
+            label: "Static Recon",
+            content: (
+              <div className="space-y-4">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <ListTree size={14} />
+                      Recon Plan Library
+                    </CardTitle>
+                  </CardHeader>
+                  <p className="text-sm text-text-secondary">
+                    Edit the saved recon baseline for each target type. These plans are stored in the database and used
+                    by the planner warmup before exploit work begins.
+                  </p>
+                </Card>
+                <StaticReconPlanSettings />
               </div>
             )
           }

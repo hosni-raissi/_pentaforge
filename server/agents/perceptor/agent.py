@@ -100,6 +100,18 @@ class PerceptorAgent:
                 reason="cycle_start_fresh_context",
             )
 
+    async def clear_context_window(self) -> None:
+        """Clear persisted and in-memory context window state for this agent."""
+        if self._context_window is None:
+            return
+        await self._context_window.clear()
+        self._context_window._entries = []
+        self._context_window._compression_count = 0
+        logger.info(
+            "perceptor_context_cleared",
+            reason="phase_transition_fresh_context",
+        )
+
     async def assess_text(
         self,
         text: str,

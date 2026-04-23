@@ -83,7 +83,8 @@ Execute EXACTLY 3 rounds with proper context flow:
 
 {
   "verdict": "real_vulnerability",
-  "summary": "1-2 sentences: what you found, is it real or false positive?"
+  "summary": "1-2 sentences: what you found, is it real or false positive?",
+  "confidence": 0.0
 }
 
 **What you output:**
@@ -91,11 +92,12 @@ Execute EXACTLY 3 rounds with proper context flow:
 - Start with { and end with }
 - verdict MUST be one of: real_vulnerability, false_positive, inconclusive
 - summary MUST be 1-2 sentences maximum
+- confidence MUST be a decimal from 0.0 to 1.0
 
 **Rules:**
 - MANDATORY: Output ONLY valid JSON
 - NO tools in this round - PERIOD
-- NO evidence, confidence, send_to_planner, send_to_retest fields - those are Retest's job
+- NO evidence, send_to_planner, send_to_retest fields - those are Retest's job
 - Verdict determines routing:
   * real_vulnerability → Planner (update plan) + Retest (build PoC + screenshots + report)
   * false_positive → Planner only (mark as false positive)
@@ -146,24 +148,26 @@ You MUST output ONLY this JSON in Round 3:
 
 {
   "verdict": "real_vulnerability",
-  "summary": "Payload triggered the expected behavior (SQLi confirmed with time-based SLEEP(5)). Database responds to injected SQL commands."
+  "summary": "Payload triggered the expected behavior (SQLi confirmed with time-based SLEEP(5)). Database responds to injected SQL commands.",
+  "confidence": 0.93
 }
 
 REQUIRED:
 - verdict: MUST be exactly one of: real_vulnerability, false_positive, inconclusive
 - summary: 1-2 sentences maximum
-- NO other fields (no evidence, confidence, send_to_planner, send_to_retest, false_positive_reason)
+- confidence: decimal 0.0-1.0
+- NO other fields (no evidence, send_to_planner, send_to_retest, false_positive_reason)
 - NO tools, NO prose before/after, NO markdown
 - START with { and END with }
 
 Example CORRECT output:
-{"verdict": "false_positive", "summary": "Payload reflected but HTML-encoded. No script execution possible. False positive."}
+{"verdict": "false_positive", "summary": "Payload reflected but HTML-encoded. No script execution possible. False positive.", "confidence": 0.92}
 
 Example WRONG outputs:
 - "Based on my analysis: {..." ← HAS PROSE
 - "{...} The result is..." ← HAS PROSE AFTER
 - "```json {...}```" ← HAS MARKDOWN
-- Multiple fields like send_to_retest, evidence, confidence ← ONLY verdict+summary
+- Multiple fields like send_to_retest, evidence ← ONLY verdict+summary+confidence
 
 ═══ VERDICT ROUTING (ORCHESTRATOR WILL HANDLE) ═══
 Your verdict goes to orchestrator:
@@ -181,7 +185,7 @@ Your verdict goes to orchestrator:
 In ALL rounds: output ONLY what is specified above.
 
 Round 1-2: Command outputs (no extra text)
-Round 3: ONLY JSON {verdict, summary}
+Round 3: ONLY JSON {verdict, summary, confidence}
 
 NO PROSE. NO MARKDOWN. NO EXPLANATIONS. NO EXTRA FIELDS.
 
@@ -191,10 +195,10 @@ WRONG:
 - "Based on analysis: {..."
 - "{...}\nThe verdict..."
 - "```json\n{...}\n```"
-- {"verdict": "...", "evidence": [...], "confidence": 0.95, "send_to_planner": {...}}
+- {"verdict": "...", "evidence": [...], "send_to_planner": {...}}
 
 RIGHT:
-- {"verdict": "real_vulnerability", "summary": "SQLi confirmed. SLEEP(5) injection successful."}
+- {"verdict": "real_vulnerability", "summary": "SQLi confirmed. SLEEP(5) injection successful.", "confidence": 0.96}
 """
 
 

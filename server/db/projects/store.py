@@ -29,6 +29,10 @@ _INTEL_RESOURCE_UPDATE_MODES = {
 }
 
 
+def _normalize_static_plan_target_type(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
 class ProjectsStore:
     """CRUD operations for project payloads persisted as JSON."""
 
@@ -138,6 +142,22 @@ class ProjectsStore:
                     name TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS planner_static_recon_plans (
+                    target_type TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_projects_planner_static_recon_plans_updated_at
+                ON planner_static_recon_plans (updated_at DESC);
                 """
             )
             cur.execute("PRAGMA table_info(intel_resources);")
@@ -674,6 +694,111 @@ class ProjectsStore:
         if not isinstance(payload, dict):
             return None
         return payload
+
+    def list_static_recon_plans(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT target_type, payload, created_at, updated_at
+                FROM planner_static_recon_plans
+                ORDER BY target_type ASC;
+                """
+            )
+            rows = cur.fetchall()
+
+        plans: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            payload.setdefault("target_type", str(row["target_type"]))
+            payload["created_at"] = str(row["created_at"])
+            payload["updated_at"] = str(row["updated_at"])
+            plans.append(payload)
+        return plans
+
+    def get_static_recon_plan(self, target_type: str) -> dict[str, Any] | None:
+        clean_target_type = _normalize_static_plan_target_type(target_type)
+        if not clean_target_type:
+            return None
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT target_type, payload, created_at, updated_at
+                FROM planner_static_recon_plans
+                WHERE target_type = ?;
+                """,
+                (clean_target_type,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload.setdefault("target_type", str(row["target_type"]))
+        payload["created_at"] = str(row["created_at"])
+        payload["updated_at"] = str(row["updated_at"])
+        return payload
+
+    def upsert_static_recon_plan(self, *, target_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        clean_target_type = _normalize_static_plan_target_type(target_type)
+        if not clean_target_type:
+            raise ValueError("target_type is required")
+        if len(clean_target_type) > 64:
+            raise ValueError("target_type is too long (max 64)")
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+
+        safe_payload = dict(payload)
+        safe_payload["target_type"] = clean_target_type
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO planner_static_recon_plans (
+                    target_type, payload, created_at, updated_at
+                )
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(target_type) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (clean_target_type, json.dumps(safe_payload, ensure_ascii=True)),
+            )
+            conn.commit()
+
+        saved = self.get_static_recon_plan(clean_target_type)
+        if saved is None:
+            raise ValueError("failed to save static recon plan")
+        return saved
+
+    def delete_static_recon_plan(self, target_type: str) -> int:
+        clean_target_type = _normalize_static_plan_target_type(target_type)
+        if not clean_target_type:
+            return 0
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM planner_static_recon_plans
+                WHERE target_type = ?;
+                """,
+                (clean_target_type,),
+            )
+            deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return deleted
 
     def list_intel_resources(
         self,

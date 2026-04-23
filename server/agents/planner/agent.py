@@ -59,7 +59,11 @@ from .config import (
 )
 from .context_window import build_planner_context_window
 from .context_builder import PlannerContextBuilder
-from .prompts import INITIAL_SYSTEM_PROMPT, LOOP_SYSTEM_PROMPT
+from .prompts import (
+    FULL_PLAN_SYSTEM_PROMPT,
+    LOOP_REPLAN_SYSTEM_PROMPT,
+    WARMUP_RECON_SYSTEM_PROMPT,
+)
 from .tools import ALL_PLANNER_TOOLS
 from .tools.pentest_plan import _current_plan, update_pentest_plan
 
@@ -1523,8 +1527,9 @@ class PlannerAgent:
     """LangGraph-based planner that builds pentest plans with tool calling.
 
     Modes:
-        - Initial (is_loop=False): Builds a complete plan from scratch.
-        - Loop (is_loop=True): Receives executor results, returns next scenarios.
+        - Warmup: Builds the first recon-only startup plan.
+        - Full: Builds the first full plan after Intel synthesis.
+        - Loop: Receives executor results, returns updated scenarios.
     """
 
     def __init__(
@@ -1573,7 +1578,7 @@ class PlannerAgent:
             self._context_builder = PlannerContextBuilder(
                 projects_store=self._projects_store,
                 vector_store=self._vector_store,
-                system_prompt=INITIAL_SYSTEM_PROMPT,
+                system_prompt=LOOP_REPLAN_SYSTEM_PROMPT,
             )
         else:
             self._context_builder = None
@@ -1691,7 +1696,7 @@ class PlannerAgent:
                     f"{type(exc).__name__}; backing off..."
                 )
 
-            tools_for_call = state.get("tool_schemas") if self._tools else None
+            tools_for_call = None if state.get("disable_tools") else (state.get("tool_schemas") if self._tools else None)
             if round_count >= round_cap:
                 tools_for_call = None
 
@@ -2461,8 +2466,19 @@ class PlannerAgent:
         user_message: str,
         is_loop: bool = False,
         intel_checklist: dict[str, Any] | None = None,
+        plan_mode: str | None = None,
     ) -> PlannerResult:
-        mode_label = "loop re-entry" if is_loop else "initial plan"
+        normalized_plan_mode = str(plan_mode or "").strip().lower()
+        if is_loop:
+            normalized_plan_mode = "loop"
+        elif normalized_plan_mode not in {"warmup", "full"}:
+            normalized_plan_mode = "warmup" if "warmup recon stage" in user_message.lower() else "full"
+
+        mode_label = {
+            "warmup": "warmup recon plan",
+            "full": "full plan",
+            "loop": "loop re-entry",
+        }.get(normalized_plan_mode, "full plan")
         self._cb.on_step(f"Planner Agent starting ({mode_label})")
         if self._context_window is not None:
             await self._context_window.record(
@@ -2475,10 +2491,15 @@ class PlannerAgent:
                 },
             )
 
-        system_content = LOOP_SYSTEM_PROMPT if is_loop else INITIAL_SYSTEM_PROMPT
+        if normalized_plan_mode == "loop":
+            system_content = LOOP_REPLAN_SYSTEM_PROMPT
+        elif normalized_plan_mode == "warmup":
+            system_content = WARMUP_RECON_SYSTEM_PROMPT
+        else:
+            system_content = FULL_PLAN_SYSTEM_PROMPT
 
         # For loop rounds, use the 6-part context builder if available
-        if is_loop and self._context_builder:
+        if normalized_plan_mode == "loop" and self._context_builder:
             try:
                 system_content = await self._context_builder.build_context(
                     project_id=self._project_id,
@@ -2489,7 +2510,7 @@ class PlannerAgent:
             except Exception as exc:
                 logger.warning("context_builder_failed", error=str(exc))
                 # Fall back to static prompt if context builder fails
-                system_content = LOOP_SYSTEM_PROMPT
+                system_content = LOOP_REPLAN_SYSTEM_PROMPT
 
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content
@@ -2499,16 +2520,16 @@ class PlannerAgent:
         checklist_overview, checklist_windows = _build_intel_checklist_windows(
             checklist_payload
         )
-        if not is_loop and checklist_compact_summary:
+        if normalized_plan_mode in {"warmup", "full"} and checklist_compact_summary:
             self._cb.on_step(
                 "Planner checklist compact state prepared: "
                 f"items={checklist_compact_summary.get('available_total', 0)} "
-                f"high_priority={len(checklist_compact_summary.get('high_priority_pending', []))}"
+                f"high_priority_tracked={len(checklist_compact_summary.get('high_priority_pending', []))}"
             )
 
         world_state_hash = _compute_world_state_hash(
             user_message=user_message,
-            is_loop=is_loop,
+            is_loop=normalized_plan_mode == "loop",
             checklist_compact_summary=checklist_compact_summary,
         )
         if self._last_state_hash and self._last_state_hash == world_state_hash:
@@ -2528,19 +2549,20 @@ class PlannerAgent:
                             "content": _build_loop_plan_context_message(),
                         }
                     ]
-                    if is_loop
+                    if normalized_plan_mode == "loop"
                     else []
                 ),
                 {"role": "user", "content": user_message},
             ],
-            "tool_schemas": self._tool_schemas_for_mode(is_loop),
+            "tool_schemas": self._tool_schemas_for_mode(normalized_plan_mode == "loop"),
+            "disable_tools": normalized_plan_mode == "warmup",
             "round_count": 0,
             "total_tool_calls": 0,
             "last_response": "",
             "last_tool_calls": [],
             "last_tool_results": [],
             "stop_after_tools": False,
-            "is_loop": is_loop,
+            "is_loop": normalized_plan_mode == "loop",
             "plan_result": {},
             "error": "",
             "recovery_attempted": False,
@@ -2550,7 +2572,7 @@ class PlannerAgent:
             "intel_checklist_compact_summary": checklist_compact_summary,
             "planning_round_cap": (
                 min(MAX_TOOL_ROUNDS, 4)
-                if not is_loop
+                if normalized_plan_mode != "loop"
                 else MAX_TOOL_ROUNDS
             ),
         }

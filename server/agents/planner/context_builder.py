@@ -83,6 +83,17 @@ class PlannerContextBuilder:
 
         detected_tech = last_scan.get("detectedTech", [])
         phase = last_scan.get("phase", "reconnaissance")
+        result = last_scan.get("result", {}) if isinstance(last_scan, dict) else {}
+        if not isinstance(result, dict):
+            result = {}
+        static_plan = result.get("plannerStaticPlan", project.get("plannerStaticPlan", {}))
+        static_plan_count = 0
+        static_plan_target_type = ""
+        if isinstance(static_plan, dict):
+            static_plan_target_type = str(static_plan.get("target_type", "")).strip()
+            scenarios = static_plan.get("scenarios", [])
+            if isinstance(scenarios, list):
+                static_plan_count = len(scenarios)
 
         checklist = project.get("checklist", {})
         if isinstance(checklist, dict):
@@ -102,6 +113,7 @@ class PlannerContextBuilder:
         return f"""ENGAGEMENT SNAPSHOT (Round {self.round_count}):
 Current Phase: {phase}
 Checklist Coverage: {coverage_pct}% ({completed}/{total_items})
+Static Recon Template: {static_plan_count} items for {static_plan_target_type or 'unknown'}
 Detected Technologies:
   - {tech_list}"""
 

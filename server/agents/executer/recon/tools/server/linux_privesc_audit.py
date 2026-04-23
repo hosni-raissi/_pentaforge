@@ -35,6 +35,16 @@ _BLOCKED_FLAGS = frozenset({"--upload", "--reverse-shell", "--exploit"})
 
 _RAW_LIMIT = 8_000
 _ERR_LIMIT = 1_000
+_SECTION_RESULT_LIMITS: dict[str, int] = {
+    "suid_bins": 64,
+    "sudo_rules": 32,
+    "cron_jobs": 32,
+    "writable_paths": 96,
+    "capabilities": 48,
+    "kernel_exploits": 48,
+    "container_findings": 24,
+    "processes": 96,
+}
 
 _LINPEAS_BIN = "/tmp/linpeas.sh"
 _LES_BIN     = "/tmp/linux-exploit-suggester.sh"
@@ -345,6 +355,27 @@ class PrivescAuditResult(BaseModel):
     raw_output:         Optional[str]            = None
     error:              Optional[str]            = None
     execution_time:     float                    = 0.0
+
+
+def _apply_result_limits(result: PrivescAuditResult) -> PrivescAuditResult:
+    truncation_notes: list[str] = []
+
+    for field_name, limit in _SECTION_RESULT_LIMITS.items():
+        items = getattr(result, field_name, None)
+        if not isinstance(items, list):
+            continue
+        original_count = len(items)
+        if original_count <= limit:
+            continue
+        setattr(result, field_name, items[:limit])
+        truncation_notes.append(f"{field_name}:{original_count}->{limit}")
+
+    if truncation_notes:
+        prefix = "[truncated] " + ", ".join(truncation_notes)
+        existing = result.raw_output or ""
+        result.raw_output = f"{prefix}\n{existing}".strip()[:_RAW_LIMIT]
+
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -847,6 +878,7 @@ def linux_privesc_audit(
     # ── Finalise ──────────────────────────────────────────────
     result.raw_output     = (stdout or stderr)[:_RAW_LIMIT] or None
     result.execution_time = round(time.monotonic() - start, 2)
+    result = _apply_result_limits(result)
 
     # Only surface stderr as error when the run produced nothing useful
     has_findings = any([

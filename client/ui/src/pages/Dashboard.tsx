@@ -39,7 +39,7 @@ import {
   type ScanEventPayload,
 } from "@/lib/projectBridge";
 import { useProjects } from "@/stores/projects";
-import type { ProjectStatus } from "@/types";
+import type { Finding, ProjectStatus } from "@/types";
 
 type InsightTab = "plan" | "checklist";
 type LogLevel = "info" | "success" | "warn" | "error";
@@ -1214,6 +1214,139 @@ export default function Dashboard() {
         );
       }
 
+      if (event.event === "verify_finding_saved" && isRecord(event.data.finding)) {
+        const finding = event.data.finding as Record<string, unknown>;
+        const activeProject = useProjects
+          .getState()
+          .projects.find((project) => project.id === activeProjectId);
+        if (activeProject) {
+          const currentFindings = Array.isArray(activeProject.findings)
+            ? [...activeProject.findings]
+            : [];
+          const incomingId = typeof finding.id === "string" ? finding.id : "";
+          const incomingTitle = typeof finding.title === "string" ? finding.title.trim().toLowerCase() : "";
+          const incomingTarget = typeof finding.target === "string" ? finding.target.trim().toLowerCase() : "";
+          const incomingCategory = typeof finding.category === "string" ? finding.category.trim().toLowerCase() : "";
+          const existingIndex = currentFindings.findIndex((row) => {
+            const rowId = typeof row.id === "string" ? row.id : "";
+            if (incomingId && rowId === incomingId) {
+              return true;
+            }
+            return (
+              String(row.title ?? "").trim().toLowerCase() === incomingTitle
+              && String(row.target ?? "").trim().toLowerCase() === incomingTarget
+              && String(row.category ?? "").trim().toLowerCase() === incomingCategory
+            );
+          });
+
+          const normalizedFinding: Finding = {
+            id: incomingId,
+            title: typeof finding.title === "string" ? finding.title : "Verified finding",
+            severity: normalizeDashboardSeverity(
+              typeof finding.severity === "string" ? finding.severity : "medium",
+            ),
+            category: typeof finding.category === "string" ? finding.category : "unknown",
+            target: typeof finding.target === "string" ? finding.target : "",
+            status:
+              finding.status === "open"
+              || finding.status === "verified"
+              || finding.status === "fixed"
+              || finding.status === "false_positive"
+                ? finding.status
+                : "verified",
+            cvss:
+              typeof finding.cvss === "number" && Number.isFinite(finding.cvss)
+                ? finding.cvss
+                : undefined,
+            cve: typeof finding.cve === "string" ? finding.cve : undefined,
+            description: typeof finding.description === "string" ? finding.description : "",
+            evidence: finding.evidence as Finding["evidence"],
+            remediation: typeof finding.remediation === "string" ? finding.remediation : undefined,
+            timestamp: typeof finding.timestamp === "string" ? finding.timestamp : event.timestamp,
+          };
+          if (existingIndex >= 0) {
+            currentFindings[existingIndex] = {
+              ...currentFindings[existingIndex],
+              ...normalizedFinding,
+            };
+          } else {
+            currentFindings.unshift(normalizedFinding);
+          }
+
+          updateProject(
+            activeProjectId,
+            {
+              updatedAt: event.timestamp,
+              findings: currentFindings,
+            },
+            { persist: false },
+          );
+        }
+      }
+
+      const eventPlanData = isRecord(event.data.plan_data)
+        ? event.data.plan_data
+        : null;
+      const eventNeeds = Array.isArray(event.data.needs)
+        ? event.data.needs
+        : undefined;
+      const eventSummary = normalizeText(event.data.summary);
+      const isWarmupPlanEvent =
+        event.event === "warmup_plan_ready"
+        || event.data.warmup === true
+        || normalizeText(event.data.stage) === "warmup";
+      const isPlannerPlanEvent =
+        event.event === "plan_updated_by_planner"
+        || event.event === "planner_complete"
+        || event.event === "warmup_plan_ready"
+        || (event.event === "scenario_state_change" && eventPlanData !== null);
+
+      if (eventPlanData || eventNeeds || eventSummary) {
+        const activeProject = useProjects
+          .getState()
+          .projects.find((project) => project.id === activeProjectId);
+        if (activeProject) {
+          const lastScan = isRecord(activeProject.lastScan)
+            ? activeProject.lastScan
+            : {};
+          const result = isRecord(lastScan.result) ? lastScan.result : {};
+          const currentPlanner = isRecord(result.planner) ? result.planner : {};
+          const currentWarmup = isRecord(result.warmup) ? result.warmup : {};
+
+          const nextPlanner = isPlannerPlanEvent
+            ? {
+              ...currentPlanner,
+              ...(eventPlanData ? { plan_data: eventPlanData } : {}),
+              ...(eventNeeds ? { needs: eventNeeds } : {}),
+              ...(eventSummary ? { summary: eventSummary } : {}),
+            }
+            : currentPlanner;
+
+          const nextWarmup = isWarmupPlanEvent
+            ? {
+              ...currentWarmup,
+              ...(eventPlanData ? { plan: eventPlanData } : {}),
+            }
+            : currentWarmup;
+
+          updateProject(
+            activeProjectId,
+            {
+              updatedAt: event.timestamp,
+              lastScan: {
+                ...lastScan,
+                result: {
+                  ...result,
+                  ...(isPlannerPlanEvent ? { planner: nextPlanner } : {}),
+                  ...(isWarmupPlanEvent ? { warmup: nextWarmup } : {}),
+                },
+              },
+            },
+            { persist: false },
+          );
+        }
+      }
+
       if (
         event.event === "scan_completed" ||
         event.event === "scan_failed" ||
@@ -1864,13 +1997,13 @@ export default function Dashboard() {
 
   const resolvedPlannerResult = (() => {
     let plannerError = "";
-    for (let index = scanEvents.length - 1; index >= 0; index -= 1) {
-      const event = scanEvents[index];
+    for (const event of scanEvents) {
       if (!isRecord(event.data)) {
         continue;
       }
       if (
         (event.event === "scenario_state_change" ||
+          event.event === "warmup_plan_ready" ||
           event.event === "plan_updated_by_planner" ||
           event.event === "planner_complete") &&
         event.data.plan_data
@@ -1900,10 +2033,11 @@ export default function Dashboard() {
       : null;
     const result = isRecord(lastScan?.result) ? lastScan.result : null;
     const planner = isRecord(result?.planner) ? result.planner : null;
+    const warmup = isRecord(result?.warmup) ? result.warmup : null;
     return {
       summary: normalizeText(planner?.summary),
       needs: planner?.needs,
-      planData: planner?.plan_data,
+      planData: planner?.plan_data ?? warmup?.plan,
       status: normalizeText(lastScan?.status),
       error: plannerError || normalizeText(lastScan?.error),
     };

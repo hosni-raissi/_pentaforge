@@ -1,0 +1,62 @@
+{
+  "framework_name": "Core 8 Cloud Reconnaissance Framework",
+  "version": "1.0",
+  "scenarios": [
+    {
+      "id": "C1",
+      "scenario": "Public Asset & IP Space Discovery",
+      "objective": "Identify the organization's cloud-native footprint, including ASN ranges and managed IP space.",
+      "methods": ["Cloud-specific IP lookups", "Reverse DNS", "Passive OSINT for cloud domains"],
+      "priority": 1
+    },
+    {
+      "id": "C2",
+      "scenario": "Storage & Data Surface Enumeration",
+      "objective": "Locate public or semi-public data stores (S3 buckets, Azure Blobs, GCP Buckets).",
+      "methods": ["Bucket name guessing/permutations", "Search engine dorking", "Cloud storage enumeration tools"],
+      "priority": 1
+    },
+    {
+      "id": "C3",
+      "scenario": "Identity & IAM Surface Mapping",
+      "objective": "Identify valid users, roles, and service accounts through public-facing hints.",
+      "methods": ["IAM enumeration via error messages", "Public role discovery", "User existence probing"],
+      "priority": 1
+    },
+    {
+      "id": "C4",
+      "scenario": "Cloud-Native Service Fingerprinting",
+      "objective": "Identify which managed services are in use (Lambda, RDS, Kubernetes, App Engine).",
+      "methods": ["Header analysis (e.g., x-amz-cf-id)", "DNS record inspection", "Endpoint behavior review"],
+      "priority": 2
+    },
+    {
+      "id": "C5",
+      "scenario": "Exposed Metadata & Management Endpoints",
+      "objective": "Identify reachable instance metadata services (IMDS) or cloud management consoles.",
+      "methods": ["SSRF probing for 169.254.169.254", "Console URL discovery", "Management API probing"],
+      "priority": 2
+    },
+    {
+      "id": "C6",
+      "scenario": "Container & Orchestration Discovery",
+      "objective": "Map out Kubernetes (K8s) clusters, Docker registries, and container management interfaces.",
+      "methods": ["K8s API server probing", "Registry enumeration", "Service mesh detection"],
+      "priority": 2
+    },
+    {
+      "id": "C7",
+      "scenario": "Serverless & Function Mapping",
+      "objective": "Discover ephemeral endpoints and triggered logic (AWS Lambda, Azure Functions).",
+      "methods": ["Trigger URL discovery", "Event source mapping", "Function name enumeration"],
+      "priority": 3
+    },
+    {
+      "id": "C8",
+      "scenario": "Trust & Cross-Account Relationship Review",
+      "objective": "Identify third-party integrations and cross-account trust boundaries.",
+      "methods": ["OIDC provider analysis", "Marketplace app review", "Cross-account role probing"],
+      "priority": 3
+    }
+  ]
+}

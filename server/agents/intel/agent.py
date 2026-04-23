@@ -37,6 +37,7 @@ from server.agents.intel.config import (
     FORMATTER_ROUNDS,
     FORMATTER_CALL_TIMEOUT_SECONDS,
     FORMATTER_MAX_TOOLS_PER_ROUND,
+    MIN_SYNTH_CHECKLIST_ITEMS,
     FORMATTER_ALLOWED_TOOLS,
     FORMATTER_TOOL_MAX_RETRIES,
     VERIFY_SOURCES,
@@ -143,6 +144,9 @@ def _default_stats() -> dict[str, Any]:
     return {
         "new_payloads": 0, "new_exploits": 0, "total_embedded": 0,
         "payload_store_added": 0,
+        "sources_total": 0, "sources_verified": 0,
+        "rag_sources_processed": 0, "rag_sources_changed": 0,
+        "rag_documents_ingested": 0, "rag_chunks_embedded": 0,
         "content_types_updated": [], "domains_updated": [],
         "update_status": "no_new_data", "rate_limited": False, "source_errors": [],
     }
@@ -1076,6 +1080,170 @@ def _flatten_checklist_item_names(payload: dict[str, Any]) -> list[str]:
             names.append(name)
     return names
 
+
+def _structured_checklist_item_count(payload: dict[str, Any]) -> int:
+    if not _is_structured_checklist_payload(payload):
+        return 0
+    return len(_flatten_checklist_item_names(payload))
+
+
+def _merge_structured_checklist_payloads(*payloads: dict[str, Any]) -> dict[str, Any]:
+    merged_target_type = ""
+    merged_blocks: dict[str, dict[str, Any]] = {}
+
+    for payload in payloads:
+        if not _is_structured_checklist_payload(payload):
+            continue
+        if not merged_target_type:
+            merged_target_type = str(payload.get("target_type", "")).strip()
+
+        for raw_block in payload.get("checklist", []):
+            if not isinstance(raw_block, dict):
+                continue
+            phase = str(raw_block.get("phase", "")).strip()
+            title = str(raw_block.get("title", "")).strip() or _phase_block_title(phase)
+            items = raw_block.get("items", [])
+            if not phase or not isinstance(items, list):
+                continue
+
+            bucket = merged_blocks.setdefault(
+                phase,
+                {
+                    "phase": phase,
+                    "title": title,
+                    "items": {},
+                },
+            )
+            if not bucket.get("title"):
+                bucket["title"] = title
+
+            ranked_items = bucket["items"]
+            if not isinstance(ranked_items, dict):
+                ranked_items = {}
+                bucket["items"] = ranked_items
+
+            for item in items:
+                if isinstance(item, dict):
+                    name = str(item.get("name", item.get("title", ""))).strip()
+                    raw_priority = item.get("priority", _priority_for_item_name(name, phase))
+                else:
+                    name = str(item).strip()
+                    raw_priority = _priority_for_item_name(name, phase)
+                if not name:
+                    continue
+                priority = _clamp_priority(raw_priority, default=_priority_for_item_name(name, phase))
+                ranked_items[name] = max(int(ranked_items.get(name, 0) or 0), priority)
+
+    checklist_blocks: list[dict[str, Any]] = []
+    total_items = 0
+    for phase in sorted(merged_blocks.keys(), key=_phase_sort_key):
+        bucket = merged_blocks[phase]
+        ranked_items = bucket.get("items", {})
+        if not isinstance(ranked_items, dict) or not ranked_items:
+            continue
+        sorted_items = sorted(
+            ranked_items.items(),
+            key=lambda kv: (-int(kv[1]), kv[0].lower()),
+        )
+        total_items += len(sorted_items)
+        checklist_blocks.append(
+            {
+                "phase": phase,
+                "title": str(bucket.get("title", "")).strip() or _phase_block_title(phase),
+                "items": [
+                    {"name": item_name, "priority": int(item_priority)}
+                    for item_name, item_priority in sorted_items
+                ],
+            }
+        )
+
+    return {
+        "target_type": merged_target_type,
+        "available_total": total_items,
+        "checklist": checklist_blocks,
+    }
+
+
+def _limit_structured_checklist_items(payload: dict[str, Any], max_items: int | None) -> dict[str, Any]:
+    if not _is_structured_checklist_payload(payload):
+        return payload
+    if max_items is None or int(max_items) <= 0:
+        return payload
+
+    remaining = int(max_items)
+    limited_blocks: list[dict[str, Any]] = []
+    total_items = 0
+
+    for raw_block in payload.get("checklist", []):
+        if remaining <= 0:
+            break
+        if not isinstance(raw_block, dict):
+            continue
+        phase = str(raw_block.get("phase", "")).strip()
+        title = str(raw_block.get("title", "")).strip()
+        items = raw_block.get("items", [])
+        if not phase or not title or not isinstance(items, list) or not items:
+            continue
+
+        normalized_items: list[dict[str, Any]] = []
+        for item in items:
+            if remaining <= 0:
+                break
+            if isinstance(item, dict):
+                name = str(item.get("name", item.get("title", ""))).strip()
+                priority = _clamp_priority(
+                    item.get("priority", _priority_for_item_name(name, phase)),
+                    default=_priority_for_item_name(name, phase),
+                )
+            else:
+                name = str(item).strip()
+                priority = _priority_for_item_name(name, phase)
+            if not name:
+                continue
+            normalized_items.append({"name": name, "priority": priority})
+            remaining -= 1
+
+        if normalized_items:
+            total_items += len(normalized_items)
+            limited_blocks.append(
+                {
+                    "phase": phase,
+                    "title": title,
+                    "items": normalized_items,
+                }
+            )
+
+    return {
+        "target_type": str(payload.get("target_type", "")).strip(),
+        "available_total": total_items,
+        "checklist": limited_blocks,
+    }
+
+
+def _ensure_structured_checklist_min_items(
+    payload: dict[str, Any],
+    *,
+    min_items: int,
+    fallback_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not _is_structured_checklist_payload(payload):
+        return payload
+
+    target_min = max(0, int(min_items or 0))
+    if target_min <= 0:
+        return payload
+
+    current_count = _structured_checklist_item_count(payload)
+    if current_count >= target_min:
+        return payload
+
+    if _is_structured_checklist_payload(fallback_payload):
+        merged = _merge_structured_checklist_payloads(payload, fallback_payload)
+        if _structured_checklist_item_count(merged) > current_count:
+            return merged
+
+    return payload
+
 def _compact_search_results_for_formatter(parsed: dict[str, Any]) -> str:
     hits = parsed.get("hits", [])
     compact_hits: list[dict[str, Any]] = []
@@ -1582,9 +1750,12 @@ class IntelAgent:
         info: str = "",
         *,
         custom_checklist_text: str = "",
+        merge_custom_checklist: bool = False,
+        max_checklist_items: int | None = None,
         force_update: bool = False,
         refresh_days_override: int | None = None,
         update_only: bool = False,
+        skip_rag_check: bool = False,
     ) -> IntelResult:
         target_type = _normalize_target_type(target_type)
         self._cb.on_step(f"Intel Agent starting for target_type='{target_type}'")
@@ -1600,42 +1771,92 @@ class IntelAgent:
             )
         await self._context.ensure_ready()
 
-        # Check cooldown
-        now = datetime.now(timezone.utc)
-        last_update = self._state_store.get_last_update(target_type)
-        refresh_days = RAG_REFRESH_DAYS
-        if refresh_days_override is not None and int(refresh_days_override) > 0:
-            refresh_days = int(refresh_days_override)
-        elif self._projects_store is not None:
-            try:
-                custom_days = self._projects_store.get_intel_refresh_days(target_type)
-                if custom_days and custom_days > 0:
-                    refresh_days = custom_days
-            except Exception as exc:
-                logger.warning("intel_refresh_days_read_failed", target_type=target_type, error=str(exc))
+        if skip_rag_check:
+            # RAG was already checked/updated at warmup start — skip redundant check
+            self._cb.on_step("RAG check skipped — already verified before warmup recon")
+            logger.info("intel_rag_check_skipped", target_type=target_type, reason="skip_rag_check_flag")
+        else:
+            # Check cooldown
+            now = datetime.now(timezone.utc)
+            last_update = self._state_store.get_last_update(target_type)
+            refresh_days = RAG_REFRESH_DAYS
+            if refresh_days_override is not None and int(refresh_days_override) > 0:
+                refresh_days = int(refresh_days_override)
+            elif self._projects_store is not None:
+                try:
+                    custom_days = self._projects_store.get_intel_refresh_days(target_type)
+                    if custom_days and custom_days > 0:
+                        refresh_days = custom_days
+                except Exception as exc:
+                    logger.warning("intel_refresh_days_read_failed", target_type=target_type, error=str(exc))
 
-        refresh_seconds = refresh_days * 86400
-        needs_update = (
-            force_update
-            or last_update is None
-            or (now - last_update).total_seconds() >= refresh_seconds
-        )
-        last_update_text = last_update.isoformat() if last_update else "none"
-        age_days = (now - last_update).total_seconds() / 86400 if last_update else None
-        age_text = f"{age_days:.2f} days" if age_days is not None else "n/a"
-        self._cb.on_step(
-            f"RAG update check: last_update={last_update_text}, age={age_text}, needs_update={'yes' if needs_update else 'no'}"
-        )
-        logger.info(
-            "intel_rag_update_check",
-            target_type=target_type,
-            last_update=last_update_text,
-            age_days=age_days,
-            needs_update=needs_update,
-            refresh_days=refresh_days,
-        )
-        if update_only:
-            if not needs_update and last_update is not None:
+            refresh_seconds = refresh_days * 86400
+            needs_update = (
+                force_update
+                or last_update is None
+                or (now - last_update).total_seconds() >= refresh_seconds
+            )
+            last_update_text = last_update.isoformat() if last_update else "none"
+            age_days = (now - last_update).total_seconds() / 86400 if last_update else None
+            age_text = f"{age_days:.2f} days" if age_days is not None else "n/a"
+            self._cb.on_step(
+                f"RAG update check: last_update={last_update_text}, age={age_text}, needs_update={'yes' if needs_update else 'no'}"
+            )
+            logger.info(
+                "intel_rag_update_check",
+                target_type=target_type,
+                last_update=last_update_text,
+                age_days=age_days,
+                needs_update=needs_update,
+                refresh_days=refresh_days,
+            )
+            if update_only:
+                if not needs_update and last_update is not None:
+                    days_ago = (now - last_update).total_seconds() / 86400
+                    self._cb.on_done(
+                        f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
+                    )
+                    logger.info(
+                        "intel_rag_update_skipped",
+                        target_type=target_type,
+                        reason="fresh_data",
+                        age_days=days_ago,
+                        refresh_days=refresh_days,
+                    )
+                    return IntelResult(
+                        status="complete",
+                        stats=_default_stats(),
+                    )
+                if force_update:
+                    self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
+                self._cb.on_step("Update-only mode: running Intel update pipeline")
+                logger.info("intel_rag_update_start", target_type=target_type, mode="update_only")
+                pipeline_report = await self._run_update_pipeline(target_type=target_type, info=info)
+                stats = _normalize_stats(pipeline_report.get("stats"))
+                self._cb.on_done("Update-only run complete")
+                logger.info("intel_rag_update_done", target_type=target_type, mode="update_only")
+                return IntelResult(status="complete", stats=stats)
+
+            if needs_update:
+                if force_update:
+                    self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
+                # CRITICAL FIX: RAG update MUST be await (blocking) before checklist approval
+                # Previously was background task, causing Planner to start before RAG ready
+                # Now: Intel waits for RAG → checklist ready → Planner starts with full context
+                self._cb.on_step("RAG update needed — updating knowledge base (blocking until complete)")
+                logger.info("intel_rag_update_start", target_type=target_type, mode="blocking")
+                try:
+                    await self._run_update_pipeline(target_type=target_type, info=info)
+                    self._cb.on_step("RAG update complete — knowledge base ready for Planner")
+                    logger.info("intel_rag_update_done", target_type=target_type, mode="blocking")
+                except Exception as rag_exc:
+                    logger.warning(
+                        "intel_rag_update_error",
+                        error=str(rag_exc)[:200],
+                        message="RAG update error, continuing with existing knowledge base",
+                    )
+                    self._cb.on_warn(f"RAG update error (continuing): {str(rag_exc)[:100]}")
+            else:
                 days_ago = (now - last_update).total_seconds() / 86400
                 self._cb.on_done(
                     f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
@@ -1647,72 +1868,31 @@ class IntelAgent:
                     age_days=days_ago,
                     refresh_days=refresh_days,
                 )
-                return IntelResult(
-                    status="complete",
-                    stats=_default_stats(),
-                )
-            if force_update:
-                self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
-            self._cb.on_step("Update-only mode: running Intel update pipeline")
-            logger.info("intel_rag_update_start", target_type=target_type, mode="update_only")
-            pipeline_report = await self._run_update_pipeline(target_type=target_type, info=info)
-            stats = _normalize_stats(pipeline_report.get("stats"))
-            self._cb.on_done("Update-only run complete")
-            logger.info("intel_rag_update_done", target_type=target_type, mode="update_only")
-            return IntelResult(status="complete", stats=stats)
-
-        if needs_update:
-            if force_update:
-                self._cb.on_step(f"Force update requested — bypassing cooldown ({refresh_days} day window)")
-            # CRITICAL FIX: RAG update MUST be await (blocking) before checklist approval
-            # Previously was background task, causing Planner to start before RAG ready
-            # Now: Intel waits for RAG → checklist ready → Planner starts with full context
-            self._cb.on_step("RAG update needed — updating knowledge base (blocking until complete)")
-            logger.info("intel_rag_update_start", target_type=target_type, mode="blocking")
-            try:
-                await self._run_update_pipeline(target_type=target_type, info=info)
-                self._cb.on_step("RAG update complete — knowledge base ready for Planner")
-                logger.info("intel_rag_update_done", target_type=target_type, mode="blocking")
-            except Exception as rag_exc:
-                logger.warning(
-                    "intel_rag_update_error",
-                    error=str(rag_exc)[:200],
-                    message="RAG update error, continuing with existing knowledge base",
-                )
-                self._cb.on_warn(f"RAG update error (continuing): {str(rag_exc)[:100]}")
-        else:
-            days_ago = (now - last_update).total_seconds() / 86400
-            self._cb.on_done(
-                f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) — skipping update"
-            )
-            logger.info(
-                "intel_rag_update_skipped",
-                target_type=target_type,
-                reason="fresh_data",
-                age_days=days_ago,
-                refresh_days=refresh_days,
-            )
 
         cleaned_payload: dict[str, Any] = {}
         base_checklist: dict[str, Any] = {}
         structured_checklist: dict[str, Any] = {}
         final_status = "complete"
         custom_checklist_clean = str(custom_checklist_text or "").strip()
+        parsed_custom_payload: dict[str, Any] = {}
         if custom_checklist_clean:
+            parsed_custom_payload = _parse_custom_checklist_text(
+                custom_checklist_clean,
+                target_type=target_type,
+            )
+            if not _is_structured_checklist_payload(parsed_custom_payload):
+                raise RuntimeError(
+                    "Uploaded custom checklist could not be parsed into a valid checklist structure."
+                )
+
+        if custom_checklist_clean and not merge_custom_checklist:
             self._cb.on_step(
                 "Skipping static RAG snapshot; custom checklist path will reuse uploaded checklist directly"
             )
             self._cb.on_step(
                 "Custom checklist detected — skipping Intel checklist generation and formatter enrichment; using uploaded .txt checklist directly"
             )
-            cleaned_payload = _parse_custom_checklist_text(
-                custom_checklist_clean,
-                target_type=target_type,
-            )
-            if not _is_structured_checklist_payload(cleaned_payload):
-                raise RuntimeError(
-                    "Uploaded custom checklist could not be parsed into a valid checklist structure."
-                )
+            cleaned_payload = parsed_custom_payload
             base_checklist = {
                 "target_type": target_type,
                 "source": "project_custom_checklist",
@@ -1720,8 +1900,12 @@ class IntelAgent:
             }
             structured_checklist = cleaned_payload
         else:
-            # Foreground: checklist → clean → format (no static RAG fetch; formatter uses search_rag dynamically)
-            self._cb.on_step("Skipping static RAG snapshot; formatter will use search_rag tools dynamically")
+            # Foreground: checklist → clean → format (OWASP checklist synthesis only)
+            if custom_checklist_clean and merge_custom_checklist:
+                self._cb.on_step(
+                    "Custom checklist detected — merging uploaded checklist with OWASP resources before synthesis"
+                )
+            self._cb.on_step("Formatter will stay OWASP-only and may use get_checklists if needed")
             self._cb.on_step("Fetching base checklist")
             base_checklist = await self._call_tool_json("get_checklists", target_type=target_type, info=info[:250])
             if isinstance(base_checklist, dict):
@@ -1739,6 +1923,15 @@ class IntelAgent:
                 except Exception as exc:
                     logger.warning("intel_clean_checklist_failed", error=str(exc), target_type=target_type)
                     cleaned_payload = build_deterministic_checklist_payload(base_checklist, info)
+
+            if custom_checklist_clean and merge_custom_checklist:
+                cleaned_payload = _merge_structured_checklist_payloads(
+                    cleaned_payload,
+                    parsed_custom_payload,
+                )
+                self._cb.on_step(
+                    "Merged custom checklist with base checklist before formatter synthesis"
+                )
 
             base_checklist_text = (
                 _format_structured_checklist_for_formatter(cleaned_payload)
@@ -1817,6 +2010,31 @@ class IntelAgent:
             if isinstance(set_checklist_json, dict) and _is_structured_checklist_payload(set_checklist_json):
                 structured_checklist = set_checklist_json
                 self._cb.on_done("Checklist normalized by set_checklist")
+
+        if _is_structured_checklist_payload(structured_checklist):
+            before_backfill = _structured_checklist_item_count(structured_checklist)
+            structured_checklist = _ensure_structured_checklist_min_items(
+                structured_checklist,
+                min_items=MIN_SYNTH_CHECKLIST_ITEMS,
+                fallback_payload=cleaned_payload if _is_structured_checklist_payload(cleaned_payload) else None,
+            )
+            after_backfill = _structured_checklist_item_count(structured_checklist)
+            if after_backfill > before_backfill:
+                self._cb.on_step(
+                    "Checklist backfilled from OWASP baseline to "
+                    f"{after_backfill} items (minimum target={MIN_SYNTH_CHECKLIST_ITEMS})"
+                )
+
+        if _is_structured_checklist_payload(structured_checklist):
+            structured_checklist = _limit_structured_checklist_items(
+                structured_checklist,
+                max_checklist_items,
+            )
+            if max_checklist_items:
+                self._cb.on_step(
+                    "Checklist capped to "
+                    f"{_structured_checklist_item_count(structured_checklist)} prioritized items"
+                )
 
         self._cb.on_done(f"Intel Agent complete — status={final_status}")
         return IntelResult(
@@ -2226,12 +2444,27 @@ class IntelAgent:
 
     # ── Update Pipeline ────────────────────────────────────────────────
 
-    def _collect_source_entries(self, target_type: str) -> list[dict[str, str]]:
+    def _collect_source_entries(self, target_type: str) -> list[dict[str, Any]]:
+        from server.db.knowledge.config.sources import INTEL_UPDATABLE_SOURCES, get_source_by_name
+
+        updatable_builtin_names = {str(name).strip().lower() for name in INTEL_UPDATABLE_SOURCES}
         configured_names = VERIFY_SOURCES.get(target_type, DEFAULT_VERIFY_SOURCES)
-        source_entries: list[dict[str, str]] = [
-            {"name": source_name, "url": ""}
-            for source_name in configured_names
-        ]
+        source_entries: list[dict[str, Any]] = []
+        for source_name in configured_names:
+            clean_name = str(source_name or "").strip()
+            if not clean_name:
+                continue
+            source_cfg = get_source_by_name(clean_name)
+            source_entries.append(
+                {
+                    "name": clean_name,
+                    "url": str(getattr(source_cfg, "url", "") or ""),
+                    "content_type": str(getattr(source_cfg, "content_type", "mixed") or "mixed").strip().lower(),
+                    "source_kind": "builtin",
+                    "update_mode": "every_3_days" if clean_name.lower() in updatable_builtin_names else "static",
+                    "updatable": clean_name.lower() in updatable_builtin_names,
+                }
+            )
 
         try:
             custom_sources = self._projects_store.list_intel_resources(enabled_only=True)
@@ -2247,14 +2480,21 @@ class IntelAgent:
                 pass
             elif row_target not in {"all", target_type}:
                 continue
+            update_mode = str(row.get("update_mode", "every_3_days") or "every_3_days").strip().lower()
+            if update_mode != "every_3_days":
+                continue
             source_entries.append(
                 {
                     "name": str(row.get("name", "")).strip(),
                     "url": str(row.get("url", "")).strip(),
+                    "content_type": str(row.get("content_type", "strategies") or "strategies").strip().lower(),
+                    "source_kind": "custom",
+                    "update_mode": update_mode,
+                    "updatable": True,
                 }
             )
 
-        deduped: list[dict[str, str]] = []
+        deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for entry in source_entries:
             source_name = str(entry.get("name", "")).strip()
@@ -2265,7 +2505,16 @@ class IntelAgent:
             if key in seen:
                 continue
             seen.add(key)
-            deduped.append({"name": source_name, "url": source_url})
+            deduped.append(
+                {
+                    "name": source_name,
+                    "url": source_url,
+                    "content_type": str(entry.get("content_type", "mixed") or "mixed").strip().lower(),
+                    "source_kind": str(entry.get("source_kind", "builtin") or "builtin").strip().lower(),
+                    "update_mode": str(entry.get("update_mode", "every_3_days") or "every_3_days").strip().lower(),
+                    "updatable": bool(entry.get("updatable", False)),
+                }
+            )
 
         return deduped
 
@@ -2281,7 +2530,17 @@ class IntelAgent:
                 source_name=source_entry["name"],
                 url=source_entry["url"],
             )
-            verified.append(res)
+            verified.append(
+                {
+                    **(res if isinstance(res, dict) else {}),
+                    "source_name": source_entry["name"],
+                    "url": source_entry["url"],
+                    "content_type": source_entry["content_type"],
+                    "source_kind": source_entry["source_kind"],
+                    "update_mode": source_entry["update_mode"],
+                    "updatable": bool(source_entry["updatable"]),
+                }
+            )
         trusted = [v for v in verified if isinstance(v, dict) and v.get("verified")]
         self._cb.on_done(f"Update: {len(trusted)}/{len(source_list)} sources verified")
 
@@ -2299,17 +2558,47 @@ class IntelAgent:
         source_errors: list[str] = []
         stats["domains_updated"] = [domain]
         content_types_updated: set[str] = set()
+        stats["sources_total"] = len(source_list)
+        stats["sources_verified"] = len(trusted)
         payload_store_added = 0
         payload_candidates: list[dict[str, Any]] = []
         exploit_candidates: list[dict[str, Any]] = []
 
-        self._cb.on_step(f"Update: Syncing payload store for '{target_type}'")
-        payload_sync = await self._sync_payload_store(target_type=target_type, domain=domain)
-        payload_store_added = int(payload_sync.get("added", 0) or 0)
-        sync_errors = payload_sync.get("errors", [])
-        if isinstance(sync_errors, list):
-            source_errors.extend(str(e) for e in sync_errors if e)
-        self._cb.on_done(f"Update: payload store synced (+{payload_store_added})")
+        trusted_builtin_sources = [
+            entry
+            for entry in trusted
+            if str(entry.get("source_kind", "")).strip().lower() == "builtin"
+            and bool(entry.get("updatable", False))
+        ]
+        if trusted_builtin_sources:
+            self._cb.on_step(
+                f"Update: Refreshing verified RAG sources ({len(trusted_builtin_sources)})"
+            )
+            rag_sync = await self._sync_verified_rag_sources(trusted_builtin_sources)
+            stats["rag_sources_processed"] = int(rag_sync.get("processed", 0) or 0)
+            stats["rag_sources_changed"] = int(rag_sync.get("changed", 0) or 0)
+            stats["rag_documents_ingested"] = int(rag_sync.get("documents", 0) or 0)
+            stats["rag_chunks_embedded"] = int(rag_sync.get("chunks", 0) or 0)
+            rag_errors = rag_sync.get("errors", [])
+            if isinstance(rag_errors, list):
+                source_errors.extend(str(e) for e in rag_errors if e)
+            for content_type in rag_sync.get("content_types_updated", []):
+                if content_type:
+                    content_types_updated.add(str(content_type))
+            self._cb.on_done(
+                "Update: RAG sources refreshed "
+                f"(processed={stats['rag_sources_processed']}, changed={stats['rag_sources_changed']}, docs={stats['rag_documents_ingested']}, "
+                f"chunks={stats['rag_chunks_embedded']})"
+            )
+
+        if trusted:
+            self._cb.on_step(f"Update: Syncing payload store for '{target_type}'")
+            payload_sync = await self._sync_payload_store(target_type=target_type, domain=domain)
+            payload_store_added = int(payload_sync.get("added", 0) or 0)
+            sync_errors = payload_sync.get("errors", [])
+            if isinstance(sync_errors, list):
+                source_errors.extend(str(e) for e in sync_errors if e)
+            self._cb.on_done(f"Update: payload store synced (+{payload_store_added})")
 
         if trusted:
             self._cb.on_step(f"Update: Fetching payloads ({len(categories)} categories) + exploits")
@@ -2370,12 +2659,12 @@ class IntelAgent:
 
         stats.update({
             "new_payloads": len(payload_new), "new_exploits": len(exploit_new),
-            "total_embedded": payload_upserted + exploit_upserted,
+            "total_embedded": stats.get("rag_chunks_embedded", 0) + payload_upserted + exploit_upserted,
             "payload_store_added": payload_store_added,
             "content_types_updated": sorted(content_types_updated),
             "rate_limited": rate_limited, "source_errors": source_errors[:MAX_SOURCE_ERRORS],
         })
-        if stats["total_embedded"] > 0 or payload_store_added > 0:
+        if stats["total_embedded"] > 0 or payload_store_added > 0 or stats.get("rag_sources_changed", 0) > 0:
             stats["update_status"] = "updated"
         elif rate_limited:
             stats["update_status"] = "rate_limited"
@@ -2400,6 +2689,61 @@ class IntelAgent:
         self._state_store.set_last_update(target_type, datetime.now(timezone.utc))
 
         return {"target_type": target_type, "info": info, "verified_sources": verified, "stats": stats, "summary": summary, "domains_considered": [domain]}
+
+    async def _sync_verified_rag_sources(self, source_entries: list[dict[str, Any]]) -> dict[str, Any]:
+        from server.db.knowledge.config.sources import get_source_by_name
+        from server.db.knowledge.orchestrator import KnowledgeOrchestrator
+
+        orchestrator = KnowledgeOrchestrator()
+        processed = 0
+        changed = 0
+        documents = 0
+        chunks = 0
+        errors: list[str] = []
+        content_types_updated: set[str] = set()
+        seen_names: set[str] = set()
+        try:
+            for entry in source_entries:
+                source_name = str(entry.get("source_name") or entry.get("name") or "").strip()
+                if not source_name:
+                    continue
+                key = source_name.lower()
+                if key in seen_names:
+                    continue
+                seen_names.add(key)
+                source_cfg = get_source_by_name(source_name)
+                if source_cfg is None:
+                    continue
+                try:
+                    result = await orchestrator.ingest_source(source_name)
+                except Exception as exc:
+                    errors.append(f"{source_name}: {exc}")
+                    continue
+                processed += 1
+                documents += int(getattr(result, "documents_extracted", 0) or 0)
+                chunks += int(getattr(result, "chunks_embedded", 0) or getattr(result, "chunks_created", 0) or 0)
+                if (
+                    int(getattr(result, "chunks_embedded", 0) or 0) > 0
+                    or int(getattr(result, "chunks_created", 0) or 0) > 0
+                    or int(getattr(result, "replaced_existing", 0) or 0) > 0
+                ):
+                    changed += 1
+                    content_types_updated.add(
+                        str(getattr(source_cfg, "content_type", "") or "").strip().lower()
+                    )
+                if getattr(result, "errors", None):
+                    errors.extend(str(item) for item in result.errors if item)
+        finally:
+            await orchestrator.close()
+
+        return {
+            "processed": processed,
+            "changed": changed,
+            "documents": documents,
+            "chunks": chunks,
+            "errors": errors,
+            "content_types_updated": sorted(ct for ct in content_types_updated if ct),
+        }
 
     async def _sync_payload_store(self, *, target_type: str, domain: str) -> dict[str, Any]:
         from server.db.knowledge.orchestrator import KnowledgeOrchestrator

@@ -2,6 +2,16 @@
 
 ## High-Level Flow
 
+Current implementation now uses a staged startup:
+
+1. `Intel update-only` refreshes/checks RAG freshness without producing the final checklist yet.
+2. `Warmup Planner` creates a recon-only warmup plan that is normalized to 8 prioritized recon scenarios.
+3. `Warmup Executer` runs 2 recon workers across 2 cycles, each worker handling 2 scenarios per cycle.
+4. `Perceptor` summarizes each warmup scenario and caches the compact result.
+5. `Intel synthesis` merges warmup summaries, uploaded checklist input, resource checklists, and RAG-guided synthesis into a capped prioritized checklist.
+6. `Main Planner` builds the mixed recon/exploit plan from that synthesized checklist.
+7. `Main Executer` runs the steady-state loop with 1 recon + 1 exploit per cycle, Verify before Planner replan, and Retest only for stronger confirmed findings.
+
 ```
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │                          Application Lifecycle                                 │

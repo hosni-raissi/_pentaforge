@@ -1,0 +1,62 @@
+{
+  "framework_name": "Core 8 Reconnaissance Framework",
+  "version": "1.1",
+  "scenarios": [
+    {
+      "id": "S1",
+      "scenario": "External Perimeter Mapping",
+      "objective": "Identify the full organizational footprint including subdomains and cloud assets.",
+      "methods": ["Subdomain discovery", "Passive OSINT", "Cloud bucket enumeration"],
+      "priority": 1
+    },
+    {
+      "id": "S2",
+      "scenario": "Defensive & Tech Fingerprinting",
+      "objective": "Map the technical stack and identify edge defenses like WAFs or CDNs.",
+      "methods": ["WAF detection", "Service banner review", "Security control mapping"],
+      "priority": 1
+    },
+    {
+      "id": "S3",
+      "scenario": "Structural Content Discovery",
+      "objective": "Build a map of architecture, including hidden paths and metadata files.",
+      "methods": ["Web crawling", "Directory brute-forcing", "Robots/Sitemap analysis"],
+      "priority": 1
+    },
+    {
+      "id": "S4",
+      "scenario": "API & Endpoint Extraction",
+      "objective": "Discover hidden APIs, WebSockets, and routes defined in client-side code.",
+      "methods": ["JavaScript source analysis", "API discovery", "WebSocket detection"],
+      "priority": 2
+    },
+    {
+      "id": "S5",
+      "scenario": "Input & Parameter Profiling",
+      "objective": "Map entry points for data to identify potential injection and logic vectors.",
+      "methods": ["Parameter discovery", "Request inspection", "HTTP method probing"],
+      "priority": 2
+    },
+    {
+      "id": "S6",
+      "scenario": "Identity & Access Analysis",
+      "objective": "Reverse-engineer authentication, session management, and permission logic.",
+      "methods": ["Auth surface mapping", "Session behavior review", "Account workflow discovery"],
+      "priority": 2
+    },
+    {
+      "id": "S7",
+      "scenario": "Data Handling & Trust Review",
+      "objective": "Probe file processing workflows and cross-origin trust boundaries.",
+      "methods": ["File upload/download mapping", "CORS analysis", "Trust boundary review"],
+      "priority": 3
+    },
+    {
+      "id": "S8",
+      "scenario": "Operational Synthesis",
+      "objective": "Final check for rate limits and artifacts to finalize the exploit strategy.",
+      "methods": ["Rate-limit probing", "Backup/Artifact hunt", "Prerequisite mapping"],
+      "priority": 3
+    }
+  ]
+}

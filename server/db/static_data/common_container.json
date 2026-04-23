@@ -1,0 +1,62 @@
+{
+  "framework_name": "Core 8 Container Reconnaissance Framework",
+  "version": "1.0",
+  "scenarios": [
+    {
+      "id": "CT1",
+      "scenario": "Runtime & Engine Identification",
+      "objective": "Determine the container runtime (Docker, containerd, CRI-O) and its version.",
+      "methods": ["Unix socket probing", "API version string extraction", "System environment analysis"],
+      "priority": 1
+    },
+    {
+      "id": "CT2",
+      "scenario": "Orchestration Control Plane Mapping",
+      "objective": "Identify if the container is managed by Kubernetes, Nomad, or Docker Swarm.",
+      "methods": ["K8s service account token checks", "Environmental variable review (KUBERNETES_SERVICE_HOST)", "Metadata endpoint probing"],
+      "priority": 1
+    },
+    {
+      "id": "CT3",
+      "scenario": "Image & Registry Enumeration",
+      "objective": "Locate the source registry and identify other images/tags that might contain secrets.",
+      "methods": ["Registry API probing", "Image layer analysis", "Vulnerability scanning of base images"],
+      "priority": 1
+    },
+    {
+      "id": "CT4",
+      "scenario": "Container Capability & Privilege Audit",
+      "objective": "Check for 'Privileged' mode or dangerous capabilities (CAP_SYS_ADMIN, CAP_NET_RAW).",
+      "methods": ["Linux capability enumeration", "Sysfs/Procfs inspection", "Device file visibility check (/dev)"],
+      "priority": 2
+    },
+    {
+      "id": "CT5",
+      "scenario": "Network Namespace & Service Mesh Review",
+      "objective": "Map the internal container network and detect sidecars (Istio, Linkerd) or open ports.",
+      "methods": ["Inter-container port scanning", "Network namespace inspection", "Sidecar proxy fingerprinting"],
+      "priority": 2
+    },
+    {
+      "id": "CT6",
+      "scenario": "Volume & Mount Point Inspection",
+      "objective": "Identify host paths mounted into the container, specifically sensitive paths like /var/run/docker.sock.",
+      "methods": ["Mount point analysis", "Sensitive file discovery in volumes", "Persistent Volume (PV) review"],
+      "priority": 2
+    },
+    {
+      "id": "CT7",
+      "scenario": "Secret & Environment Disclosure",
+      "objective": "Find hardcoded credentials in environment variables, config maps, or hidden .docker/config files.",
+      "methods": ["Env variable dumping", "ConfigMap/Secret API extraction", "Filesystem secret hunting"],
+      "priority": 3
+    },
+    {
+      "id": "CT8",
+      "scenario": "Resource Constraint & Escape Probing",
+      "objective": "Test for cgroup limitations and potential for fork bombs or kernel-level escapes.",
+      "methods": ["Cgroup limit review", "Kernel version correlation", "Namespace boundary testing"],
+      "priority": 3
+    }
+  ]
+}
