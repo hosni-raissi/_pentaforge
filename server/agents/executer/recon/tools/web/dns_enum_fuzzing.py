@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Any
 from functools import lru_cache
 from pydantic import BaseModel, Field, field_validator, model_validator
+from server.agents.executer.recon.config import is_blocked_host
 
 
 # ══════════════════════════════════════════════════════════════
@@ -266,21 +267,12 @@ class DNSEnumRequest(BaseModel):
     def validate_target(cls, v):
         value = v.strip().lower()
 
-        blocked_exact = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254"}
-        if value in blocked_exact:
+        if is_blocked_host(value):
             raise ValueError(f"Target '{v}' is blocked")
 
         # IP/network validation
         try:
-            net = ipaddress.ip_network(value, strict=False)
-            if (
-                net.is_loopback
-                or net.is_link_local
-                or net.is_multicast
-                or net.is_unspecified
-                or net.is_private
-            ):
-                raise ValueError(f"Target '{v}' is blocked")
+            ipaddress.ip_network(value, strict=False)
             return value
         except ValueError:
             pass

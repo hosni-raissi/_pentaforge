@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -95,13 +95,11 @@ def _validate_target(value: str) -> str:
     if not v:
         raise ValueError("Target must not be empty")
 
+    if is_blocked_host(v.lower()):
+        raise ValueError(f"Target '{v}' is blocked")
+
     ip = _is_ip(v)
     if ip is not None:
-        for net in _BLOCKED_NETWORKS:
-            if ip in net:
-                raise ValueError(
-                    f"Target '{v}' is in a blocked range ({net})"
-                )
         return v
 
     # Hostname path

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Dict
 from urllib.parse import quote_plus
 from pydantic import BaseModel, Field, field_validator
+from server.agents.executer.recon.config import is_blocked_host
 
 
 # ═══════════════════════════════════════════════════════
@@ -220,11 +221,9 @@ class WafDetectRequest(BaseModel):
     @field_validator("target")
     def validate_target(cls, v):
 
-        blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
-
         clean = re.sub(r"^\w+://", "", v).split("/")[0]
 
-        if clean in blocked:
+        if is_blocked_host(clean):
             raise ValueError("Local targets are blocked")
 
         return v.strip()

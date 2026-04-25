@@ -10,6 +10,7 @@ This service is the API entrypoint for scan execution:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from copy import deepcopy
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import structlog
 
@@ -71,6 +73,10 @@ WARMUP_RECON_SCENARIOS_PER_WORKER = 2
 WARMUP_RECON_CYCLES = 2
 MAX_SYNTH_INTEL_CHECKLIST_ITEMS = 20
 RETEST_MIN_CONFIDENCE = 0.75
+SCENARIO_EXECUTION_HISTORY_LIMIT = 4
+PROMPT_HISTORY_SCENARIO_LIMIT = 3
+PROMPT_HISTORY_ROLE_LIMIT = 6
+PROMPT_HISTORY_TOOL_LIMIT = 4
 _FINDING_CWE_MAP: dict[str, str] = {
     "command injection": "CWE-78",
     "sql injection": "CWE-89",
@@ -131,7 +137,55 @@ def _coerce_string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         clean = value.strip()
         return [clean] if clean else []
-    return []
+    return [] 
+
+
+def _extract_target_host(target: str) -> str:
+    raw = str(target or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    host = parsed.hostname or ""
+    if host:
+        return str(host).strip().lower()
+    return raw.strip().lower().split("/")[0].split(":")[0]
+
+
+def _is_loopback_or_local_target(target: str) -> bool:
+    host = _extract_target_host(target)
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.endswith(".local")
+
+
+def _build_target_execution_guidance(
+    *,
+    target: str,
+    scenario_tasks: list[str] | None = None,
+) -> str:
+    host = _extract_target_host(target)
+    tasks = [str(item).strip() for item in (scenario_tasks or []) if str(item).strip()]
+    if not _is_loopback_or_local_target(target):
+        return "Target execution guidance: standard target. Use scenario-appropriate tools and avoid unnecessary duplicates."
+
+    guidance_lines = [
+        "Target execution guidance: this is a loopback/local target.",
+        f"Resolved host: {host or 'localhost'}",
+        "Treat public-internet enumeration as inapplicable here.",
+        "Do NOT spend rounds on internet-perimeter or external OSINT tooling such as amass/subdomain/cloud/CDN discovery for this target.",
+        "Prefer local web evidence: detect_tech, http_probe, http_header_analysis, web_crawler, web_fuzz, directory_file_fuzzing, api_endpoint_discovery, api_passive_enum, js_source_code_analyzer, param_discovery, websocket_recon, cors_misconfig_check, session_token_analysis.",
+        "Use run_custom only for tightly scoped localhost HTTP/service checks when that adds direct evidence.",
+        "Do NOT use run_python in warmup recon unless there is no built-in tool that can summarize already collected evidence.",
+        "If the assigned scenario is inherently public-internet oriented, gather the minimal local evidence that still applies, then mark it blocked instead of retrying unrelated tools.",
+        "For Identity & Access Analysis, focus on discovered auth routes, cookies, headers, login/session artifacts, and access-control clues; if none exist, mark blocked after a minimal focused attempt.",
+        "For Operational Synthesis, synthesize already discovered endpoints, headers, trust-boundary clues, rate-limit behavior, and artifact paths; do not restart broad discovery from scratch.",
+    ]
+    if tasks:
+        guidance_lines.append(f"Current assigned scenarios: {', '.join(tasks)}")
+    return "\n".join(guidance_lines)
 
 
 def _compact_preview(value: Any, limit: int = 220) -> str:
@@ -224,6 +278,283 @@ def _extract_tool_names(tool_results: Any) -> list[str]:
         if tool_name and tool_name not in names:
             names.append(tool_name)
     return names
+
+
+def _normalize_recon_result_status(
+    value: Any,
+    *,
+    summary: Any = "",
+    findings: Any = None,
+    tools: Any = None,
+    tool_results: Any = None,
+    default: str = "failed",
+) -> str:
+    raw = str(value or "").strip().lower()
+    summary_text = str(summary or "").strip().lower()
+    findings_list = findings if isinstance(findings, list) else []
+    tools_list = tools if isinstance(tools, list) else []
+    tool_results_list = tool_results if isinstance(tool_results, list) else []
+    has_findings = any(isinstance(item, dict) for item in findings_list)
+    has_tools = any(str(item).strip() for item in tools_list)
+    has_tool_results = any(isinstance(item, dict) for item in tool_results_list)
+    useful_summary_markers = (
+        "discovered",
+        "identified",
+        "found",
+        "revealed",
+        "mapped",
+        "enumerated",
+        "fingerprinted",
+        "observed",
+        "detected",
+        "collected",
+        "exposed",
+        "located",
+    )
+    blocked_summary_markers = (
+        "blocked",
+        "restriction",
+        "restricted",
+        "prevented",
+        "policy",
+        "localhost",
+        "127.0.0.1",
+        "insufficient",
+        "limited",
+    )
+    if raw in {"complete", "completed", "done", "success", "succeeded"}:
+        return "complete"
+    if raw in {
+        "blocked",
+        "partial",
+        "partially_complete",
+        "partially completed",
+        "partial_success",
+        "partially_successful",
+        "incomplete",
+        "limited",
+    }:
+        return "blocked"
+    if raw in {"failed", "failure", "error"}:
+        if (
+            has_findings
+            or has_tools
+            or has_tool_results
+            or any(marker in summary_text for marker in useful_summary_markers)
+            or any(marker in summary_text for marker in blocked_summary_markers)
+        ):
+            return "blocked"
+        return "failed"
+    if any(marker in summary_text for marker in blocked_summary_markers):
+        return "blocked"
+    if has_findings or has_tools or has_tool_results or any(marker in summary_text for marker in useful_summary_markers):
+        return "blocked"
+    return default
+
+
+def _build_scenario_execution_history_entry(
+    *,
+    cycle_number: int,
+    agent_role: str,
+    row_result: dict[str, Any],
+) -> dict[str, Any]:
+    tool_results = row_result.get("tool_results", []) if isinstance(row_result, dict) else []
+    tool_entries = _extract_tool_execution_entries(tool_results)
+    commands = _extract_commands_from_tool_results(tool_results)
+    tools = _extract_tool_names(tool_results)
+    round_labels = row_result.get("round_labels", []) if isinstance(row_result, dict) else []
+    raw_status = str(row_result.get("status", "")).strip().lower()
+    if str(agent_role or "").strip().lower() == "recon":
+        normalized_status = _normalize_recon_result_status(
+            raw_status,
+            summary=row_result.get("summary", ""),
+            findings=row_result.get("findings", []),
+            tools=tools,
+            tool_results=tool_results,
+            default="unknown",
+        )
+    else:
+        normalized_status = raw_status or "unknown"
+
+    return {
+        "cycle": int(cycle_number or 0),
+        "status": normalized_status,
+        "summary": _compact_preview(row_result.get("summary", ""), 240),
+        "rounds_seen": [
+            str(item).strip().lower()
+            for item in round_labels
+            if str(item).strip()
+        ] if isinstance(round_labels, list) else [],
+        "tools": tools[:PROMPT_HISTORY_TOOL_LIMIT],
+        "commands": commands[:PROMPT_HISTORY_TOOL_LIMIT],
+        "tool_executions": [
+            {
+                "tool": str(item.get("tool", "")).strip(),
+                "command": str(item.get("command", "")).strip(),
+            }
+            for item in tool_entries[:PROMPT_HISTORY_TOOL_LIMIT]
+            if str(item.get("tool", "")).strip()
+        ],
+    }
+
+
+def _append_scenario_execution_history(
+    plan_data: dict[str, Any],
+    scenario: dict[str, Any],
+    *,
+    cycle_number: int,
+    row_result: dict[str, Any],
+) -> bool:
+    target = _locate_scenario_in_plan(plan_data, scenario)
+    if not isinstance(target, dict):
+        return False
+
+    history = target.get("execution_history", [])
+    if not isinstance(history, list):
+        history = []
+
+    entry = _build_scenario_execution_history_entry(
+        cycle_number=cycle_number,
+        agent_role=str(target.get("agent", "")).strip().lower(),
+        row_result=row_result,
+    )
+    cycle_value = int(entry.get("cycle", 0) or 0)
+    filtered = [
+        item for item in history
+        if isinstance(item, dict) and int(item.get("cycle", 0) or 0) != cycle_value
+    ]
+    filtered.append(entry)
+    target["execution_history"] = filtered[-SCENARIO_EXECUTION_HISTORY_LIMIT:]
+    return True
+
+
+def _iter_plan_scenarios(plan_data: dict[str, Any]) -> list[dict[str, Any]]:
+    scenarios: list[dict[str, Any]] = []
+    phases = plan_data.get("phases", [])
+    if not isinstance(phases, list):
+        return scenarios
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        for step in phase.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            for scenario in step.get("scenarios", []):
+                if isinstance(scenario, dict):
+                    scenarios.append(scenario)
+    return scenarios
+
+
+def _format_history_entry_for_prompt(
+    entry: dict[str, Any],
+    *,
+    task: str,
+) -> str:
+    cycle = int(entry.get("cycle", 0) or 0)
+    status = str(entry.get("status", "")).strip().lower() or "unknown"
+    summary = str(entry.get("summary", "")).strip() or "(no summary recorded)"
+    rounds_seen = entry.get("rounds_seen", [])
+    rounds_text = ", ".join(
+        str(item).strip().lower() for item in rounds_seen if str(item).strip()
+    ) if isinstance(rounds_seen, list) else ""
+    tool_executions = entry.get("tool_executions", [])
+    tool_chunks: list[str] = []
+    if isinstance(tool_executions, list):
+        for item in tool_executions[:PROMPT_HISTORY_TOOL_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool", "")).strip()
+            command = str(item.get("command", "")).strip()
+            if tool_name and command:
+                tool_chunks.append(f"{tool_name} => {command}")
+            elif tool_name:
+                tool_chunks.append(tool_name)
+    if not tool_chunks:
+        tool_chunks = [
+            str(item).strip()
+            for item in entry.get("tools", [])
+            if str(item).strip()
+        ][:PROMPT_HISTORY_TOOL_LIMIT]
+    tools_text = "; ".join(tool_chunks) if tool_chunks else "no tool executions recorded"
+    rounds_suffix = f"; rounds={rounds_text}" if rounds_text else ""
+    return (
+        f"- Cycle {cycle} | {task} | status={status}{rounds_suffix}\n"
+        f"  Tools/commands: {tools_text}\n"
+        f"  Summary: {summary}"
+    )
+
+
+def _format_agent_execution_history_for_prompt(
+    plan_data: dict[str, Any],
+    *,
+    agent_role: str,
+    active_scenarios: list[dict[str, Any]] | None = None,
+) -> str:
+    normalized_role = str(agent_role or "").strip().lower()
+    active_scenarios = [
+        item for item in (active_scenarios or [])
+        if isinstance(item, dict)
+    ]
+    if not normalized_role:
+        return "No prior execution history for this agent."
+
+    lines: list[str] = []
+    active_keys = {
+        (
+            str(item.get("task", "")).strip().lower(),
+            _normalize_priority(item.get("priority", 3)),
+        )
+        for item in active_scenarios
+    }
+
+    current_scenario_lines: list[str] = []
+    for scenario in active_scenarios:
+        history = scenario.get("execution_history", [])
+        if not isinstance(history, list) or not history:
+            continue
+        task = str(scenario.get("task", "")).strip() or "scenario"
+        for entry in history[-PROMPT_HISTORY_SCENARIO_LIMIT:]:
+            if isinstance(entry, dict):
+                current_scenario_lines.append(
+                    _format_history_entry_for_prompt(entry, task=task)
+                )
+
+    if current_scenario_lines:
+        lines.append("Previous runs for the currently assigned scenario(s):")
+        lines.extend(current_scenario_lines)
+
+    role_entries: list[tuple[int, str]] = []
+    for scenario in _iter_plan_scenarios(plan_data):
+        if str(scenario.get("agent", "")).strip().lower() != normalized_role:
+            continue
+        scenario_key = (
+            str(scenario.get("task", "")).strip().lower(),
+            _normalize_priority(scenario.get("priority", 3)),
+        )
+        if scenario_key in active_keys:
+            continue
+        history = scenario.get("execution_history", [])
+        if not isinstance(history, list):
+            continue
+        task = str(scenario.get("task", "")).strip() or "scenario"
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            role_entries.append(
+                (
+                    int(entry.get("cycle", 0) or 0),
+                    _format_history_entry_for_prompt(entry, task=task),
+                )
+            )
+
+    role_entries.sort(key=lambda item: item[0], reverse=True)
+    if role_entries:
+        lines.append(f"Other prior {normalized_role} cycle activity:")
+        lines.extend(text for _, text in role_entries[:PROMPT_HISTORY_ROLE_LIMIT])
+
+    if not lines:
+        return "No prior execution history for this agent."
+    return "\n".join(lines)
 
 
 def _extract_screenshots_from_tool_results(tool_results: Any) -> list[dict[str, Any]]:
@@ -1259,7 +1590,10 @@ def _mark_scenario_done_in_plan(plan_data: dict[str, Any], scenario: dict[str, A
             target = phases[phase_idx]["steps"][step_idx]["scenarios"][scen_idx]
             if isinstance(target, dict):
                 target["done"] = True
-                target["status"] = "completed"
+                target["status"] = _normalize_scenario_status(
+                    target.get("status"),
+                    done=True,
+                )
                 return True
         except (IndexError, KeyError, TypeError):
             pass
@@ -1289,19 +1623,29 @@ def _mark_scenario_done_in_plan(plan_data: dict[str, Any], scenario: dict[str, A
                 priority = _normalize_priority(item.get("priority", 3))
                 if task == target_task and agent == target_agent and priority == target_priority:
                     item["done"] = True
-                    item["status"] = "completed"
+                    item["status"] = _normalize_scenario_status(
+                        item.get("status"),
+                        done=True,
+                    )
                     return True
     return False
 
 
 def _normalize_scenario_status(value: Any, *, done: bool = False) -> str:
     if done:
+        normalized_done = str(value or "").strip().lower()
+        if normalized_done in {"failed", "error"}:
+            return "failed"
+        if normalized_done in {"blocked", "vulnerable", "not_vulnerable", "inconclusive"}:
+            return normalized_done
         return "completed"
     normalized = str(value or "").strip().lower()
     if normalized in {"completed", "complete", "done"}:
         return "completed"
     if normalized in {"working", "running", "in_progress", "in progress"}:
         return "working"
+    if normalized in {"blocked", "failed", "error", "vulnerable", "not_vulnerable", "inconclusive"}:
+        return "failed" if normalized == "error" else normalized
     return "not yet"
 
 
@@ -2861,12 +3205,22 @@ class ScanOrchestratorService:
     def _build_executer_message(
         self,
         *,
+        plan_data: dict[str, Any],
         scenario: dict[str, Any],
         target: str,
         target_type: str,
         scope: str,
         info: str,
     ) -> str:
+        history_block = _format_agent_execution_history_for_prompt(
+            plan_data,
+            agent_role=str(scenario.get("agent", "")).strip().lower() or "recon",
+            active_scenarios=[scenario],
+        )
+        target_guidance = _build_target_execution_guidance(
+            target=target,
+            scenario_tasks=[str(scenario.get("task", "")).strip()],
+        )
         return (
             f"Scenario: {str(scenario.get('task', '')).strip()}\n"
             f"Agent: {str(scenario.get('agent', '')).strip()}\n"
@@ -2877,11 +3231,14 @@ class ScanOrchestratorService:
             f"Target type: {target_type}\n"
             f"Scope: {scope}\n"
             f"Extra info: {info}\n"
+            f"{target_guidance}\n"
+            f"Prior execution history:\n{history_block}\n"
         )
 
     def _build_warmup_batch_executer_message(
         self,
         *,
+        plan_data: dict[str, Any],
         scenarios: list[dict[str, Any]],
         target: str,
         target_type: str,
@@ -2909,19 +3266,34 @@ class ScanOrchestratorService:
                 f"Methods: {json.dumps(methods, ensure_ascii=True)}"
             )
 
+        history_block = _format_agent_execution_history_for_prompt(
+            plan_data,
+            agent_role="recon",
+            active_scenarios=scenarios,
+        )
+        target_guidance = _build_target_execution_guidance(
+            target=target,
+            scenario_tasks=[str(item.get("task", "")).strip() for item in scenarios if isinstance(item, dict)],
+        )
         message = (
             "Warmup scenario batch:\n"
             "You have multiple recon scenarios assigned to the same worker for this warmup cycle.\n"
             "Stay strictly inside these listed scenarios.\n"
             "Treat each scenario as a separate lane of work.\n"
             "If you call a tool, include `_scenario_id` in the tool arguments with the matching scenario id.\n"
-            "Across rounds 1 and 2, use at most 2 tools per round total, ideally covering both scenarios.\n"
+            "Across rounds 1 and 2, use at most 3 tools per round total, ideally covering both scenarios.\n"
+            "Use prior execution history as valid evidence when it directly helps the assigned scenario.\n"
+            "If a scenario is `Operational Synthesis`, it may synthesize earlier recon evidence from prior cycles and the current batch.\n"
+            "Make sure every assigned scenario gets direct evidence by the end of Round 2.\n"
             "In the final JSON, include `scenario_summaries` with one entry per scenario.\n\n"
             "Target info:\n"
             f"Target: {target}\n"
             f"Target type: {target_type}\n"
             f"Scope: {scope}\n"
             f"Extra info: {info}\n\n"
+            f"{target_guidance}\n\n"
+            "Prior recon execution history:\n"
+            f"{history_block}\n\n"
             "Assigned scenarios:\n\n"
             + "\n\n".join(blocks)
         )
@@ -3059,6 +3431,7 @@ class ScanOrchestratorService:
 
         if len(scenarios) == 1:
             message = self._build_executer_message(
+                plan_data=plan_data,
                 scenario=scenarios[0],
                 target=target,
                 target_type=target_type,
@@ -3078,26 +3451,41 @@ class ScanOrchestratorService:
                 "round_labels": result.round_labels,
             }
             scenario = scenarios[0]
-            _update_scenario_runtime_state(plan_data, scenario, status="completed", done=True)
+            _append_scenario_execution_history(
+                plan_data,
+                scenario,
+                cycle_number=cycle_number,
+                row_result=row_result,
+            )
+            row_status = _normalize_recon_result_status(
+                row_result.get("status"),
+                summary=row_result.get("summary", ""),
+                findings=row_result.get("findings", []),
+                tool_results=row_result.get("tool_results", []),
+                default="complete",
+            )
+            row_result["status"] = row_status
+            _update_scenario_runtime_state(plan_data, scenario, status=row_status, done=True)
             _mark_scenario_done_in_plan(plan_data, scenario)
             self._emit_event(
                 project_id,
                 event="scenario_state_change",
                 scan_id=scan_id,
-                level="success",
+                level="success" if row_status == "complete" else "warn",
                 message=(
                     f"Worker [{worker_number - 1}] Executer [cycle {display_cycle_number}] "
-                    f"warmup scenario completed: {str(scenario.get('task', '')).strip()[:120]}"
+                    f"warmup scenario finished with status={row_status}: "
+                    f"{str(scenario.get('task', '')).strip()[:120]}"
                 ),
                 data={
                     "stage": "executer",
-                    "kind": "scenario_completed",
+                    "kind": "scenario_finished",
                     "scenario_task": str(scenario.get("task", "")).strip(),
                     "agent": "recon",
                     "worker": worker_number - 1,
                     "cycle": display_cycle_number,
                     "warmup": True,
-                    "state": "completed",
+                    "state": row_status,
                     "plan_data": plan_data,
                 },
             )
@@ -3105,6 +3493,7 @@ class ScanOrchestratorService:
             return completed_rows
 
         batch_message, labeled_scenarios = self._build_warmup_batch_executer_message(
+            plan_data=plan_data,
             scenarios=scenarios,
             target=target,
             target_type=target_type,
@@ -3135,7 +3524,14 @@ class ScanOrchestratorService:
                 and str(tr.get("scenario_id", "")).strip().lower() == scenario_id
             ]
             row_result = {
-                "status": str(per_scenario.get("status", result.status)).strip().lower() or result.status,
+                "status": _normalize_recon_result_status(
+                    per_scenario.get("status", result.status),
+                    summary=per_scenario.get("summary", result.summary),
+                    findings=per_scenario.get("findings", []) if isinstance(per_scenario.get("findings"), list) else result.findings,
+                    tools=per_scenario.get("tools", []) if isinstance(per_scenario.get("tools"), list) else [],
+                    tool_results=scenario_tool_results,
+                    default=str(result.status or "").strip().lower() or "failed",
+                ),
                 "summary": str(per_scenario.get("summary", result.summary)).strip() or result.summary,
                 "findings": per_scenario.get("findings", []) if isinstance(per_scenario.get("findings"), list) else result.findings,
                 "evidence": [],
@@ -3145,26 +3541,42 @@ class ScanOrchestratorService:
                 "rounds_executed": result.rounds_executed,
                 "round_labels": result.round_labels,
             }
-            _update_scenario_runtime_state(plan_data, scenario, status="completed", done=True)
+            _append_scenario_execution_history(
+                plan_data,
+                scenario,
+                cycle_number=cycle_number,
+                row_result=row_result,
+            )
+            row_status = _normalize_recon_result_status(
+                row_result.get("status"),
+                summary=row_result.get("summary", ""),
+                findings=row_result.get("findings", []),
+                tools=per_scenario.get("tools", []) if isinstance(per_scenario.get("tools"), list) else [],
+                tool_results=row_result.get("tool_results", []),
+                default="complete",
+            )
+            row_result["status"] = row_status
+            _update_scenario_runtime_state(plan_data, scenario, status=row_status, done=True)
             _mark_scenario_done_in_plan(plan_data, scenario)
             self._emit_event(
                 project_id,
                 event="scenario_state_change",
                 scan_id=scan_id,
-                level="success",
+                level="success" if row_status == "complete" else "warn",
                 message=(
                     f"Worker [{worker_number - 1}] Executer [cycle {display_cycle_number}] "
-                    f"warmup scenario completed: {str(scenario.get('task', '')).strip()[:120]}"
+                    f"warmup scenario finished with status={row_status}: "
+                    f"{str(scenario.get('task', '')).strip()[:120]}"
                 ),
                 data={
                     "stage": "executer",
-                    "kind": "scenario_completed",
+                    "kind": "scenario_finished",
                     "scenario_task": str(scenario.get("task", "")).strip(),
                     "agent": "recon",
                     "worker": worker_number - 1,
                     "cycle": display_cycle_number,
                     "warmup": True,
-                    "state": "completed",
+                    "state": row_status,
                     "plan_data": plan_data,
                 },
             )
@@ -3484,6 +3896,7 @@ class ScanOrchestratorService:
     async def _execute_scenario_with_agent(
         self,
         *,
+        plan_data: dict[str, Any],
         scenario: dict[str, Any],
         recon_agent: Any,
         exploit_agent: Any,
@@ -3493,6 +3906,7 @@ class ScanOrchestratorService:
         info: str,
     ) -> dict[str, Any]:
         message = self._build_executer_message(
+            plan_data=plan_data,
             scenario=scenario,
             target=target,
             target_type=target_type,
@@ -3526,6 +3940,7 @@ class ScanOrchestratorService:
         *,
         project_id: str,
         scan_id: str,
+        cycle_number: int,
         plan_data: dict[str, Any],
         recon_agent: Any,
         exploit_agent: Any,
@@ -3619,6 +4034,7 @@ class ScanOrchestratorService:
         if selected:
             results = await asyncio.gather(*[
                 self._execute_scenario_with_agent(
+                    plan_data=plan_data,
                     scenario=scenario,
                     recon_agent=recon_agent,
                     exploit_agent=exploit_agent,
@@ -4054,10 +4470,19 @@ class ScanOrchestratorService:
         for row in execution_rows:
             row_result = row.get("result", {}) if isinstance(row, dict) else {}
             row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
+
+            scenario = row.get("scenario", {})
+            if isinstance(scenario, dict):
+                _append_scenario_execution_history(
+                    plan_data,
+                    scenario,
+                    cycle_number=cycle_number,
+                    row_result=row_result,
+                )
+
             if row_status in {"failed", "error"}:
                 continue
 
-            scenario = row.get("scenario", {})
             if isinstance(scenario, dict):
                 rounds_executed = int(row_result.get("rounds_executed", 0) or 0)
                 round_labels = row_result.get("round_labels", [])
@@ -5162,6 +5587,7 @@ class ScanOrchestratorService:
                         should_continue, updated_plan = await self._run_execution_cycle(
                             project_id=project_id,
                             scan_id=scan_id,
+                            cycle_number=display_cycle_count,
                             plan_data=plan_data,
                             recon_agent=recon_agent,
                             exploit_agent=exploit_agent,

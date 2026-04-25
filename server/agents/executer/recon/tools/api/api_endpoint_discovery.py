@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from server.agents.executer.recon.tools.api._common import (
     extract_host,
 )
+from server.agents.executer.recon.config import is_blocked_host
 
 # ══════════════════════════════════════════════════════════════
 # 1. SCHEMAS
@@ -42,12 +43,7 @@ class APIDiscoveryRequest(BaseModel):
     def validate_target(cls, v):
         cleaned = v.strip()
         host = extract_host(cleaned)
-        blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
-        if host in {"127.0.0.1", "localhost", "::1"}:
-            if not re.match(r"^https?://[a-zA-Z0-9]", cleaned):
-                raise ValueError(f"Invalid target: {v}")
-            return cleaned
-        if host in blocked:
+        if is_blocked_host(host):
             raise ValueError(f"Target '{v}' is blocked")
 
         domain_pattern = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"

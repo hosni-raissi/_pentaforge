@@ -1,0 +1,90 @@
+{
+  "project_id": "4b4c5347-daca-4c28-8caf-d483f009d28f",
+  "updated_at": "2026-04-25T13:20:59.420008+00:00",
+  "findings": [
+    {
+      "id": "6c9e16e2-9f40-4ae4-922b-d2a66567bbf8",
+      "title": "Anomalous edge-layer behavior confirmed: `/nonexistent-path` returned 200 OK, malformed requests (PRI method, invalid Host header) triggered differential responses, and unusual Cache-Control headers were observed. These indicators validate the presence of an edge layer (e.g., reverse proxy or load balancer).",
+      "severity": "critical",
+      "category": "Security Issue",
+      "target": "http://127.0.0.1:3001",
+      "status": "verified",
+      "cvss": null,
+      "cve": null,
+      "description": "Vulnerability Type: Security Issue\nTarget Endpoint: N/A\n\nFinding Summary:\nAnomalous edge-layer behavior confirmed: `/nonexistent-path` returned 200 OK, malformed requests (PRI method, invalid Host header) triggered differential responses, and unusual Cache-Control headers were observed. These indicators validate the presence of an edge layer (e.g., reverse proxy or load balancer).\n\nVerification Status: CONFIRMED\nSeverity Level: CRITICAL\nVerification Confidence: 0.95\n\nScenario:\nIdentify edge defenses (WAF/CDN/load balancer) via response anomalies\n\nConfirmation Commands:\n  - curl -v http://127.0.0.1:3001/nonexistent-path\n  - curl -v -X PRI http://127.0.0.1:3001/\n  - curl -v -H 'Host: invalid.host.test' http://127.0.0.1:3001/\n  - curl -I http://127.0.0.1:3001/robots.txt\n\nTools Used:\n  - run_custom",
+      "evidence": {
+        "verification_summary": "Anomalous edge-layer behavior confirmed: `/nonexistent-path` returned 200 OK, malformed requests (PRI method, invalid Host header) triggered differential responses, and unusual Cache-Control headers were observed. These indicators validate the presence of an edge layer (e.g., reverse proxy or load balancer).",
+        "verification_confidence": 0.95,
+        "commands": [
+          "curl -v http://127.0.0.1:3001/nonexistent-path",
+          "curl -v -X PRI http://127.0.0.1:3001/",
+          "curl -v -H 'Host: invalid.host.test' http://127.0.0.1:3001/",
+          "curl -I http://127.0.0.1:3001/robots.txt"
+        ],
+        "tools_used": [
+          "run_custom"
+        ],
+        "tool_executions": [
+          {
+            "tool": "run_custom",
+            "command": "curl -v http://127.0.0.1:3001/nonexistent-path",
+            "args": {
+              "command": "curl",
+              "reason": "Verify if the endpoint `/nonexistent-path` returns a 200 OK status instead of 404 Not Found, indicating an edge layer masking backend responses.",
+              "args": [
+                "-v",
+                "http://127.0.0.1:3001/nonexistent-path"
+              ]
+            },
+            "result_preview": "{\"success\":true,\"command\":\"curl\",\"args\":[\"-v\",\"http://127.0.0.1:3001/nonexistent-path\"],\"reason\":\"Verify if the endpoint `/nonexistent-path` returns a 200 OK status instead of 404 Not Found, indicating an edge layer masking backend responses.\",\"full_command\":\"curl -v http://12..."
+          },
+          {
+            "tool": "run_custom",
+            "command": "curl -v -X PRI http://127.0.0.1:3001/",
+            "args": {
+              "command": "curl",
+              "reason": "Re-send a request with the non-standard HTTP method `PRI` to confirm if the edge layer rejects it with a 400 Bad Request response.",
+              "args": [
+                "-v",
+                "-X",
+                "PRI",
+                "http://127.0.0.1:3001/"
+              ]
+            },
+            "result_preview": "{\"success\":true,\"command\":\"curl\",\"args\":[\"-v\",\"-X\",\"PRI\",\"http://127.0.0.1:3001/\"],\"reason\":\"Re-send a request with the non-standard HTTP method `PRI` to confirm if the edge layer rejects it with a 400 Bad Request response.\",\"full_command\":\"curl -v -X PRI http://127.0.0.1:3001..."
+          },
+          {
+            "tool": "run_custom",
+            "command": "curl -v -H 'Host: invalid.host.test' http://127.0.0.1:3001/",
+            "args": {
+              "command": "curl",
+              "reason": "Send a request with an invalid Host header to confirm if the edge layer handles it differently (e.g., returns 200 OK instead of 400/502), further validating edge-layer presence.",
+              "args": [
+                "-v",
+                "-H",
+                "Host: invalid.host.test",
+                "http://127.0.0.1:3001/"
+              ]
+            },
+            "result_preview": "{\"success\":true,\"command\":\"curl\",\"args\":[\"-v\",\"-H\",\"Host: invalid.host.test\",\"http://127.0.0.1:3001/\"],\"reason\":\"Send a request with an invalid Host header to confirm if the edge layer handles it differently (e.g., returns 200 OK instead of 400/502), further validating edge-la..."
+          },
+          {
+            "tool": "run_custom",
+            "command": "curl -I http://127.0.0.1:3001/robots.txt",
+            "args": {
+              "command": "curl",
+              "reason": "Compare Cache-Control headers for static (e.g., /robots.txt) and dynamic (e.g., /) content to confirm unusual caching behavior indicative of an edge layer.",
+              "args": [
+                "-I",
+                "http://127.0.0.1:3001/robots.txt"
+              ]
+            },
+            "result_preview": "{\"success\":true,\"command\":\"curl\",\"args\":[\"-I\",\"http://127.0.0.1:3001/robots.txt\"],\"reason\":\"Compare Cache-Control headers for static (e.g., /robots.txt) and dynamic (e.g., /) content to confirm unusual caching behavior indicative of an edge layer.\",\"full_command\":\"curl -I http..."
+          }
+        ]
+      },
+      "remediation": "Retest/PoC generation pending. Review the confirmation commands and remove or patch the affected service/version.",
+      "timestamp": "2026-04-25T13:20:59.416497+00:00"
+    }
+  ]
+}

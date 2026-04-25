@@ -46,17 +46,7 @@ ALLOWED_TARGET_DOMAINS: frozenset[str] = frozenset({
     # "example.com"
 })
 
-# Cloud metadata endpoints — always blocked
-BLOCKED_HOSTNAMES: frozenset[str] = frozenset({
-    "metadata.google.internal",
-    "metadata.internal",
-    "169.254.169.254",       # AWS / Azure / GCP IMDS
-    "instance-data",         # older EC2 alias
-})
-
-LOCAL_HOSTNAMES: frozenset[str] = frozenset({
-   "ip6-localhost", "ip6-loopback",
-})
+from server.agents.executer.recon.config import is_blocked_host
 
 BLOCKED_CIDRS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.IPv4Network("100.64.0.0/10"),    # CGNAT
@@ -164,12 +154,9 @@ async def is_blocked_target(target: str) -> tuple[bool, str]:
 
     allow_local = local_targets_allowed()
 
-    # 2. Hardcoded Blocklists
-    if host in BLOCKED_HOSTNAMES:
+    # 2. Centralized Blocklists
+    if is_blocked_host(host):
         return True, f"blocked hostname: {host!r}"
-
-    if host in LOCAL_HOSTNAMES:
-        return False, ""
 
     # 3. Fast IP Literal Check
     try:

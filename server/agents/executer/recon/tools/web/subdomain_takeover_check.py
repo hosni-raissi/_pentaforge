@@ -11,6 +11,7 @@ import concurrent.futures
 from typing import Optional
 from functools import lru_cache
 from pydantic import BaseModel, Field, field_validator
+from server.agents.executer.recon.config import is_blocked_host
 
 
 # ══════════════════════════════════════════════════════════════
@@ -73,9 +74,8 @@ class SubdomainTakeoverRequest(BaseModel):
     @field_validator("target")
     @classmethod
     def validate_target(cls, v: str) -> str:
-        blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1", "169.254.169.254"]
         clean = v.strip().lower()
-        if clean in blocked:
+        if is_blocked_host(clean):
             raise ValueError(f"Target '{v}' is blocked")
 
         # Domain or IP validation

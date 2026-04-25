@@ -104,8 +104,7 @@ class ProjectConfig:
 # Security constants
 DANGEROUS_CHARS = [";", "&&", "||", "|", "`", "$(", ">", "\n", "\r", "'", '"']
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 # Allowed wordlist directories
 ALLOWED_WORDLIST_DIRS = [
@@ -160,19 +159,8 @@ class ParamDiscoveryRequest(BaseModel):
         if not domain_part or len(domain_part) < 3:
             raise ValueError(f"Invalid target format: {v}")
 
-        for b_host in _BLOCKED_HOSTNAMES:
-            if domain_part == b_host or domain_part.endswith(f".{b_host}"):
-                raise ValueError(f"Target '{v}' matches blocked hostname '{b_host}'")
-        
-        try:
-            import ipaddress
-            ip = ipaddress.ip_address(domain_part)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ValueError(f"Target '{v}' resolves to a blocked IP space")
-        except ValueError as exc:
-            if "blocked IP space" in str(exc):
-                raise
+        if is_blocked_host(domain_part):
+            raise ValueError(f"Target '{v}' is blocked")
 
         return clean
 

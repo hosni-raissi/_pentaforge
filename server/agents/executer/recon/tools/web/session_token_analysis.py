@@ -14,8 +14,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import urllib.parse
 import ipaddress
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 COMMON_COOKIE_NAMES = [
     "JSESSIONID", "PHPSESSID", "ASP.NET_SessionId", "session",
@@ -43,18 +42,8 @@ class SessionAnalysisRequest(BaseModel):
             raise ValueError("Target URL does not contain a hostname")
         
         host_lower = host.lower()
-        for b_host in _BLOCKED_HOSTNAMES:
-            if host_lower == b_host or host_lower.endswith(f".{b_host}"):
-                raise ValueError(f"Target '{cleaned}' matches blocked hostname '{b_host}'")
-        
-        try:
-            ip = ipaddress.ip_address(host)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ValueError(f"Target '{cleaned}' relies on a blocked IP space")
-        except ValueError as exc:
-            if "blocked IP space" in str(exc):
-                raise
+        if is_blocked_host(host_lower):
+            raise ValueError(f"Target '{cleaned}' is blocked")
         
         return cleaned
 class TokenCharacteristics(BaseModel):

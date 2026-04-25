@@ -93,16 +93,7 @@ class _Config:
     VALID_FORMATS:          frozenset = frozenset({"text", "json", "csv", "jsonl"})
     DEFAULT_FORMAT:         str       = "text"
 
-    @property
-    def BLOCKED_TARGETS(self) -> frozenset[str]:
-        try:
-            from server.agents.executer.recon.config import BLOCKED_HOSTNAMES, BLOCKED_NETWORKS
-            targets: set[str] = set(BLOCKED_HOSTNAMES)
-            for net in BLOCKED_NETWORKS:
-                targets.add(str(net))
-            return frozenset(t.lower() for t in targets)
-        except ImportError:
-            return frozenset()
+
 
 
 CFG = _Config()
@@ -241,11 +232,20 @@ def _resolve_sudo_askpass(
 # ══════════════════════════════════════════════════════════════════════
 
 def _validate_target(v: str) -> str:
+    from server.agents.executer.recon.config import is_blocked_host, BLOCKED_NETWORKS as _BLOCKED_NETWORKS
     clean = v.strip()
 
-    for blocked in CFG.BLOCKED_TARGETS:
-        if blocked in clean.lower():
-            raise ValueError(f"Target '{v}' is blocked")
+    if is_blocked_host(clean.lower()):
+        raise ValueError(f"Target '{v}' is blocked")
+
+    if "/" in clean:
+        try:
+            net = ipaddress.ip_network(clean, strict=False)
+            for blocked_net in _BLOCKED_NETWORKS:
+                if net.overlaps(blocked_net):
+                    raise ValueError(f"Target CIDR '{v}' overlaps with blocked network {blocked_net}")
+        except ValueError:
+            pass
 
     if ":" in clean and " " not in clean:
         try:

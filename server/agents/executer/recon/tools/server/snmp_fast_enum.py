@@ -15,8 +15,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 # ══════════════════════════════════════════════════════════════
 # 1. CONSTANTS
@@ -59,20 +58,9 @@ class SNMPFastEnumRequest(BaseModel):
             raise ValueError(f"Hostname too long: {v!r}")
 
         # Check hostname blocklist FIRST
-        v_lower = v.lower()
-        for b_host in _BLOCKED_HOSTNAMES:
-            if v_lower == b_host or v_lower.endswith(f".{b_host}"):
-                raise ValueError(f"Target '{v}' matches blocked hostname '{b_host}'")
-
-        try:
-            ip = ipaddress.ip_address(v)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ValueError(f"Target '{v}' is in a blocked range ({net})")
-            return v
-        except ValueError as exc:
-            if "blocked range" in str(exc) or "blocked hostname" in str(exc):
-                raise
+        if is_blocked_host(v.lower()):
+            raise ValueError(f"Target '{v}' is blocked")
+        return v
 
         # Check domain format
         if not _DOMAIN_RE.match(v.lower()):

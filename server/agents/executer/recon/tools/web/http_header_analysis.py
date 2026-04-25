@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from typing import Optional, Any
 from pydantic import BaseModel, Field, field_validator
 import urllib3
+from server.agents.executer.recon.config import is_blocked_host
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -44,9 +45,8 @@ class HeaderAnalysisRequest(BaseModel):
     @field_validator("target")
     @classmethod
     def validate_target(cls, v):
-        blocked = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
         host = _normalize_host(v)
-        if host in blocked:
+        if is_blocked_host(host):
             raise ValueError(f"Target '{v}' is blocked")
 
         domain_pattern = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"

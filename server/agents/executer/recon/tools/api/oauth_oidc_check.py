@@ -19,8 +19,7 @@ from server.agents.executer.recon.tools.api._common import (
 # ══════════════════════════════════════════════════════════════
 import os
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 
 class OAuthCheckRequest(BaseModel):
@@ -44,17 +43,8 @@ class OAuthCheckRequest(BaseModel):
             return cleaned
 
         host_lower = host.lower()
-        if host_lower in _BLOCKED_HOSTNAMES or any(host_lower.endswith(f".{b}") for b in _BLOCKED_HOSTNAMES):
-             raise ValueError(f"Target '{v}' is a blocked hostname.")
-
-        try:
-            import ipaddress
-            ip = ipaddress.ip_address(host)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ValueError(f"Target '{v}' is a blocked internal IP.")
-        except ValueError:
-            pass
+        if is_blocked_host(host_lower):
+            raise ValueError(f"Target '{v}' is blocked.")
 
         if not re.match(r"^https?://[a-zA-Z0-9]", cleaned):
             raise ValueError("Target must start with http:// or https://")

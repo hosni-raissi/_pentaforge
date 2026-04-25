@@ -14,6 +14,7 @@ import threading
 import ipaddress
 from typing import Optional, Any
 from pydantic import BaseModel, Field, field_validator
+from server.agents.executer.recon.config import is_blocked_host
 
 # ══════════════════════════════════════════════════════════════
 # FIX 1 — RATE LIMITER + RETRY WITH EXPONENTIAL BACKOFF
@@ -113,8 +114,7 @@ class CDNOriginRequest(BaseModel):
     @field_validator("target")
     @classmethod
     def validate_target(cls, v):
-        blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
-        if v.strip() in blocked:
+        if is_blocked_host(v.strip()):
             raise ValueError(f"Target '{v}' is blocked")
 
         domain_pattern = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$"

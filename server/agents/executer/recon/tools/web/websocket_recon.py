@@ -27,8 +27,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. CONSTANTS
 # ══════════════════════════════════════════════════════════════
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 # Common WebSocket paths to probe
 WS_PATHS = [
@@ -69,11 +68,7 @@ _MAX_WORKERS_PER_HOST = 5   # throttle per-host to be polite
 
 def _is_private_ip(addr: str) -> bool:
     """Return True if addr resolves to a private/reserved IP range."""
-    try:
-        ip = ipaddress.ip_address(addr)
-        return any(ip in net for net in _BLOCKED_NETWORKS)
-    except ValueError:
-        return False
+    return is_blocked_host(addr)
 
 
 def _resolve_and_check(hostname: str) -> Optional[str]:
@@ -81,10 +76,8 @@ def _resolve_and_check(hostname: str) -> Optional[str]:
     Resolve hostname to IP and check it is publicly routable.
     Returns error string if blocked, None if safe.
     """
-    host_lower = hostname.lower()
-    for b_host in _BLOCKED_HOSTNAMES:
-        if host_lower == b_host or host_lower.endswith(f".{b_host}"):
-            return f"Hostname '{hostname}' is blocked"
+    if is_blocked_host(hostname):
+        return f"Hostname '{hostname}' is blocked"
 
     try:
         _, _, addrs = socket.gethostbyname_ex(hostname)
@@ -92,9 +85,9 @@ def _resolve_and_check(hostname: str) -> Optional[str]:
         return f"DNS resolution failed for '{hostname}': {exc}"
 
     for addr in addrs:
-        if _is_private_ip(addr):
+        if is_blocked_host(addr):
             return (
-                f"Hostname '{hostname}' resolves to private/reserved IP '{addr}' — "
+                f"Hostname '{hostname}' resolves to blocked IP '{addr}' — "
                 "SSRF protection blocked this request"
             )
     return None

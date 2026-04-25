@@ -36,8 +36,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -117,9 +116,7 @@ class ReconResult(BaseModel):
 # 3. SECURITY VALIDATION
 # ══════════════════════════════════════════════════════════════════════
 
-def _ip_in_blocked_networks(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Return True if addr falls within any blocked network."""
-    return any(addr in net for net in _BLOCKED_NETWORKS)
+    pass
 
 
 def _validate_target(target: str) -> tuple[bool, str]:
@@ -135,24 +132,17 @@ def _validate_target(target: str) -> tuple[bool, str]:
     """
     clean = target.strip().lower()
 
-    # 1. Exact hostname blocklist
-    if clean in _BLOCKED_HOSTNAMES:
-        return True, f"Hostname '{target}' is blocked"
+    if is_blocked_host(clean):
+        return True, f"Target '{target}' is blocked"
 
     # 2. Embedded IP patterns (e.g. evil.127.0.0.1.xip.io)
     for match in _EMBEDDED_IP_RE.findall(clean):
-        try:
-            addr = ipaddress.ip_address(match)
-            if _ip_in_blocked_networks(addr):
-                return True, f"Target contains blocked IP pattern: {match}"
-        except ValueError:
-            continue
+        if is_blocked_host(match):
+            return True, f"Target contains blocked IP pattern: {match}"
 
     # 3. Direct IP address
     try:
-        addr = ipaddress.ip_address(target.strip())
-        if _ip_in_blocked_networks(addr):
-            return True, f"IP {target} is in a blocked network"
+        ipaddress.ip_address(clean)
         return False, ""  # Valid IP — skip DNS step
     except ValueError:
         pass  # Not a bare IP — continue to DNS check
@@ -162,14 +152,10 @@ def _validate_target(target: str) -> tuple[bool, str]:
         resolved = socket.getaddrinfo(clean, None)
         for item in resolved:
             raw_ip = item[4][0]
-            try:
-                addr = ipaddress.ip_address(raw_ip)
-                if _ip_in_blocked_networks(addr):
-                    return True, (
-                        f"'{target}' resolves to blocked IP {raw_ip}"
-                    )
-            except ValueError:
-                continue
+            if is_blocked_host(raw_ip):
+                return True, (
+                    f"'{target}' resolves to blocked IP {raw_ip}"
+                )
     except socket.gaierror:
         # Unresolvable — let the tools report the error naturally
         logger.debug("DNS resolution failed for %s — passing through", target)

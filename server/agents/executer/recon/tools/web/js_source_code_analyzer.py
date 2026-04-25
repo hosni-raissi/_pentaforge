@@ -78,8 +78,7 @@ class ProjectConfig:
 # 2. SSRF GUARD
 # ══════════════════════════════════════════════════════════════════════
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 
 def _is_ssrf_safe(hostname: str) -> tuple[bool, str]:
@@ -87,7 +86,7 @@ def _is_ssrf_safe(hostname: str) -> tuple[bool, str]:
     Resolve the hostname and verify it does not point to an internal
     or reserved IP address. Returns (is_safe, reason).
     """
-    if hostname.lower() in _BLOCKED_HOSTNAMES:
+    if is_blocked_host(hostname):
         return False, f"Blocked hostname: {hostname}"
 
     try:
@@ -98,14 +97,8 @@ def _is_ssrf_safe(hostname: str) -> tuple[bool, str]:
 
     for _, _, _, _, sockaddr in results:
         raw_ip = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(raw_ip)
-        except ValueError:
-            continue
-
-        for network in _BLOCKED_NETWORKS:
-            if ip in network:
-                return False, f"IP {raw_ip} is in blocked range {network}"
+        if is_blocked_host(raw_ip):
+            return False, f"IP {raw_ip} is blocked"
 
     return True, ""
 

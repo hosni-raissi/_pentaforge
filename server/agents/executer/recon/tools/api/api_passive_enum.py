@@ -16,8 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from server.agents.executer.recon.tools.api._common import extract_host
 
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 _COMMON_PASSIVE_PATHS = [
     "/",
@@ -87,17 +86,8 @@ class PassiveEnumRequest(BaseModel):
             return cleaned
 
         host_lower = host.lower()
-        if host_lower in _BLOCKED_HOSTNAMES or any(host_lower.endswith(f".{b}") for b in _BLOCKED_HOSTNAMES):
-             raise ValueError(f"Target '{v}' is a blocked hostname.")
-
-        try:
-            import ipaddress
-            ip = ipaddress.ip_address(host)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ValueError(f"Target '{v}' is a blocked internal IP.")
-        except ValueError:
-            pass
+        if is_blocked_host(host_lower):
+            raise ValueError(f"Target '{v}' is blocked.")
 
         domain = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"
         bare = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$"

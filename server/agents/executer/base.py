@@ -316,6 +316,97 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
         summary = raw.strip() or "No response generated."
         return ExecuterResult(status="incomplete", summary=summary)
 
+    scenario_summaries = parsed.get("scenario_summaries", [])
+    if not isinstance(scenario_summaries, list):
+        scenario_summaries = []
+
+    def _normalize_recon_status_value(
+        value: Any,
+        *,
+        summary: Any = "",
+        findings: Any = None,
+        tools: Any = None,
+        default: str = "failed",
+    ) -> str:
+        raw_status = str(value or "").strip().lower()
+        summary_text = str(summary or "").strip().lower()
+        findings_list = findings if isinstance(findings, list) else []
+        tools_list = tools if isinstance(tools, list) else []
+        has_findings = any(isinstance(item, dict) for item in findings_list)
+        has_tools = any(str(item).strip() for item in tools_list)
+        useful_summary_markers = (
+            "discovered",
+            "identified",
+            "found",
+            "revealed",
+            "mapped",
+            "enumerated",
+            "fingerprinted",
+            "observed",
+            "detected",
+            "collected",
+            "exposed",
+            "located",
+        )
+        blocked_summary_markers = (
+            "blocked",
+            "restriction",
+            "restricted",
+            "prevented",
+            "policy",
+            "localhost",
+            "127.0.0.1",
+            "insufficient",
+            "limited",
+        )
+        if raw_status in {"complete", "completed", "done", "success", "succeeded"}:
+            return "complete"
+        if raw_status in {
+            "blocked",
+            "partial",
+            "partially_complete",
+            "partially completed",
+            "partial_success",
+            "partially_successful",
+            "incomplete",
+            "limited",
+        }:
+            return "blocked"
+        if raw_status in {"failed", "failure", "error"}:
+            if has_findings or has_tools or any(marker in summary_text for marker in useful_summary_markers):
+                return "blocked"
+            return "failed"
+        if any(marker in summary_text for marker in blocked_summary_markers):
+            return "blocked"
+        if has_findings or has_tools or any(marker in summary_text for marker in useful_summary_markers):
+            return "blocked"
+        return default
+
+    normalized_scenario_summaries: list[dict[str, Any]] = []
+    for item in scenario_summaries:
+        if not isinstance(item, dict):
+            continue
+        normalized_item = dict(item)
+        if role == "recon":
+            normalized_item["status"] = _normalize_recon_status_value(
+                normalized_item.get("status"),
+                summary=normalized_item.get("summary"),
+                findings=normalized_item.get("findings"),
+                tools=normalized_item.get("tools"),
+                default="blocked",
+            )
+        summary_value = normalized_item.get("summary", "")
+        if isinstance(summary_value, list):
+            summary_value = " ".join(str(x) for x in summary_value if str(x).strip())
+        normalized_item["summary"] = str(summary_value or "").strip()
+        findings_value = normalized_item.get("findings", [])
+        normalized_item["findings"] = findings_value if isinstance(findings_value, list) else []
+        tools_value = normalized_item.get("tools", [])
+        normalized_item["tools"] = [
+            str(x).strip() for x in tools_value if str(x).strip()
+        ] if isinstance(tools_value, list) else []
+        normalized_scenario_summaries.append(normalized_item)
+
     # CRITICAL FIX: Check for "verdict" field (Verify agent) or "status" field (other agents)
     status = parsed.get("status")
     if not status:
@@ -341,6 +432,32 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
             status = "inconclusive"
     elif role == "recon":
         # Recon: complete, blocked, or failed
+        status = _normalize_recon_status_value(
+            status,
+            summary=parsed.get("summary", ""),
+            findings=parsed.get("findings", []),
+            tools=[
+                tool_name
+                for item in normalized_scenario_summaries
+                if isinstance(item, dict)
+                for tool_name in (
+                    item.get("tools", []) if isinstance(item.get("tools", []), list) else []
+                )
+            ],
+            default=status,
+        )
+        if status not in {"complete", "blocked", "failed"} and normalized_scenario_summaries:
+            summary_statuses = [
+                str(item.get("status", "")).strip().lower()
+                for item in normalized_scenario_summaries
+                if str(item.get("status", "")).strip()
+            ]
+            if summary_statuses and all(item == "complete" for item in summary_statuses):
+                status = "complete"
+            elif any(item in {"complete", "blocked"} for item in summary_statuses):
+                status = "blocked"
+            else:
+                status = "failed"
         if status not in {"complete", "blocked", "failed"}:
             logger.warning(
                 "executer_invalid_recon_status",
@@ -365,7 +482,6 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
     needs = parsed.get("needs", [])
     summary = parsed.get("summary", "")
     next_hypotheses = parsed.get("next_hypotheses", [])
-    scenario_summaries = parsed.get("scenario_summaries", [])
     raw_confidence = parsed.get("confidence")
     confidence: float | None = None
     try:
@@ -386,8 +502,6 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
         needs = []
     if not isinstance(next_hypotheses, list):
         next_hypotheses = []
-    if not isinstance(scenario_summaries, list):
-        scenario_summaries = []
 
     # Ensure summary is a string
     if isinstance(summary, list):
@@ -402,9 +516,7 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
         needs=needs,
         summary=summary,
         next_hypotheses=[str(item) for item in next_hypotheses],
-        scenario_summaries=[
-            item for item in scenario_summaries if isinstance(item, dict)
-        ],
+        scenario_summaries=normalized_scenario_summaries,
     )
 
 
@@ -418,8 +530,13 @@ def _default_status_for_failed_consolidation(role: str) -> str:
 
 
 def _get_valid_params(tool: Tool) -> set[str] | None:
+    parameters = tool.parameters if isinstance(tool.parameters, dict) else {}
+    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+    if isinstance(properties, dict) and properties:
+        return {str(name) for name in properties.keys() if str(name).strip()}
+
     try:
-        sig = inspect.signature(tool.execute)
+        sig = inspect.signature(tool.fn)
         params = set()
         for name, param in sig.parameters.items():
             if name == "self":
@@ -468,6 +585,7 @@ class BaseExecuterAgent:
         self._tool_schemas = [t.schema() for t in tools]
         self._tool_valid_params = {t.name: _get_valid_params(t) for t in tools}
         self._execution_tool_timeout_cap_seconds: int | None = None
+        self._current_user_message: str = ""
 
         if self._mode == "local":
             self._local_config = local_config or local_llm_config
@@ -1167,6 +1285,9 @@ class BaseExecuterAgent:
         Build an explicit reminder for consolidation-only rounds.
         This prevents context drift after seeing tool output and reinforces the JSON-only requirement.
         """
+        warmup_batch_mode = "Warmup scenario batch" in str(
+            getattr(self, "_current_user_message", "") or ""
+        )
         role_templates = {
             "verify": (
                 f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
@@ -1177,9 +1298,17 @@ class BaseExecuterAgent:
             ),
             "recon": (
                 f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
-                "You have completed reconnaissance. Now output ONLY valid JSON with three fields: "
-                '"status" (complete|blocked|failed), "findings" (array), and "summary" (1-2 sentences). '
-                "NO prose before or after JSON. NO markdown. Start with { and end with }."
+                "You have completed reconnaissance. "
+                + (
+                    "Because this is warmup batch mode, output ONLY valid JSON with four top-level fields: "
+                    '"status" (complete|blocked|failed), "findings" (array), "summary" (1-2 sentences), '
+                    'and "scenario_summaries" (array). Each scenario_summaries item must contain '
+                    '"scenario_id", "task", "status" (complete|blocked|failed), "summary", "findings", and "tools". '
+                    if warmup_batch_mode
+                    else "Now output ONLY valid JSON with three fields: "
+                    '"status" (complete|blocked|failed), "findings" (array), and "summary" (1-2 sentences). '
+                )
+                + "NO prose before or after JSON. NO markdown. Start with { and end with }."
             ),
             "exploit": (
                 f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
@@ -1204,6 +1333,9 @@ class BaseExecuterAgent:
         recent_tool_output = self._format_tool_results(tool_results[-8:])
         if len(recent_tool_output) > 5000:
             recent_tool_output = recent_tool_output[-5000:]
+        warmup_batch_mode = "Warmup scenario batch" in str(
+            getattr(self, "_current_user_message", "") or ""
+        )
 
         role_specific = {
             "verify": (
@@ -1219,7 +1351,11 @@ class BaseExecuterAgent:
             "recon": (
                 "You attempted tool calls in the final consolidation round, which is not allowed.\n"
                 "Do NOT call tools. Use only the already collected reconnaissance evidence below.\n"
-                'Return ONLY strict JSON with: {"status":"complete|blocked|failed","findings":[],"summary":"..."}'
+                + (
+                    'Return ONLY strict JSON with: {"status":"complete|blocked|failed","findings":[],"summary":"...","scenario_summaries":[{"scenario_id":"s1","task":"...","status":"complete|blocked|failed","summary":"...","findings":[],"tools":[]}]}'
+                    if warmup_batch_mode
+                    else 'Return ONLY strict JSON with: {"status":"complete|blocked|failed","findings":[],"summary":"..."}'
+                )
             ),
             "exploit": (
                 "You attempted tool calls in the final consolidation round, which is not allowed.\n"
@@ -1346,6 +1482,7 @@ class BaseExecuterAgent:
 
     async def run(self, user_message: str) -> ExecuterResult:
         self._cb.on_step(f"[{self._role}] starting run")
+        self._current_user_message = str(user_message or "")
         if self._context_window is not None:
             await self._context_window.record(
                 kind="run_input",
@@ -1391,7 +1528,7 @@ class BaseExecuterAgent:
                         "tool_results": len(all_tool_results),
                     },
                 )
-            self._cb.on_done(f"[{self._role}] completed with status={result.status}")
+            self._cb.on_done(f"[{self._role}] finished with status={result.status}")
             return result
 
         for round_index in range(1, self._max_tool_rounds + 1):
@@ -1624,6 +1761,10 @@ class BaseExecuterAgent:
                     self._cb.on_warn(
                         f"[{self._role}] No tool calls on non-final round {round_index}; continuing to next round"
                     )
+                    messages.append({
+                        "role": "user",
+                        "content": "You did not invoke any tools this round. If you are finished, you must still wait for the final consolidation round to output your JSON result. Please continue your analysis or invoke tools if necessary.",
+                    })
                     continue
 
             tool_messages, tool_results, discovered, halted_for_approval = await self._run_tools(

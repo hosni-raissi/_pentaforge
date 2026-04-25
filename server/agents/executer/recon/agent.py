@@ -159,6 +159,7 @@ def build_recon_scenario_packet(
     return (
         "Recon scenario packet:\n"
         "1) Scenario + target info from operator follows below.\n"
+        "   Operator info may include prior execution history for this agent.\n"
         "2) Use scoped recon tools to maximize useful recon signal for this scenario.\n"
         f"3) Max tool executions per round: {max_tool_calls_per_round}. Max rounds per scenario: 3.\n"
         "4) Always update context window with new findings each round.\n\n"

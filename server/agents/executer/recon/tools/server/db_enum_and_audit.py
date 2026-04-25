@@ -32,8 +32,7 @@ PORT_SERVICE_HINTS: dict[int, str] = {
     9042:  "cassandra",
 }
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+
 
 
 # ---------------------------------------------------------------------------
@@ -53,17 +52,8 @@ class DbEnumRequest(BaseModel):
         if not clean:
             raise ValueError("target is required")
         host = _extract_host(clean)
-        if host.lower() in _BLOCKED_HOSTNAMES:
+        if is_blocked_host(host.lower()):
             raise ValueError(f"Target '{value}' is blocked")
-        try:
-            addr = ipaddress.ip_address(host)
-            if any(addr in net for net in _BLOCKED_NETWORKS):
-                raise ValueError(f"Target '{value}' resolves to a private/loopback address")
-        except ValueError as exc:
-            # Not a bare IP — check after DNS resolution below; re-raise only
-            # if it came from our own guard, not from ip_address().
-            if "private" in str(exc) or "blocked" in str(exc):
-                raise
         return clean
 
     @field_validator("ports")

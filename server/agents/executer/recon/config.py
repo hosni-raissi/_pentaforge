@@ -8,7 +8,7 @@ import socket
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MAX_TOOL_ROUNDS = 3
-LLM_CALL_TIMEOUT_SECONDS = 60
+LLM_CALL_TIMEOUT_SECONDS = 300
 RECON_CONTEXT_WINDOW_MAX_TOKENS = 15000
 RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000
 RECON_MAX_TOOL_CALLS_PER_ROUND = 2
@@ -143,23 +143,32 @@ def _enable_burp_auto_capture() -> bool:
 BURP_AUTO_CAPTURE_ACTIVE = _enable_burp_auto_capture()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Security Configuration
+#  Security Configuration — Target Blocking
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import ipaddress
+from urllib.parse import urlparse as _urlparse
 
-# List of ipaddress.IPv4Network or IPv6Network objects to block (e.g. 10.0.0.0/8)
-BLOCKED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("224.0.0.0/4"),
-    ipaddress.ip_network("255.255.255.255/32"),
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("::/128"),
-    ipaddress.ip_network("fe80::/10"),
-]
+# Centralized blocked-hosts set.  ALL recon tools import `is_blocked_host`
+# from this module instead of maintaining their own hardcoded lists.
+# Leave empty to allow every target (including localhost); populate as needed.
+BLOCKED_HOSTS: set[str] = set()
+# Example:  BLOCKED_HOSTS = {"169.254.169.254", "metadata.google.internal"}
 
-BLOCKED_HOSTNAMES: list[str] = [
-    "localhost", "broadcasthost", "local"
-]
+# Backward-compatible aliases — network/server tools still import these.
+# Kept empty so nothing is blocked; migrate callers to is_blocked_host() over time.
+BLOCKED_HOSTNAMES: set[str] = set()
+BLOCKED_NETWORKS: list = []
+
+
+def is_blocked_host(value: str) -> bool:
+    """Return True when *value* (hostname, IP, or full URL) is blocked."""
+    if not BLOCKED_HOSTS:
+        return False
+    host = value.strip().lower()
+    # If it looks like a URL, extract the hostname.
+    if host.startswith(("http://", "https://")):
+        parsed = _urlparse(host)
+        host = (parsed.hostname or "").lower()
+    # Strip port if present (e.g. "127.0.0.1:3001").
+    host = host.split(":")[0]
+    return host in BLOCKED_HOSTS

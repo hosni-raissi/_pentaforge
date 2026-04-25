@@ -88,9 +88,7 @@ _LIMITER = _TokenBucket(30.0)   # replaced per api_fuzzing() call
 # §2  SCHEMAS
 # ══════════════════════════════════════════════════════════════════════════════
 
-_BLOCKED_HOSTS = frozenset({
-    "127.0.0.1", "localhost", "0.0.0.0", "::1", "[::]",
-})
+from server.agents.executer.recon.config import is_blocked_host
 _DANGEROUS_CHARS = (";", "&&", "||", "|", "`", "$(", ">>")
 _BLOCKED_FLAGS   = frozenset({"-o", "--output", "-O", "-od"})
 
@@ -139,13 +137,8 @@ class FuzzRequest(BaseModel):
     def _target(cls, v: str) -> str:
         v = v.strip()
         h = _host(v)
-        if h in _BLOCKED_HOSTS:
-            if os.getenv("PENTAFORGE_ALLOW_LOCAL_API_TARGETS") != "1":
-                raise ValueError(f"Target host is blocked: {v}")
-            # Allow explicit local HTTP(S) URLs when local override is enabled.
-            if not re.match(r"^https?://", v):
-                raise ValueError(f"Invalid target format: {v}")
-            return v
+        if is_blocked_host(h):
+            raise ValueError(f"Target host is blocked: {v}")
         if not (_RE_DOMAIN.match(v) or _RE_BARE.match(v) or _RE_IP_HTTP.match(v)):
             raise ValueError(f"Invalid target format: {v}")
         return v

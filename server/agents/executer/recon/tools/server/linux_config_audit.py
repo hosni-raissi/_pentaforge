@@ -23,8 +23,7 @@ from typing import Any, Optional
 import paramiko
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 # ══════════════════════════════════════════════════════════════
 # 1. CONSTANTS
@@ -89,20 +88,9 @@ class LinuxConfigAuditRequest(BaseModel):
         if len(clean) > 253:
             raise ValueError(f"Hostname too long: {clean!r}")
 
-        v_lower = clean.lower()
-        for b_host in _BLOCKED_HOSTNAMES:
-            if v_lower == b_host or v_lower.endswith(f".{b_host}"):
-                raise ValueError(f"Target '{clean}' matches blocked hostname '{b_host}'")
-
-        try:
-            ip = ipaddress.ip_address(clean)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ValueError(f"Target '{clean}' is in a blocked range ({net})")
-            return clean
-        except ValueError as exc:
-            if "blocked range" in str(exc) or "blocked hostname" in str(exc):
-                raise
+        if is_blocked_host(clean.lower()):
+            raise ValueError(f"Target '{clean}' is blocked")
+        return clean
 
         if not _DOMAIN_RE.match(clean.lower()):
             raise ValueError(f"{clean!r} is neither a valid IP nor a valid domain")

@@ -7,9 +7,13 @@ from server.app.orchestrator import (
     _build_post_warmup_intel_info,
     _build_planner_kickoff_message,
     _build_static_recon_plan,
+    _build_target_execution_guidance,
+    _append_scenario_execution_history,
+    _format_agent_execution_history_for_prompt,
     _format_structured_checklist_for_prompt,
     _build_warmup_planner_message,
     _build_warmup_recon_plan,
+    _normalize_scenario_status,
     _normalize_perceptor_classification,
     ScanOrchestratorService,
     _format_static_recon_plan_for_prompt,
@@ -20,6 +24,8 @@ from server.app.orchestrator import (
 from server.agents.executer.base import BaseExecuterAgent
 from server.agents.executer.base import _default_status_for_failed_consolidation
 from server.agents.executer.base import _compact_tool_result_payload
+from server.agents.executer.base import _get_valid_params
+from server.agents.executer.base import _parse_executer_output
 from server.agents.executer.recon.agent import (
     _max_tool_calls_per_round_for_message,
     _tool_timeout_cap_for_message,
@@ -748,6 +754,35 @@ def test_base_executer_does_not_inject_timeout_for_tools_without_timeout_schema(
     assert "timeout" not in filtered
 
 
+def test_base_executer_filters_unexpected_tool_args_from_schema():
+    tool = Tool(
+        name="dummy_schema_tool",
+        description="dummy",
+        fn=lambda target, passive_mode=False: {"target": target, "passive_mode": passive_mode},
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "passive_mode": {"type": "boolean"},
+            },
+            "required": ["target"],
+        },
+    )
+    assert _get_valid_params(tool) == {"target", "passive_mode"}
+    agent = object.__new__(BaseExecuterAgent)
+    agent._role = "recon"
+    agent._tools = {"dummy_schema_tool": tool}
+    agent._tool_valid_params = {"dummy_schema_tool": {"target", "passive_mode"}}
+    agent._execution_tool_timeout_cap_seconds = None
+
+    filtered = agent._filter_tool_args(
+        "dummy_schema_tool",
+        {"target": "http://example.com", "passive_mode": True, "tool": "junk"},
+    )
+
+    assert filtered == {"target": "http://example.com", "passive_mode": True}
+
+
 def test_base_executer_recovers_malformed_tool_name_payload():
     tool = Tool(
         name="web_crawler",
@@ -780,6 +815,445 @@ def test_base_executer_recovers_malformed_tool_name_payload():
     assert args["tool"] == "katana"
     assert args["target"] == "http://scanme.nmap.org"
     assert args["args"] == ["-jc"]
+
+
+def test_scenario_status_preserves_failed_and_blocked_when_done():
+    assert _normalize_scenario_status("failed", done=True) == "failed"
+    assert _normalize_scenario_status("blocked", done=True) == "blocked"
+    assert _normalize_scenario_status("complete", done=True) == "completed"
+
+
+def test_parse_executer_output_normalizes_recon_partial_statuses():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "partial",
+                "findings": [],
+                "summary": "Partial evidence gathered.",
+                "scenario_summaries": [
+                    {
+                        "scenario_id": "s1",
+                        "task": "Local Perimeter Mapping",
+                        "status": "partial",
+                        "summary": "Blocked by localhost restrictions.",
+                        "findings": [],
+                        "tools": ["run_custom"],
+                    },
+                    {
+                        "scenario_id": "s2",
+                        "task": "API Extraction",
+                        "status": "complete",
+                        "summary": "Endpoints discovered.",
+                        "findings": [],
+                        "tools": ["api_endpoint_discovery"],
+                    },
+                ],
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "blocked"
+    assert [item["status"] for item in result.scenario_summaries] == ["blocked", "complete"]
+
+
+def test_parse_executer_output_derives_recon_status_from_scenario_summaries():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "unknown",
+                "findings": [],
+                "summary": "Warmup batch summary.",
+                "scenario_summaries": [
+                    {
+                        "scenario_id": "s1",
+                        "task": "Scenario A",
+                        "status": "complete",
+                        "summary": "A done",
+                        "findings": [],
+                        "tools": [],
+                    },
+                    {
+                        "scenario_id": "s2",
+                        "task": "Scenario B",
+                        "status": "blocked",
+                        "summary": "B blocked",
+                        "findings": [],
+                        "tools": [],
+                    },
+                ],
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "blocked"
+
+
+def test_parse_executer_output_downgrades_failed_recon_summary_with_evidence():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "failed",
+                "findings": [],
+                "summary": "Discovered several endpoints but localhost restrictions limited rate-limit validation.",
+                "scenario_summaries": [
+                    {
+                        "scenario_id": "s2",
+                        "task": "Operational Synthesis",
+                        "status": "failed",
+                        "summary": "Discovered backup paths and rate-limit clues, but localhost restrictions limited validation.",
+                        "findings": [
+                            {
+                                "title": "Artifact clue",
+                                "severity": "info",
+                                "details": "Observed backup path indicators.",
+                                "tools": ["web_fuzz"],
+                            }
+                        ],
+                        "tools": ["http_header_analysis", "web_fuzz"],
+                    }
+                ],
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "blocked"
+    assert result.scenario_summaries[0]["status"] == "blocked"
+
+
+def test_execution_history_is_added_to_prompt_for_same_agent_role():
+    class DummyProjectsStore:
+        def get_project(self, project_id: str) -> dict:
+            return {"id": project_id}
+
+        def upsert_project(self, project: dict) -> dict:
+            return project
+
+        def append_scan_event_cache(self, project_id: str, payload: dict) -> None:
+            return None
+
+    service = ScanOrchestratorService(projects_store=DummyProjectsStore())
+    scenario = {
+        "task": "Structural Content Discovery",
+        "agent": "recon",
+        "priority": 1,
+        "details": "Find exposed files",
+        "methods": ["crawl"],
+    }
+    other = {
+        "task": "Defensive & Tech Fingerprinting",
+        "agent": "recon",
+        "priority": 2,
+        "details": "Fingerprint stack",
+        "methods": ["headers"],
+    }
+    plan_data = _build_warmup_recon_plan(
+        target="http://example.com",
+        scope="scope",
+        target_type="web_app",
+        seed_scenarios=[scenario, other],
+    )
+
+    tracked_scenario = plan_data["phases"][0]["steps"][0]["scenarios"][0]
+    tracked_other = plan_data["phases"][0]["steps"][0]["scenarios"][1]
+    _append_scenario_execution_history(
+        plan_data,
+        tracked_scenario,
+        cycle_number=1,
+        row_result={
+            "status": "complete",
+            "summary": "Found /.git and /robots.txt.",
+            "tool_results": [
+                {
+                    "name": "web_fuzz",
+                    "args": {"target": "http://example.com"},
+                    "result": "{}",
+                }
+            ],
+            "round_labels": ["r1", "r2"],
+        },
+    )
+    _append_scenario_execution_history(
+        plan_data,
+        tracked_other,
+        cycle_number=1,
+        row_result={
+            "status": "blocked",
+            "summary": "Fingerprinting blocked by local target policy.",
+            "tool_results": [
+                {
+                    "name": "detect_tech",
+                    "args": {"target": "http://example.com"},
+                    "result": "{}",
+                }
+            ],
+            "round_labels": ["r1"],
+        },
+    )
+
+    history = _format_agent_execution_history_for_prompt(
+        plan_data,
+        agent_role="recon",
+        active_scenarios=[tracked_scenario],
+    )
+    message = service._build_executer_message(
+        plan_data=plan_data,
+        scenario=tracked_scenario,
+        target="http://example.com",
+        target_type="web_app",
+        scope="scope",
+        info="info",
+    )
+
+    assert "Previous runs for the currently assigned scenario(s):" in history
+    assert "Other prior recon cycle activity:" in history
+    assert "web_fuzz" in history
+    assert "detect_tech" in history
+    assert "Prior execution history:" in message
+    assert "Found /.git and /robots.txt." in message
+
+
+def test_target_execution_guidance_marks_loopback_targets_and_discourages_external_enumeration():
+    guidance = _build_target_execution_guidance(
+        target="http://127.0.0.1:3001",
+        scenario_tasks=["External Perimeter Mapping", "Operational Synthesis"],
+    )
+
+    assert "loopback/local target" in guidance
+    assert "Do NOT spend rounds on internet-perimeter or external OSINT tooling" in guidance
+    assert "Do NOT use run_python in warmup recon" in guidance
+    assert "Operational Synthesis" in guidance
+
+
+def test_execution_cycle_hands_info_findings_to_planner_without_cycle_number_crash():
+    class DummyProjectsStore:
+        def get_project(self, project_id: str) -> dict:
+            return {"id": project_id}
+
+        def upsert_project(self, project: dict) -> dict:
+            return project
+
+        def append_scan_event_cache(self, project_id: str, payload: dict) -> None:
+            return None
+
+    class DummyResult:
+        status = "complete"
+        summary = "Discovered websocket and API routes."
+        findings = [{"title": "WebSocket route", "severity": "info"}]
+        evidence = []
+        needs = []
+        tool_results = [
+            {
+                "name": "websocket_recon",
+                "args": {"target": "http://127.0.0.1:3001"},
+                "result": '{"socket_io": true}',
+            }
+        ]
+        discovered_target_types = []
+        rounds_executed = 3
+        round_labels = ["r1", "r2", "r3"]
+
+    class DummyReconAgent:
+        async def run(self, message: str) -> DummyResult:
+            return DummyResult()
+
+    class DummyExploitAgent:
+        async def run(self, message: str) -> DummyResult:
+            return DummyResult()
+
+    class DummyVerifyAgent:
+        def reset_context_window_for_cycle(self) -> None:
+            return None
+
+    class DummyPerceptorAgent:
+        async def assess_tool_results(self, *, scenario: dict, tool_results: list, asset_context: dict) -> dict:
+            return {
+                "finding_type": "info",
+                "compact_summary": "Socket.IO endpoint and client-side API hints discovered.",
+                "overall": {"ssvc": "TRACK"},
+            }
+
+    class DummyPlanner:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+            self.summary = "Planner integrated recon info and moved forward."
+
+        async def run(self, message: str, **kwargs: object) -> object:
+            self.messages.append(message)
+            return self
+
+    service = ScanOrchestratorService(projects_store=DummyProjectsStore())
+    emitted_events: list[dict] = []
+    service._emit_event = lambda *args, **kwargs: emitted_events.append(kwargs)  # type: ignore[method-assign]
+
+    plan_data = {
+        "target": "http://127.0.0.1:3001",
+        "scope": "local web app",
+        "target_types": ["web_app"],
+        "phases": [
+            {
+                "name": "Reconnaissance",
+                "priority": 1,
+                "steps": [
+                    {
+                        "id": "recon-01",
+                        "description": "Discover APIs",
+                        "scenarios": [
+                            {
+                                "task": "Discover hidden APIs and WebSockets using client-side code and documentation.",
+                                "agent": "recon",
+                                "priority": 2,
+                                "done": False,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    planner = DummyPlanner()
+
+    async def _run() -> tuple[bool, dict]:
+        return await service._run_execution_cycle(
+            project_id="p1",
+            scan_id="s1",
+            cycle_number=3,
+            plan_data=plan_data,
+            recon_agent=DummyReconAgent(),
+            exploit_agent=DummyExploitAgent(),
+            verify_agent=DummyVerifyAgent(),
+            retest_agent=DummyVerifyAgent(),
+            perceptor_agent=DummyPerceptorAgent(),
+            loop_planner=planner,
+            target="http://127.0.0.1:3001",
+            target_type="web_app",
+            scope="local web app",
+            info="info",
+            intel_checklist={},
+        )
+
+    should_continue, updated_plan = asyncio.run(_run())
+
+    assert should_continue is True
+    assert planner.messages
+    assert "RECONNAISSANCE FINDINGS (informational only)" in planner.messages[0]
+    assert "Socket.IO endpoint and client-side API hints discovered." in planner.messages[0]
+    scenario = updated_plan["phases"][0]["steps"][0]["scenarios"][0]
+    assert scenario["done"] is True
+    assert scenario.get("execution_history", [{}])[-1]["cycle"] == 3
+    assert any(event.get("event") == "plan_updated_by_planner" for event in emitted_events)
+
+
+def test_warmup_batch_message_explicitly_allows_operational_synthesis_to_use_prior_evidence():
+    class DummyProjectsStore:
+        def get_project(self, project_id: str) -> dict:
+            return {"id": project_id}
+
+        def upsert_project(self, project: dict) -> dict:
+            return project
+
+        def append_scan_event_cache(self, project_id: str, payload: dict) -> None:
+            return None
+
+    service = ScanOrchestratorService(projects_store=DummyProjectsStore())
+    scenarios = [
+        {"task": "Data Handling & Trust Review", "agent": "recon", "priority": 3, "details": "Review trust", "methods": ["cors"]},
+        {"task": "Operational Synthesis", "agent": "recon", "priority": 3, "details": "Synthesize artifacts", "methods": ["rate limit"]},
+    ]
+    plan_data = _build_warmup_recon_plan(
+        target="http://example.com",
+        scope="scope",
+        target_type="web_app",
+        seed_scenarios=scenarios,
+    )
+
+    message, _ = service._build_warmup_batch_executer_message(
+        plan_data=plan_data,
+        scenarios=scenarios,
+        target="http://example.com",
+        target_type="web_app",
+        scope="scope",
+        info="info",
+    )
+
+    assert "If a scenario is `Operational Synthesis`, it may synthesize earlier recon evidence" in message
+    assert "Make sure every assigned scenario gets direct evidence by the end of Round 2." in message
+    assert "loopback/local target" not in message
+
+
+def test_warmup_batch_message_includes_loopback_guidance_when_target_is_local():
+    class DummyProjectsStore:
+        def get_project(self, project_id: str) -> dict:
+            return {"id": project_id}
+
+        def upsert_project(self, project: dict) -> dict:
+            return project
+
+        def append_scan_event_cache(self, project_id: str, payload: dict) -> None:
+            return None
+
+    service = ScanOrchestratorService(projects_store=DummyProjectsStore())
+    scenarios = [
+        {"task": "External Perimeter Mapping", "agent": "recon", "priority": 1, "details": "Map perimeter", "methods": ["OSINT"]},
+        {"task": "Identity & Access Analysis", "agent": "recon", "priority": 2, "details": "Analyze auth", "methods": ["session review"]},
+    ]
+    plan_data = _build_warmup_recon_plan(
+        target="http://127.0.0.1:3001",
+        scope="scope",
+        target_type="web_app",
+        seed_scenarios=scenarios,
+    )
+
+    message, _ = service._build_warmup_batch_executer_message(
+        plan_data=plan_data,
+        scenarios=scenarios,
+        target="http://127.0.0.1:3001",
+        target_type="web_app",
+        scope="scope",
+        info="info",
+    )
+
+    assert "loopback/local target" in message
+    assert "Do NOT spend rounds on internet-perimeter or external OSINT tooling" in message
+    assert "Identity & Access Analysis" in message
+    assert "Do NOT use run_python in warmup recon" in message
+
+
+def test_single_scenario_message_includes_loopback_target_guidance():
+    class DummyProjectsStore:
+        def get_project(self, project_id: str) -> dict:
+            return {"id": project_id}
+
+        def upsert_project(self, project: dict) -> dict:
+            return project
+
+        def append_scan_event_cache(self, project_id: str, payload: dict) -> None:
+            return None
+
+    service = ScanOrchestratorService(projects_store=DummyProjectsStore())
+    plan_data = _build_warmup_recon_plan(
+        target="http://127.0.0.1:3001",
+        scope="scope",
+        target_type="web_app",
+        seed_scenarios=[
+            {"task": "Identity & Access Analysis", "agent": "recon", "priority": 2, "details": "auth", "methods": ["session review"]},
+        ],
+    )
+    scenario = plan_data["phases"][1]["steps"][0]["scenarios"][0]
+    message = service._build_executer_message(
+        plan_data=plan_data,
+        scenario=scenario,
+        target="http://127.0.0.1:3001",
+        target_type="web_app",
+        scope="scope",
+        info="info",
+    )
+
+    assert "loopback/local target" in message
+    assert "Do NOT use run_python in warmup recon" in message
+    assert "Identity & Access Analysis" in message
 
 
 def test_run_warmup_recon_worker_returns_one_result_per_scenario():

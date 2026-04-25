@@ -12,8 +12,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 _ALLOWED_TOOLS = {"bloodhound-python", "ldapdomaindump"}
 _DANGEROUS = {";", "&&", "||", "|", "`", "$(", ">>", "'", '"', "\n"}
@@ -41,17 +40,8 @@ class ADGraphReconRequest(BaseModel):
         if not clean:
             raise ValueError("target cannot be empty")
         v_lower = clean.lower()
-        for b_host in _BLOCKED_HOSTNAMES:
-            if v_lower == b_host or v_lower.endswith(f".{b_host}"):
-                raise ValueError(f"Target '{clean}' matches blocked hostname '{b_host}'")
-        try:
-            ip = ipaddress.ip_address(clean)
-            for net in _BLOCKED_NETWORKS:
-                if ip in net:
-                    raise ValueError(f"Target '{clean}' is in a blocked range ({net})")
-        except ValueError as exc:
-            if "blocked range" in str(exc):
-                raise
+        if is_blocked_host(v_lower):
+            raise ValueError(f"Target '{clean}' is blocked")
         return clean
 
     @field_validator("domain", "username")

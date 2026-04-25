@@ -57,9 +57,7 @@ def _normalize_target_url(value: str) -> str:
     return value
 
 
-def _is_blocked_host(host: str) -> bool:
-    blocked = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
-    return host in blocked
+from server.agents.executer.recon.config import is_blocked_host as _is_blocked_host
 
 
 def _get_bare(url: str) -> str:

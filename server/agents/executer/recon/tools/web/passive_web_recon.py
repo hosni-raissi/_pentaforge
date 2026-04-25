@@ -15,8 +15,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from server.agents.executer.recon.config import BLOCKED_HOSTNAMES as _BLOCKED_HOSTNAMES
-from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
 
 
 ALLOWED_SOURCES = {"crtsh", "wayback", "otx", "urlscan"}
@@ -140,18 +139,7 @@ def _normalize_domain(value: str) -> str:
 
 
 def _is_blocked_target(host: str) -> bool:
-    host_lower = host.lower()
-    for b_host in _BLOCKED_HOSTNAMES:
-        if host_lower == b_host or host_lower.endswith(f".{b_host}"):
-            return True
-    try:
-        ip = ipaddress.ip_address(host)
-        for net in _BLOCKED_NETWORKS:
-            if ip in net:
-                return True
-    except ValueError:
-        pass
-    return False
+    return is_blocked_host(host)
 
 
 def _is_retryable_exception(exc: Exception) -> bool:

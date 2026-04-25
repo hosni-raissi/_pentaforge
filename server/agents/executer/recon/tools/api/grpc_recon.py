@@ -58,17 +58,7 @@ SENSITIVE_NAME_PATTERNS: list[str] = [
     "delete", "execute", "upload", "internal", "private",
 ]
 
-# Blocked CIDR ranges — grpc_recon targets URLs so we validate the hostname
-_BLOCKED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("224.0.0.0/4"),
-    ipaddress.ip_network("255.255.255.255/32"),
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("::/128"),
-    ipaddress.ip_network("fe80::/10"),
-]
+from server.agents.executer.recon.config import is_blocked_host
 
 # RFC-1123 hostname pattern
 _HOSTNAME_RE = re.compile(
@@ -122,15 +112,13 @@ def _validate_http_target(value: str) -> str:
     if not hostname:
         raise ValueError("Target URL must contain a hostname")
 
-    # IP check
+    # Host/IP SSRF check
     try:
-        ip = ipaddress.ip_address(hostname)
-        for net in _BLOCKED_NETWORKS:
-            if ip in net:
-                raise ValueError(f"Target hostname '{hostname}' is in a blocked range ({net})")
+        if is_blocked_host(hostname):
+            raise ValueError(f"Target hostname '{hostname}' is blocked")
         return value.strip()
     except ValueError as exc:
-        if "blocked range" in str(exc):
+        if "blocked" in str(exc):
             raise
 
     # Hostname check

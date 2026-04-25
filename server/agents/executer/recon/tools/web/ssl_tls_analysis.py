@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, Any
 from functools import lru_cache
 from pydantic import BaseModel, Field, field_validator
+from server.agents.executer.recon.config import is_blocked_host
 
 
 # ══════════════════════════════════════════════════════════════
@@ -218,9 +219,8 @@ class SslTlsRequest(BaseModel):
     @field_validator("target")
     @classmethod
     def validate_target(cls, v):
-        blocked = ["127.0.0.1", "localhost", "0.0.0.0", "::1", "169.254.169.254"]
         clean_v = re.sub(r"^\w+://", "", v.strip()).split('/')[0].split(':')[0]
-        if clean_v in blocked:
+        if is_blocked_host(clean_v):
             raise ValueError(f"Target '{v}' is blocked")
         return v.strip()
 
