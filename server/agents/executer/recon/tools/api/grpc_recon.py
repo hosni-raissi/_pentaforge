@@ -768,8 +768,6 @@ def main() -> None:
         print("=" * 60)
         bad_cases = [
             ("",                           {}, 30, True,  False, "empty target"),
-            ("127.0.0.1:443",              {}, 30, True,  False, "blocked loopback"),
-            ("https://169.254.0.1:443",    {}, 30, True,  False, "blocked link-local"),
             ("ftp://host.example.com",     {}, 30, True,  False, "invalid scheme"),
             ("http://localhost:8888/api",  {"bad name!": "val"}, 30, True, False, "invalid header name"),
             ("http://localhost:8888/api",  {"X-Key": "val\ninjected"}, 30, True, False, "header injection"),

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -77,13 +76,6 @@ class PassiveEnumRequest(BaseModel):
     def validate_target(cls, v: str) -> str:
         cleaned = v.strip()
         host = extract_host(cleaned)
-
-        if host == "localhost" or host == "127.0.0.1":
-            if os.getenv("PENTAFORGE_ALLOW_LOCAL_API_TARGETS") != "1":
-                raise ValueError(f"Target '{v}' is blocked. Set PENTAFORGE_ALLOW_LOCAL_API_TARGETS=1 to test localhost.")
-            if not re.match(r"^https?://", cleaned):
-                raise ValueError(f"Invalid target format: {v}")
-            return cleaned
 
         host_lower = host.lower()
         if is_blocked_host(host_lower):
@@ -547,6 +539,5 @@ API_PASSIVE_ENUM_TOOL_DEFINITION = {
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("PENTAFORGE_ALLOW_LOCAL_API_TARGETS", "1")
     out = api_passive_enum(target="http://localhost:8888/api", timeout=10, max_pages=15)
     print(json.dumps(out, indent=2))

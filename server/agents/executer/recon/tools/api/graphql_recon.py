@@ -3,7 +3,6 @@ from __future__ import annotations
 
 __all__ = ["graphql_recon", "GRAPHQL_RECON_TOOL_DEFINITION"]
 
-import ipaddress
 import json
 import re
 import sys
@@ -19,6 +18,8 @@ except Exception:  # pragma: no cover - fallback for older/vendored layouts
     InsecureRequestWarning = Warning
 from pydantic import BaseModel, Field, field_validator
 
+from server.agents.executer.recon.config import is_blocked_host
+
 # Suppress SSL warnings globally for pentest use
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
@@ -28,14 +29,6 @@ warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 _DANGEROUS      = frozenset({";", "&&", "||", "|", "`", "$(", ">>", "'", '"', "\n", "\r"})
 _CRLF_CHARS     = frozenset({"\r", "\n", "\x00"})
-
-# IPs/hosts that must never be targeted
-_BLOCKED_HOSTS  = frozenset({
-    "localhost", "127.0.0.1", "::1", "0.0.0.0",
-    "169.254.169.254",          # AWS IMDS
-    "metadata.google.internal", # GCP metadata
-    "metadata.azure.com",       # Azure metadata (SSRF guard)
-})
 
 _GRAPHQL_PATHS = [
     "/graphql", "/graphql/", "/graphiql", "/gql",
@@ -119,15 +112,6 @@ def _extract_host(url: str) -> str:
     return m.group(1) if m else url.lower()
 
 
-def _is_private_ip(host: str) -> bool:
-    """Return True if host resolves to a private/loopback/link-local address."""
-    try:
-        ip = ipaddress.ip_address(host)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
-    except ValueError:
-        return False
-
-
 # ══════════════════════════════════════════════════════════════
 # 3. SCHEMAS
 # ══════════════════════════════════════════════════════════════
@@ -147,11 +131,8 @@ class GraphQLReconRequest(BaseModel):
         if not re.match(r"^https?://[a-zA-Z0-9]", v):
             raise ValueError("Target must start with http:// or https://")
         host = _extract_host(v)
-        # FIX: block ALL loopback/private/metadata hosts — not just allow them
-        if host in _BLOCKED_HOSTS:
-            raise ValueError(f"Target host '{host}' is blocked (internal/reserved)")
-        if _is_private_ip(host):
-            raise ValueError(f"Target IP '{host}' is private/loopback — blocked")
+        if is_blocked_host(host):
+            raise ValueError(f"Target host '{host}' is blocked by recon config")
         return v
 
     @field_validator("endpoints", mode="before")
@@ -734,9 +715,6 @@ def _print_result(label: str, r: dict, verbose_schemas: bool = False) -> None:
 def _run_validation_tests() -> bool:
     cases: list[tuple[str, dict]] = [
         ("PASS — no scheme",                 dict(target="example.com")),
-        ("PASS — localhost blocked",         dict(target="http://localhost/graphql")),
-        ("PASS — 127.0.0.1 blocked",         dict(target="http://127.0.0.1/graphql")),
-        ("PASS — AWS IMDS blocked",          dict(target="http://169.254.169.254/graphql")),
         ("PASS — path traversal endpoint",   dict(target="http://localhost:8888/api",
                                                    endpoints=["/../etc/passwd"])),
         ("PASS — injection in endpoint",     dict(target="http://localhost:8888/api",

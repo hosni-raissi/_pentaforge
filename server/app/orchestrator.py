@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from copy import deepcopy
@@ -25,6 +26,7 @@ from urllib.parse import urlparse
 import structlog
 
 from server.db.projects import ProjectsStore
+from server.db.projects.runtime_cache import get_project_runtime_cache
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
 
 logger = structlog.get_logger(__name__)
@@ -77,6 +79,8 @@ SCENARIO_EXECUTION_HISTORY_LIMIT = 4
 PROMPT_HISTORY_SCENARIO_LIMIT = 3
 PROMPT_HISTORY_ROLE_LIMIT = 6
 PROMPT_HISTORY_TOOL_LIMIT = 4
+PROJECT_FINDINGS_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+WARMUP_PERCEPTOR_CACHE_TTL_SECONDS = 2 * 60 * 60
 _FINDING_CWE_MAP: dict[str, str] = {
     "command injection": "CWE-78",
     "sql injection": "CWE-89",
@@ -180,12 +184,58 @@ def _build_target_execution_guidance(
         "Use run_custom only for tightly scoped localhost HTTP/service checks when that adds direct evidence.",
         "Do NOT use run_python in warmup recon unless there is no built-in tool that can summarize already collected evidence.",
         "If the assigned scenario is inherently public-internet oriented, gather the minimal local evidence that still applies, then mark it blocked instead of retrying unrelated tools.",
-        "For Identity & Access Analysis, focus on discovered auth routes, cookies, headers, login/session artifacts, and access-control clues; if none exist, mark blocked after a minimal focused attempt.",
+        "For Identity & Access Analysis, focus on discovered auth routes, cookies, headers, login/session artifacts, and access-control clues; if none exist after a minimal focused attempt, record that negative result and move on.",
         "For Operational Synthesis, synthesize already discovered endpoints, headers, trust-boundary clues, rate-limit behavior, and artifact paths; do not restart broad discovery from scratch.",
     ]
     if tasks:
         guidance_lines.append(f"Current assigned scenarios: {', '.join(tasks)}")
     return "\n".join(guidance_lines)
+
+
+def _build_warmup_scenario_tool_guidance(task: str) -> str:
+    task_name = str(task or "").strip().lower()
+    if not task_name:
+        return ""
+
+    guidance_map: list[tuple[str, str]] = [
+        (
+            "local web app perimeter mapping",
+            "Preferred tools: http_probe, web_crawler, web_fuzz, api_endpoint_discovery. Avoid repeating broad discovery once core routes are confirmed.",
+        ),
+        (
+            "defensive & tech fingerprinting",
+            "Preferred tools: detect_tech, http_header_analysis, waf_detection. Avoid spending extra rounds on generic crawling unless it adds direct fingerprint evidence.",
+        ),
+        (
+            "structural content discovery",
+            "Preferred tools: web_crawler, directory_file_fuzzing, web_fuzz, js_source_code_analyzer. Focus on hidden paths, metadata, and client-side route clues.",
+        ),
+        (
+            "api & endpoint extraction",
+            "Preferred tools: api_passive_enum, api_endpoint_discovery, js_source_code_analyzer, websocket_recon. Avoid generic header checks unless they reveal API-specific behavior.",
+        ),
+        (
+            "input & parameter profiling",
+            "Preferred tools: web_crawler, js_source_code_analyzer, api_endpoint_discovery, then param_discovery only once against confirmed dynamic endpoints. Avoid repeating param_discovery or session_token_analysis when no forms, params, or cookies were found.",
+        ),
+        (
+            "identity & access analysis",
+            "Preferred tools: web_crawler on auth routes, http_header_analysis, session_token_analysis on real cookie-bearing responses, js_source_code_analyzer for auth flows. Avoid repeating session_token_analysis if no cookies or login/session artifacts exist; summarize the negative result instead.",
+        ),
+        (
+            "data handling & trust review",
+            "Preferred tools: cors_misconfig_check, http_header_analysis, api_response_analyzer, web_fuzz on upload or file-processing routes. Avoid restarting perimeter discovery.",
+        ),
+        (
+            "operational synthesis",
+            "Preferred approach: synthesize prior evidence first. At most one small validation call on an already discovered endpoint if needed. Do not restart broad crawling, fuzzing, or fingerprinting from scratch.",
+        ),
+    ]
+
+    for marker, guidance in guidance_map:
+        if marker in task_name:
+            return guidance
+    return ""
 
 
 def _compact_preview(value: Any, limit: int = 220) -> str:
@@ -772,18 +822,158 @@ def _write_project_findings_cache(
     project_id: str,
     findings: list[dict[str, Any]],
     cache_dir: str | None = None,
+    use_redis: bool = True,
 ) -> str:
-    base_dir = cache_dir or os.path.join(os.path.dirname(__file__), "..", "cache", "project_findings")
-    os.makedirs(base_dir, exist_ok=True)
-    cache_path = os.path.join(base_dir, f"{str(project_id).strip()}.json")
     payload = {
         "project_id": str(project_id).strip(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "findings": findings,
     }
+    if use_redis and not cache_dir:
+        cache_key = f"project_findings:{str(project_id).strip()}"
+        get_project_runtime_cache().set_json(
+            cache_key,
+            payload,
+            ttl_seconds=PROJECT_FINDINGS_CACHE_TTL_SECONDS,
+        )
+        return f"redis://{cache_key}"
+
+    base_dir = cache_dir or os.path.join(os.path.dirname(__file__), "..", "cache", "project_findings")
+    os.makedirs(base_dir, exist_ok=True)
+    cache_path = os.path.join(base_dir, f"{str(project_id).strip()}.json")
     with open(cache_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=True, indent=2)
     return cache_path
+
+
+def _slugify_cache_part(value: Any, *, max_len: int = 80) -> str:
+    clean = str(value or "").strip().lower()
+    clean = re.sub(r"^[a-z][a-z0-9+.-]*://", "", clean)
+    clean = clean.strip().strip("/")
+    clean = re.sub(r"[^a-z0-9._-]+", "-", clean)
+    clean = re.sub(r"-{2,}", "-", clean).strip("-._")
+    if not clean:
+        return ""
+    return clean[:max_len].strip("-._")
+
+
+def _project_cache_timestamp(value: Any = None) -> str:
+    raw = str(value or "").strip()
+    dt: datetime
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _extract_project_display_name(project: dict[str, Any] | None) -> str:
+    if not isinstance(project, dict):
+        return ""
+    for key in ("name", "title", "projectName", "displayName"):
+        value = str(project.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _build_project_run_cache_dir(
+    *,
+    project_id: str,
+    target: str,
+    project_name: str = "",
+    created_at: str | None = None,
+    cache_root: str | None = None,
+) -> str:
+    root = cache_root or os.path.join(os.path.dirname(__file__), "..", "cache", "project_runs")
+    project_part = _slugify_cache_part(project_name) or _slugify_cache_part(project_id, max_len=48) or "project"
+    target_raw = str(target or "").strip()
+    parsed_target = urlparse(target_raw if "://" in target_raw else f"//{target_raw}")
+    target_identity = parsed_target.netloc or _extract_target_host(target_raw) or target_raw
+    target_part = _slugify_cache_part(target_identity, max_len=80) or "target"
+    timestamp = _project_cache_timestamp(created_at)
+    folder_name = f"{project_part}__{target_part}__{timestamp}"
+    path = os.path.abspath(os.path.join(root, folder_name))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _write_warmup_perceptor_cache(
+    *,
+    project_id: str,
+    target: str,
+    project_name: str,
+    created_at: str,
+    warmup_summaries: list[dict[str, Any]],
+    recon_plan_data: dict[str, Any],
+    project_cache_dir: str,
+    use_redis: bool = True,
+) -> str:
+    payload = {
+        "project_id": str(project_id).strip(),
+        "target": str(target or "").strip(),
+        "project_name": str(project_name or "").strip(),
+        "created_at": created_at,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+        "recon_plan": recon_plan_data if isinstance(recon_plan_data, dict) else {},
+        "summaries": warmup_summaries,
+    }
+    if use_redis:
+        cache_key = (
+            f"warmup_perceptor:{str(project_id).strip()}:"
+            f"{_project_cache_timestamp(created_at)}"
+        )
+        get_project_runtime_cache().set_json(
+            cache_key,
+            payload,
+            ttl_seconds=WARMUP_PERCEPTOR_CACHE_TTL_SECONDS,
+        )
+        return f"redis://{cache_key}"
+
+    cache_dir = os.path.join(project_cache_dir, "warmup_perceptor")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, "summaries.json")
+    with open(cache_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True, indent=2)
+    return cache_path
+
+
+def _consume_warmup_perceptor_cache(
+    cache_path: str,
+    *,
+    use_redis: bool = True,
+) -> list[dict[str, Any]]:
+    if use_redis and str(cache_path or "").startswith("redis://"):
+        cache_key = str(cache_path).removeprefix("redis://").strip()
+        payload = get_project_runtime_cache().pop_json(cache_key) or {}
+        summaries = payload.get("summaries") if isinstance(payload, dict) else None
+        return [item for item in summaries if isinstance(item, dict)] if isinstance(summaries, list) else []
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    summaries = payload.get("summaries") if isinstance(payload, dict) else None
+    if not isinstance(summaries, list):
+        summaries = []
+
+    cache_dir = os.path.dirname(cache_path)
+    try:
+        shutil.rmtree(cache_dir)
+    except OSError as exc:  # pragma: no cover - defensive cleanup
+        logger.warning(
+            "warmup_perceptor_cache_delete_failed",
+            cache_path=cache_path,
+            error=str(exc),
+        )
+    return [item for item in summaries if isinstance(item, dict)]
 
 
 def _normalize_target_type(value: Any) -> str:
@@ -1045,6 +1235,51 @@ def _default_warmup_recon_scenarios(target_type: str) -> list[dict[str, Any]]:
     return _default_static_recon_scenarios(target_type)[:WARMUP_RECON_SCENARIO_COUNT]
 
 
+_LOCAL_WARMUP_EXTERNAL_TERMS = (
+    "external perimeter",
+    "public perimeter",
+    "organizational footprint",
+    "subdomain",
+    "cloud asset",
+    "cdn",
+    "asn",
+    "osint",
+)
+
+
+def _adapt_warmup_scenario_for_target(
+    scenario: dict[str, Any],
+    *,
+    target: str,
+) -> dict[str, Any]:
+    """Keep warmup scenarios useful for loopback/local lab targets."""
+    if not _is_loopback_or_local_target(target):
+        return dict(scenario)
+
+    task = str(scenario.get("task") or scenario.get("scenario") or "").strip()
+    details = str(scenario.get("details") or scenario.get("objective") or "").strip()
+    methods = scenario.get("methods", []) if isinstance(scenario.get("methods"), list) else []
+    haystack = " ".join([task, details, " ".join(str(item) for item in methods)]).lower()
+
+    if not any(term in haystack for term in _LOCAL_WARMUP_EXTERNAL_TERMS):
+        return dict(scenario)
+
+    adapted = dict(scenario)
+    adapted["task"] = "Local Web App Perimeter Mapping"
+    adapted["details"] = (
+        "Map the local in-scope web application boundary, live service, exposed root paths, "
+        "same-origin APIs, and local HTTP behavior. Public-internet footprinting is not applicable "
+        "for this loopback target."
+    )
+    adapted["methods"] = [
+        "Local service reachability probing",
+        "Same-origin route and endpoint inventory",
+        "HTTP surface boundary mapping",
+    ]
+    adapted["priority"] = min(_normalize_priority(scenario.get("priority", 2)), 2)
+    return adapted
+
+
 def _build_static_recon_plan(target_type: str) -> dict[str, Any]:
     normalized = _normalize_target_type(target_type)
     scenarios = _default_static_recon_scenarios(normalized)
@@ -1248,6 +1483,7 @@ def _build_warmup_recon_plan(
     def _push(scenario: dict[str, Any]) -> None:
         if len(candidates) >= wanted:
             return
+        scenario = _adapt_warmup_scenario_for_target(scenario, target=target)
         task = str(scenario.get("task", "")).strip()
         if not task:
             return
@@ -1383,7 +1619,14 @@ def _build_warmup_planner_message(
         "## Warmup Planner Task\n"
         "This is a recon-only warmup stage before the main pentest plan.\n"
         "Return a plan containing EXACTLY 8 reconnaissance scenarios and NO exploit/report work.\n"
-        "Start from the stored static recon template for this target type.\n"
+        + (
+            "This target is loopback/local. Replace public-internet perimeter scenarios "
+            "(subdomains, ASN, CDN, cloud buckets, passive OSINT) with local web app perimeter mapping "
+            "against the provided URL. Do not include External Perimeter Mapping for loopback targets.\n"
+            if _is_loopback_or_local_target(target)
+            else ""
+        )
+        + "Start from the stored static recon template for this target type.\n"
         "Use the target profile, scope rules, static recon template, and available recon tooling to maximize information gain while staying in scope.\n"
         "Using only the target description and scope rules, keep the plan as-is or adapt priorities/details/order so it better matches the target.\n"
         "Preserve the original static scenario task names unless the target description clearly requires a small adjustment.\n"
@@ -2039,6 +2282,7 @@ def _build_planner_kickoff_message(
     warmup_summaries: list[dict[str, Any]],
 ) -> str:
     warmup_lines = []
+    completed_warmup_tasks: list[str] = []
     for idx, item in enumerate(warmup_summaries[:8], start=1):
         if not isinstance(item, dict):
             continue
@@ -2047,7 +2291,19 @@ def _build_planner_kickoff_message(
         compact_summary = str(item.get("compact_summary", "")).strip()
         if task:
             warmup_lines.append(f"- [{idx}] ({finding_type}) {task}: {compact_summary}")
+            if task not in completed_warmup_tasks:
+                completed_warmup_tasks.append(task)
     checklist_text = _format_structured_checklist_for_prompt(intel_checklist)
+    completed_warmup_text = (
+        ", ".join(completed_warmup_tasks)
+        if completed_warmup_tasks
+        else "(no completed warmup tasks recorded)"
+    )
+    local_target_note = (
+        "This is a loopback/local target. Do not use public web search, passive internet OSINT, or internet-perimeter assumptions in the full-plan tool round.\n"
+        if _is_loopback_or_local_target(target)
+        else ""
+    )
     return (
         f"Target: {target}\n"
         f"Target type: {target_type}\n"
@@ -2055,6 +2311,7 @@ def _build_planner_kickoff_message(
         f"Info: {info}\n\n"
         "## Target Data\n"
         "Use the target, target type, scope, and info as hard planning constraints.\n\n"
+        f"{local_target_note}"
         "## Static Recon Template\n"
         f"{_format_static_recon_plan_for_prompt(static_recon_plan)}\n\n"
         "## Intel Input\n"
@@ -2066,15 +2323,22 @@ def _build_planner_kickoff_message(
         f"{checklist_text}\n\n"
         "## Warmup Recon Results\n"
         f"{chr(10).join(warmup_lines) if warmup_lines else '(no warmup summaries available)'}\n\n"
+        "## Completed Warmup Baseline\n"
+        f"Completed warmup recon tasks already covered: {completed_warmup_text}\n"
+        "Do NOT recreate these as fresh scenarios unless a warmup summary clearly shows an unresolved gap or a justified deeper follow-up.\n\n"
         "## Planner Task\n"
         "1. FIRST STEP: create a great pentest plan for this target.\n"
         "2. Start from target data + static recon template + warmup results, then use the synthesized checklist to refine the full plan.\n"
         "3. Treat warmup recon results as the source of truth for what the target actually exposes.\n"
         "4. Use the synthesized checklist as prioritized coverage guidance, not as abstract theory.\n"
-        "5. The initial full plan should keep recon evidence-first and only add exploit scenarios when recon artifacts justify them.\n"
-        "6. Every scenario should map back to either warmup evidence, target description, or a concrete checklist item.\n"
-        "7. Return strict JSON with keys: summary, needs, plan, action_plan.\n"
-        "8. action_plan must include: checklist_updates, checklist_additions, "
+        "5. The initial full plan should be dense enough to cover the synthesized checklist in one plan, not a thin starter plan.\n"
+        "6. Keep total scenarios across Phases 1-3 at 20 or fewer.\n"
+        "7. Do not leave Reconnaissance empty. Do not leave Exploitation empty when P1-P2 checklist items or warmup evidence justify active testing.\n"
+        "8. Every scenario should map back to either warmup evidence, target description, or a concrete checklist item.\n"
+        "9. Do NOT invent endpoints, routes, or parameters for exploit scenarios. If the checklist suggests a vulnerability but no concrete target artifact exists yet, schedule recon/enumeration to close that gap first.\n"
+        "10. Cover modern attack paths only when they fit the observed target surface: API authz, IDOR/BOLA, GraphQL, WebSocket, upload abuse, SSRF, SSTI, deserialization, session/token abuse, CORS/trust misuse.\n"
+        "11. Return strict JSON with keys: summary, needs, plan, action_plan.\n"
+        "12. action_plan must include: checklist_updates, checklist_additions, "
         "plan_modifications, dispatch, phase_advance, phase_advance_blocked_by, rationale.\n"
     )
 
@@ -3252,6 +3516,7 @@ class ScanOrchestratorService:
             task = str(scenario.get("task", "")).strip()
             details = str(scenario.get("details", "")).strip()
             methods = scenario.get("methods", []) if isinstance(scenario.get("methods"), list) else []
+            tool_guidance = _build_warmup_scenario_tool_guidance(task)
             labeled_scenarios.append(
                 {
                     "scenario_id": scenario_id,
@@ -3263,7 +3528,8 @@ class ScanOrchestratorService:
                 f"Task: {task}\n"
                 f"Priority: {_normalize_priority(scenario.get('priority', 3))}\n"
                 f"Details: {details}\n"
-                f"Methods: {json.dumps(methods, ensure_ascii=True)}"
+                f"Methods: {json.dumps(methods, ensure_ascii=True)}\n"
+                f"Tool guidance: {tool_guidance or 'Use the smallest complementary tools that directly fit this scenario. Avoid near-duplicate repeats.'}"
             )
 
         history_block = _format_agent_execution_history_for_prompt(
@@ -3285,6 +3551,8 @@ class ScanOrchestratorService:
             "Use prior execution history as valid evidence when it directly helps the assigned scenario.\n"
             "If a scenario is `Operational Synthesis`, it may synthesize earlier recon evidence from prior cycles and the current batch.\n"
             "Make sure every assigned scenario gets direct evidence by the end of Round 2.\n"
+            "Round 1 must call at least one focused recon tool unless every assigned scenario is impossible for this target.\n"
+            "Do not repeat the same expensive tool for the same scenario unless earlier evidence exposed a new concrete endpoint, cookie, route, or behavior that justifies the retry.\n"
             "In the final JSON, include `scenario_summaries` with one entry per scenario.\n\n"
             "Target info:\n"
             f"Target: {target}\n"
@@ -3597,6 +3865,7 @@ class ScanOrchestratorService:
         info: str,
         callback: Any,
         cycle_offset: int = 0,
+        project_cache_dir: str = "",
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from server.agents.executer.recon.agent import ReconExecuterAgent
         from server.agents.perceptor.agent import PerceptorAgent
@@ -3674,6 +3943,7 @@ class ScanOrchestratorService:
                     callback=worker_cb,
                     target_types=[target_type],
                     project_id=None,
+                    project_cache_dir=project_cache_dir,
                     config=override_config,
                 )
             )
@@ -3992,6 +4262,21 @@ class ScanOrchestratorService:
         )
 
         if not selected:
+            self._emit_event(
+                project_id,
+                event="executer_cycle_idle",
+                scan_id=scan_id,
+                level="info",
+                message="Executer [idle] no runnable scenarios remain in the current plan. Asking Planner whether the pentest is complete or the plan needs refilling.",
+                data={
+                    "stage": "executer",
+                    "kind": "idle_no_selected_scenarios",
+                    "cycle": cycle_number,
+                    "total_scenarios_in_plan": total_scenarios,
+                    "done_scenarios": done_scenarios,
+                    "pending_scenarios": total_scenarios - done_scenarios,
+                },
+            )
             # No more scenarios - ask planner if done
             return await self._check_planner_completion(
                 project_id=project_id,
@@ -4811,6 +5096,17 @@ class ScanOrchestratorService:
         intel_checklist: dict[str, Any],
     ) -> tuple[bool, dict[str, Any]]:
         """Ask planner if pentest is complete."""
+        self._emit_event(
+            project_id,
+            event="planner_completion_check_started",
+            scan_id=scan_id,
+            level="info",
+            message="Planner [check] no runnable scenarios remain. Reviewing whether the pentest is complete or the plan should be refreshed.",
+            data={
+                "stage": "planner",
+                "kind": "completion_check_start",
+            },
+        )
         completion_message = (
             f"Target: {target}\n"
             f"Target type: {target_type}\n"
@@ -4843,7 +5139,7 @@ class ScanOrchestratorService:
                 event="plan_updated_by_planner",
                 scan_id=scan_id,
                 level="info",
-                message="Planner refreshed plan after empty-scenario completion check.",
+                message="Planner refreshed plan after the no-runnable-scenarios completion check.",
                 data={
                     "stage": "planner",
                     "kind": "plan_updated_after_completion_check",
@@ -4892,12 +5188,20 @@ class ScanOrchestratorService:
             self._projects_store,
             target_type,
         )
+        project_cache_dir = ""
         custom_checklist_text = ""
         print_steps = _is_truthy_env("INTEL_PRINT_STEPS", "1")
         intel_stats: dict[str, Any] = {}
 
         try:
             project = self._projects_store.get_project(project_id) or {}
+            project_name = _extract_project_display_name(project if isinstance(project, dict) else {})
+            project_cache_dir = _build_project_run_cache_dir(
+                project_id=project_id,
+                target=target,
+                project_name=project_name,
+                created_at=started_at,
+            )
             custom_checklist_text = (
                 str(project.get("customChecklistText", "")).strip()
                 if isinstance(project, dict)
@@ -5061,6 +5365,7 @@ class ScanOrchestratorService:
                 info=info,
                 callback=executer_callback,
                 cycle_offset=0,
+                project_cache_dir=project_cache_dir,
             )
 
             self._persist_project_status(
@@ -5093,9 +5398,23 @@ class ScanOrchestratorService:
                 },
             )
 
+            warmup_cache_path = _write_warmup_perceptor_cache(
+                project_id=project_id,
+                target=target,
+                project_name=project_name,
+                created_at=started_at,
+                warmup_summaries=warmup_summaries,
+                recon_plan_data=warmup_plan_data,
+                project_cache_dir=project_cache_dir,
+            )
+            warmup_summaries_for_intel = (
+                _consume_warmup_perceptor_cache(warmup_cache_path)
+                or warmup_summaries
+            )
+
             synthesis_info = _build_post_warmup_intel_info(
                 info=info,
-                warmup_summaries=warmup_summaries,
+                warmup_summaries=warmup_summaries_for_intel,
                 recon_plan_data=warmup_plan_data,
             )
             self._emit_event(
@@ -5107,7 +5426,9 @@ class ScanOrchestratorService:
                 data={
                     "stage": "intel",
                     "kind": "synthesis_start",
-                    "warmup_summary_count": len(warmup_summaries),
+                    "warmup_summary_count": len(warmup_summaries_for_intel),
+                    "warmup_cache_path": warmup_cache_path,
+                    "project_cache_dir": project_cache_dir,
                 },
             )
             intel_result = await intel_agent.run(
@@ -5501,19 +5822,23 @@ class ScanOrchestratorService:
                 callback=executer_callback,
                 target_types=[target_type],
                 project_id=project_id,
+                project_cache_dir=project_cache_dir,
             )
             exploit_agent = ExploitExecuterAgent(
                 callback=executer_callback,
                 target_types=[target_type],
                 project_id=project_id,
+                project_cache_dir=project_cache_dir,
             )
             verify_agent = VerifyExecuterAgent(
                 callback=executer_callback,
                 project_id=project_id,
+                project_cache_dir=project_cache_dir,
             )
             retest_agent = RetestExecuterAgent(
                 callback=executer_callback,
                 project_id=project_id,
+                project_cache_dir=project_cache_dir,
             )
             perceptor_agent = PerceptorAgent(project_id=project_id)
             loop_planner_callback = PrintCallback(

@@ -46,14 +46,7 @@ ALLOWED_TARGET_DOMAINS: frozenset[str] = frozenset({
     # "example.com"
 })
 
-from server.agents.executer.recon.config import is_blocked_host
-
-BLOCKED_CIDRS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
-    ipaddress.IPv4Network("100.64.0.0/10"),    # CGNAT
-    ipaddress.IPv4Network("169.254.0.0/16"),   # link-local
-    ipaddress.IPv6Network("fc00::/7"),         # ULA
-    ipaddress.IPv6Network("fe80::/10"),        # IPv6 link-local
-)
+from server.agents.executer.recon.config import BLOCKED_NETWORKS, is_blocked_host
 
 _HEADER_NAME_FORBIDDEN = re.compile(r"[\r\n: ]")
 _HEADER_VALUE_FORBIDDEN = re.compile(r"[\r\n]")
@@ -115,19 +108,10 @@ def _ip_is_unsafe(ip_str: str, *, allow_local: bool = False) -> tuple[bool, str]
     except ValueError:
         return True, f"unparseable IP: {ip_str!r}"
 
-    if ip.is_loopback:
-        return (False, "") if allow_local else (True, f"loopback: {ip}")
+    if is_blocked_host(str(ip)):
+        return True, f"blocked by recon config: {ip}"
 
-    for label, flag in (
-        ("private",     ip.is_private),
-        ("link-local",  ip.is_link_local),
-        ("multicast",   ip.is_multicast),
-        ("reserved",    ip.is_reserved),
-    ):
-        if flag:
-            return True, f"{label} address: {ip}"
-
-    for cidr in BLOCKED_CIDRS:
+    for cidr in BLOCKED_NETWORKS:
         if ip in cidr:
             return True, f"blocked CIDR {cidr}: {ip}"
 

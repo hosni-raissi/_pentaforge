@@ -67,13 +67,13 @@ _MAX_WORKERS_PER_HOST = 5   # throttle per-host to be polite
 # ══════════════════════════════════════════════════════════════
 
 def _is_private_ip(addr: str) -> bool:
-    """Return True if addr resolves to a private/reserved IP range."""
+    """Return True if addr is blocked by recon config."""
     return is_blocked_host(addr)
 
 
 def _resolve_and_check(hostname: str) -> Optional[str]:
     """
-    Resolve hostname to IP and check it is publicly routable.
+    Resolve hostname to IP and check it against recon config.
     Returns error string if blocked, None if safe.
     """
     if is_blocked_host(hostname):
@@ -88,7 +88,7 @@ def _resolve_and_check(hostname: str) -> Optional[str]:
         if is_blocked_host(addr):
             return (
                 f"Hostname '{hostname}' resolves to blocked IP '{addr}' — "
-                "SSRF protection blocked this request"
+                "recon config blocked this request"
             )
     return None
 
@@ -99,7 +99,7 @@ def _ssrf_check(url: str) -> Optional[str]:
     host = parsed.hostname or ""
     # Direct IP supplied?
     if _is_private_ip(host):
-        return f"Direct private IP '{host}' is blocked"
+        return f"Direct IP/host '{host}' is blocked by recon config"
     return _resolve_and_check(host)
 
 
@@ -457,7 +457,7 @@ def websocket_recon(
     │  CSWSH TESTING        Origin enforcement on all live endpoints   │
     │  AUTH DETECTION       401 / 403 gated endpoints flagged         │
     │  TLS AWARENESS        Surfaces cert errors rather than hiding   │
-    │  SSRF PROTECTION      DNS rebinding + private IP range checks   │
+    │  TARGET GUARD         Central recon config host/range checks    │
     └─────────────────────────────────────────────────────────────────┘
 
     Args:
@@ -599,7 +599,7 @@ WEBSOCKET_RECON_TOOL_DEFINITION = {
         "and HTML body scanning. Tests for CSWSH (Cross-Site WebSocket Hijacking) "
         "by probing Origin enforcement on all live endpoints — including auth-gated ones. "
         "Flags TLS issues, auth requirements, and server misconfigurations. "
-        "SSRF-safe: blocks private IPs, cloud metadata endpoints, and DNS rebinding. "
+        "Target-safe: honors centralized recon config blocklists and DNS rebinding checks. "
         "Non-intrusive reconnaissance — no frames sent after handshake."
     ),
     "parameters": {
@@ -610,7 +610,7 @@ WEBSOCKET_RECON_TOOL_DEFINITION = {
                 "description": (
                     "Base URL of the target (e.g. 'https://example.com'). "
                     "Accepts http://, https://, ws://, wss://. "
-                    "Private IPs and cloud metadata URLs are blocked."
+                    "Targets listed in recon config are blocked."
                 ),
             },
             "headers": {

@@ -14,11 +14,6 @@ from server.agents.executer.recon.tools.api._common import (
 )
 
 
-# ══════════════════════════════════════════════════════════════
-# 1. SCHEMAS
-# ══════════════════════════════════════════════════════════════
-import os
-
 from server.agents.executer.recon.config import is_blocked_host
 
 
@@ -34,13 +29,6 @@ class OAuthCheckRequest(BaseModel):
     def validate_target(cls, v: str) -> str:
         cleaned = v.strip()
         host = extract_host(cleaned)
-        
-        if host == "localhost" or host == "127.0.0.1" or host == "::1":
-            if os.getenv("PENTAFORGE_ALLOW_LOCAL_API_TARGETS") != "1":
-                raise ValueError(f"Target '{v}' is blocked. Set PENTAFORGE_ALLOW_LOCAL_API_TARGETS=1 to test localhost.")
-            if not re.match(r"^https?://[a-zA-Z0-9]", cleaned):
-                raise ValueError("Target must start with http:// or https://")
-            return cleaned
 
         host_lower = host.lower()
         if is_blocked_host(host_lower):
@@ -658,14 +646,10 @@ REDIRECT_URI = None                         # known redirect URI, or None
 HEADERS      = {}                           # e.g. {"Authorization": "Bearer ..."}
 TIMEOUT      = 30                           # per-request timeout in seconds (5–120)
 EMIT_JSON    = False                        # True → raw JSON output, False → summary
-ALLOW_LOCAL_TARGETS_IN_MAIN = True         # convenience for local lab runs
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    if ALLOW_LOCAL_TARGETS_IN_MAIN and os.getenv("PENTAFORGE_ALLOW_LOCAL_API_TARGETS") is None:
-        os.environ["PENTAFORGE_ALLOW_LOCAL_API_TARGETS"] = "1"
-
     result = oauth_oidc_check(
         target=TARGET,
         client_id=CLIENT_ID,

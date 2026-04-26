@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from server.agents.executer.recon.config import is_blocked_host
+
 # ══════════════════════════════════════════════════════════════════════
 # LOGGING
 # ══════════════════════════════════════════════════════════════════════
@@ -44,7 +46,6 @@ if not logger.handlers:
 # ══════════════════════════════════════════════════════════════════════
 
 _SHELL_DANGEROUS = frozenset({";", "&&", "||", "|", "`", "$(", ">>", "'", '"'})
-_BLOCKED_TARGETS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1"})
 _VALID_TOOLS = frozenset({"arp-scan", "arping"})
 
 _INTERFACE_RE = [re.compile(p) for p in (
@@ -79,9 +80,8 @@ class ArpScanRequest(BaseModel):
     @classmethod
     def validate_target(cls, v: str) -> str:
         clean = v.strip().lower()
-        for blocked in _BLOCKED_TARGETS:
-            if blocked in clean:
-                raise ValueError(f"Target '{v}' is blocked")
+        if is_blocked_host(clean):
+            raise ValueError(f"Target '{v}' is blocked by recon config")
         return v.strip()
 
     @field_validator("interface")

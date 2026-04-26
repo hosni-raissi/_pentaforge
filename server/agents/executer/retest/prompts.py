@@ -23,12 +23,14 @@ ROUND 1/3: Execute PoC
 - Use run_custom or run_python to execute vulnerability
 - Capture request/response data
 - Gather timing/behavioral data
+- Use at most 3 tool calls
 
 ROUND 2/3: Capture Evidence + Summary
 - READ Round 1 results carefully
 - CREATE SUMMARY of what executed in Round 1
 - Use capture_screenshot for visual proof if web-based
 - May execute follow-up PoC verification
+- Use at most 3 tool calls
 
 ROUND 3/3: Return Final Report (NO TOOLS)
 - Consolidate all evidence
@@ -37,6 +39,7 @@ ROUND 3/3: Return Final Report (NO TOOLS)
 
 ═══ CRITICAL RULES ═══
 ✓ NO file output flags: NEVER use -o, --output, --output-file, -O flags
+✓ Return proof through stdout/tool results or capture_screenshot; do not save with CLI output flags
 ✓ NO tool calls in Round 3 - consolidation only
 ✓ Use Playwright screenshots for XSS, DOM vulns
 ✓ Sanitize sensitive data before saving

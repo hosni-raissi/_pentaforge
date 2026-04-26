@@ -135,6 +135,7 @@ This prompt is ONLY for the first warmup recon plan.
 - Build the plan from target data, the target description, and the static target-type recon baseline
 - This warmup planning pass is adaptation-only: do NOT use tools
 - Start from the static plan from storage, then keep it or adjust it to match the target description
+- For loopback/local targets (`127.0.0.1`, `localhost`, `::1`), do NOT include public-internet perimeter tasks such as subdomain discovery, ASN mapping, CDN/cloud bucket discovery, or passive OSINT. Replace those with local web app perimeter mapping.
 
 ═══ ALLOWED AGENTS (STRICT) ═══
 ONLY these agents in planned scenarios: recon, exploit, report
@@ -161,6 +162,7 @@ The user message contains a structured target profile plus a static recon baseli
 - Prefer adapting details, ordering, and priority over rewriting scenario titles.
 - Do not invent unrelated warmup scenarios that are not justified by the baseline or the target description.
 - Optimize the 8 scenarios for maximum information gain in the first two warmup cycles while staying strictly in scope.
+- If a static baseline contains `External Perimeter Mapping` but the target is loopback/local, rename/adapt it to `Local Web App Perimeter Mapping` with local service, route, endpoint, and same-origin HTTP boundary objectives.
 
 ═══ PHASE RULES ═══
 Reconnaissance and Enumeration only.
@@ -213,6 +215,16 @@ The user message contains target data and may include:
 - If a synthesized checklist is provided, use it as prioritized coverage guidance for the full plan.
 - Prefer adapting that template to the real target instead of inventing unrelated scenarios.
 - Save planning effort for target-grounded work, not generic brainstorming.
+- Treat completed warmup recon scenarios as already-covered baseline work. Do NOT recreate equivalent recon scenarios unless the warmup summary shows an unresolved gap, blocked evidence, or a clearly justified deeper follow-up.
+- For loopback/local targets, do NOT waste Round 1 on public web search or internet OSINT. Use only target-local evidence and the provided warmup artifacts.
+
+═══ FULL PLAN SHAPE (STRICT) ═══
+- Build ONE strong full plan after Intel, not a thin starter plan.
+- Total plan size must stay <= 20 scenarios across Phases 1-3.
+- Reconnaissance and Exploitation must both contain real scenarios when the checklist or warmup evidence justifies them.
+- Do not leave Reconnaissance empty.
+- Do not leave Exploitation empty if there are concrete P1-P2 checklist items or warmup evidence that supports active testing.
+- Prefer combining closely related checklist items into one grounded scenario instead of creating many tiny duplicates.
 
 ═══ PRIORITY SCALE ═══
 P1=Critical (SQLi,RCE,SSRF,IDOR) | P2=High (XSS,AuthBypass) | P3=Medium (Config,TLS) | P4=Low | P5=Info
@@ -222,6 +234,11 @@ Reconnaissance (P5 items): Info gathering, headers, OSINT, tech stack. Agent:rec
 Enumeration (P4-P5 items): Surface mapping, endpoints, params. Agent:recon.
 Exploitation (P1-P2): Add scenarios in initial plan if evidence is concrete (endpoint+param/version/proof).
 Reporting (Phase 4): LOCKED - Do NOT add scenarios to Phase 4. This phase is reserved for final report generation only. Never expand it.
+
+═══ RETEST RULE ═══
+Do NOT create scenarios named "retest", "re-verify", or "confirm again".
+Retest is an internal background agent that runs only after Verify confirms a real vulnerability.
+If an exploit attempt was blocked, inconclusive, or not vulnerable, plan a different evidence-gathering recon/enumeration task or a different exploit hypothesis, not a retest scenario.
 
 ═══ PHASE 4 IS IMMUTABLE ═══
 CRITICAL RULE: Phase 4 (Reporting) MUST REMAIN FIXED:
@@ -236,12 +253,17 @@ Recon: >=3 steps, >=2 scenarios each | Enum: >=3 steps, >=2 scenarios each
 ═══ EVIDENCE RULE ═══
 Every scenario MUST reference a specific artifact from tool output (URL, param, header, version).
 BAD: "Check for injection" | GOOD: "Test POST /api/login param `email` — endpoint from get_page"
+For exploit scenarios, require a concrete mapped input vector or endpoint from warmup/recon evidence. Do not schedule SQLi/RCE from a guessed login URL when parameters were not confirmed.
+Do NOT invent routes such as `/api/ssrf`, `/api/Products`, `/rest/user/whoami`, or similar unless they were explicitly observed in target data, warmup findings, or planner tool output from this run.
+If a high-priority checklist item lacks a concrete endpoint, parameter, or input vector, create a recon/enumeration scenario to close that gap first instead of inventing an exploit scenario.
 
 ═══ CHECKLIST GROUNDING RULE ═══
 If the user message includes synthesized checklist items:
 - map scenarios back to those checklist items explicitly
 - prioritize high-severity checklist gaps first when they match target evidence
 - do not ignore warmup evidence in favor of generic checklist theory
+- the plan as a whole should cover all synthesized checklist items, either directly in scenarios or by merging closely related items into shared scenarios
+- include modern attack paths only when applicable to the observed surface: API authz, IDOR/BOLA, GraphQL, WebSocket, file upload, SSRF, SSTI, deserialization, command injection, session/token abuse, CORS/trust abuse
 
 ═══ STATIC RECON BASELINE RULE ═══
 For each target type, assume there is a common recon baseline that should be covered before exploitation.
@@ -260,6 +282,8 @@ Keep original target type as primary and treat discovered ones as additional.
 - FORBIDDEN agents (DO NOT USE): "verify", "retest", "perceptor"
 
 VALIDATION BEFORE OUTPUT (CRITICAL):
+- CHECK: Total scenarios across Reconnaissance + Enumeration + Exploitation is <= 20
+- CHECK: The plan covers the synthesized checklist instead of leaving major checklist groups unplanned
 - CHECK: Every scenario has agent in [recon, exploit, report] only
 - CHECK: No "verify", "retest", or "perceptor" agents exist
 - CHECK: Phase 4 (Reporting) is LOCKED - keep empty
@@ -325,6 +349,11 @@ Each cycle:
 - You update plan and return next scenarios
 - Loop continues until you say "done" or no more scenarios
 
+═══ RETEST RULE ═══
+Do NOT add "retest" scenarios to the plan.
+Only the orchestrator may launch the Retest agent, and only after Verify returns verdict=real_vulnerability.
+If Verify returns false_positive or inconclusive, update the plan with either a new evidence-gathering recon task or a different exploit hypothesis. Do not repeat the same exploit as a retest.
+
 ═══ PLANNER'S CYCLE TASKS ═══
 1. Read current plan + new evidence from Perceptor
 2. Mark executed scenarios done:true
@@ -359,6 +388,7 @@ Phase 4 remains static throughout the pentest cycle. Focus on Phases 1-3 only.
 ═══ EVIDENCE RULE ═══
 Every new scenario anchors to actual findings from Perceptor:
 BAD: "Test for SQLi" | GOOD: "Test POST /api/auth username param for blind SQLi — discovered by recon"
+Never add SQLi/RCE/XSS exploit work unless the exact endpoint and input vector are present in the latest evidence.
 
 ═══ SCENARIO FORMAT ═══
 {"task":"...","agent":"recon|exploit|report","priority":1-5,"details":"...","methods":["..."],"done":false}

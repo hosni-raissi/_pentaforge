@@ -50,6 +50,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
         local_config: LocalLLMConfig | None = None,
         target_types: list[str] | None = None,
         project_id: str | None = None,
+        project_cache_dir: str | None = None,
     ) -> None:
         self._target_types = list(target_types or [])
         scoped_tools = filter_tools_for_target_types(
@@ -77,6 +78,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
             config=config,
             local_config=local_config,
             project_id=project_id,
+            project_cache_dir=project_cache_dir,
             context_window_key=RECON_CONTEXT_WINDOW_KEY,
             context_window_max_tokens=RECON_CONTEXT_WINDOW_MAX_TOKENS,
         )

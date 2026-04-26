@@ -1986,8 +1986,6 @@ API_FUZZING_TOOL_DEFINITION = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    os.environ.setdefault("PENTAFORGE_ALLOW_LOCAL_API_TARGETS", "1")
-
     target = os.getenv("PENTAFORGE_FUZZ_TARGET", "http://localhost:8888/api").rstrip("/")
     profile_env = os.getenv("PENTAFORGE_FUZZ_PROFILE")
     profile = (profile_env or "smoke").strip().lower()

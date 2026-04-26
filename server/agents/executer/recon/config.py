@@ -1,5 +1,6 @@
 """Configuration for the Recon executer agent."""
 
+import ipaddress as _ipaddress
 import os
 import socket
 
@@ -11,7 +12,7 @@ MAX_TOOL_ROUNDS = 3
 LLM_CALL_TIMEOUT_SECONDS = 300
 RECON_CONTEXT_WINDOW_MAX_TOKENS = 15000
 RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000
-RECON_MAX_TOOL_CALLS_PER_ROUND = 2
+RECON_MAX_TOOL_CALLS_PER_ROUND = 3
 WARMUP_RECON_MAX_TOOL_CALLS_PER_ROUND = 3
 RECON_TOOL_EXECUTION_TIMEOUT_SECONDS = 240
 
@@ -160,15 +161,38 @@ BLOCKED_HOSTNAMES: set[str] = set()
 BLOCKED_NETWORKS: list = []
 
 
+def _extract_host_for_block_check(value: str) -> str:
+    host = str(value or "").strip().lower()
+    if not host:
+        return ""
+    if host.startswith(("http://", "https://", "ws://", "wss://")):
+        parsed = _urlparse(host)
+        return (parsed.hostname or "").lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end != -1 else host.strip("[]")
+    if host.count(":") == 1:
+        left, right = host.rsplit(":", 1)
+        if right.isdigit():
+            return left
+    return host
+
+
 def is_blocked_host(value: str) -> bool:
     """Return True when *value* (hostname, IP, or full URL) is blocked."""
-    if not BLOCKED_HOSTS:
+    host = _extract_host_for_block_check(value)
+    if not host:
         return False
-    host = value.strip().lower()
-    # If it looks like a URL, extract the hostname.
-    if host.startswith(("http://", "https://")):
-        parsed = _urlparse(host)
-        host = (parsed.hostname or "").lower()
-    # Strip port if present (e.g. "127.0.0.1:3001").
-    host = host.split(":")[0]
-    return host in BLOCKED_HOSTS
+
+    blocked_hosts = set(BLOCKED_HOSTS) | set(BLOCKED_HOSTNAMES)
+    if host in blocked_hosts:
+        return True
+
+    if BLOCKED_NETWORKS:
+        try:
+            addr = _ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return any(addr in net for net in BLOCKED_NETWORKS)
+
+    return False

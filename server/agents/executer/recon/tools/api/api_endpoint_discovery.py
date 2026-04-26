@@ -2502,7 +2502,6 @@ if __name__ == "__main__":
     import os
     import urllib3
     urllib3.disable_warnings()
-    os.environ.setdefault("PENTAFORGE_ALLOW_LOCAL_API_TARGETS", "1")
 
     LOCAL_CRAPI_TARGET = "http://localhost:8888/api"
     """

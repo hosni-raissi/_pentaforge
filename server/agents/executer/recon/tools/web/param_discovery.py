@@ -349,7 +349,10 @@ def calculate_timeout(tool: str, args: list[str], base_timeout: int) -> int:
         multiplier = 0.5
     
     calculated = int(base_timeout * multiplier)
-    return min(max(calculated, 60), 3600)
+    # Respect the caller's explicit timeout cap. We can scale downward for fast
+    # tools, but we should not silently extend beyond the requested limit.
+    caller_cap = max(int(base_timeout or 0), 60)
+    return min(max(calculated, 60), caller_cap)
 
 
 def extract_domain(target: str) -> str:

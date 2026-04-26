@@ -29,16 +29,17 @@ def _target_query_text(target_type: str) -> str:
 
 FORMATTER_SYSTEM_PROMPT = (
     "Role: Intel agent for prioritized pentest checklist generation.\n"
-    "Goal: build the best target-specific checklist by combining recon evidence, target info, and OWASP checklist coverage.\n"
+    "Goal: build the best target-specific checklist by combining recon evidence, target info, the current recon plan, OWASP checklist coverage, and NIST-style control coverage.\n"
     "\n"
     "Tools: get_checklists.\n"
     "Required usage:\n"
     "1) Review the target info, current recon plan, latest Perceptor cache, and current checklist.\n"
     "2) Treat the latest recon plan and Perceptor cache as the source of truth for what the target actually exposes.\n"
-    "3) Use get_checklists only for OWASP checklist coverage. Do not use RAG-style reasoning or invent off-scope work.\n"
+    "3) Use get_checklists only for OWASP checklist coverage. NIST-style control coverage may already be present in the current checklist baseline.\n"
     "4) Respect explicit scope exclusions from the target info (for example: no SQL injection, do not test XSS).\n"
     "5) Output a strong target-specific checklist with 15-20 items total.\n"
-    "6) Prioritize checklist items using this order of trust: Perceptor cache -> current recon plan -> target info/scope -> uploaded checklist -> OWASP checklist coverage.\n"
+    "6) Prioritize checklist items using this order of trust: Perceptor cache -> current recon plan -> target info/scope -> uploaded checklist -> NIST-style baseline -> OWASP checklist coverage.\n"
+    "7) Put likely or observed vulnerability classes first, then fill remaining slots with high-value unknowns that still fit the exposed surface.\n"
     "\n"
 
     f"Budget: {FORMATTER_ROUNDS} rounds total; keep last round for final JSON.\n"
@@ -97,15 +98,33 @@ def build_user_message(
             f"({tool_calls_remaining} for tools + 1 for final answer)."
         )
 
+    coverage_counts = formatter_payload.get("coverage_counts", {}) if isinstance(formatter_payload, dict) else {}
+    methods_count = int(coverage_counts.get("methods", 0) or 0) if isinstance(coverage_counts, dict) else 0
+    techniques_count = int(coverage_counts.get("techniques", 0) or 0) if isinstance(coverage_counts, dict) else 0
+    vulnerabilities_count = int(coverage_counts.get("vulnerabilities", 0) or 0) if isinstance(coverage_counts, dict) else 0
+    baseline_summary = (
+        "Checklist baseline summary:\n"
+        f"- methods coverage hints: {methods_count}\n"
+        f"- techniques coverage hints: {techniques_count}\n"
+        f"- vulnerability coverage hints: {vulnerabilities_count}\n"
+    )
+
     return (
         f"Target: {target_type}\n"
+        "Intel input bundle:\n"
+        "1. Target description and scope\n"
+        "2. Current recon plan\n"
+        "3. Warmup recon findings / Perceptor cache\n"
+        "4. Current merged checklist baseline (OWASP + NIST-style controls + uploaded checklist if present)\n\n"
         f"Target context:\n{info or 'none'}\n\n"
+        f"{baseline_summary}\n"
         "Prioritization order:\n"
         "1. Latest Perceptor cache and discovered target artifacts\n"
         "2. Current recon plan\n"
         "3. Target info and scope constraints\n"
         "4. Uploaded or baseline checklist items\n"
-        "5. OWASP checklist coverage\n\n"
+        "5. NIST-style baseline controls already present in the current checklist\n"
+        "6. OWASP checklist coverage\n\n"
         "Current checklist:\n"
         f"{base_checklist_text}\n\n"
         f"{budget_text}\n\n"
@@ -113,9 +132,10 @@ def build_user_message(
         "1) infer what the target actually exposes from the recon plan and Perceptor cache.\n"
         "2) if you need OWASP coverage help, call get_checklists only.\n"
         "3) keep the checklist narrow, target-specific, and strictly within scope.\n"
-        "4) produce between 15 and 20 checklist items total.\n"
-        "5) give each item concrete wording tied to observed target details where possible.\n"
-        "6) return final JSON with keys: status, checklist.\n"
+        "4) prioritize observed or likely vulnerability classes first, then add high-value unknown coverage.\n"
+        "5) produce between 15 and 20 checklist items total.\n"
+        "6) give each item concrete wording tied to observed target details where possible.\n"
+        "7) return final JSON with keys: status, checklist.\n"
     )
 
 
@@ -155,6 +175,7 @@ def build_priority_reprompt_prompt(
         "- do not remove blocks or items\n"
         "- set explicit phase numbers on all blocks as strings and do not skip numbers\n"
         "- phase numbering must be sequential in checklist order: 1,2,3,...\n"
+        "- items suggested by observed recon findings or likely vulnerability classes should rank ahead of generic unknowns\n"
         "- no markdown, no prose\n\n"
         "Severity scale:\n"
         "S1 / priority 1 = Critical -> SQLi, RCE, SSRF, Command Injection, Privilege Escalation\n"

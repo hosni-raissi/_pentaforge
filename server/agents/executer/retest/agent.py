@@ -48,6 +48,7 @@ class RetestExecuterAgent(BaseExecuterAgent):
         config: PublicLLMConfig | None = None,
         local_config: LocalLLMConfig | None = None,
         project_id: str | None = None,
+        project_cache_dir: str | None = None,
     ) -> None:
         super().__init__(
             role="retest",
@@ -61,6 +62,7 @@ class RetestExecuterAgent(BaseExecuterAgent):
             config=config,
             local_config=local_config,
             project_id=project_id,
+            project_cache_dir=project_cache_dir,
             context_window_key=RETEST_CONTEXT_WINDOW_KEY,
             context_window_max_tokens=RETEST_CONTEXT_WINDOW_MAX_TOKENS,
         )

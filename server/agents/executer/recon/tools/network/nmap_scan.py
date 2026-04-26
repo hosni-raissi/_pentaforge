@@ -255,12 +255,10 @@ def _validate_target(v: str) -> str:
                     raise ValueError(
                         f"IPv6 CIDR too large: {net.num_addresses} hosts (max {CFG.MAX_CIDR_HOSTS})"
                     )
-                if net.is_loopback or net.is_unspecified or net.is_multicast:
-                    raise ValueError(f"IPv6 network type not allowed: {net}")
             else:
                 addr = ipaddress.ip_address(clean)
-                if addr.is_loopback or addr.is_unspecified or addr.is_multicast:
-                    raise ValueError(f"IPv6 address type not allowed: {addr}")
+                if is_blocked_host(str(addr)):
+                    raise ValueError(f"IPv6 address '{addr}' is blocked by recon config")
             return clean
         except ValueError as exc:
             if any(k in str(exc) for k in ("too large", "not allowed")):
@@ -275,8 +273,9 @@ def _validate_target(v: str) -> str:
             raise ValueError(
                 f"CIDR too large: {net.num_addresses} hosts (max {CFG.MAX_CIDR_HOSTS})"
             )
-        if net.is_loopback or net.is_unspecified or net.is_multicast:
-            raise ValueError(f"Network type not allowed: {net}")
+        for blocked_net in _BLOCKED_NETWORKS:
+            if net.overlaps(blocked_net):
+                raise ValueError(f"Target CIDR '{v}' overlaps with blocked network {blocked_net}")
 
     return clean
 

@@ -26,6 +26,7 @@ from server.config.agent import (
 )
 from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
+from server.agents.rate_limiter import get_backup_llm_fallback
 
 from .tools import ALL_INTEL_TOOLS, IntelContext, set_context
 from .tools.get_checklists import (
@@ -1244,6 +1245,88 @@ def _ensure_structured_checklist_min_items(
 
     return payload
 
+
+def _build_nist_baseline_checklist_payload(
+    target_type: str,
+    info: str,
+) -> dict[str, Any]:
+    lowered = str(info or "").lower()
+    normalized_target = _normalize_target_type(target_type)
+
+    phase_items: dict[str, list[str]] = {
+        "1": [
+            "Asset inventory and exposed service validation for the in-scope target",
+        ],
+        "3": [
+            "Security configuration, error handling, and debug artifact exposure review",
+            "Sensitive data protection review for transport, storage, and logging paths",
+        ],
+        "4": [
+            "Least-privilege and authorization enforcement review on exposed interfaces",
+            "Server-side input validation review on dynamic endpoints and workflows",
+        ],
+        "5": [
+            "Session, token, and abuse-control review for authenticated flows",
+        ],
+    }
+
+    if normalized_target in {"web_app", "api"}:
+        phase_items["1"].append("Client-side route, dependency, and API surface exposure review")
+        phase_items["3"].append("Security headers, CORS, and trust-boundary configuration review")
+        phase_items["4"].append("Access-control review for exposed API objects, admin routes, and business actions")
+
+    if "graphql" in lowered:
+        phase_items["4"].append("GraphQL schema exposure, resolver authorization, and introspection review")
+    if any(marker in lowered for marker in ("websocket", "socket.io", "ws://", "wss://")):
+        phase_items["4"].append("WebSocket authentication, authorization, and message trust review")
+    if any(marker in lowered for marker in ("upload", "file-processing", "file processing", "multipart", "attachment")):
+        phase_items["4"].append("File upload, content validation, and storage isolation review")
+    if any(marker in lowered for marker in ("api-docs", "swagger", "/api", "rest api", "endpoint")):
+        phase_items["4"].append("Exposed API documentation, object enumeration, and rate-control review")
+    if any(marker in lowered for marker in ("login", "auth", "session", "cookie", "jwt", "token")):
+        phase_items["5"].append("Authentication flow, credential handling, and token lifecycle review")
+    if any(marker in lowered for marker in ("admin", "debug", "internal")):
+        phase_items["3"].append("Administrative and debug interface exposure review")
+    if any(marker in lowered for marker in ("cors", "cross-origin")):
+        phase_items["3"].append("Cross-origin trust boundary and browser-enforced policy review")
+
+    checklist_blocks: list[dict[str, Any]] = []
+    total_items = 0
+    for phase in sorted(phase_items.keys(), key=_phase_sort_key):
+        seen: set[str] = set()
+        normalized_items: list[dict[str, Any]] = []
+        for name in phase_items[phase]:
+            clean = str(name or "").strip()
+            if not clean:
+                continue
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append(
+                {
+                    "name": clean,
+                    "priority": _priority_for_item_name(clean, phase),
+                }
+            )
+        if not normalized_items:
+            continue
+        total_items += len(normalized_items)
+        checklist_blocks.append(
+            {
+                "phase": phase,
+                "title": _phase_block_title(phase),
+                "items": normalized_items,
+            }
+        )
+
+    return {
+        "target_type": normalized_target,
+        "available_total": total_items,
+        "checklist": checklist_blocks,
+    }
+
+
 def _compact_search_results_for_formatter(parsed: dict[str, Any]) -> str:
     hits = parsed.get("hits", [])
     compact_hits: list[dict[str, Any]] = []
@@ -1905,7 +1988,7 @@ class IntelAgent:
                 self._cb.on_step(
                     "Custom checklist detected — merging uploaded checklist with OWASP resources before synthesis"
                 )
-            self._cb.on_step("Formatter will stay OWASP-only and may use get_checklists if needed")
+            self._cb.on_step("Formatter will use recon evidence plus merged OWASP and NIST-style checklist baseline")
             self._cb.on_step("Fetching base checklist")
             base_checklist = await self._call_tool_json("get_checklists", target_type=target_type, info=info[:250])
             if isinstance(base_checklist, dict):
@@ -1923,6 +2006,19 @@ class IntelAgent:
                 except Exception as exc:
                     logger.warning("intel_clean_checklist_failed", error=str(exc), target_type=target_type)
                     cleaned_payload = build_deterministic_checklist_payload(base_checklist, info)
+
+            nist_baseline_payload = _build_nist_baseline_checklist_payload(
+                target_type,
+                info,
+            )
+            if _is_structured_checklist_payload(nist_baseline_payload):
+                cleaned_payload = _merge_structured_checklist_payloads(
+                    cleaned_payload,
+                    nist_baseline_payload,
+                )
+                self._cb.on_step(
+                    "Merged NIST-style baseline controls into the Intel checklist seed"
+                )
 
             if custom_checklist_clean and merge_custom_checklist:
                 cleaned_payload = _merge_structured_checklist_payloads(
@@ -2184,27 +2280,35 @@ class IntelAgent:
             expected = [str(idx) for idx in range(1, len(phases) + 1)]
             return phases == expected
 
-        try:
-            response = await asyncio.wait_for(
-                self._llm.chat(
-                    [
-                        ChatMessage(
-                            role="system",
-                            content=PRIORITY_REPROMPT_SYSTEM_PROMPT,
-                        ),
-                        ChatMessage(role="user", content=prompt),
-                    ],
-                    temperature=0,
-                    max_tokens=11000,
-                ),
-                timeout=60,
-            )
-            parsed = _parse_json_best_effort(response.content or "")
+        priority_messages = [
+            ChatMessage(
+                role="system",
+                content=PRIORITY_REPROMPT_SYSTEM_PROMPT,
+            ),
+            ChatMessage(role="user", content=prompt),
+        ]
+
+        def _parse_priority_response(content: str) -> dict[str, Any]:
+            parsed = _parse_json_best_effort(content or "")
             if parsed is not None:
                 if isinstance(parsed, dict) and _is_structured_checklist_payload(parsed):
                     normalized = _normalize_llm_priorities_only(parsed)
                     if _checklist_all_items_have_priority(normalized) and _has_sequential_phases(normalized):
                         return normalized
+            return {}
+
+        try:
+            response = await asyncio.wait_for(
+                self._llm.chat(
+                    priority_messages,
+                    temperature=0,
+                    max_tokens=11000,
+                ),
+                timeout=60,
+            )
+            normalized = _parse_priority_response(response.content or "")
+            if normalized:
+                return normalized
 
             # If the model returns malformed/partial payload, fail softly so caller fallback applies.
             logger.info("intel_fix_priorities_unusable_payload", target_type=target_type)
@@ -2217,6 +2321,39 @@ class IntelAgent:
                 error_repr=repr(exc),
                 target_type=target_type,
             )
+
+            backup_llm = await get_backup_llm_fallback().get_backup_llm()
+            if backup_llm is not None:
+                self._cb.on_warn(
+                    "Intel priority refinement failed; retrying once with backup LLM."
+                )
+                try:
+                    backup_response = await asyncio.wait_for(
+                        backup_llm.chat(
+                            priority_messages,
+                            temperature=0,
+                            max_tokens=11000,
+                        ),
+                        timeout=60,
+                    )
+                    normalized = _parse_priority_response(backup_response.content or "")
+                    if normalized:
+                        logger.info(
+                            "intel_fix_priorities_backup_success",
+                            target_type=target_type,
+                        )
+                        return normalized
+                    logger.info(
+                        "intel_fix_priorities_backup_unusable_payload",
+                        target_type=target_type,
+                    )
+                except Exception as backup_exc:
+                    logger.warning(
+                        "intel_fix_priorities_backup_failed",
+                        error=str(backup_exc),
+                        error_type=type(backup_exc).__name__,
+                        target_type=target_type,
+                    )
 
         # Signal failure — caller runs strict stop behavior.
         return {}

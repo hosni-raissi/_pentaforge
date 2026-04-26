@@ -519,8 +519,6 @@ def main() -> None:
     print("  [3] Validation tests (all expected to fail)")
     print("=" * 60)
     bad_cases = [
-        ("127.0.0.1",    "nmap",   [],                  60,  "blocked loopback"),
-        ("169.254.1.1",  "nmap",   [],                  60,  "blocked link-local"),
         ("10.0.0.1",     "masscan", [],                 60,  "invalid tool"),
         ("NMAP",         "nmap",   [],                  60,  "invalid hostname"),
         ("10.0.0.1",     "nmap",   ["sU"],              60,  "arg missing -- prefix"),

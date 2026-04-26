@@ -5,9 +5,11 @@ Shared base implementation for executer agents.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
 import re
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -28,6 +30,15 @@ from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 
 logger = structlog.get_logger(__name__)
+
+_executer_callback_context: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "executer_callback_context",
+    default=None,
+)
+_executer_tool_context: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "executer_tool_context",
+    default={},
+)
 
 _EXECUTER_LLM_RETRY_MAX = 3
 _EXECUTER_LLM_RETRY_BASE_SECONDS = 1.5
@@ -67,6 +78,28 @@ _TOOL_RESULT_MAX_LIST_ITEMS = 40
 _TOOL_RESULT_MAX_NESTED_LIST_ITEMS = 12
 _TOOL_RESULT_MAX_DICT_KEYS = 40
 _TOOL_RESULT_MAX_DEPTH = 4
+
+
+def _is_rate_limit_error(exc: Exception | None) -> bool:
+    text = str(exc or "").lower()
+    return "429" in text or "rate limit" in text
+
+
+def _is_transient_llm_error(exc: Exception | None) -> bool:
+    text = str(exc or "").lower()
+    transient_markers = (
+        "temporary failure in name resolution",
+        "name or service not known",
+        "try again",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "network is unreachable",
+        "timed out",
+        "timeout",
+        "dns",
+    )
+    return any(marker in text for marker in transient_markers)
 
 
 class ExecuterCallback(Protocol):
@@ -263,30 +296,241 @@ def _extract_json_from_text(raw: str) -> dict[str, Any]:
     return {}
 
 
+def _extract_verify_verdict_from_text(raw: str) -> dict[str, Any]:
+    parsed = _extract_json_from_text(raw)
+    if isinstance(parsed, dict):
+        verdict = str(parsed.get("verdict", "")).strip().lower()
+        if verdict in {"real_vulnerability", "false_positive", "inconclusive"}:
+            return parsed
+
+    verdict_match = re.search(r'"verdict"\s*:\s*"([^"]+)"', raw, re.IGNORECASE)
+    if not verdict_match:
+        return {}
+
+    verdict_value = verdict_match.group(1).strip().lower()
+    if verdict_value not in {"real_vulnerability", "false_positive", "inconclusive"}:
+        return {}
+
+    summary = ""
+    summary_match = re.search(r'"summary"\s*:\s*"((?:\\.|[^"\\])*)"', raw, re.IGNORECASE)
+    if summary_match:
+        try:
+            summary = json.loads(f'"{summary_match.group(1)}"')
+        except json.JSONDecodeError:
+            summary = summary_match.group(1)
+
+    confidence: float | None = None
+    confidence_match = re.search(r'"confidence"\s*:\s*([0-9]*\.?[0-9]+)', raw, re.IGNORECASE)
+    if confidence_match:
+        try:
+            confidence = max(0.0, min(1.0, float(confidence_match.group(1))))
+        except ValueError:
+            confidence = None
+
+    payload: dict[str, Any] = {
+        "verdict": verdict_value,
+        "summary": summary or raw.strip(),
+    }
+    if confidence is not None:
+        payload["confidence"] = confidence
+    return payload
+
+
+def _coerce_optional_confidence(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, confidence))
+
+
+def _recon_summary_implies_completion(summary: Any) -> bool:
+    text = str(summary or "").strip().lower()
+    if not text:
+        return False
+
+    blocked_markers = (
+        "blocked",
+        "restriction",
+        "restricted",
+        "prevented",
+        "policy",
+        "localhost",
+        "127.0.0.1",
+        "insufficient",
+        "limited",
+        "unable to",
+        "could not",
+        "failed to",
+        "no evidence",
+    )
+    if any(marker in text for marker in blocked_markers):
+        return False
+
+    completion_markers = (
+        "completed",
+        "complete",
+        "confirmed",
+        "successfully",
+        "fingerprinted",
+        "mapped",
+        "identified",
+        "discovered",
+        "enumerated",
+        "extracted",
+        "synthesized",
+        "validated",
+        "reviewed",
+        "analyzed",
+    )
+    return any(marker in text for marker in completion_markers)
+
+
+def _recon_scenario_summary_implies_completion(
+    *,
+    task: Any,
+    summary: Any,
+    findings: Any = None,
+    tools: Any = None,
+) -> bool:
+    task_text = str(task or "").strip().lower()
+    summary_text = str(summary or "").strip().lower()
+    findings_list = findings if isinstance(findings, list) else []
+    tools_list = tools if isinstance(tools, list) else []
+    if not task_text or not summary_text:
+        return False
+
+    findings_text = " ".join(
+        f"{str(item.get('title', '')).strip()} {str(item.get('details', '')).strip()}".lower()
+        for item in findings_list
+        if isinstance(item, dict)
+    )
+    tools_text = " ".join(str(item).strip().lower() for item in tools_list if str(item).strip())
+    evidence_text = " ".join(part for part in [summary_text, findings_text, tools_text] if part).strip()
+    if not evidence_text:
+        return False
+
+    task_markers: dict[str, tuple[str, ...]] = {
+        "structural content discovery": (
+            "robots.txt",
+            "sitemap",
+            "swagger",
+            "openapi",
+            "api-docs",
+            "portal",
+            "metadata",
+            "hidden path",
+            "hidden paths",
+            "directory",
+            "directories",
+            "admin",
+            "debug",
+            ".git",
+            ".env",
+            "backup",
+        ),
+        "api & endpoint extraction": (
+            "swagger",
+            "openapi",
+            "api-docs",
+            "graphql",
+            "endpoint",
+            "endpoints",
+            "route",
+            "routes",
+            "websocket",
+            "socket",
+            "rest",
+            "/api",
+            "schema",
+        ),
+        "input & parameter profiling": (
+            "parameter",
+            "parameters",
+            "input field",
+            "input fields",
+            "form",
+            "forms",
+            "query param",
+            "body param",
+            "json body",
+            "hidden parameter",
+            "hidden parameters",
+        ),
+        "identity & access analysis": (
+            "auth",
+            "login",
+            "session",
+            "cookie",
+            "cookies",
+            "token",
+            "tokens",
+            "bearer",
+            "oauth",
+            "oidc",
+            "authentication",
+            "authorization",
+            "access control",
+        ),
+        "local web app perimeter mapping": (
+            "service",
+            "services",
+            "port",
+            "ports",
+            "reachable",
+            "accessible",
+            "endpoint",
+            "route",
+        ),
+        "defensive & tech fingerprinting": (
+            "tech stack",
+            "angular",
+            "react",
+            "vue",
+            "node",
+            "express",
+            "typescript",
+            "cors",
+            "security header",
+            "headers",
+            "waf",
+            "framework",
+            "fingerprinted",
+        ),
+    }
+
+    matched_task = next(
+        (name for name in task_markers if name in task_text),
+        "",
+    )
+    if not matched_task:
+        return False
+
+    return any(marker in evidence_text for marker in task_markers[matched_task])
+
+
 def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
     parsed = _extract_json_from_text(raw)
 
     # CRITICAL FIX: If JSON parsing failed completely, try to extract verdict field directly from raw text
     # This handles cases where Verify agent outputs {"verdict": "..."} but JSON parsing fails
     if not parsed:
-        # Try direct regex extraction for verdict field (Verify agent Round 3)
-        verdict_match = re.search(r'"verdict"\s*:\s*"([^"]+)"', raw, re.IGNORECASE)
-        if verdict_match:
-            verdict_value = verdict_match.group(1).strip().lower()
-            if verdict_value in {"real_vulnerability", "false_positive", "inconclusive"}:
-                # Successfully extracted verdict from raw text
-                logger.info(
-                    "executer_verdict_extracted_from_raw",
-                    role=role,
-                    verdict=verdict_value,
-                    raw_length=len(raw),
-                )
-                summary = raw.strip() or "No structured response."
-                return ExecuterResult(
-                    status=verdict_value,
-                    confidence=None,
-                    summary=summary,
-                )
+        extracted_verdict = _extract_verify_verdict_from_text(raw)
+        if extracted_verdict:
+            verdict_value = str(extracted_verdict.get("verdict", "")).strip().lower()
+            logger.info(
+                "executer_verdict_extracted_from_raw",
+                role=role,
+                verdict=verdict_value,
+                raw_length=len(raw),
+            )
+            return ExecuterResult(
+                status=verdict_value,
+                confidence=_coerce_optional_confidence(extracted_verdict.get("confidence")),
+                summary=str(extracted_verdict.get("summary", "")).strip() or raw.strip(),
+            )
 
         # If consolidation role (verify/retest) and no verdict found, default to inconclusive
         # instead of incomplete (incomplete means agent still has work to do)
@@ -405,7 +649,23 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
         normalized_item["tools"] = [
             str(x).strip() for x in tools_value if str(x).strip()
         ] if isinstance(tools_value, list) else []
+        if (
+            role == "recon"
+            and normalized_item.get("status") in {"blocked", "failed"}
+            and _recon_scenario_summary_implies_completion(
+                task=normalized_item.get("task", ""),
+                summary=normalized_item.get("summary", ""),
+                findings=normalized_item.get("findings", []),
+                tools=normalized_item.get("tools", []),
+            )
+        ):
+            normalized_item["status"] = "complete"
         normalized_scenario_summaries.append(normalized_item)
+    summary_statuses = [
+        str(item.get("status", "")).strip().lower()
+        for item in normalized_scenario_summaries
+        if str(item.get("status", "")).strip()
+    ]
 
     # CRITICAL FIX: Check for "verdict" field (Verify agent) or "status" field (other agents)
     status = parsed.get("status")
@@ -446,18 +706,19 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
             ],
             default=status,
         )
-        if status not in {"complete", "blocked", "failed"} and normalized_scenario_summaries:
-            summary_statuses = [
-                str(item.get("status", "")).strip().lower()
-                for item in normalized_scenario_summaries
-                if str(item.get("status", "")).strip()
-            ]
-            if summary_statuses and all(item == "complete" for item in summary_statuses):
+        if summary_statuses:
+            if all(item == "complete" for item in summary_statuses):
                 status = "complete"
             elif any(item in {"complete", "blocked"} for item in summary_statuses):
                 status = "blocked"
             else:
                 status = "failed"
+        elif (
+            status == "blocked"
+            and parsed.get("findings")
+            and _recon_summary_implies_completion(parsed.get("summary", ""))
+        ):
+            status = "complete"
         if status not in {"complete", "blocked", "failed"}:
             logger.warning(
                 "executer_invalid_recon_status",
@@ -483,16 +744,7 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
     summary = parsed.get("summary", "")
     next_hypotheses = parsed.get("next_hypotheses", [])
     raw_confidence = parsed.get("confidence")
-    confidence: float | None = None
-    try:
-        if raw_confidence is not None:
-            confidence = float(raw_confidence)
-            if confidence < 0:
-                confidence = 0.0
-            elif confidence > 1:
-                confidence = 1.0
-    except (TypeError, ValueError):
-        confidence = None
+    confidence = _coerce_optional_confidence(raw_confidence)
 
     if not isinstance(findings, list):
         findings = []
@@ -507,6 +759,16 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
     if isinstance(summary, list):
         summary = " ".join(str(s) for s in summary) if summary else ""
     summary = str(summary) if summary else ""
+
+    if role in {"verify", "retest"} and summary:
+        embedded_verdict = _extract_verify_verdict_from_text(summary)
+        embedded_status = str(embedded_verdict.get("verdict", "")).strip().lower()
+        if embedded_status in {"real_vulnerability", "false_positive", "inconclusive"}:
+            status = embedded_status
+            summary = str(embedded_verdict.get("summary", "")).strip() or summary
+            confidence = _coerce_optional_confidence(
+                embedded_verdict.get("confidence", confidence)
+            )
 
     return ExecuterResult(
         status=status,
@@ -570,6 +832,7 @@ class BaseExecuterAgent:
         config: PublicLLMConfig | None = None,
         local_config: LocalLLMConfig | None = None,
         project_id: str | None = None,
+        project_cache_dir: str | None = None,
         context_window_key: str | None = None,
         context_window_max_tokens: int = 0,
     ) -> None:
@@ -580,6 +843,8 @@ class BaseExecuterAgent:
         self._call_timeout_seconds = call_timeout_seconds
         self._mode = mode or llm_mode.mode
         self._cb = callback or _NoOpCallback()
+        self._project_id = str(project_id or "").strip()
+        self._project_cache_dir = str(project_cache_dir or "").strip()
 
         self._tools = {t.name: t for t in tools}
         self._tool_schemas = [t.schema() for t in tools]
@@ -883,6 +1148,64 @@ class BaseExecuterAgent:
 
         return None
 
+    def _declared_target_url(self) -> str:
+        message = str(getattr(self, "_current_user_message", "") or "")
+        match = re.search(r"^Target:\s*(\S+)", message, flags=re.MULTILINE)
+        return match.group(1).strip() if match else ""
+
+    def _url_host_port(self, value: str) -> tuple[str, int | None, str]:
+        parsed = urlparse(str(value or "").strip())
+        host = (parsed.hostname or "").strip().lower()
+        scheme = (parsed.scheme or "").strip().lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is None and scheme == "http":
+            port = 80
+        elif port is None and scheme == "https":
+            port = 443
+        return host, port, scheme
+
+    def _is_loopback_hostname(self, host: str) -> bool:
+        normalized = str(host or "").strip().lower()
+        return normalized in {"localhost", "127.0.0.1", "::1"}
+
+    def _extract_urls_from_run_custom(self, args: dict[str, Any]) -> list[str]:
+        if not isinstance(args, dict):
+            return []
+        urls: list[str] = []
+        for value in args.get("args", []):
+            text = str(value or "")
+            urls.extend(re.findall(r"https?://[^\s'\"<>]+", text))
+        return urls
+
+    def _detect_out_of_scope_run_custom_url(self, tool_name: str, args: dict[str, Any]) -> str | None:
+        if tool_name != "run_custom" or not isinstance(args, dict):
+            return None
+
+        target_url = self._declared_target_url()
+        target_host, target_port, _ = self._url_host_port(target_url)
+        if not target_host:
+            return None
+
+        for url in self._extract_urls_from_run_custom(args):
+            url_host, url_port, _ = self._url_host_port(url)
+            if not url_host:
+                continue
+
+            same_host = url_host == target_host
+            same_loopback_family = (
+                self._is_loopback_hostname(url_host)
+                and self._is_loopback_hostname(target_host)
+            )
+            if not (same_host or same_loopback_family):
+                return f"{url} is outside target host {target_host}"
+            if target_port is not None and url_port is not None and url_port != target_port:
+                return f"{url} uses port {url_port}, expected {target_port}"
+
+        return None
+
     def _build_tool_invocation_signature(
         self,
         *,
@@ -890,6 +1213,30 @@ class BaseExecuterAgent:
         args: dict[str, Any],
         scenario_id: str,
     ) -> str:
+        semantic_tool_names = {
+            "js_source_code_analyzer",
+            "detect_tech",
+            "http_header_analysis",
+            "http_probe",
+            "web_crawler",
+            "api_passive_enum",
+            "param_discovery",
+            "session_token_analysis",
+            "oauth_oidc_check",
+        }
+        if tool_name.strip().lower() in semantic_tool_names:
+            normalized_target = str(
+                args.get("target")
+                or args.get("url")
+                or args.get("endpoint")
+                or args.get("host")
+                or ""
+            ).strip().lower()
+            if normalized_target:
+                return (
+                    f"{scenario_id.strip().lower()}::"
+                    f"{tool_name.strip().lower()}::semantic::{normalized_target}"
+                )
         try:
             args_blob = json.dumps(args, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         except TypeError:
@@ -1019,8 +1366,8 @@ class BaseExecuterAgent:
             args = self._filter_tool_args(tool_name, args)
             args, sanitized_output_flags = self._sanitize_known_file_output_args(tool_name, args)
             if sanitized_output_flags:
-                self._cb.on_warn(
-                    f"[{self._role}] removed file-output args for {tool_name}: {' '.join(sanitized_output_flags[:4])}"
+                self._cb.on_step(
+                    f"[{self._role}] normalized {tool_name}: removed file-output args {' '.join(sanitized_output_flags[:4])}"
                 )
             output_arg_issue = self._detect_disallowed_file_output(tool_name, args)
             if output_arg_issue:
@@ -1056,6 +1403,45 @@ class BaseExecuterAgent:
                         "scenario_id": scenario_id,
                         "result": result,
                         "discovered_target_types": extract_discovered_target_types(result),
+                        "approval_required": False,
+                    },
+                )
+                continue
+
+            target_scope_issue = self._detect_out_of_scope_run_custom_url(tool_name, args)
+            if target_scope_issue:
+                result = json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "Command target is outside the current scenario target. "
+                            "Re-run against the exact target host and port from the operator packet."
+                        ),
+                        "blocked_target": target_scope_issue,
+                        "role": self._role,
+                        "tool": tool_name,
+                    },
+                    ensure_ascii=True,
+                )
+                self._cb.on_warn(
+                    f"[{self._role}] blocked out-of-scope target for {tool_name}: {target_scope_issue}"
+                )
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "content": result,
+                        "tool_call_id": call_id,
+                        "name": tool_name,
+                    },
+                )
+                tool_results.append(
+                    {
+                        "tool_call_id": call_id,
+                        "name": tool_name,
+                        "args": args,
+                        "scenario_id": scenario_id,
+                        "result": result,
+                        "discovered_target_types": [],
                         "approval_required": False,
                     },
                 )
@@ -1166,7 +1552,20 @@ class BaseExecuterAgent:
                             f"{f' [{scenario_id}]' if scenario_id else ''}: {tool_name}"
                         )
                     try:
-                        raw_result = await tool.execute(**args)
+                        callback_token = _executer_callback_context.set(self._cb)
+                        tool_context_token = _executer_tool_context.set(
+                            {
+                                "project_id": self._project_id,
+                                "project_cache_dir": self._project_cache_dir,
+                                "role": self._role,
+                                "tool": tool_name,
+                            }
+                        )
+                        try:
+                            raw_result = await tool.execute(**args)
+                        finally:
+                            _executer_tool_context.reset(tool_context_token)
+                            _executer_callback_context.reset(callback_token)
                         result = _compact_tool_result_payload(str(raw_result or ""))
                         done_message = (
                             f"[{self._role}] "
@@ -1483,6 +1882,7 @@ class BaseExecuterAgent:
     async def run(self, user_message: str) -> ExecuterResult:
         self._cb.on_step(f"[{self._role}] starting run")
         self._current_user_message = str(user_message or "")
+        warmup_batch_mode = "Warmup scenario batch" in self._current_user_message
         if self._context_window is not None:
             await self._context_window.record(
                 kind="run_input",
@@ -1586,11 +1986,12 @@ class BaseExecuterAgent:
 
                 except Exception as exc:
                     llm_exc = exc
-                    text = str(exc).lower()
-                    is_rate_limited = "429" in text or "rate limit" in text
+                    is_rate_limited = _is_rate_limit_error(exc)
+                    is_transient_error = _is_transient_llm_error(exc)
 
-                    # BACKUP LLM FALLBACK: On 429, try backup LLM for single call
-                    if is_rate_limited and attempt <= 1:
+                    # BACKUP LLM FALLBACK: On 429 or transient network/DNS errors,
+                    # try backup LLM for a single call if configured.
+                    if (is_rate_limited or is_transient_error) and attempt <= 1:
                         backup_llm = await backup_fallback.get_backup_llm()
                         if backup_llm is not None:
                             try:
@@ -1598,10 +1999,10 @@ class BaseExecuterAgent:
                                     "backup_llm_fallback_attempt",
                                     role=self._role,
                                     round=round_index,
-                                    reason="main_llm_429",
+                                    reason="main_llm_429" if is_rate_limited else "main_llm_transient_error",
                                 )
                                 self._cb.on_warn(
-                                    f"[{self._role}] Using backup LLM (main hit 429); "
+                                    f"[{self._role}] Using backup LLM (main hit {'429' if is_rate_limited else 'temporary error'}); "
                                     f"single call, then return to main LLM"
                                 )
 
@@ -1648,6 +2049,22 @@ class BaseExecuterAgent:
                             round=round_index,
                             attempt=attempt,
                             wait_seconds=wait_seconds,
+                        )
+                        await asyncio.sleep(wait_seconds)
+                        continue
+                    if is_transient_error and attempt < max_attempts and not used_backup_llm:
+                        wait_seconds = 5.0 if attempt == 1 else 12.0
+                        self._cb.on_warn(
+                            f"[{self._role}] LLM temporary network/DNS error "
+                            f"(attempt {attempt}/{max_attempts}); retrying in {wait_seconds:.0f}s"
+                        )
+                        logger.warning(
+                            "llm_transient_error_backoff",
+                            role=self._role,
+                            round=round_index,
+                            attempt=attempt,
+                            wait_seconds=wait_seconds,
+                            error=str(exc)[:160],
                         )
                         await asyncio.sleep(wait_seconds)
                         continue
@@ -1758,12 +2175,33 @@ class BaseExecuterAgent:
                     return await _finalize_result(result)
                 else:
                     # Non-final round with no tool calls: force next iteration to reach final consolidation
-                    self._cb.on_warn(
+                    if warmup_batch_mode and self._role == "recon":
+                        nudge = (
+                            "Warmup batch mode requires active evidence collection. "
+                            "You did not invoke any tools this non-final round. In your next response, call at least one "
+                            "focused scenario-locked recon tool with `_scenario_id`, unless every assigned scenario is "
+                            "objectively impossible for this target. For loopback/local web targets, prefer focused "
+                            "local tools such as http_probe, detect_tech, http_header_analysis, web_crawler, web_fuzz, "
+                            "directory_file_fuzzing, api_endpoint_discovery, api_passive_enum, js_source_code_analyzer, "
+                            "param_discovery, websocket_recon, cors_misconfig_check, or session_token_analysis. "
+                            "Do not spend another non-final round only thinking."
+                        )
+                    else:
+                        nudge = (
+                            "You did not invoke any tools this round. If you are finished, you must still wait for the "
+                            "final consolidation round to output your JSON result. Please continue your analysis or "
+                            "invoke tools if necessary."
+                        )
+                    no_tool_message = (
                         f"[{self._role}] No tool calls on non-final round {round_index}; continuing to next round"
                     )
+                    if warmup_batch_mode and self._role == "recon":
+                        self._cb.on_warn(no_tool_message)
+                    else:
+                        self._cb.on_step(no_tool_message)
                     messages.append({
                         "role": "user",
-                        "content": "You did not invoke any tools this round. If you are finished, you must still wait for the final consolidation round to output your JSON result. Please continue your analysis or invoke tools if necessary.",
+                        "content": nudge,
                     })
                     continue
 

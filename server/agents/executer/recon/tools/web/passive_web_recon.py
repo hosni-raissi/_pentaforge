@@ -57,7 +57,7 @@ class PassiveWebReconRequest(BaseModel):
         if not domain:
             raise ValueError("target must be a domain or URL")
         if _is_blocked_target(domain):
-            raise ValueError("local or internal targets are blocked")
+            raise ValueError("target is blocked by recon config")
         return v.strip()
 
     @field_validator("sources")

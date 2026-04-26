@@ -4,8 +4,10 @@ import json
 
 from server.app.orchestrator import (
     _build_verified_finding_entry,
+    _build_project_run_cache_dir,
     _build_post_warmup_intel_info,
     _build_planner_kickoff_message,
+    _build_warmup_scenario_tool_guidance,
     _build_static_recon_plan,
     _build_target_execution_guidance,
     _append_scenario_execution_history,
@@ -19,11 +21,14 @@ from server.app.orchestrator import (
     _format_static_recon_plan_for_prompt,
     _select_warmup_recon_batches,
     _should_trigger_retest,
+    _consume_warmup_perceptor_cache,
+    _write_warmup_perceptor_cache,
     _write_project_findings_cache,
 )
 from server.agents.executer.base import BaseExecuterAgent
 from server.agents.executer.base import _default_status_for_failed_consolidation
 from server.agents.executer.base import _compact_tool_result_payload
+from server.agents.executer.base import _executer_tool_context
 from server.agents.executer.base import _get_valid_params
 from server.agents.executer.base import _parse_executer_output
 from server.agents.executer.recon.agent import (
@@ -31,8 +36,14 @@ from server.agents.executer.recon.agent import (
     _tool_timeout_cap_for_message,
     build_recon_scenario_packet,
 )
-from server.agents.executer.recon.tools.all.run_custom import strip_output_file_flags
+from server.agents.executer.recon.tools.all.run_custom import (
+    redirect_default_tool_outputs,
+    strip_output_file_flags,
+    validate_command_policy,
+)
+from server.agents.executer.recon.tools.web.param_discovery import calculate_timeout
 from server.agents.intel.agent import (
+    _build_nist_baseline_checklist_payload,
     _ensure_structured_checklist_min_items,
     _limit_structured_checklist_items,
     _merge_structured_checklist_payloads,
@@ -75,6 +86,35 @@ def test_build_warmup_recon_plan_normalizes_to_exactly_eight_recon_scenarios():
                 all_agents.append(scenario["agent"])
 
     assert all(agent == "recon" for agent in all_agents)
+
+
+def test_build_warmup_recon_plan_rewrites_external_perimeter_for_loopback_target():
+    seed = [
+        {
+            "task": "External Perimeter Mapping",
+            "agent": "recon",
+            "priority": 1,
+            "details": "Identify subdomains, cloud assets, and public OSINT footprint.",
+            "methods": ["Subdomain discovery", "Passive OSINT", "Cloud bucket enumeration"],
+        }
+    ]
+
+    plan = _build_warmup_recon_plan(
+        target="http://127.0.0.1:3001",
+        scope="local lab scope",
+        target_type="web_app",
+        seed_scenarios=seed,
+    )
+
+    tasks = [
+        scenario["task"]
+        for phase in plan["phases"]
+        for step in phase.get("steps", [])
+        for scenario in step.get("scenarios", [])
+    ]
+
+    assert "Local Web App Perimeter Mapping" in tasks
+    assert "External Perimeter Mapping" not in tasks
 
 
 def test_select_warmup_recon_batches_splits_first_four_recon_scenarios():
@@ -194,6 +234,29 @@ def test_warmup_planner_message_uses_target_description_and_disables_tools():
     assert "Do NOT use tools in this planner pass." in message
 
 
+def test_warmup_planner_message_for_loopback_rejects_external_perimeter():
+    static_plan = _build_static_recon_plan("web_app")
+
+    message = _build_warmup_planner_message(
+        target="http://127.0.0.1:3001",
+        target_type="web_app",
+        scope="Allowed: local recon only.",
+        info="Local training web app.",
+        static_recon_plan=static_plan,
+    )
+
+    assert "This target is loopback/local" in message
+    assert "Do not include External Perimeter Mapping for loopback targets." in message
+    assert "local web app perimeter mapping" in message
+
+
+def test_warmup_scenario_tool_guidance_for_input_parameter_profiling_is_specific():
+    guidance = _build_warmup_scenario_tool_guidance("Input & Parameter Profiling")
+
+    assert "param_discovery only once" in guidance
+    assert "Avoid repeating param_discovery or session_token_analysis" in guidance
+
+
 def test_full_planner_kickoff_message_includes_checklist_and_warmup_evidence():
     static_plan = _build_static_recon_plan("web_app")
     message = _build_planner_kickoff_message(
@@ -239,6 +302,12 @@ def test_full_planner_kickoff_message_includes_checklist_and_warmup_evidence():
     assert "## Warmup Recon Results" in message
     assert "Apache/2.4.7 and missing HSTS discovered." in message
     assert "Treat warmup recon results as the source of truth" in message
+    assert "20 or fewer" in message
+    assert "Do not leave Exploitation empty" in message
+    assert "modern attack paths" in message
+    assert "Completed warmup recon tasks already covered" in message
+    assert "Do NOT recreate these as fresh scenarios" in message
+    assert "Do NOT invent endpoints, routes, or parameters" in message
 
 
 def test_structured_checklist_prompt_includes_all_items_not_just_first_slice():
@@ -319,6 +388,28 @@ def test_post_warmup_intel_info_includes_recon_plan_and_latest_cycle_cache():
     assert "This is the result (Perceptor cache) from cycle 2:" in info
     assert "Discovered /graphql with introspection hints and admin-linked mutations." in info
     assert "Earlier cache that should be omitted." not in info
+
+
+def test_nist_baseline_checklist_uses_observed_api_and_graphql_surface():
+    payload = _build_nist_baseline_checklist_payload(
+        "web_app",
+        (
+            "Target description / info:\n"
+            "Public app with login, /api-docs, GraphQL endpoint, admin routes, websocket updates, and CORS findings."
+        ),
+    )
+
+    item_names = [
+        item["name"]
+        for block in payload["checklist"]
+        for item in block["items"]
+        if isinstance(item, dict)
+    ]
+
+    assert any("API" in name or "api" in name for name in item_names)
+    assert any("GraphQL" in name for name in item_names)
+    assert any("WebSocket" in name for name in item_names)
+    assert any("CORS" in name for name in item_names)
 
 
 def test_intel_backfills_checklist_to_minimum_from_fallback_payload():
@@ -419,6 +510,67 @@ def test_base_executer_builds_forced_consolidation_prompt_with_prior_content_and
     assert "Return ONLY strict JSON" in prompt
 
 
+def test_base_executer_verify_nonfinal_no_tool_round_does_not_reference_warmup_batch_mode():
+    class DummyCallback:
+        def __init__(self) -> None:
+            self.steps: list[str] = []
+            self.done: list[str] = []
+            self.warns: list[str] = []
+
+        def on_step(self, message: str) -> None:
+            self.steps.append(message)
+
+        def on_done(self, message: str) -> None:
+            self.done.append(message)
+
+        def on_warn(self, message: str) -> None:
+            self.warns.append(message)
+
+    class DummyResponse:
+        def __init__(self, content: str) -> None:
+            self.content = content
+            self.tool_calls: list[dict[str, object]] = []
+            self.usage: dict[str, int] = {}
+
+    class DummyLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages: list[object], **kwargs: object) -> DummyResponse:
+            self.calls += 1
+            if self.calls < 3:
+                return DummyResponse("")
+            return DummyResponse(
+                json.dumps(
+                    {
+                        "verdict": "inconclusive",
+                        "summary": "Verification did not confirm the finding.",
+                    }
+                )
+            )
+
+    agent = object.__new__(BaseExecuterAgent)
+    agent._role = "verify"
+    agent._cb = DummyCallback()
+    agent._context_window = None
+    agent._system_prompt = "verify prompt"
+    agent._model_name = "test-model"
+    agent._max_tool_rounds = 3
+    agent._llm = DummyLLM()
+    agent._tool_schemas = None
+    agent._tools = {}
+    agent._call_timeout_seconds = 1
+    agent._max_tool_calls_per_round = 0
+
+    result = asyncio.run(agent.run("Verify whether the reported issue is reproducible."))
+
+    assert result.status == "inconclusive"
+    assert "did not confirm" in result.summary
+    assert agent._llm.calls == 3
+    assert any("No tool calls on non-final round 1" in item for item in agent._cb.steps)
+    assert any("No tool calls on non-final round 2" in item for item in agent._cb.steps)
+
+
 def test_compact_tool_result_payload_truncates_large_lists_and_strings():
     raw = json.dumps(
         {
@@ -506,7 +658,7 @@ def test_warmup_recon_messages_enable_timeout_cap():
 def test_warmup_recon_messages_raise_tool_budget_to_three():
     assert _max_tool_calls_per_round_for_message("Warmup scenario batch:\nScenario ID: s1") == 3
     assert _max_tool_calls_per_round_for_message("Extra info: foo\nWarmup mode: recon-only surface discovery.") == 3
-    assert _max_tool_calls_per_round_for_message("Normal recon scenario") == 2
+    assert _max_tool_calls_per_round_for_message("Normal recon scenario") == 3
 
 
 def test_recon_scenario_packet_reflects_runtime_tool_budget():
@@ -570,6 +722,50 @@ def test_run_custom_output_flag_strip_is_command_aware():
     )
     assert ssh_cleaned == ["-o", "BatchMode=yes", "user@10.0.0.5"]
     assert ssh_stripped == []
+
+
+def test_run_custom_blocks_wget_mirroring_flags_that_create_host_folders():
+    blocked = validate_command_policy(
+        "wget",
+        [
+            "--convert-links",
+            "--adjust-extension",
+            "--page-requisites",
+            "--no-parent",
+            "http://127.0.0.1:3001",
+        ],
+    )
+
+    assert blocked is not None
+    assert "wget flags" in blocked
+
+
+def test_run_custom_redirects_commix_default_output_folder_to_project_cache(tmp_path):
+    token = _executer_tool_context.set({"project_cache_dir": str(tmp_path / "project-cache")})
+    try:
+        cleaned, removed = redirect_default_tool_outputs(
+            "commix",
+            [
+                "--url=http://127.0.0.1:3001/debug?cmd=INJECT_HERE",
+                "--batch",
+                "--output-dir",
+                ".output",
+            ],
+        )
+    finally:
+        _executer_tool_context.reset(token)
+
+    assert ".output" not in cleaned
+    assert removed == ["--output-dir", ".output"]
+    assert "--output-dir" in cleaned
+    safe_dir = cleaned[cleaned.index("--output-dir") + 1]
+    assert safe_dir.endswith("project-cache/tool_outputs/commix")
+
+
+def test_param_discovery_timeout_never_exceeds_requested_cap():
+    assert calculate_timeout("arjun", ["-m", "GET,POST"], 240) <= 240
+    assert calculate_timeout("arjun", ["-m", "GET,POST"], 120) <= 120
+    assert calculate_timeout("x8", [], 240) <= 240
 
 
 def test_base_executer_preserves_valid_ssh_dash_o_and_sanitizes_known_output_flags():
@@ -663,6 +859,139 @@ def test_base_executer_suppresses_duplicate_tool_invocations():
     assert any("duplicate tool call suppressed" in item for item in agent._cb.warns)
 
 
+def test_base_executer_suppresses_semantic_duplicate_recon_reads_on_same_target():
+    tool = Tool(
+        name="js_source_code_analyzer",
+        description="dummy",
+        fn=lambda target, depth=1: {"target": target, "depth": depth, "ok": True},
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "depth": {"type": "integer"},
+            },
+            "required": ["target"],
+        },
+    )
+
+    class DummyCallback:
+        def __init__(self) -> None:
+            self.warns: list[str] = []
+
+        def on_step(self, message: str) -> None:
+            return None
+
+        def on_done(self, message: str) -> None:
+            return None
+
+        def on_warn(self, message: str) -> None:
+            self.warns.append(message)
+
+        def request_tool_approval(self, **kwargs) -> bool:
+            return True
+
+    agent = object.__new__(BaseExecuterAgent)
+    agent._role = "recon"
+    agent._tools = {"js_source_code_analyzer": tool}
+    agent._tool_valid_params = {"js_source_code_analyzer": {"target", "depth"}}
+    agent._execution_tool_timeout_cap_seconds = None
+    agent._cb = DummyCallback()
+
+    _, tool_results, discovered, halted = asyncio.run(
+        agent._run_tools(
+            [
+                {
+                    "id": "call-2",
+                    "function": {
+                        "name": "js_source_code_analyzer",
+                        "arguments": '{"target":"http://127.0.0.1:3001","depth":3,"_scenario_id":"s1"}',
+                    },
+                }
+            ],
+            previous_tool_results=[
+                {
+                    "name": "js_source_code_analyzer",
+                    "args": {"target": "http://127.0.0.1:3001", "depth": 1},
+                    "scenario_id": "s1",
+                    "result": '{"ok": true}',
+                }
+            ],
+        )
+    )
+
+    assert not halted
+    assert discovered == []
+    assert "Duplicate tool invocation suppressed" in tool_results[0]["result"]
+    assert any("duplicate tool call suppressed" in item for item in agent._cb.warns)
+
+
+def test_base_executer_suppresses_semantic_duplicate_param_discovery_on_same_target():
+    tool = Tool(
+        name="param_discovery",
+        description="dummy",
+        fn=lambda target, timeout=120: {"target": target, "timeout": timeout, "ok": True},
+        parameters={
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string"},
+                "target": {"type": "string"},
+                "timeout": {"type": "integer"},
+            },
+            "required": ["tool", "target"],
+        },
+    )
+
+    class DummyCallback:
+        def __init__(self) -> None:
+            self.warns: list[str] = []
+
+        def on_step(self, message: str) -> None:
+            return None
+
+        def on_done(self, message: str) -> None:
+            return None
+
+        def on_warn(self, message: str) -> None:
+            self.warns.append(message)
+
+        def request_tool_approval(self, **kwargs) -> bool:
+            return True
+
+    agent = object.__new__(BaseExecuterAgent)
+    agent._role = "recon"
+    agent._tools = {"param_discovery": tool}
+    agent._tool_valid_params = {"param_discovery": {"tool", "target", "timeout"}}
+    agent._execution_tool_timeout_cap_seconds = None
+    agent._cb = DummyCallback()
+
+    _, tool_results, discovered, halted = asyncio.run(
+        agent._run_tools(
+            [
+                {
+                    "id": "call-2",
+                    "function": {
+                        "name": "param_discovery",
+                        "arguments": '{"tool":"arjun","target":"http://127.0.0.1:3001/api/debug","timeout":240,"_scenario_id":"s1"}',
+                    },
+                }
+            ],
+            previous_tool_results=[
+                {
+                    "name": "param_discovery",
+                    "args": {"tool": "arjun", "target": "http://127.0.0.1:3001/api/debug", "timeout": 120},
+                    "scenario_id": "s1",
+                    "result": '{"ok": true}',
+                }
+            ],
+        )
+    )
+
+    assert not halted
+    assert discovered == []
+    assert "Duplicate tool invocation suppressed" in tool_results[0]["result"]
+    assert any("duplicate tool call suppressed" in item for item in agent._cb.warns)
+
+
 def test_build_verified_finding_entry_includes_commands_and_cve_candidates():
     finding = _build_verified_finding_entry(
         target="10.129.39.165",
@@ -716,6 +1045,7 @@ def test_write_project_findings_cache_writes_project_snapshot(tmp_path):
             }
         ],
         cache_dir=str(tmp_path),
+        use_redis=False,
     )
 
     with open(cache_path, "r", encoding="utf-8") as handle:
@@ -724,6 +1054,105 @@ def test_write_project_findings_cache_writes_project_snapshot(tmp_path):
     assert payload["project_id"] == "project-123"
     assert len(payload["findings"]) == 1
     assert payload["findings"][0]["title"] == "Verified finding"
+
+
+def test_project_run_cache_dir_uses_project_target_and_creation_time(tmp_path):
+    cache_dir = _build_project_run_cache_dir(
+        project_id="project-123",
+        project_name="Juice Shop Lab",
+        target="http://127.0.0.1:3001",
+        created_at="2026-04-25T12:34:56+00:00",
+        cache_root=str(tmp_path),
+    )
+
+    assert cache_dir.startswith(str(tmp_path))
+    assert cache_dir.endswith("juice-shop-lab__127.0.0.1-3001__20260425T123456Z")
+
+
+def test_warmup_perceptor_cache_is_consumed_once_and_deleted(tmp_path):
+    project_cache_dir = _build_project_run_cache_dir(
+        project_id="project-123",
+        project_name="Juice Shop Lab",
+        target="http://127.0.0.1:3001",
+        created_at="2026-04-25T12:34:56+00:00",
+        cache_root=str(tmp_path),
+    )
+    cache_path = _write_warmup_perceptor_cache(
+        project_id="project-123",
+        target="http://127.0.0.1:3001",
+        project_name="Juice Shop Lab",
+        created_at="2026-04-25T12:34:56+00:00",
+        project_cache_dir=project_cache_dir,
+        recon_plan_data={"phases": []},
+        warmup_summaries=[
+            {
+                "task": "API & Endpoint Extraction",
+                "compact_summary": "Discovered API routes.",
+                "cycle": 2,
+            }
+        ],
+        use_redis=False,
+    )
+
+    consumed = _consume_warmup_perceptor_cache(cache_path, use_redis=False)
+
+    assert consumed[0]["task"] == "API & Endpoint Extraction"
+    assert not (tmp_path / "juice-shop-lab__127.0.0.1-3001__20260425T123456Z" / "warmup_perceptor").exists()
+
+
+def test_write_project_findings_cache_uses_runtime_redis_cache(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class DummyRuntimeCache:
+        def set_json(self, key: str, payload: dict[str, Any], *, ttl_seconds: int | None = None) -> None:
+            captured["key"] = key
+            captured["payload"] = payload
+            captured["ttl"] = ttl_seconds
+
+    monkeypatch.setattr(
+        "server.app.orchestrator.get_project_runtime_cache",
+        lambda: DummyRuntimeCache(),
+    )
+
+    cache_ref = _write_project_findings_cache(
+        project_id="project-123",
+        findings=[{"id": "finding-1", "title": "Verified finding"}],
+    )
+
+    assert cache_ref == "redis://project_findings:project-123"
+    assert captured["key"] == "project_findings:project-123"
+    assert captured["payload"]["project_id"] == "project-123"
+
+
+def test_warmup_perceptor_cache_uses_runtime_redis_cache(monkeypatch):
+    stored: dict[str, dict[str, Any]] = {}
+
+    class DummyRuntimeCache:
+        def set_json(self, key: str, payload: dict[str, Any], *, ttl_seconds: int | None = None) -> None:
+            stored[key] = payload
+
+        def pop_json(self, key: str) -> dict[str, Any] | None:
+            return stored.pop(key, None)
+
+    monkeypatch.setattr(
+        "server.app.orchestrator.get_project_runtime_cache",
+        lambda: DummyRuntimeCache(),
+    )
+
+    cache_ref = _write_warmup_perceptor_cache(
+        project_id="project-123",
+        target="http://127.0.0.1:3001",
+        project_name="Juice Shop Lab",
+        created_at="2026-04-25T12:34:56+00:00",
+        project_cache_dir="/tmp/unused",
+        recon_plan_data={"phases": []},
+        warmup_summaries=[{"task": "Operational Synthesis", "cycle": 2}],
+    )
+
+    consumed = _consume_warmup_perceptor_cache(cache_ref)
+
+    assert cache_ref.startswith("redis://warmup_perceptor:project-123:")
+    assert consumed == [{"task": "Operational Synthesis", "cycle": 2}]
 
 
 def test_base_executer_does_not_inject_timeout_for_tools_without_timeout_schema():
@@ -890,6 +1319,39 @@ def test_parse_executer_output_derives_recon_status_from_scenario_summaries():
     assert result.status == "blocked"
 
 
+def test_parse_executer_output_downgrades_complete_batch_when_any_scenario_is_blocked():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "complete",
+                "findings": [{"title": "Useful clue", "severity": "info", "details": "Observed routes."}],
+                "summary": "Warmup batch found useful evidence.",
+                "scenario_summaries": [
+                    {
+                        "scenario_id": "s1",
+                        "task": "Scenario A",
+                        "status": "complete",
+                        "summary": "A done",
+                        "findings": [],
+                        "tools": ["web_crawler"],
+                    },
+                    {
+                        "scenario_id": "s2",
+                        "task": "Scenario B",
+                        "status": "blocked",
+                        "summary": "B blocked by missing auth artifacts",
+                        "findings": [],
+                        "tools": ["session_token_analysis"],
+                    },
+                ],
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "blocked"
+
+
 def test_parse_executer_output_downgrades_failed_recon_summary_with_evidence():
     result = _parse_executer_output(
         json.dumps(
@@ -921,6 +1383,165 @@ def test_parse_executer_output_downgrades_failed_recon_summary_with_evidence():
 
     assert result.status == "blocked"
     assert result.scenario_summaries[0]["status"] == "blocked"
+
+
+def test_parse_executer_output_promotes_blocked_recon_to_complete_when_summary_confirms_completion():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "blocked",
+                "findings": [
+                    {
+                        "title": "Hidden API routes",
+                        "severity": "info",
+                        "details": "Identified GraphQL and REST route clues from client bundles.",
+                        "tools": ["js_source_code_analyzer"],
+                    }
+                ],
+                "summary": "Successfully extracted hidden API and WebSocket route clues from client-side code.",
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "complete"
+
+
+def test_parse_executer_output_promotes_structural_discovery_summary_with_real_artifacts():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "blocked",
+                "findings": [],
+                "summary": "Warmup batch summary.",
+                "scenario_summaries": [
+                    {
+                        "scenario_id": "s1",
+                        "task": "Structural Content Discovery",
+                        "status": "blocked",
+                        "summary": "Discovered robots.txt and Swagger UI portal, but catch-all routes and failed directory fuzzing limited deeper enumeration.",
+                        "findings": [],
+                        "tools": ["web_fuzz", "web_crawler", "directory_file_fuzzing"],
+                    }
+                ],
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "complete"
+    assert result.scenario_summaries[0]["status"] == "complete"
+
+
+def test_parse_executer_output_promotes_input_parameter_profiling_negative_result():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "blocked",
+                "findings": [],
+                "summary": "Warmup batch summary.",
+                "scenario_summaries": [
+                    {
+                        "scenario_id": "s1",
+                        "task": "Input & Parameter Profiling",
+                        "status": "blocked",
+                        "summary": "Mapped 125 API endpoints and analyzed JavaScript files, but no hidden parameters or input fields were found.",
+                        "findings": [],
+                        "tools": ["api_endpoint_discovery", "js_source_code_analyzer", "param_discovery"],
+                    }
+                ],
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "complete"
+    assert result.scenario_summaries[0]["status"] == "complete"
+
+
+def test_parse_executer_output_promotes_identity_access_negative_result():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "blocked",
+                "findings": [],
+                "summary": "Warmup batch summary.",
+                "scenario_summaries": [
+                    {
+                        "scenario_id": "s2",
+                        "task": "Identity & Access Analysis",
+                        "status": "blocked",
+                        "summary": "Analyzed security headers and auth-related endpoints, but no session tokens, cookies, or authentication flows were present.",
+                        "findings": [],
+                        "tools": ["http_header_analysis", "web_crawler", "js_source_code_analyzer"],
+                    }
+                ],
+            }
+        ),
+        role="recon",
+    )
+
+    assert result.status == "complete"
+    assert result.scenario_summaries[0]["status"] == "complete"
+
+
+def test_parse_executer_output_uses_embedded_verify_verdict_from_summary():
+    result = _parse_executer_output(
+        json.dumps(
+            {
+                "status": "inconclusive",
+                "summary": json.dumps(
+                    {
+                        "verdict": "real_vulnerability",
+                        "summary": "Missing CSP and HSTS confirmed by response headers.",
+                        "confidence": 0.91,
+                    }
+                ),
+            }
+        ),
+        role="verify",
+    )
+
+    assert result.status == "real_vulnerability"
+    assert "Missing CSP and HSTS" in result.summary
+    assert result.confidence == pytest.approx(0.91)
+
+
+def test_run_custom_target_guard_blocks_wrong_target_port():
+    agent = object.__new__(BaseExecuterAgent)
+    agent._current_user_message = "Target: http://127.0.0.1:3001\nScenario: Test login"
+
+    reason = agent._detect_out_of_scope_run_custom_url(
+        "run_custom",
+        {
+            "command": "sqlmap",
+            "args": [
+                "-u",
+                "http://127.0.0.1:301/login?email=test@example.com",
+            ],
+        },
+    )
+
+    assert reason is not None
+    assert "expected 3001" in reason
+
+
+def test_run_custom_target_guard_allows_same_loopback_target_port():
+    agent = object.__new__(BaseExecuterAgent)
+    agent._current_user_message = "Target: http://127.0.0.1:3001\nScenario: Test login"
+
+    reason = agent._detect_out_of_scope_run_custom_url(
+        "run_custom",
+        {
+            "command": "curl",
+            "args": [
+                "-i",
+                "http://localhost:3001/login",
+            ],
+        },
+    )
+
+    assert reason is None
 
 
 def test_execution_history_is_added_to_prompt_for_same_agent_role():
@@ -1219,6 +1840,43 @@ def test_warmup_batch_message_includes_loopback_guidance_when_target_is_local():
     assert "Do NOT spend rounds on internet-perimeter or external OSINT tooling" in message
     assert "Identity & Access Analysis" in message
     assert "Do NOT use run_python in warmup recon" in message
+
+
+def test_warmup_batch_message_includes_scenario_tool_guidance():
+    class DummyProjectsStore:
+        def get_project(self, project_id: str) -> dict:
+            return {"id": project_id}
+
+        def upsert_project(self, project: dict) -> dict:
+            return project
+
+        def append_scan_event_cache(self, project_id: str, payload: dict) -> None:
+            return None
+
+    service = ScanOrchestratorService(projects_store=DummyProjectsStore())
+    scenarios = [
+        {"task": "Input & Parameter Profiling", "agent": "recon", "priority": 2, "details": "Profile inputs", "methods": ["params"]},
+        {"task": "Identity & Access Analysis", "agent": "recon", "priority": 2, "details": "Review auth", "methods": ["cookies"]},
+    ]
+    plan_data = _build_warmup_recon_plan(
+        target="http://127.0.0.1:3001",
+        scope="scope",
+        target_type="web_app",
+        seed_scenarios=scenarios,
+    )
+
+    message, _ = service._build_warmup_batch_executer_message(
+        plan_data=plan_data,
+        scenarios=scenarios,
+        target="http://127.0.0.1:3001",
+        target_type="web_app",
+        scope="scope",
+        info="info",
+    )
+
+    assert "Tool guidance:" in message
+    assert "param_discovery only once" in message
+    assert "Avoid repeating session_token_analysis" in message
 
 
 def test_single_scenario_message_includes_loopback_target_guidance():

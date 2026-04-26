@@ -11,6 +11,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from server.agents.executer.recon.config import BLOCKED_NETWORKS as _BLOCKED_NETWORKS
+from server.agents.executer.recon.config import is_blocked_host
+
 
 COMMON_DB_PORTS: tuple[int, ...] = (
     1433,   # MSSQL

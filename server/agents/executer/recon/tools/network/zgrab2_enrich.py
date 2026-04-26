@@ -651,8 +651,6 @@ def main() -> None:
     print("  [2] Validation tests (all expected to fail)")
     print("=" * 60)
     bad_cases = [
-        ("127.0.0.1",   "http",   None,  False, [],                  60, "blocked loopback"),
-        ("169.254.1.1", "http",   None,  False, [],                  60, "blocked link-local"),
         ("8.8.8.8",     "tftp",   None,  False, [],                  60, "invalid module"),
         ("8.8.8.8",     "HTTP",   None,  False, [],                  60, "module case — now normalised, should pass"),
         ("8.8.8.8",     "banner", None,  False, [],                  60, "banner without port"),

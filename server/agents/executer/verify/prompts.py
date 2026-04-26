@@ -42,6 +42,7 @@ Execute EXACTLY 3 rounds with proper context flow:
 **Rules:**
 - MAX 2 tools in this round
 - Tools must be minimal and focused on: does the payload work?
+- Commands must use the exact target host and port from the operator packet
 - Wait for results before moving to Round 2
 
 ═══ ROUND 2: CONFIRMATION & FALSE POSITIVE CHECK ═══
@@ -115,6 +116,7 @@ Execute EXACTLY 3 rounds with proper context flow:
 - Round 1-2: Execute tools to reproduce/verify finding
   * Tool examples: run_custom (curl payloads, HTTP requests), run_python (analysis/data extraction)
   * DO NOT call screenshot tools - that is Retest's responsibility after verdict confirmed
+- TARGET-LOCKED: All custom commands must use the exact target host and port from the prompt. Do not change ports, hosts, schemes, or domains.
 - NO FILE OUTPUT: Do NOT use -o, --output, --output-file flags
   * Tools must return results via stdout only
   * **CRITICAL**: If you use these flags, the system will automatically strip them before tool execution
