@@ -238,6 +238,121 @@ def _build_warmup_scenario_tool_guidance(task: str) -> str:
     return ""
 
 
+def _build_target_type_followup_hypotheses(
+    *,
+    target_type: str,
+    warmup_summaries: list[dict[str, Any]],
+    intel_vulnerabilities: list[str],
+) -> list[str]:
+    evidence_parts: list[str] = []
+    for item in warmup_summaries:
+        if not isinstance(item, dict):
+            continue
+        evidence_parts.append(str(item.get("task", "")).strip())
+        evidence_parts.append(str(item.get("compact_summary", "")).strip())
+    evidence_parts.extend(str(item).strip() for item in intel_vulnerabilities if str(item).strip())
+    evidence_text = " ".join(part for part in evidence_parts if part).lower()
+
+    def has_any(*markers: str) -> bool:
+        return any(marker in evidence_text for marker in markers)
+
+    grouped_rules: dict[str, list[tuple[tuple[str, ...], str]]] = {
+        "web": [
+            (
+                ("cors", "access-control-allow-origin", "origin", "websocket", "socket.io"),
+                "Trust-boundary misuse is plausible: convert discovered cross-origin or WebSocket clues into focused CORS/CSWSH validation against already observed routes or sockets.",
+            ),
+            (
+                ("protected", "admin", "debug", "swagger", "openapi", "api-docs", "graphql", "endpoint"),
+                "Access-control weaknesses are plausible: promote authorization, IDOR, or BOLA testing for already discovered protected, admin, debug, or documented API surfaces.",
+            ),
+            (
+                ("upload", "file processing", "file-processing", "multipart", "attachment", "import"),
+                "File-handling abuse is plausible: schedule upload or file-processing testing only where the warmup evidence already exposed concrete file-related routes or handlers.",
+            ),
+            (
+                ("500", "error", "stack trace", "exception", "verbose"),
+                "Error-handling weaknesses are plausible: validate stack traces, debug leakage, and unsafe error paths around the exact endpoints that already returned verbose failures.",
+            ),
+            (
+                ("login", "auth", "session", "token", "cookie", "jwt"),
+                "Authentication or session abuse is plausible: follow up with targeted session, token, and auth-flow testing on concrete login or protected flows already seen in recon.",
+            ),
+            (
+                ("form", "parameter", "query", "input", "search", "filter"),
+                "Injection or input-validation issues are plausible: promote focused injection testing only on confirmed forms, parameters, or dynamic endpoints already found in warmup.",
+            ),
+        ],
+        "service": [
+            (
+                ("tls", "ssl", "certificate", "cipher"),
+                "Transport or crypto weaknesses are plausible: convert the observed TLS/certificate evidence into targeted protocol and configuration validation.",
+            ),
+            (
+                ("admin", "management", "dashboard", "console", "debug"),
+                "Administrative exposure is plausible: promote access-control and hardening checks against already observed management surfaces.",
+            ),
+            (
+                ("auth", "login", "session", "token", "credential"),
+                "Authentication weaknesses are plausible: follow up on concrete auth surfaces with credential, session, or privilege-abuse scenarios.",
+            ),
+        ],
+        "repo": [
+            (
+                ("secret", "token", "key", "credential", "env", ".npmrc", ".pypirc"),
+                "Secret exposure is plausible: promote targeted verification of discovered credentials, tokens, or configuration material before broad new exploration.",
+            ),
+            (
+                ("workflow", "action", "ci", "pipeline", "hook"),
+                "Pipeline abuse is plausible: convert discovered CI/CD or automation clues into workflow, token-scope, or trigger-abuse scenarios.",
+            ),
+            (
+                ("dependency", "package", "manifest", "lockfile"),
+                "Supply-chain risk is plausible: schedule dependency-trust, package-source, or unsafe build-chain follow-up where manifests or lockfiles were already exposed.",
+            ),
+        ],
+        "runtime": [
+            (
+                ("service", "port", "exposed", "open", "listener"),
+                "Service exposure is plausible: convert confirmed exposed services into version-specific hardening, auth, and privilege-boundary testing.",
+            ),
+            (
+                ("config", "metadata", "iam", "role", "policy", "secret"),
+                "Configuration abuse is plausible: prioritize privilege, policy, and secret-handling validation around the exact artifacts already uncovered.",
+            ),
+            (
+                ("container", "image", "registry", "docker", "kubernetes", "pod"),
+                "Runtime isolation weaknesses are plausible: promote image, registry, or container-boundary testing only where those artifacts were actually observed.",
+            ),
+        ],
+    }
+
+    target_group_map = {
+        "web_app": "web",
+        "api": "web",
+        "mobile": "web",
+        "desktop": "web",
+        "linux_server": "service",
+        "network": "service",
+        "iot": "service",
+        "infra": "runtime",
+        "cloud": "runtime",
+        "container": "runtime",
+        "repository": "repo",
+    }
+    group = target_group_map.get(str(target_type or "").strip().lower(), "web")
+    hypotheses = [
+        hypothesis
+        for markers, hypothesis in grouped_rules.get(group, [])
+        if has_any(*markers)
+    ]
+    if not hypotheses and evidence_text:
+        hypotheses.append(
+            "Use the strongest concrete warmup evidence to create one deeper follow-up scenario that validates the observed weakness before restarting broad discovery."
+        )
+    return hypotheses[:6]
+
+
 def _compact_preview(value: Any, limit: int = 220) -> str:
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -2033,7 +2148,7 @@ def _sync_plan_data_into_planner_state(plan_data: dict[str, Any]) -> bool:
 
 
 def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[str, Any]:
-    """Remove any scenarios with forbidden agents (verify, retest, perceptor) from plan.
+    """Remove any scenarios with forbidden agents and speculative exploit examples from plan.
 
     Returns cleaned plan_data with only recon/exploit/report scenarios.
     """
@@ -2041,6 +2156,90 @@ def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[st
         return plan_data
 
     FORBIDDEN_AGENTS = {"verify", "retest", "perceptor"}
+
+    def _strip_speculative_examples(text: str) -> tuple[str, bool]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", False
+
+        updated = raw
+        changed = False
+        patterns = [
+            r"\s*\((?:e\.g\.|eg\.|for example|such as)[^)]*\)",
+            r"\s*[-,:]?\s*(?:e\.g\.|eg\.|for example|such as)\s+[^.;\n]*(?:/|https?://|wss?://|s3://|gs://)[^.;\n]*",
+        ]
+        for pattern in patterns:
+            next_value = re.sub(pattern, "", updated, flags=re.IGNORECASE)
+            if next_value != updated:
+                changed = True
+                updated = next_value
+
+        updated = re.sub(r"\s{2,}", " ", updated).strip(" ,;-")
+        return updated, changed
+
+    def _has_concrete_artifact_reference(text: str) -> bool:
+        haystack = str(text or "")
+        patterns = (
+            r"https?://\S+",
+            r"wss?://\S+",
+            r"s3://\S+",
+            r"gs://\S+",
+            r"/[A-Za-z0-9._~{}:-]{2,}(?:/[A-Za-z0-9._~{}:{}-]*)*",
+            r"\bport\s+\d+\b",
+            r"\bCVE-\d{4}-\d+\b",
+            r"`[^`]{1,64}`",
+        )
+        return any(re.search(pattern, haystack, flags=re.IGNORECASE) for pattern in patterns)
+
+    def _sanitize_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(scenario, dict):
+            return scenario
+
+        cleaned = dict(scenario)
+        changed = False
+        speculative = False
+
+        for field_name in ("task", "details"):
+            value = str(cleaned.get(field_name, "") or "")
+            updated, was_changed = _strip_speculative_examples(value)
+            if was_changed:
+                speculative = True
+                changed = True
+                cleaned[field_name] = updated
+
+        methods = cleaned.get("methods", [])
+        if isinstance(methods, list):
+            cleaned_methods: list[str] = []
+            for method in methods:
+                updated, was_changed = _strip_speculative_examples(str(method or ""))
+                speculative = speculative or was_changed
+                changed = changed or was_changed
+                if updated:
+                    cleaned_methods.append(updated)
+            cleaned["methods"] = cleaned_methods
+
+        agent_name = str(cleaned.get("agent", "") or "").strip().lower()
+        evidence_blob = " ".join(
+            [
+                str(cleaned.get("task", "") or ""),
+                str(cleaned.get("details", "") or ""),
+                " ".join(str(item or "") for item in cleaned.get("methods", []) if str(item or "").strip()),
+            ]
+        )
+        if agent_name == "exploit" and speculative and not _has_concrete_artifact_reference(evidence_blob):
+            cleaned["details"] = (
+                "Confirm the exact target artifact for this hypothesis before active exploitation. "
+                + str(cleaned.get("details", "") or "").strip()
+            ).strip()
+            methods = cleaned.get("methods", [])
+            if isinstance(methods, list):
+                prefix = "confirm the exact endpoint, parameter, asset, or input vector from observed evidence"
+                if prefix not in methods:
+                    cleaned["methods"] = [prefix, *methods]
+            changed = True
+
+        return cleaned if changed else scenario
+
     cleaned_plan = dict(plan_data)
     phases = cleaned_plan.get("phases", [])
 
@@ -2050,6 +2249,7 @@ def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[st
     for phase in phases:
         if not isinstance(phase, dict):
             continue
+        phase_name = str(phase.get("name", "") or "").strip().lower()
         steps = phase.get("steps", [])
         if not isinstance(steps, list):
             continue
@@ -2062,12 +2262,30 @@ def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[st
                 continue
 
             # Filter out forbidden agents
-            cleaned_scenarios = [
-                s for s in scenarios
-                if isinstance(s, dict) and s.get("agent", "").strip().lower() not in FORBIDDEN_AGENTS
-            ]
+            cleaned_scenarios = []
+            for scenario in scenarios:
+                if not isinstance(scenario, dict):
+                    continue
+                if scenario.get("agent", "").strip().lower() in FORBIDDEN_AGENTS:
+                    continue
+
+                cleaned_scenario = _sanitize_scenario(scenario)
+                if not isinstance(cleaned_scenario, dict):
+                    continue
+
+                current_agent = str(cleaned_scenario.get("agent", "") or "").strip().lower()
+                if phase_name in {"reconnaissance", "enumeration"} and current_agent == "exploit":
+                    cleaned_scenario = dict(cleaned_scenario)
+                    cleaned_scenario["agent"] = "recon"
+                elif phase_name == "exploitation" and current_agent == "recon":
+                    cleaned_scenario = dict(cleaned_scenario)
+                    cleaned_scenario["agent"] = "exploit"
+
+                cleaned_scenarios.append(cleaned_scenario)
 
             if len(cleaned_scenarios) != len(scenarios):
+                step["scenarios"] = cleaned_scenarios
+            elif cleaned_scenarios != scenarios:
                 step["scenarios"] = cleaned_scenarios
 
     return cleaned_plan
@@ -2294,6 +2512,11 @@ def _build_planner_kickoff_message(
             if task not in completed_warmup_tasks:
                 completed_warmup_tasks.append(task)
     checklist_text = _format_structured_checklist_for_prompt(intel_checklist)
+    followup_hypotheses = _build_target_type_followup_hypotheses(
+        target_type=target_type,
+        warmup_summaries=warmup_summaries,
+        intel_vulnerabilities=intel_vulnerabilities,
+    )
     completed_warmup_text = (
         ", ".join(completed_warmup_tasks)
         if completed_warmup_tasks
@@ -2323,6 +2546,8 @@ def _build_planner_kickoff_message(
         f"{checklist_text}\n\n"
         "## Warmup Recon Results\n"
         f"{chr(10).join(warmup_lines) if warmup_lines else '(no warmup summaries available)'}\n\n"
+        "## Evidence-Backed Follow-Up Hypotheses\n"
+        f"{chr(10).join(f'- {item}' for item in followup_hypotheses) if followup_hypotheses else '(no follow-up hypotheses generated yet)'}\n\n"
         "## Completed Warmup Baseline\n"
         f"Completed warmup recon tasks already covered: {completed_warmup_text}\n"
         "Do NOT recreate these as fresh scenarios unless a warmup summary clearly shows an unresolved gap or a justified deeper follow-up.\n\n"
@@ -2330,15 +2555,16 @@ def _build_planner_kickoff_message(
         "1. FIRST STEP: create a great pentest plan for this target.\n"
         "2. Start from target data + static recon template + warmup results, then use the synthesized checklist to refine the full plan.\n"
         "3. Treat warmup recon results as the source of truth for what the target actually exposes.\n"
-        "4. Use the synthesized checklist as prioritized coverage guidance, not as abstract theory.\n"
-        "5. The initial full plan should be dense enough to cover the synthesized checklist in one plan, not a thin starter plan.\n"
-        "6. Keep total scenarios across Phases 1-3 at 20 or fewer.\n"
-        "7. Do not leave Reconnaissance empty. Do not leave Exploitation empty when P1-P2 checklist items or warmup evidence justify active testing.\n"
-        "8. Every scenario should map back to either warmup evidence, target description, or a concrete checklist item.\n"
-        "9. Do NOT invent endpoints, routes, or parameters for exploit scenarios. If the checklist suggests a vulnerability but no concrete target artifact exists yet, schedule recon/enumeration to close that gap first.\n"
-        "10. Cover modern attack paths only when they fit the observed target surface: API authz, IDOR/BOLA, GraphQL, WebSocket, upload abuse, SSRF, SSTI, deserialization, session/token abuse, CORS/trust misuse.\n"
-        "11. Return strict JSON with keys: summary, needs, plan, action_plan.\n"
-        "12. action_plan must include: checklist_updates, checklist_additions, "
+        "4. Treat the evidence-backed follow-up hypotheses as candidate scenario seeds whenever they map to concrete observed artifacts.\n"
+        "5. Use the synthesized checklist as prioritized coverage guidance, not as abstract theory.\n"
+        "6. The initial full plan should be dense enough to cover the synthesized checklist in one plan, not a thin starter plan.\n"
+        "7. Keep total scenarios across Phases 1-3 at 20 or fewer.\n"
+        "8. Do not leave Reconnaissance empty. Do not leave Exploitation empty when P1-P2 checklist items or warmup evidence justify active testing.\n"
+        "9. Every scenario should map back to either warmup evidence, target description, or a concrete checklist item.\n"
+        "10. Do NOT invent endpoints, routes, parameters, repos, services, cloud assets, or credentials for exploit scenarios. If the checklist suggests a vulnerability but no concrete target artifact exists yet, schedule recon/enumeration to close that gap first.\n"
+        "11. Cover modern attack paths only when they fit the observed target surface: API authz, IDOR/BOLA, GraphQL, WebSocket, upload abuse, SSRF, SSTI, deserialization, session/token abuse, CORS/trust misuse, CI/CD abuse, exposed secrets, cloud/IAM misconfigurations, container escape paths, and admin-surface weaknesses.\n"
+        "12. Return strict JSON with keys: summary, needs, plan, action_plan.\n"
+        "13. action_plan must include: checklist_updates, checklist_additions, "
         "plan_modifications, dispatch, phase_advance, phase_advance_blocked_by, rationale.\n"
     )
 

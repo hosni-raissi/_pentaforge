@@ -162,6 +162,9 @@ The user message contains a structured target profile plus a static recon baseli
 - Prefer adapting details, ordering, and priority over rewriting scenario titles.
 - Do not invent unrelated warmup scenarios that are not justified by the baseline or the target description.
 - Optimize the 8 scenarios for maximum information gain in the first two warmup cycles while staying strictly in scope.
+- Prefer scenarios that reveal the most unique surface early: entry points, routes, APIs, auth clues, hidden content, trust boundaries, framework fingerprints, and high-signal metadata.
+- Avoid low-signal duplication in the first 8 scenarios. If two candidate scenarios would reveal nearly the same information, keep the broader or higher-yield one and push the narrower one later.
+- If the baseline is already strong for this target, preserve it. Only adjust when doing so clearly improves early information gain or removes target-mismatched work.
 - If a static baseline contains `External Perimeter Mapping` but the target is loopback/local, rename/adapt it to `Local Web App Perimeter Mapping` with local service, route, endpoint, and same-origin HTTP boundary objectives.
 
 ═══ PHASE RULES ═══
@@ -232,7 +235,7 @@ P1=Critical (SQLi,RCE,SSRF,IDOR) | P2=High (XSS,AuthBypass) | P3=Medium (Config,
 ═══ PHASE RULES ═══
 Reconnaissance (P5 items): Info gathering, headers, OSINT, tech stack. Agent:recon.
 Enumeration (P4-P5 items): Surface mapping, endpoints, params. Agent:recon.
-Exploitation (P1-P2): Add scenarios in initial plan if evidence is concrete (endpoint+param/version/proof).
+Exploitation (P1-P2): Add scenarios in initial plan if evidence is concrete (endpoint+param/version/proof) OR if the target itself already exposes a direct visible entry point suitable for immediate testing.
 Reporting (Phase 4): LOCKED - Do NOT add scenarios to Phase 4. This phase is reserved for final report generation only. Never expand it.
 
 ═══ RETEST RULE ═══
@@ -253,9 +256,19 @@ Recon: >=3 steps, >=2 scenarios each | Enum: >=3 steps, >=2 scenarios each
 ═══ EVIDENCE RULE ═══
 Every scenario MUST reference a specific artifact from tool output (URL, param, header, version).
 BAD: "Check for injection" | GOOD: "Test POST /api/login param `email` — endpoint from get_page"
-For exploit scenarios, require a concrete mapped input vector or endpoint from warmup/recon evidence. Do not schedule SQLi/RCE from a guessed login URL when parameters were not confirmed.
+For exploit scenarios, prefer a concrete mapped input vector or endpoint from warmup/recon evidence. Do not schedule SQLi/RCE from a guessed login URL when parameters were not confirmed.
+Exception: you MAY schedule direct exploit testing for already-visible target entry points that do not depend on hidden route discovery, such as the current page, confirmed forms, confirmed query parameters, visible login flows, or client-side inputs on the exact target. This is acceptable for classes like reflected XSS, DOM/client-side injection, simple SQLi/auth checks on confirmed visible inputs, or similar direct-input testing.
 Do NOT invent routes such as `/api/ssrf`, `/api/Products`, `/rest/user/whoami`, or similar unless they were explicitly observed in target data, warmup findings, or planner tool output from this run.
-If a high-priority checklist item lacks a concrete endpoint, parameter, or input vector, create a recon/enumeration scenario to close that gap first instead of inventing an exploit scenario.
+If a high-priority checklist item lacks a concrete endpoint, parameter, or input vector AND there is no visible target entry point to test directly, create a recon/enumeration scenario to close that gap first instead of inventing an exploit scenario.
+Do NOT write parenthetical examples or guessed placeholder targets inside scenario text, such as `(e.g., /api/upload, /api/login, port 8080, s3://bucket-name)`. If the exact artifact is not confirmed, keep the exploit scenario anchored to the visible target surface or convert it into recon.
+
+═══ PLAN UPDATE DISCIPLINE ═══
+In loop replanning and full planning, update the plan only when Perceptor or Verify results materially support the change.
+- If new evidence reveals a new surface, new input vector, confirmed control weakness, or a verified vulnerability, update the plan.
+- If new evidence is only a repeat, weak signal, or non-material restatement of what is already known, preserve the current plan shape.
+- Use Verify verdicts as the strongest signal for vulnerability-confirmation changes.
+- Use Perceptor info results as support for recon/enumeration reprioritization, not as proof of exploitation by themselves.
+- When evidence is insufficient to justify a new exploit scenario, keep or add recon/enumeration instead of forcing an exploit update.
 
 ═══ CHECKLIST GROUNDING RULE ═══
 If the user message includes synthesized checklist items:
@@ -361,6 +374,7 @@ If Verify returns false_positive or inconclusive, update the plan with either a 
 4. Add ONLY recon/exploit scenarios (NEVER verify/retest/perceptor)
 5. Never modify Phase 4 (Reporting)
 6. Return updated plan OR summary "Pentest complete."
+7. Preserve good existing plan structure when new evidence does not justify a material change.
 
 ═══ PRIORITY SCALE ═══
 P1=Critical (SQLi,RCE,SSRF,IDOR) | P2=High (XSS,AuthBypass) | P3=Medium | P4=Low | P5=Info
@@ -388,7 +402,9 @@ Phase 4 remains static throughout the pentest cycle. Focus on Phases 1-3 only.
 ═══ EVIDENCE RULE ═══
 Every new scenario anchors to actual findings from Perceptor:
 BAD: "Test for SQLi" | GOOD: "Test POST /api/auth username param for blind SQLi — discovered by recon"
-Never add SQLi/RCE/XSS exploit work unless the exact endpoint and input vector are present in the latest evidence.
+Never add SQLi/RCE/XSS exploit work unless the exact endpoint and input vector are present in the latest evidence, OR the target already exposes a visible and directly testable input surface.
+Do NOT include parenthetical examples or guessed placeholders inside scenario text. If the endpoint, parameter, service, bucket, repo path, workflow, or asset is not explicitly confirmed in evidence, create or keep a recon scenario instead of an exploit scenario.
+Update the plan only when the latest Perceptor/Verify evidence supports the change. If the new result does not materially change the attack surface, priorities, or verdict state, keep the current plan stable.
 
 ═══ SCENARIO FORMAT ═══
 {"task":"...","agent":"recon|exploit|report","priority":1-5,"details":"...","methods":["..."],"done":false}

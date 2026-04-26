@@ -7,6 +7,7 @@ from server.app.orchestrator import (
     _build_project_run_cache_dir,
     _build_post_warmup_intel_info,
     _build_planner_kickoff_message,
+    _build_target_type_followup_hypotheses,
     _build_warmup_scenario_tool_guidance,
     _build_static_recon_plan,
     _build_target_execution_guidance,
@@ -17,6 +18,7 @@ from server.app.orchestrator import (
     _build_warmup_recon_plan,
     _normalize_scenario_status,
     _normalize_perceptor_classification,
+    _sanitize_plan_remove_forbidden_agents,
     ScanOrchestratorService,
     _format_static_recon_plan_for_prompt,
     _select_warmup_recon_batches,
@@ -36,17 +38,24 @@ from server.agents.executer.recon.agent import (
     _tool_timeout_cap_for_message,
     build_recon_scenario_packet,
 )
+from server.agents.executer.exploit.agent import build_exploit_scenario_packet
 from server.agents.executer.recon.tools.all.run_custom import (
     redirect_default_tool_outputs,
     strip_output_file_flags,
     validate_command_policy,
 )
 from server.agents.executer.recon.tools.web.param_discovery import calculate_timeout
+from server.agents.executer.exploit.prompts import SYSTEM_PROMPT as EXPLOIT_SYSTEM_PROMPT
+from server.agents.executer.verify.prompts import SYSTEM_PROMPT as VERIFY_SYSTEM_PROMPT
 from server.agents.intel.agent import (
     _build_nist_baseline_checklist_payload,
     _ensure_structured_checklist_min_items,
     _limit_structured_checklist_items,
     _merge_structured_checklist_payloads,
+)
+from server.agents.planner.prompts import (
+    LOOP_REPLAN_SYSTEM_PROMPT,
+    WARMUP_RECON_SYSTEM_PROMPT,
 )
 from server.agents.planner.tools.pentest_plan import _merge_phases
 from server.core.tool import Tool
@@ -300,14 +309,152 @@ def test_full_planner_kickoff_message_includes_checklist_and_warmup_evidence():
     assert "P2 Test default credentials" in message
     assert "P3 Review session token entropy" in message
     assert "## Warmup Recon Results" in message
+    assert "## Evidence-Backed Follow-Up Hypotheses" in message
     assert "Apache/2.4.7 and missing HSTS discovered." in message
     assert "Treat warmup recon results as the source of truth" in message
+    assert "Treat the evidence-backed follow-up hypotheses as candidate scenario seeds" in message
     assert "20 or fewer" in message
     assert "Do not leave Exploitation empty" in message
     assert "modern attack paths" in message
     assert "Completed warmup recon tasks already covered" in message
     assert "Do NOT recreate these as fresh scenarios" in message
-    assert "Do NOT invent endpoints, routes, or parameters" in message
+    assert "Do NOT invent endpoints, routes, parameters, repos, services, cloud assets, or credentials" in message
+
+
+def test_followup_hypotheses_are_target_type_aware_for_repository_targets():
+    hypotheses = _build_target_type_followup_hypotheses(
+        target_type="repository",
+        warmup_summaries=[
+            {
+                "task": "Repository Metadata Review",
+                "compact_summary": "Discovered GitHub Actions workflow files and exposed .npmrc token.",
+            }
+        ],
+        intel_vulnerabilities=["Possible dependency and token exposure"],
+    )
+
+    assert any("Secret exposure is plausible" in item for item in hypotheses)
+    assert any("Pipeline abuse is plausible" in item for item in hypotheses)
+
+
+def test_followup_hypotheses_are_target_type_aware_for_web_targets():
+    hypotheses = _build_target_type_followup_hypotheses(
+        target_type="web_app",
+        warmup_summaries=[
+            {
+                "task": "API & Endpoint Extraction",
+                "compact_summary": "Discovered protected API endpoints, wildcard CORS, debug/admin routes, and upload handlers.",
+            }
+        ],
+        intel_vulnerabilities=["Missing CSP and CORS misconfiguration"],
+    )
+
+    assert any("Trust-boundary misuse is plausible" in item for item in hypotheses)
+    assert any("Access-control weaknesses are plausible" in item for item in hypotheses)
+    assert any("File-handling abuse is plausible" in item for item in hypotheses)
+
+
+def test_warmup_planner_prompt_emphasizes_max_information_gain_and_preserving_good_baseline():
+    assert "maximum information gain" in WARMUP_RECON_SYSTEM_PROMPT
+    assert "Prefer scenarios that reveal the most unique surface early" in WARMUP_RECON_SYSTEM_PROMPT
+    assert "If the baseline is already strong for this target, preserve it." in WARMUP_RECON_SYSTEM_PROMPT
+
+
+def test_loop_replan_prompt_requires_evidence_supported_plan_updates():
+    assert "Update the plan only when the latest Perceptor/Verify evidence supports the change." in LOOP_REPLAN_SYSTEM_PROMPT
+    assert "keep the current plan stable" in LOOP_REPLAN_SYSTEM_PROMPT
+
+
+def test_verify_prompt_emphasizes_false_positive_rejection():
+    assert "First try to disprove weak findings." in VERIFY_SYSTEM_PROMPT
+    assert "A real vulnerability needs reproducible security impact" in VERIFY_SYSTEM_PROMPT
+    assert "route existence is not enough" in VERIFY_SYSTEM_PROMPT
+
+
+def test_exploit_prompt_prefers_payload_generator_for_injection():
+    assert "prefer `payload_generator` before using stock/default payload strings" in EXPLOIT_SYSTEM_PROMPT
+    assert "PAYLOAD-FIRST FOR INJECTION" in EXPLOIT_SYSTEM_PROMPT
+
+
+def test_plan_sanitizer_strips_speculative_examples_and_downgrades_exploit_without_concrete_artifact():
+    plan = {
+        "phases": [
+            {
+                "name": "Exploitation",
+                "steps": [
+                    {
+                        "id": "exp-01",
+                        "scenarios": [
+                            {
+                                "task": "Test Command Injection on endpoints processing file uploads or system commands (e.g., /api/upload, /api/execute).",
+                                "agent": "exploit",
+                                "priority": 1,
+                                "details": "Probe speculative handlers such as /api/upload for command execution.",
+                                "methods": ["test upload command injection such as /api/upload"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    sanitized = _sanitize_plan_remove_forbidden_agents(plan)
+    scenario = sanitized["phases"][0]["steps"][0]["scenarios"][0]
+
+    assert scenario["agent"] == "exploit"
+    assert "/api/upload" not in scenario["task"]
+    assert "/api/execute" not in scenario["task"]
+    assert "Confirm the exact target artifact" in scenario["details"]
+    assert scenario["methods"][0] == "confirm the exact endpoint, parameter, asset, or input vector from observed evidence"
+
+
+def test_plan_sanitizer_enforces_phase_agent_alignment():
+    plan = {
+        "phases": [
+            {
+                "name": "Enumeration",
+                "steps": [
+                    {
+                        "id": "enum-01",
+                        "scenarios": [
+                            {
+                                "task": "Map all entry points for data submission.",
+                                "agent": "exploit",
+                                "priority": 2,
+                                "details": "Enumerate forms and parameters.",
+                                "methods": ["map form fields"],
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "name": "Exploitation",
+                "steps": [
+                    {
+                        "id": "exp-01",
+                        "scenarios": [
+                            {
+                                "task": "Test for SQLi in login forms and API parameters using classic payloads.",
+                                "agent": "recon",
+                                "priority": 1,
+                                "details": "Use observed inputs to test SQL injection.",
+                                "methods": ["test classic SQLi payloads on confirmed parameters"],
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+    }
+
+    sanitized = _sanitize_plan_remove_forbidden_agents(plan)
+    enum_scenario = sanitized["phases"][0]["steps"][0]["scenarios"][0]
+    exploit_scenario = sanitized["phases"][1]["steps"][0]["scenarios"][0]
+
+    assert enum_scenario["agent"] == "recon"
+    assert exploit_scenario["agent"] == "exploit"
 
 
 def test_structured_checklist_prompt_includes_all_items_not_just_first_slice():
@@ -667,6 +814,18 @@ def test_recon_scenario_packet_reflects_runtime_tool_budget():
         context_block="No stored context window entries.",
         available_tools=["nmap_scan", "linux_config_audit"],
         target_types=["linux_server"],
+        max_tool_calls_per_round=3,
+    )
+
+    assert "Max tool executions per round: 3. Max rounds per scenario: 3." in packet
+
+
+def test_exploit_scenario_packet_reflects_runtime_tool_budget():
+    packet = build_exploit_scenario_packet(
+        scenario_and_target="Scenario: test command injection",
+        context_block="No stored context window entries.",
+        available_tools=["run_custom", "payload_generator"],
+        run_custom_catalog=["katana", "ffuf"],
         max_tool_calls_per_round=3,
     )
 
@@ -1542,6 +1701,46 @@ def test_run_custom_target_guard_allows_same_loopback_target_port():
     )
 
     assert reason is None
+
+
+def test_run_custom_target_guard_ignores_origin_header_urls():
+    agent = object.__new__(BaseExecuterAgent)
+    agent._current_user_message = "Target: http://127.0.0.1:3001\nScenario: Verify CORS"
+
+    reason = agent._detect_out_of_scope_run_custom_url(
+        "run_custom",
+        {
+            "command": "curl",
+            "args": [
+                "-i",
+                "-H",
+                "Origin:",
+                "https://evil.com",
+                "http://127.0.0.1:3001/socket.io/?EIO=4&transport=websocket",
+            ],
+        },
+    )
+
+    assert reason is None
+
+
+def test_run_custom_target_guard_blocks_wrong_target_host():
+    agent = object.__new__(BaseExecuterAgent)
+    agent._current_user_message = "Target: http://127.0.0.1:3001\nScenario: Test login"
+
+    reason = agent._detect_out_of_scope_run_custom_url(
+        "run_custom",
+        {
+            "command": "curl",
+            "args": [
+                "-I",
+                "http://example.com/login",
+            ],
+        },
+    )
+
+    assert reason is not None
+    assert "outside target host 127.0.0.1" in reason
 
 
 def test_execution_history_is_added_to_prompt_for_same_agent_role():

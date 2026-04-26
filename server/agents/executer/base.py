@@ -72,6 +72,39 @@ _RUN_CUSTOM_SHORT_FILE_OUTPUT_FLAGS: dict[str, set[str]] = {
 _RUN_CUSTOM_COMBINED_FILE_OUTPUT_PREFIXES: dict[str, tuple[str, ...]] = {
     "nmap": ("-oA", "-oN", "-oX", "-oG"),
 }
+_RUN_CUSTOM_URL_TARGET_FLAGS = {
+    "-u",
+    "--url",
+    "--target",
+    "--uri",
+}
+_RUN_CUSTOM_URL_TARGET_PREFIXES = (
+    "-u=",
+    "--url=",
+    "--target=",
+    "--uri=",
+)
+_RUN_CUSTOM_IGNORE_URL_VALUE_FLAGS = {
+    "-h",
+    "--header",
+    "-d",
+    "--data",
+    "--data-raw",
+    "--data-binary",
+    "--data-urlencode",
+    "-b",
+    "--cookie",
+    "-e",
+    "--referer",
+    "-a",
+    "--user-agent",
+    "--proxy-header",
+}
+_RUN_CUSTOM_HEADER_STYLE_FLAGS = {
+    "-h",
+    "--header",
+    "--proxy-header",
+}
 _TOOL_RESULT_MAX_STRING_CHARS = 600
 _TOOL_RESULT_MAX_TOTAL_CHARS = 12000
 _TOOL_RESULT_MAX_LIST_ITEMS = 40
@@ -1171,13 +1204,70 @@ class BaseExecuterAgent:
         normalized = str(host or "").strip().lower()
         return normalized in {"localhost", "127.0.0.1", "::1"}
 
+    def _looks_like_network_url(self, value: str) -> bool:
+        stripped = str(value or "").strip().strip("'\"")
+        return stripped.lower().startswith(("http://", "https://", "ws://", "wss://"))
+
+    def _consume_non_target_flag_value_tokens(
+        self,
+        tokens: list[str],
+        idx: int,
+        flag: str,
+    ) -> int:
+        next_idx = idx + 1
+        if next_idx >= len(tokens):
+            return next_idx
+
+        if flag in _RUN_CUSTOM_HEADER_STYLE_FLAGS:
+            header_value = str(tokens[next_idx] or "").strip()
+            if (
+                header_value.endswith(":")
+                and next_idx + 1 < len(tokens)
+                and not str(tokens[next_idx + 1] or "").strip().startswith("-")
+            ):
+                return next_idx + 2
+        return next_idx + 1
+
     def _extract_urls_from_run_custom(self, args: dict[str, Any]) -> list[str]:
         if not isinstance(args, dict):
             return []
+        command = str(args.get("command", "") or "").strip().lower()
+        _ = command  # command-specific handling may be expanded without changing callers.
+        tokens = [str(value or "").strip() for value in args.get("args", [])]
         urls: list[str] = []
-        for value in args.get("args", []):
-            text = str(value or "")
-            urls.extend(re.findall(r"https?://[^\s'\"<>]+", text))
+        idx = 0
+        while idx < len(tokens):
+            token = tokens[idx]
+            lowered = token.lower()
+            if not token:
+                idx += 1
+                continue
+
+            if lowered in _RUN_CUSTOM_IGNORE_URL_VALUE_FLAGS:
+                idx = self._consume_non_target_flag_value_tokens(tokens, idx, lowered)
+                continue
+
+            if lowered in _RUN_CUSTOM_URL_TARGET_FLAGS:
+                next_value = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+                if self._looks_like_network_url(next_value):
+                    urls.append(next_value.strip("'\""))
+                idx += 2
+                continue
+
+            matched_prefix = next(
+                (prefix for prefix in _RUN_CUSTOM_URL_TARGET_PREFIXES if lowered.startswith(prefix)),
+                None,
+            )
+            if matched_prefix is not None:
+                value = token[len(matched_prefix) :].strip().strip("'\"")
+                if self._looks_like_network_url(value):
+                    urls.append(value)
+                idx += 1
+                continue
+
+            if self._looks_like_network_url(token):
+                urls.append(token.strip("'\""))
+            idx += 1
         return urls
 
     def _detect_out_of_scope_run_custom_url(self, tool_name: str, args: dict[str, Any]) -> str | None:

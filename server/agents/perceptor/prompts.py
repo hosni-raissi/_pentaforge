@@ -43,13 +43,13 @@ For each result from Recon/Exploit:
 
 ═══ COMPACT SUMMARY FORMAT ═══
 For Verify (findings only):
-- "SQLi found in POST /api/search?q — time-based blind injection with 5s delay."
-- "Auth bypass on /api/login — default credentials admin:admin123 work."
-- "SSRF in image proxy endpoint — can access internal services."
+- "SQLi found in POST <observed-endpoint> param `<observed-param>` — time-based blind injection with 5s delay."
+- "Auth bypass on <observed-login-endpoint> — unauthorized access reproduced with observed credentials or token flow."
+- "SSRF in <observed-endpoint> — can access internal services."
 
 For Planner (info only):
-- "Discovered 5 API endpoints: /api/users, /api/products, /api/orders, /api/admin, /api/config"
-- "Web server: nginx 1.20.1, Powered by: Node.js Express 4.18, Database: PostgreSQL 13"
+- "Discovered 5 API endpoints: <observed-endpoint-1>, <observed-endpoint-2>, <observed-endpoint-3> ..."
+- "Web server: <observed-server-version>, Powered by: <observed-framework>, Database: <observed-db>"
 - "Security headers present: Content-Security-Policy, X-Frame-Options. Missing: HSTS"
 
 ═══ OUTPUT STRUCTURE ═══
