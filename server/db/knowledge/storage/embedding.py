@@ -33,6 +33,10 @@ class EmbeddingGenerator:
     Designed for batch processing with automatic retry.
     """
 
+    _shared_local_models: dict[tuple[str, str], object] = {}
+    _shared_local_encode_devices: dict[tuple[str, str], str | None] = {}
+    _shared_openai_clients: dict[str, object] = {}
+
     def __init__(
         self,
         model: str | None = None,
@@ -51,6 +55,14 @@ class EmbeddingGenerator:
         self._local_encode_device: str | None = None
         # Adaptive local encode batch size (learned after first OOM).
         self._adaptive_local_batch_size = self.batch_size
+
+    def _local_cache_key(self) -> tuple[str, str]:
+        local_model_name = (
+            self.model
+            if self.provider == "local"
+            else "nomic-ai/nomic-embed-text-v2-moe"
+        )
+        return (self.provider, local_model_name)
 
     # ── Local (sentence-transformers) ─────────────────────────────────────
 
@@ -79,7 +91,13 @@ class EmbeddingGenerator:
 
     def _get_local_model(self):
         """Lazy-init local sentence-transformers model."""
+        cache_key = self._local_cache_key()
         if self._local_model is None:
+            shared_model = self.__class__._shared_local_models.get(cache_key)
+            if shared_model is not None:
+                self._local_model = shared_model
+                self._local_encode_device = self.__class__._shared_local_encode_devices.get(cache_key)
+                return self._local_model
             try:
                 from sentence_transformers import SentenceTransformer
             except ImportError:
@@ -101,6 +119,8 @@ class EmbeddingGenerator:
                 self._local_model = self._load_sentence_transformer(local_model_name, device="cpu")
                 self._local_encode_device = "cpu"
                 logger.warning("local_embedding_model_loaded_on_cpu_after_oom")
+            self.__class__._shared_local_models[cache_key] = self._local_model
+            self.__class__._shared_local_encode_devices[cache_key] = self._local_encode_device
             logger.info("local_embedding_model_loaded", model=local_model_name)
         return self._local_model
 
@@ -158,6 +178,7 @@ class EmbeddingGenerator:
             # Some wrappers may not expose .to(); still force CPU during encode.
             pass
         self._local_encode_device = "cpu"
+        self.__class__._shared_local_encode_devices[self._local_cache_key()] = "cpu"
         self._clear_cuda_cache()
         logger.warning("local_embedding_fallback_cpu")
 
@@ -213,11 +234,16 @@ class EmbeddingGenerator:
     async def _get_openai_client(self):
         """Lazy-init OpenAI async client."""
         if self._openai_client is None:
+            shared_client = self.__class__._shared_openai_clients.get(self.model)
+            if shared_client is not None:
+                self._openai_client = shared_client
+                return self._openai_client
             try:
                 from openai import AsyncOpenAI
             except ImportError:
                 raise RuntimeError("openai package required — pip install openai")
             self._openai_client = AsyncOpenAI()
+            self.__class__._shared_openai_clients[self.model] = self._openai_client
             logger.info("openai_client_initialized", model=self.model)
         return self._openai_client
 

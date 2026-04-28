@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from .config import RETEST_CONTEXT_WINDOW_MAX_TOKENS
+from .config import (
+    MAX_TOOL_ROUNDS,
+    RETEST_CONTEXT_WINDOW_MAX_TOKENS,
+    RETEST_MAX_TOOL_CALLS_PER_ROUND,
+)
 from .catalog import RETEST_TOOLS
 
 
@@ -40,7 +44,8 @@ def build_retest_scenario_packet(
         "Retest scenario packet:\n"
         "1) Finding/scenario details follow below.\n"
         "2) Use scoped retest tools to validate remediation quality.\n"
-        "3) Max tool executions per round: 2. Max rounds per scenario: 5.\n"
+        f"3) Max tool executions per round: {RETEST_MAX_TOOL_CALLS_PER_ROUND}. "
+        f"Max rounds per scenario: {MAX_TOOL_ROUNDS}.\n"
         "4) Always update context window with replay/mutation outcomes each round.\n\n"
         "Current context window:\n"
         f"{context_block}\n\n"

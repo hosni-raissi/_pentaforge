@@ -1,0 +1,696 @@
+{
+  "overview": {
+    "project_id": "1e6e3d30-a2e7-4a04-889d-7394c2b8a842",
+    "scan_id": "13646568-4504-4dc1-a96b-a3b810bbfea6",
+    "target": "10.129.44.186",
+    "target_type": "linux_server",
+    "scope": "this is a ctf",
+    "info": "Target: 10.129.44.186\nScope: this is a ctf\nthis is a ctf"
+  },
+  "profile": {
+    "target_type": "linux_server",
+    "version": "1.0",
+    "generated_from": "static_target_info_profile",
+    "max_blocks": 2,
+    "blocks": [
+      {
+        "id": "service_inventory",
+        "name": "Service Inventory",
+        "interaction": "active_safe",
+        "goal": "Map open services, routes, and transport exposure.",
+        "tools": [
+          "nmap_scan",
+          "route_topology",
+          "dns_recon"
+        ]
+      },
+      {
+        "id": "host_posture",
+        "name": "Host Posture",
+        "interaction": "active_safe",
+        "goal": "Collect host configuration and Linux security posture clues.",
+        "tools": [
+          "linux_config_audit"
+        ]
+      }
+    ],
+    "updated_at": "2026-04-27T09:32:02.230996+00:00",
+    "created_at": "2026-04-27 09:32:02"
+  },
+  "gathering": {
+    "status": "completed",
+    "blocks": [
+      {
+        "id": "service_inventory",
+        "name": "Service Inventory",
+        "goal": "Map open services, routes, and transport exposure.",
+        "interaction": "active_safe",
+        "planned_tools": [
+          "nmap_scan",
+          "route_topology",
+          "run_custom"
+        ],
+        "selection_rationale": "Kept nmap_scan and route_topology as they are allowed and useful for service/route mapping. Replaced dns_recon (not in allowed tools) with a scoped dig command to gather basic DNS info without brute-forcing.",
+        "skipped_tools": [
+          "dns_recon"
+        ],
+        "status": "completed",
+        "summary": "Service inventory block completed for target 10.129.44.186 (CTF linux_server). Two open TCP services identified (SSH on port 22, HTTP on port 80) and a DNS hostname '2million.htb' observed. Route topology probing failed to establish connectivity or latency metrics, while DNS query returned no records (NXDOMAIN).",
+        "key_findings": [
+          "Host 10.129.44.186 is up, resolves to hostname '2million.htb'.",
+          "Two open TCP ports: 22 (SSH), 80 (HTTP).",
+          "No DNS records found for the IP (NXDOMAIN).",
+          "Route topology tools failed to gather path or latency data."
+        ],
+        "risk_signals": [
+          "Exposed SSH (port 22) and HTTP (port 80) services may present attack surface.",
+          "Hostname '2million.htb' suggests potential virtual hosting; web service may respond to this name."
+        ],
+        "open_questions": [
+          "Are SSH credentials or keys available for authentication?",
+          "Does the HTTP service on port 80 serve content for '2million.htb'?",
+          "Are there additional services on non-standard ports not covered by top-100 scan?"
+        ],
+        "artifacts": [
+          "Hostname: 2million.htb",
+          "Open ports: 22/tcp (SSH), 80/tcp (HTTP)"
+        ],
+        "results": [
+          {
+            "tool": "nmap_scan",
+            "status": "completed",
+            "summary": "Nmap TCP scan confirmed host 10.129.44.186 is up with two open ports: 22 (SSH) and 80 (HTTP). Hostname '2million.htb' observed.",
+            "command": "nmap_scan(target=\"10.129.44.186\", scan_mode=\"tcp\", top_ports=100, output_format=\"text\", timeout=120)",
+            "artifacts": [
+              "2million.htb",
+              "22/tcp (SSH)",
+              "80/tcp (HTTP)"
+            ]
+          },
+          {
+            "tool": "route_topology",
+            "status": "partial",
+            "summary": "Route topology tools (MTR, Nmap traceroute) failed to gather path or latency data; host connectivity could not be mapped beyond local network.",
+            "command": "route_topology(target=\"10.129.44.186\", output_format=\"text\")",
+            "artifacts": []
+          },
+          {
+            "tool": "run_custom",
+            "status": "completed",
+            "summary": "DNS dig query for ANY records on 10.129.44.186 returned NXDOMAIN; no records found.",
+            "command": "dig ANY 10.129.44.186",
+            "artifacts": []
+          }
+        ]
+      },
+      {
+        "id": "host_posture",
+        "name": "Host Posture",
+        "goal": "Collect host configuration and Linux security posture clues.",
+        "interaction": "active_safe",
+        "planned_tools": [
+          "linux_config_audit"
+        ],
+        "selection_rationale": "linux_config_audit is allowed and directly relevant for assessing Linux host posture. No refinement needed.",
+        "skipped_tools": [],
+        "status": "partial",
+        "summary": "The host posture assessment for 10.129.44.186 failed due to a configuration error in the linux_config_audit tool. The tool requires a username for remote target auditing, which was not provided.",
+        "key_findings": [
+          "The host posture assessment for 10.129.44.186 failed due to a configuration error in the linux_config_audit tool. The tool requires a username for remote target auditing, which was not provided."
+        ],
+        "risk_signals": [],
+        "open_questions": [
+          "What is the correct username for remote auditing of this Linux host?",
+          "Are there alternative tools or methods to assess host posture without requiring a username?"
+        ],
+        "artifacts": [],
+        "results": [
+          {
+            "tool": "linux_config_audit",
+            "status": "partial",
+            "summary": "Tool execution failed due to missing username for remote target auditing. No host posture data was collected.",
+            "command": "linux_config_audit(target=\"10.129.44.186\", mode=\"quick\", timeout=120)",
+            "artifacts": []
+          }
+        ]
+      }
+    ],
+    "program": [
+      {
+        "id": "service_inventory",
+        "name": "Service Inventory",
+        "interaction": "active_safe",
+        "goal": "Map open services, routes, and transport exposure.",
+        "tools": [
+          "nmap_scan",
+          "route_topology",
+          {
+            "tool": "run_custom",
+            "command": "dig",
+            "args": [
+              "ANY",
+              "10.129.44.186"
+            ],
+            "reason": "Basic DNS record check for the target IP to complement service mapping."
+          }
+        ],
+        "status": "refine",
+        "selection_rationale": "Kept nmap_scan and route_topology as they are allowed and useful for service/route mapping. Replaced dns_recon (not in allowed tools) with a scoped dig command to gather basic DNS info without brute-forcing.",
+        "skipped_tools": [
+          "dns_recon"
+        ]
+      },
+      {
+        "id": "host_posture",
+        "name": "Host Posture",
+        "interaction": "active_safe",
+        "goal": "Collect host configuration and Linux security posture clues.",
+        "tools": [
+          "linux_config_audit"
+        ],
+        "status": "keep",
+        "selection_rationale": "linux_config_audit is allowed and directly relevant for assessing Linux host posture. No refinement needed.",
+        "skipped_tools": []
+      }
+    ]
+  },
+  "updates": [
+    {
+      "title": "Add '2million.htb' to /etc/hosts and verify HTTP service response for this hostname",
+      "summary": "scenario=\"Add '2million.htb' to /etc/hosts and verify HTTP service response for this hostname\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/cor...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform full TCP port scan (1-65535) to identify non-standard open ports",
+      "summary": "scenario='Perform full TCP port scan (1-65535) to identify non-standard open ports' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/correlation",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "[FAILED] Perform UDP port scan (top 1000) to identify exposed services - LLM error after 3 attempt(s): [Errno -3] Tem...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "[FAILED] Enumerate SSH version and supported authentication methods on port 22 - LLM error after 3 attempt(s): [Errno...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "[FAILED] Perform UDP port scan (top 1000) to identify exposed services - LLM error after 3 attempt(s): [Errno -3] Tem...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "[FAILED] Enumerate SSH version and supported authentication methods on port 22 - LLM error after 3 attempt(s): [Errno...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "[FAILED] Perform UDP port scan (top 1000) to identify exposed services - LLM error after 3 attempt(s): [Errno -3] Tem...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "[FAILED] Enumerate SSH version and supported authentication methods on port 22 - LLM error after 3 attempt(s): [Errno...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "[FAILED] Perform UDP port scan (top 1000) to identify exposed services - LLM error after 3 attempt(s): [Errno -3] Tem...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "[FAILED] Enumerate SSH version and supported authentication methods on port 22 - LLM error after 3 attempt(s): [Errno...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "[FAILED] Perform UDP port scan (top 1000) to identify exposed services - LLM error after 3 attempt(s): [Errno -3] Tem...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "[FAILED] Enumerate SSH version and supported authentication methods on port 22 - LLM error after 3 attempt(s): [Errno...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "[FAILED] Perform UDP port scan (top 1000) to identify exposed services - LLM error after 3 attempt(s): [Errno -3] Tem...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "[FAILED] Enumerate SSH version and supported authentication methods on port 22 - LLM error after 3 attempt(s): [Errno...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "[FAILED] Perform UDP port scan (top 1000) to identify exposed services - LLM error after 3 attempt(s): [Errno -3] Tem...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "[FAILED] Enumerate SSH version and supported authentication methods on port 22 - LLM error after 3 attempt(s): [Errno...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Perform UDP port scan (top 1000) to identify exposed services",
+      "summary": "scenario='Perform UDP port scan (top 1000) to identify exposed services' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/correlation",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Enumerate SSH version and supported authentication methods on port 22",
+      "summary": "scenario='Enumerate SSH version and supported authentication methods on port 22' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/correlation",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Check for HTTP service version, headers, and technologies",
+      "summary": "scenario='Check for HTTP service version, headers, and technologies' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/correlation",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Review HTTP response for '2million.htb' for clues",
+      "summary": "The HTTP response for '2million.htb' reveals a standard web application with no immediate signs of vulnerabilities or misconfigurations, but further active testing is required to confirm exploitability or hidden clues.",
+      "agent": "recon",
+      "status": "inconclusives",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Test for virtual host misconfiguration by sending requests to '2million.htb' and the IP address to compare responses",
+      "summary": "scenario=\"Test for virtual host misconfiguration by sending requests to '2million.htb' and the IP address to compare ...\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Check for exposed .git, .svn, or other VCS directories on the web root of '2million.htb'",
+      "summary": "scenario=\"Check for exposed .git, .svn, or other VCS directories on the web root of '2million.htb'\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for tren...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Spider/crawl the web application '2million.htb' to map all accessible routes and parameters",
+      "summary": "scenario=\"Spider/crawl the web application '2million.htb' to map all accessible routes and parameters\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for t...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Review authentication mechanisms on '2million.htb' for weaknesses",
+      "summary": "No evidence of authentication weaknesses, JWT flaws, or session mismanagement was found in the login page, JavaScript file, or prior tool outputs. The original finding lacks reproducible security impact.",
+      "agent": "recon",
+      "status": "false_positives",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Check for exposed sensitive files on '2million.htb'",
+      "summary": "scenario=\"Check for exposed sensitive files on '2million.htb'\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/correlation",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Test for HTTP verb tampering and method-based vulnerabilities on '2million.htb'",
+      "summary": "scenario=\"Test for HTTP verb tampering and method-based vulnerabilities on '2million.htb'\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/correla...",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Test for IDOR or broken access control on user-specific endpoints of '2million.htb'",
+      "summary": "All tested user-specific endpoints returned a 301 redirect to a generic 404 page without exposing unauthorized user data or unauthorized access, confirming no IDOR or broken access control vulnerability.",
+      "agent": "recon",
+      "status": "false_positives",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Assess impact of missing or weak security headers on '2million.htb'",
+      "summary": "The target is missing critical security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options, etc.), enabling risks like XSS, clickjacking, and MIME-sniffing. Verified via direct header analysis.",
+      "agent": "recon",
+      "status": "real_vulnerabilities",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Assess impact of missing or weak security headers on '2million.htb'",
+      "summary": "PoC/report evidence generated for verified finding: The target is missing critical security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options, etc.), enabling risks like XSS, clickjacking, and MIME-sniffing. Verified via direct...",
+      "agent": "retest",
+      "status": "retest_poc_generated",
+      "stage": "retest"
+    },
+    {
+      "title": "Test for SQL injection vulnerabilities on mapped endpoints of '2million.htb'",
+      "summary": "LLM error after 3 attempt(s)",
+      "agent": "recon",
+      "status": "inconclusives",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Assess impact of missing security headers on '2million.htb' and test for XSS, clickjacking, and MIME-sniffing vulnerabilities",
+      "summary": "The target is missing critical security headers (X-Frame-Options, X-Content-Type-Options, Content-Security-Policy, X-XSS-Protection) across all endpoints, confirming clickjacking and MIME-sniffing vulnerabilities. No direct XSS exploitat...",
+      "agent": "recon",
+      "status": "real_vulnerabilities",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Assess impact of missing security headers on '2million.htb' and test for XSS, clickjacking, and MIME-sniffing vulnerabilities",
+      "summary": "PoC/report evidence generated for verified finding: The target is missing critical security headers (X-Frame-Options, X-Content-Type-Options, Content-Security-Policy, X-XSS-Protection) across all endpoints, confirming clickjacking and MI...",
+      "agent": "retest",
+      "status": "retest_poc_generated",
+      "stage": "retest"
+    },
+    {
+      "title": "Test for weak or default credentials on SSH service (port 22) using a curated list of common credentials",
+      "summary": "[INCONCLUSIVE] Test for weak or default credentials on SSH service (port 22) using a curated list of common credentia...",
+      "agent": "exploit",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Check for SSH key-based authentication support and enumerate potential key paths on port 22",
+      "summary": "[INCONCLUSIVE] Check for SSH key-based authentication support and enumerate potential key paths on port 22 - Collecte...",
+      "agent": "exploit",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Exploit missing X-Frame-Options header to test clickjacking vulnerability on '2million.htb'",
+      "summary": "[INCONCLUSIVE] Exploit missing X-Frame-Options header to test clickjacking vulnerability on '2million.htb' - Collecte...",
+      "agent": "exploit",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Exploit missing X-Content-Type-Options header to test MIME-sniffing vulnerability on '2million.htb'",
+      "summary": "[INCONCLUSIVE] Exploit missing X-Content-Type-Options header to test MIME-sniffing vulnerability on '2million.htb' -...",
+      "agent": "exploit",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Test for XSS vulnerabilities on mapped endpoints of '2million.htb'",
+      "summary": "[INCONCLUSIVE] Test for XSS vulnerabilities on mapped endpoints of '2million.htb' - Collected exploit evidence across...",
+      "agent": "exploit",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Test for LFI/RFI vulnerabilities on mapped endpoints of '2million.htb'",
+      "summary": "[INCONCLUSIVE] Test for LFI/RFI vulnerabilities on mapped endpoints of '2million.htb' - Collected exploit evidence ac...",
+      "agent": "exploit",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "If initial access is gained, enumerate user privileges and sudo capabilities",
+      "summary": "scenario='If initial access is gained, enumerate user privileges and sudo capabilities' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=0 reason=Track for trend/correlation",
+      "agent": "recon",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Check for writable system files or directories",
+      "summary": "Writable files were identified, but they are non-critical and user-owned, with no unauthorized system impact or privilege escalation potential.",
+      "agent": "recon",
+      "status": "false_positives",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Search for sensitive files on the system",
+      "summary": "[INCONCLUSIVE] Search for sensitive files on the system - Collected exploit evidence across 2 tool round(s). Forwardi...",
+      "agent": "exploit",
+      "status": "info_only",
+      "stage": "perceptor"
+    },
+    {
+      "title": "Deepen enumeration of web application endpoints to identify hidden parameters or routes using manual and automated techniques",
+      "summary": "Hardcoded API endpoint (/api/stats/daily/owns/) and hidden parameters were confirmed in the JavaScript file, validating the finding as a real vulnerability.",
+      "agent": "recon",
+      "status": "real_vulnerabilities",
+      "stage": "execution_cycle"
+    },
+    {
+      "title": "Deepen enumeration of web application endpoints to identify hidden parameters or routes using manual and automated techniques",
+      "summary": "LLM error after 3 attempt(s): Cannot send a request, as the client has been closed.",
+      "agent": "retest",
+      "status": "retest_poc_generated",
+      "stage": "retest"
+    }
+  ],
+  "checklist": {
+    "target_type": "linux_server",
+    "available_total": 25,
+    "checklist": [
+      {
+        "phase": "1",
+        "title": "Reconnaissance",
+        "items": [
+          {
+            "name": "Add '2million.htb' to /etc/hosts and verify HTTP service response for this hostname",
+            "priority": 2
+          },
+          {
+            "name": "Perform full TCP port scan (1-65535) to identify non-standard open ports",
+            "priority": 2
+          },
+          {
+            "name": "Perform UDP port scan (top 1000) to identify exposed services",
+            "priority": 3
+          },
+          {
+            "name": "Enumerate SSH version and supported authentication methods on port 22",
+            "priority": 2
+          },
+          {
+            "name": "Check for HTTP service version, headers, and technologies (e.g., Server, X-Powered-By, Cookies)",
+            "priority": 2
+          },
+          {
+            "name": "Review HTTP response for '2million.htb' for clues (e.g., comments, hidden paths, API endpoints)",
+            "priority": 2
+          },
+          {
+            "name": "Test for virtual host misconfiguration (e.g., default server response, IP-based access)",
+            "priority": 3
+          },
+          {
+            "name": "Check for exposed .git, .svn, or other VCS directories on the web root",
+            "priority": 3
+          }
+        ]
+      },
+      {
+        "phase": "2",
+        "title": "Web Service Assessment",
+        "items": [
+          {
+            "name": "Spider/crawl the web application to map all accessible routes and parameters",
+            "priority": 2
+          },
+          {
+            "name": "Test for common web vulnerabilities (e.g., SQLi, XSS, LFI, RFI) on identified endpoints",
+            "priority": 2
+          },
+          {
+            "name": "Review authentication mechanisms (e.g., login forms, session cookies, JWT tokens)",
+            "priority": 2
+          },
+          {
+            "name": "Check for exposed sensitive files (e.g., backup files, configuration files, database dumps)",
+            "priority": 2
+          },
+          {
+            "name": "Test for HTTP verb tampering and method-based vulnerabilities (e.g., PUT, DELETE)",
+            "priority": 3
+          },
+          {
+            "name": "Assess impact of missing or weak security headers (e.g., CSP, HSTS, X-Frame-Options)",
+            "priority": 3
+          },
+          {
+            "name": "Test for IDOR or broken access control on user-specific endpoints",
+            "priority": 2
+          }
+        ]
+      },
+      {
+        "phase": "3",
+        "title": "SSH Service Assessment",
+        "items": [
+          {
+            "name": "Test for weak or default credentials on SSH service (e.g., root:toor, admin:admin)",
+            "priority": 2
+          },
+          {
+            "name": "Check for SSH key-based authentication support and enumerate potential key paths",
+            "priority": 2
+          },
+          {
+            "name": "Test for SSH version-specific vulnerabilities (e.g., user enumeration, CVE exploits)",
+            "priority": 3
+          },
+          {
+            "name": "Validate if SSH brute-forcing is feasible (e.g., rate-limiting, account lockout)",
+            "priority": 3
+          }
+        ]
+      },
+      {
+        "phase": "4",
+        "title": "Privilege Escalation & Post-Exploitation",
+        "items": [
+          {
+            "name": "If initial access is gained, enumerate user privileges and sudo capabilities",
+            "priority": 4
+          },
+          {
+            "name": "Check for writable system files or directories (e.g., /etc/passwd, cron jobs)",
+            "priority": 4
+          },
+          {
+            "name": "Search for sensitive files (e.g., SSH keys, configuration files, credentials)",
+            "priority": 4
+          },
+          {
+            "name": "Review running processes and services for privilege escalation opportunities",
+            "priority": 4
+          }
+        ]
+      },
+      {
+        "phase": "5",
+        "title": "Flag Extraction & Reporting",
+        "items": [
+          {
+            "name": "Search for flags in common locations (e.g., /home, /var/www, /root)",
+            "priority": 1
+          },
+          {
+            "name": "Document all findings, exploit paths, and proof of concepts for reporting",
+            "priority": 5
+          }
+        ]
+      }
+    ]
+  },
+  "artifacts": [
+    "Service Inventory",
+    "Map open services, routes, and transport exposure.",
+    "Service inventory block completed for target 10.129.44.186 (CTF linux_server). Two open TCP services identified (SSH on port 22, HTTP on port 80) and a DNS hostname '2million.ht...",
+    "Hostname: 2million.htb",
+    "Open ports: 22/tcp (SSH), 80/tcp (HTTP)",
+    "Nmap TCP scan confirmed host 10.129.44.186 is up with two open ports: 22 (SSH) and 80 (HTTP). Hostname '2million.htb' observed.",
+    "2million.htb",
+    "22/tcp (SSH)",
+    "80/tcp (HTTP)",
+    "Route topology tools (MTR, Nmap traceroute) failed to gather path or latency data; host connectivity could not be mapped beyond local network.",
+    "DNS dig query for ANY records on 10.129.44.186 returned NXDOMAIN; no records found.",
+    "Host Posture",
+    "Collect host configuration and Linux security posture clues.",
+    "The host posture assessment for 10.129.44.186 failed due to a configuration error in the linux_config_audit tool. The tool requires a username for remote target auditing, which...",
+    "Tool execution failed due to missing username for remote target auditing. No host posture data was collected.",
+    "Add '2million.htb' to /etc/hosts and verify HTTP service response for this hostname",
+    "scenario=\"Add '2million.htb' to /etc/hosts and verify HTTP service response for this hostname\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0...",
+    "Perform full TCP port scan (1-65535) to identify non-standard open ports",
+    "scenario='Perform full TCP port scan (1-65535) to identify non-standard open ports' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na...",
+    "Perform UDP port scan (top 1000) to identify exposed services",
+    "Enumerate SSH version and supported authentication methods on port 22",
+    "scenario='Perform UDP port scan (top 1000) to identify exposed services' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na ke...",
+    "scenario='Enumerate SSH version and supported authentication methods on port 22' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na ep...",
+    "Check for HTTP service version, headers, and technologies",
+    "scenario='Check for HTTP service version, headers, and technologies' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no...",
+    "Review HTTP response for '2million.htb' for clues",
+    "The HTTP response for '2million.htb' reveals a standard web application with no immediate signs of vulnerabilities or misconfigurations, but further active testing is required t...",
+    "Test for virtual host misconfiguration by sending requests to '2million.htb' and the IP address to compare responses",
+    "scenario=\"Test for virtual host misconfiguration by sending requests to '2million.htb' and the IP address to compare ...\" agent=recon priority=6 finding_type=info confidence=low...",
+    "Check for exposed .git, .svn, or other VCS directories on the web root of '2million.htb'",
+    "scenario=\"Check for exposed .git, .svn, or other VCS directories on the web root of '2million.htb'\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK sc...",
+    "Spider/crawl the web application '2million.htb' to map all accessible routes and parameters",
+    "scenario=\"Spider/crawl the web application '2million.htb' to map all accessible routes and parameters\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK...",
+    "Review authentication mechanisms on '2million.htb' for weaknesses",
+    "No evidence of authentication weaknesses, JWT flaws, or session mismanagement was found in the login page, JavaScript file, or prior tool outputs. The original finding lacks rep...",
+    "Check for exposed sensitive files on '2million.htb'",
+    "scenario=\"Check for exposed sensitive files on '2million.htb'\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvss=na epss=na kev=no cves=...",
+    "Test for HTTP verb tampering and method-based vulnerabilities on '2million.htb'",
+    "scenario=\"Test for HTTP verb tampering and method-based vulnerabilities on '2million.htb'\" agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04...",
+    "Test for IDOR or broken access control on user-specific endpoints of '2million.htb'",
+    "All tested user-specific endpoints returned a 301 redirect to a generic 404 page without exposing unauthorized user data or unauthorized access, confirming no IDOR or broken acc...",
+    "Assess impact of missing or weak security headers on '2million.htb'",
+    "The target is missing critical security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options, etc.), enabling risks like XSS, clickjacking, and MIME-sniffing. Verified vi...",
+    "PoC/report evidence generated for verified finding: The target is missing critical security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options, etc.), enabling risks li...",
+    "Test for SQL injection vulnerabilities on mapped endpoints of '2million.htb'",
+    "LLM error after 3 attempt(s):",
+    "Assess impact of missing security headers on '2million.htb' and test for XSS, clickjacking, and MIME-sniffing vulnerabilities",
+    "The target is missing critical security headers (X-Frame-Options, X-Content-Type-Options, Content-Security-Policy, X-XSS-Protection) across all endpoints, confirming clickjackin...",
+    "PoC/report evidence generated for verified finding: The target is missing critical security headers (X-Frame-Options, X-Content-Type-Options, Content-Security-Policy, X-XSS-Prot...",
+    "Test for weak or default credentials on SSH service (port 22) using a curated list of common credentials",
+    "Check for SSH key-based authentication support and enumerate potential key paths on port 22",
+    "Exploit missing X-Frame-Options header to test clickjacking vulnerability on '2million.htb'",
+    "Exploit missing X-Content-Type-Options header to test MIME-sniffing vulnerability on '2million.htb'",
+    "Test for XSS vulnerabilities on mapped endpoints of '2million.htb'",
+    "Test for LFI/RFI vulnerabilities on mapped endpoints of '2million.htb'",
+    "If initial access is gained, enumerate user privileges and sudo capabilities",
+    "scenario='If initial access is gained, enumerate user privileges and sudo capabilities' agent=recon priority=6 finding_type=info confidence=low summary=ssvc=TRACK score=0.04 cvs...",
+    "Check for writable system files or directories",
+    "Writable files were identified, but they are non-critical and user-owned, with no unauthorized system impact or privilege escalation potential.",
+    "Search for sensitive files on the system",
+    "Deepen enumeration of web application endpoints to identify hidden parameters or routes using manual and automated techniques",
+    "Hardcoded API endpoint (/api/stats/daily/owns/) and hidden parameters were confirmed in the JavaScript file, validating the finding as a real vulnerability.",
+    "LLM error after 3 attempt(s): Cannot send a request, as the client has been closed."
+  ],
+  "compression": {
+    "last_markdown_tokens": 1340,
+    "max_markdown_tokens": 4500
+  },
+  "paths": {
+    "json": "/home/hosnizap/projects/PentaForge/server/cache/project_runs/dee__10.129.44.186__20260428T140501Z/system_memory/memory.json",
+    "markdown": "/home/hosnizap/projects/PentaForge/server/cache/project_runs/dee__10.129.44.186__20260428T140501Z/system_memory/memory.md"
+  },
+  "verified_findings": [
+    {
+      "title": "Hardcoded API endpoint (/api/stats/daily/owns/) and hidden parameters were confirmed in the JavaScript file, validating the finding as a real vulnerability.",
+      "summary": "Deepen enumeration of web application endpoints to identify hidden parameters or routes using manual and automated techniques",
+      "status": "real_vulnerability"
+    }
+  ]
+}

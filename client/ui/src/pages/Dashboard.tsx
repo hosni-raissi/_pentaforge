@@ -31,6 +31,8 @@ import { Card } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import {
+  approveInformationGatheringForProjectScanFromDesktop,
+  approvePasswordForProjectScanFromDesktop,
   approveToolForProjectScanFromDesktop,
   approvePlannerForProjectScanFromDesktop,
   listProjectScanEventsFromDesktop,
@@ -41,7 +43,7 @@ import {
 import { useProjects } from "@/stores/projects";
 import type { Finding, ProjectStatus } from "@/types";
 
-type InsightTab = "plan" | "checklist";
+type InsightTab = "plan" | "checklist" | "information";
 type LogLevel = "info" | "success" | "warn" | "error";
 type DashboardSeverity = "critical" | "high" | "medium" | "low" | "info";
 
@@ -97,6 +99,56 @@ interface PlannerPlanView {
   phases: PlannerPhaseView[];
 }
 
+interface InformationGatheringProgramToolView {
+  label: string;
+  kind: "builtin" | "custom";
+}
+
+interface InformationGatheringProgramBlockView {
+  id: string;
+  name: string;
+  goal: string;
+  interaction: string;
+  status: string;
+  selectionRationale: string;
+  skippedTools: string[];
+  plannedTools: InformationGatheringProgramToolView[];
+}
+
+interface InformationGatheringResultView {
+  tool: string;
+  status: string;
+  summary: string;
+  command: string;
+}
+
+interface InformationGatheringBlockView {
+  id: string;
+  name: string;
+  goal: string;
+  interaction: string;
+  status: string;
+  summary: string;
+  keyFindings: string[];
+  riskSignals: string[];
+  openQuestions: string[];
+  selectionRationale: string;
+  skippedTools: string[];
+  plannedTools: string[];
+  results: InformationGatheringResultView[];
+}
+
+interface InformationGatheringView {
+  status: string;
+  program: InformationGatheringProgramBlockView[];
+  blocks: InformationGatheringBlockView[];
+  workingBlockId: string;
+  paths: {
+    json: string;
+    markdown: string;
+  };
+}
+
 interface ArchitectureHost {
   id: string;
   name: string;
@@ -149,6 +201,14 @@ interface PendingToolApprovalView {
   toolName: string;
   callId: string;
   args: Record<string, unknown>;
+}
+
+interface PendingPasswordRequestView {
+  passwordId: string;
+  toolName: string;
+  prompt: string;
+  reason: string;
+  callId: string;
 }
 
 type ApprovalMode =
@@ -494,6 +554,17 @@ function normalizeRoundLabel(value: unknown): string {
     return `r${raw}`;
   }
   return "";
+}
+
+function scenarioStatusRank(value: PlannerScenarioView["status"]): number {
+  switch (value) {
+    case "completed":
+      return 2;
+    case "working":
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 function normalizePhase(value: unknown): string {
@@ -904,7 +975,7 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
       const rawScenarios = Array.isArray(rawStep.scenarios)
         ? rawStep.scenarios
         : [];
-      const scenarios: PlannerScenarioView[] = [];
+      const scenarioMap = new Map<string, PlannerScenarioView>();
       for (const rawScenario of rawScenarios) {
         if (!isRecord(rawScenario)) {
           continue;
@@ -913,7 +984,7 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
         if (!task) {
           continue;
         }
-        scenarios.push({
+        const nextScenario: PlannerScenarioView = {
           scenario: task,
           agent: normalizeText(rawScenario.agent) || "recon",
           status: normalizeScenarioStatus(
@@ -921,12 +992,27 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
             rawScenario.done === true,
           ),
           plannerRound: normalizeRoundLabel(rawScenario.planner_round_added),
-        });
+        };
+        const dedupeKey = `${nextScenario.agent}::${nextScenario.scenario}`.toLowerCase();
+        const existingScenario = scenarioMap.get(dedupeKey);
+        if (!existingScenario) {
+          scenarioMap.set(dedupeKey, nextScenario);
+          continue;
+        }
+        const existingRank = scenarioStatusRank(existingScenario.status);
+        const nextRank = scenarioStatusRank(nextScenario.status);
+        if (nextRank > existingRank) {
+          existingScenario.status = nextScenario.status;
+        }
+        if (!existingScenario.plannerRound && nextScenario.plannerRound) {
+          existingScenario.plannerRound = nextScenario.plannerRound;
+        }
       }
+      const scenarios = Array.from(scenarioMap.values());
 
       const description =
         normalizeText(rawStep.description) || normalizeText(rawStep.id);
-      if (!description && scenarios.length === 0) {
+      if (scenarios.length === 0) {
         continue;
       }
       steps.push({
@@ -941,11 +1027,226 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
     });
   }
 
-  if (phases.length === 0) {
+  const nonEmptyPhases = phases.filter((phase) => phase.steps.length > 0);
+
+  if (nonEmptyPhases.length === 0) {
     return null;
   }
 
-  return { phases };
+  return { phases: nonEmptyPhases };
+}
+
+function toInformationGatheringToolLabel(value: unknown): InformationGatheringProgramToolView | null {
+  if (typeof value === "string") {
+    const label = normalizeText(value);
+    if (!label) {
+      return null;
+    }
+    return { label, kind: "builtin" };
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  const tool = normalizeText(value.tool) || "run_custom";
+  const command = normalizeText(value.command);
+  const args = Array.isArray(value.args)
+    ? value.args.map((item) => normalizeText(item)).filter((item) => item.length > 0)
+    : [];
+  const label = command
+    ? `${tool}: ${command}${args.length ? ` ${args.join(" ")}` : ""}`
+    : tool;
+  return label ? { label, kind: tool === "run_custom" ? "custom" : "builtin" } : null;
+}
+
+function toInformationGatheringProgramBlock(value: unknown): InformationGatheringProgramBlockView | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const name = normalizeText(value.name) || normalizeText(value.id);
+  if (!name) {
+    return null;
+  }
+  const rawTools = Array.isArray(value.tools)
+    ? value.tools
+    : Array.isArray(value.planned_tools)
+      ? value.planned_tools
+      : [];
+  return {
+    id: normalizeText(value.id) || name.toLowerCase().replace(/\s+/g, "_"),
+    name,
+    goal: normalizeText(value.goal),
+    interaction: normalizeText(value.interaction),
+    status: normalizeText(value.status) || "keep",
+    selectionRationale: normalizeText(value.selection_rationale) || normalizeText(value.rationale),
+    skippedTools: Array.isArray(value.skipped_tools)
+      ? value.skipped_tools.map((item) => normalizeText(item)).filter((item) => item.length > 0)
+      : [],
+    plannedTools: rawTools
+      .map((item) => toInformationGatheringToolLabel(item))
+      .filter((item): item is InformationGatheringProgramToolView => item !== null),
+  };
+}
+
+function toInformationGatheringResult(value: unknown): InformationGatheringResultView | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const tool = normalizeText(value.tool);
+  if (!tool) {
+    return null;
+  }
+  return {
+    tool,
+    status: normalizeText(value.status) || "completed",
+    summary: normalizeText(value.summary),
+    command: normalizeText(value.command),
+  };
+}
+
+function toInformationGatheringBlock(value: unknown): InformationGatheringBlockView | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const name = normalizeText(value.name) || normalizeText(value.id);
+  if (!name) {
+    return null;
+  }
+  return {
+    id: normalizeText(value.id) || name.toLowerCase().replace(/\s+/g, "_"),
+    name,
+    goal: normalizeText(value.goal),
+    interaction: normalizeText(value.interaction),
+    status: normalizeText(value.status) || "completed",
+    summary: normalizeText(value.summary),
+    keyFindings: Array.isArray(value.key_findings)
+      ? value.key_findings.map((item) => normalizeText(item)).filter((item) => item.length > 0)
+      : [],
+    riskSignals: Array.isArray(value.risk_signals)
+      ? value.risk_signals.map((item) => normalizeText(item)).filter((item) => item.length > 0)
+      : [],
+    openQuestions: Array.isArray(value.open_questions)
+      ? value.open_questions.map((item) => normalizeText(item)).filter((item) => item.length > 0)
+      : [],
+    selectionRationale: normalizeText(value.selection_rationale),
+    skippedTools: Array.isArray(value.skipped_tools)
+      ? value.skipped_tools.map((item) => normalizeText(item)).filter((item) => item.length > 0)
+      : [],
+    plannedTools: Array.isArray(value.planned_tools)
+      ? value.planned_tools.map((item) => normalizeText(item)).filter((item) => item.length > 0)
+      : [],
+    results: Array.isArray(value.results)
+      ? value.results.map((item) => toInformationGatheringResult(item)).filter((item): item is InformationGatheringResultView => item !== null)
+      : [],
+  };
+}
+
+function toInformationGatheringView(value: unknown): InformationGatheringView | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const rawProgram = Array.isArray(value.program) ? value.program : [];
+  const rawBlocks = Array.isArray(value.blocks) ? value.blocks : [];
+  const paths = isRecord(value.paths) ? value.paths : {};
+  const program = rawProgram
+    .map((item) => toInformationGatheringProgramBlock(item))
+    .filter((item): item is InformationGatheringProgramBlockView => item !== null);
+  const blocks = rawBlocks
+    .map((item) => toInformationGatheringBlock(item))
+    .filter((item): item is InformationGatheringBlockView => item !== null);
+  if (program.length === 0 && blocks.length === 0 && !normalizeText(value.status)) {
+    return null;
+  }
+  return {
+    status: normalizeText(value.status) || (blocks.length > 0 ? "completed" : "running"),
+    program,
+    blocks,
+    workingBlockId: normalizeText(value.workingBlockId),
+    paths: {
+      json: normalizeText(paths.json),
+      markdown: normalizeText(paths.markdown),
+    },
+  };
+}
+
+function buildInformationGatheringViewFromEvents(
+  events: ScanEventPayload[],
+): InformationGatheringView | null {
+  const gathering: Record<string, unknown> = {};
+
+  for (const event of events) {
+    if (
+      event.event !== "target_info_gathering_program_organized" &&
+      event.event !== "target_info_gathering_block_started" &&
+      event.event !== "target_info_gathering_block_completed" &&
+      event.event !== "target_info_gathering_waiting_approval" &&
+      event.event !== "target_info_gathering_approval_received" &&
+      event.event !== "target_info_gathering_complete"
+    ) {
+      continue;
+    }
+
+    if (event.event === "target_info_gathering_program_organized" && isRecord(event.data.program)) {
+      gathering.status = "organized";
+      const blocks = Array.isArray(event.data.program.blocks) ? event.data.program.blocks : [];
+      if (blocks.length > 0) {
+        gathering.program = blocks;
+      }
+      if (isRecord(event.data.program.paths)) {
+        gathering.paths = event.data.program.paths;
+      }
+    }
+
+    if (event.event === "target_info_gathering_block_started" && isRecord(event.data.block)) {
+      gathering.status = "running";
+      gathering.workingBlockId = normalizeText(event.data.block.id);
+    }
+
+    if (event.event === "target_info_gathering_block_completed" && isRecord(event.data.block)) {
+      const block = event.data.block;
+      const currentBlocks = Array.isArray(gathering.blocks) ? [...gathering.blocks] : [];
+      const blockId = normalizeText(block.id);
+      const existingIndex = currentBlocks.findIndex(
+        (item) => isRecord(item) && normalizeText(item.id) === blockId,
+      );
+      if (existingIndex >= 0) {
+        currentBlocks[existingIndex] = block;
+      } else {
+        currentBlocks.push(block);
+      }
+      gathering.status = "running";
+      gathering.blocks = currentBlocks;
+      if (normalizeText(gathering.workingBlockId) === blockId) {
+        gathering.workingBlockId = "";
+      }
+    }
+
+    if (event.event === "target_info_gathering_waiting_approval") {
+      gathering.status = "organized";
+    }
+
+    if (event.event === "target_info_gathering_approval_received") {
+      gathering.status = "running";
+    }
+
+    if (event.event === "target_info_gathering_complete") {
+      gathering.status = "completed";
+      gathering.workingBlockId = "";
+      if (isRecord(event.data.gathering)) {
+        const completed = event.data.gathering;
+        if (Array.isArray(completed.program) && completed.program.length > 0) {
+          gathering.program = completed.program;
+        }
+        if (Array.isArray(completed.blocks) && completed.blocks.length > 0) {
+          gathering.blocks = completed.blocks;
+        }
+      }
+      if (isRecord(event.data.target_memory)) {
+        gathering.paths = event.data.target_memory;
+      }
+    }
+  }
+
+  return toInformationGatheringView(gathering);
 }
 
 function buildTargetArchitectureDraft(
@@ -1071,12 +1372,13 @@ export default function Dashboard() {
   })();
   const shouldStreamScanEvents = Boolean(activeProjectId && activeScanId);
 
-  const [insightTab, setInsightTab] = useState<InsightTab>("checklist");
+  const [insightTab, setInsightTab] = useState<InsightTab>("information");
   const [isInsightFullscreen, setIsInsightFullscreen] = useState(false);
   const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [locallyAckedApprovalId, setLocallyAckedApprovalId] = useState<string | null>(null);
+  const [locallyAckedPasswordId, setLocallyAckedPasswordId] = useState<string | null>(null);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("custom");
   const [showApprovalModeMenu, setShowApprovalModeMenu] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<
@@ -1098,8 +1400,11 @@ export default function Dashboard() {
   const streamDegradedRef = useRef(true);
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
+  const [informationGatheringApprovalLoading, setInformationGatheringApprovalLoading] = useState(false);
   const [plannerApprovalLoading, setPlannerApprovalLoading] = useState(false);
   const [toolApprovalLoading, setToolApprovalLoading] = useState<"approve" | "skip" | null>(null);
+  const [passwordResponseLoading, setPasswordResponseLoading] = useState<"approve" | "deny" | null>(null);
+  const [pendingPasswordValue, setPendingPasswordValue] = useState("");
   const [checklistActionKey, setChecklistActionKey] = useState<string | null>(
     null,
   );
@@ -1348,6 +1653,161 @@ export default function Dashboard() {
       }
 
       if (
+        event.event === "planner_checklist_started" ||
+        event.event === "planner_checklist_complete" ||
+        event.event === "planner_waiting_approval" ||
+        event.event === "planner_approval_received"
+      ) {
+        const activeProject = useProjects
+          .getState()
+          .projects.find((project) => project.id === activeProjectId);
+        if (activeProject) {
+          const lastScan = isRecord(activeProject.lastScan)
+            ? activeProject.lastScan
+            : {};
+          const result = isRecord(lastScan.result) ? lastScan.result : {};
+          const currentIntel = isRecord(result.intel) ? result.intel : {};
+          const nextIntel: Record<string, unknown> = { ...currentIntel };
+
+          if (event.event === "planner_checklist_started") {
+            nextIntel.status = "running";
+          }
+
+          if (event.event === "planner_checklist_complete") {
+            nextIntel.status = normalizeText(event.data.intel_status) || "complete";
+            if (event.data.checklist) {
+              nextIntel.checklist = event.data.checklist;
+            }
+            if (eventSummary) {
+              nextIntel.summary = eventSummary;
+            }
+          }
+
+          if (event.event === "planner_waiting_approval") {
+            nextIntel.status = "awaiting_approval";
+          }
+
+          updateProject(
+            activeProjectId,
+            {
+              updatedAt: event.timestamp,
+              lastScan: {
+                ...lastScan,
+                result: {
+                  ...result,
+                  intel: nextIntel,
+                },
+              },
+            },
+            { persist: false },
+          );
+        }
+      }
+
+      if (
+        event.event === "target_info_gathering_program_organized" ||
+        event.event === "target_info_gathering_block_started" ||
+        event.event === "target_info_gathering_block_completed" ||
+        event.event === "target_info_gathering_waiting_approval" ||
+        event.event === "target_info_gathering_approval_received" ||
+        event.event === "target_info_gathering_complete"
+      ) {
+        const activeProject = useProjects
+          .getState()
+          .projects.find((project) => project.id === activeProjectId);
+        if (activeProject) {
+          const lastScan = isRecord(activeProject.lastScan)
+            ? activeProject.lastScan
+            : {};
+          const result = isRecord(lastScan.result) ? lastScan.result : {};
+          const currentGathering = isRecord(result.targetInfoGathering)
+            ? result.targetInfoGathering
+            : {};
+          const nextGathering: Record<string, unknown> = { ...currentGathering };
+
+          if (event.event === "target_info_gathering_program_organized" && isRecord(event.data.program)) {
+            nextGathering.status = "organized";
+            const blocks = Array.isArray(event.data.program.blocks) ? event.data.program.blocks : [];
+            if (blocks.length > 0) {
+              nextGathering.program = blocks;
+            }
+            if (isRecord(event.data.program.paths)) {
+              nextGathering.paths = event.data.program.paths;
+            }
+          }
+
+          if (event.event === "target_info_gathering_block_started" && isRecord(event.data.block)) {
+            const block = event.data.block;
+            nextGathering.status = "running";
+            nextGathering.workingBlockId = normalizeText(block.id);
+          }
+
+          if (event.event === "target_info_gathering_block_completed" && isRecord(event.data.block)) {
+            const block = event.data.block;
+            const currentBlocks = Array.isArray(nextGathering.blocks) ? [...nextGathering.blocks] : [];
+            const blockId = normalizeText(block.id);
+            const existingIndex = currentBlocks.findIndex(
+              (item) => isRecord(item) && normalizeText(item.id) === blockId,
+            );
+            if (existingIndex >= 0) {
+              currentBlocks[existingIndex] = block;
+            } else {
+              currentBlocks.push(block);
+            }
+            nextGathering.status = "running";
+            nextGathering.blocks = currentBlocks;
+            if (normalizeText(nextGathering.workingBlockId) === blockId) {
+              nextGathering.workingBlockId = "";
+            }
+          }
+
+          if (event.event === "target_info_gathering_waiting_approval") {
+            nextGathering.status = "organized";
+          }
+
+          if (event.event === "target_info_gathering_approval_received") {
+            nextGathering.status = "running";
+          }
+
+          if (event.event === "target_info_gathering_complete") {
+            nextGathering.status = "completed";
+            nextGathering.workingBlockId = "";
+            if (isRecord(event.data.gathering)) {
+              const gathering = event.data.gathering;
+              if (Array.isArray(gathering.program)) {
+                if (gathering.program.length > 0) {
+                  nextGathering.program = gathering.program;
+                }
+              }
+              if (Array.isArray(gathering.blocks)) {
+                if (gathering.blocks.length > 0) {
+                  nextGathering.blocks = gathering.blocks;
+                }
+              }
+            }
+            if (isRecord(event.data.target_memory)) {
+              nextGathering.paths = event.data.target_memory;
+            }
+          }
+
+          updateProject(
+            activeProjectId,
+            {
+              updatedAt: event.timestamp,
+              lastScan: {
+                ...lastScan,
+                result: {
+                  ...result,
+                  targetInfoGathering: nextGathering,
+                },
+              },
+            },
+            { persist: false },
+          );
+        }
+      }
+
+      if (
         event.event === "scan_completed" ||
         event.event === "scan_failed" ||
         event.event === "intel_complete"
@@ -1518,6 +1978,33 @@ export default function Dashboard() {
       normalizeRunningStatus(project) === "running",
   );
   const canRun = !isRunning && !isStarting && !hasAnotherRunningProject;
+  const awaitingInformationGatheringApproval = (() => {
+    for (const event of scanEvents) {
+      if (event.event === "target_info_gathering_waiting_approval") {
+        return true;
+      }
+      if (
+        event.event === "target_info_gathering_approval_received" ||
+        event.event === "target_info_gathering_complete" ||
+        event.event === "planner_checklist_started" ||
+        event.event === "scan_completed" ||
+        event.event === "scan_failed" ||
+        event.event === "scan_paused" ||
+        event.event === "scan_cancelled"
+      ) {
+        return false;
+      }
+    }
+
+    const lastScan = isRecord(activeProject.lastScan)
+      ? activeProject.lastScan
+      : null;
+    const waitingFlag = lastScan?.awaitingInformationGatheringApproval;
+    if (typeof waitingFlag === "boolean") {
+      return waitingFlag;
+    }
+    return lastScan?.awaiting_information_gathering_approval === true;
+  })();
   const awaitingPlannerApproval = (() => {
     for (const event of scanEvents) {
       if (event.event === "planner_waiting_approval") {
@@ -1570,6 +2057,7 @@ export default function Dashboard() {
       }
       if (
         event.event === "executer_tool_approval_decision" ||
+        event.event === "executer_tool_approval_cleared" ||
         event.event === "scan_completed" ||
         event.event === "scan_failed" ||
         event.event === "scan_paused" ||
@@ -1606,6 +2094,66 @@ export default function Dashboard() {
     return null;
   })();
   const pendingToolCommandPreview = buildPendingApprovalCommand(pendingToolApproval);
+  const pendingPasswordRequest: PendingPasswordRequestView | null = (() => {
+    for (const event of scanEvents) {
+      if (event.event === "executer_password_request") {
+        const data = event.data;
+        const candidate = {
+          passwordId: typeof data.password_id === "string" ? data.password_id : "",
+          toolName: typeof data.tool_name === "string" ? data.tool_name : "",
+          prompt: typeof data.prompt === "string" ? data.prompt : "",
+          reason: typeof data.reason === "string" ? data.reason : "",
+          callId: typeof data.call_id === "string" ? data.call_id : "",
+        };
+        if (
+          candidate.passwordId &&
+          locallyAckedPasswordId &&
+          candidate.passwordId === locallyAckedPasswordId
+        ) {
+          return null;
+        }
+        return candidate;
+      }
+      if (
+        event.event === "executer_password_response" ||
+        event.event === "executer_password_timeout" ||
+        event.event === "scan_completed" ||
+        event.event === "scan_failed" ||
+        event.event === "scan_paused" ||
+        event.event === "scan_cancelled"
+      ) {
+        return null;
+      }
+    }
+    return null;
+  })();
+
+  const handleApproveInformationGathering = async () => {
+    if (!activeProjectId || informationGatheringApprovalLoading || !isRunning) {
+      return;
+    }
+    setInformationGatheringApprovalLoading(true);
+    try {
+      await approveInformationGatheringForProjectScanFromDesktop(activeProjectId);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to approve information gathering.";
+      setStreamLogs((previous) => {
+        const nextEntry: DashboardLogEntry = {
+          id: `info-gathering-approve-error-${Math.random().toString(36).slice(2, 10)}`,
+          level: "warn",
+          message: `Information Gathering approval failed: ${message}`,
+          at: new Date().toISOString(),
+          source: "information_gathering",
+        };
+        return [...previous, nextEntry];
+      });
+    } finally {
+      setInformationGatheringApprovalLoading(false);
+    }
+  };
 
   const handleApprovePlanner = async () => {
     if (!activeProjectId || plannerApprovalLoading || !isRunning) {
@@ -1670,6 +2218,45 @@ export default function Dashboard() {
       });
     } finally {
       setToolApprovalLoading(null);
+    }
+  };
+
+  const handlePasswordResponse = async (approved: boolean) => {
+    if (!activeProjectId || !isRunning || !pendingPasswordRequest?.passwordId || passwordResponseLoading) {
+      return;
+    }
+    const passwordId = pendingPasswordRequest.passwordId;
+    const submittedPassword = approved ? pendingPasswordValue : "";
+    setLocallyAckedPasswordId(passwordId);
+    setPasswordResponseLoading(approved ? "approve" : "deny");
+    try {
+      await approvePasswordForProjectScanFromDesktop(activeProjectId, {
+        passwordId,
+        password: submittedPassword,
+        approved,
+      });
+      setPendingPasswordValue("");
+    } catch (error) {
+      setLocallyAckedPasswordId(null);
+      let message = "Failed to submit password response.";
+      if (error instanceof Error) {
+        message =
+          error.name === "AbortError"
+            ? "Password response timed out while waiting for server response."
+            : error.message;
+      }
+      setStreamLogs((previous) => {
+        const nextEntry: DashboardLogEntry = {
+          id: `password-response-error-${Math.random().toString(36).slice(2, 10)}`,
+          level: "warn",
+          message: `Password response failed: ${message}`,
+          at: new Date().toISOString(),
+          source: "executer",
+        };
+        return [...previous, nextEntry];
+      });
+    } finally {
+      setPasswordResponseLoading(null);
     }
   };
 
@@ -1851,6 +2438,20 @@ export default function Dashboard() {
       `${pendingToolApproval.role}: ${pendingToolCommandPreview || pendingToolApproval.toolName}`,
     );
   }, [pendingToolApproval, pendingToolCommandPreview, pushDesktopNotification]);
+
+  useEffect(() => {
+    setPendingPasswordValue("");
+  }, [pendingPasswordRequest?.passwordId]);
+
+  useEffect(() => {
+    if (!pendingPasswordRequest?.passwordId) {
+      return;
+    }
+    pushDesktopNotification(
+      "PentaForge Password Needed",
+      `${pendingPasswordRequest.toolName || "Tool"} requires authentication`,
+    );
+  }, [pendingPasswordRequest, pushDesktopNotification]);
 
   useEffect(() => {
     if (!awaitingPlannerApproval || !activeProjectId) {
@@ -2048,6 +2649,24 @@ export default function Dashboard() {
     resolvedPlannerResult.needs,
   );
   const plannerPlanView = toPlannerPlanView(resolvedPlannerResult.planData);
+  const informationGatheringView = (() => {
+    const activeResult = isRecord(activeProject.lastScan)
+      && isRecord(activeProject.lastScan.result)
+      ? activeProject.lastScan.result
+      : null;
+    const persisted = toInformationGatheringView(activeResult?.targetInfoGathering);
+    if (persisted && (persisted.program.length > 0 || persisted.blocks.length > 0)) {
+      return persisted;
+    }
+    const fromEvents = buildInformationGatheringViewFromEvents(scanEvents);
+    if (fromEvents && (fromEvents.program.length > 0 || fromEvents.blocks.length > 0)) {
+      return fromEvents;
+    }
+    return persisted ?? fromEvents;
+  })();
+  const informationGatheringCompletedIds = new Set(
+    (informationGatheringView?.blocks ?? []).map((block) => block.id),
+  );
   const architectureDraft = buildTargetArchitectureDraft(
     activeProject.targetType,
     activeProject.target,
@@ -2076,7 +2695,14 @@ export default function Dashboard() {
 
   const resolvedChecklist = (() => {
     for (const event of scanEvents) {
-      if (event.event !== "intel_complete" || !isRecord(event.data)) {
+      if (
+        event.event !== "planner_checklist_complete" &&
+        event.event !== "planner_waiting_approval" &&
+        event.event !== "intel_complete"
+      ) {
+        continue;
+      }
+      if (!isRecord(event.data)) {
         continue;
       }
       const structured = toStructuredChecklist(event.data.checklist);
@@ -2949,6 +3575,23 @@ export default function Dashboard() {
               </Button>
             </div>
           ) : null}
+          {awaitingInformationGatheringApproval ? (
+            <div className="flex justify-center pt-2">
+              <Button
+                size="sm"
+                variant="primary"
+                className="bg-blue-600 hover:bg-blue-700"
+                onClick={() => {
+                  void handleApproveInformationGathering();
+                }}
+                loading={informationGatheringApprovalLoading}
+                title="Approve static information gathering plan and continue"
+              >
+                <Check size={14} />
+                Continue Information Gathering
+              </Button>
+            </div>
+          ) : null}
           {pendingToolApproval ? (
             <div className="mt-2 flex flex-col items-center gap-2 pt-2">
               <p className="text-xs text-text-muted text-center">
@@ -2978,6 +3621,57 @@ export default function Dashboard() {
                   <X size={14} />
                   Skip Tool
                 </Button>
+              </div>
+            </div>
+          ) : null}
+          {pendingPasswordRequest ? (
+            <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+              <p className="text-sm font-semibold text-text-primary">
+                Authentication required for {pendingPasswordRequest.toolName || "tool"}
+              </p>
+              {pendingPasswordRequest.reason ? (
+                <p className="mt-1 text-xs text-text-muted">
+                  {pendingPasswordRequest.reason}
+                </p>
+              ) : null}
+              {pendingPasswordRequest.prompt ? (
+                <p className="mt-1 text-xs text-text-muted">
+                  Prompt: <span className="font-mono">{pendingPasswordRequest.prompt}</span>
+                </p>
+              ) : null}
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <Input
+                  type="password"
+                  value={pendingPasswordValue}
+                  onChange={(event) => setPendingPasswordValue(event.target.value)}
+                  placeholder="Enter password"
+                  className="sm:max-w-sm"
+                />
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() => {
+                      void handlePasswordResponse(true);
+                    }}
+                    loading={passwordResponseLoading === "approve"}
+                    disabled={pendingPasswordValue.length === 0}
+                  >
+                    <Check size={14} />
+                    Send Password
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      void handlePasswordResponse(false);
+                    }}
+                    loading={passwordResponseLoading === "deny"}
+                  >
+                    <X size={14} />
+                    Deny
+                  </Button>
+                </div>
               </div>
             </div>
           ) : null}
@@ -3117,10 +3811,10 @@ export default function Dashboard() {
               <div className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-0/40 p-1">
                 <Button
                   size="xs"
-                  variant={insightTab === "plan" ? "secondary" : "ghost"}
-                  onClick={() => setInsightTab("plan")}
+                  variant={insightTab === "information" ? "secondary" : "ghost"}
+                  onClick={() => setInsightTab("information")}
                 >
-                  Plan
+                  Information
                 </Button>
                 <Button
                   size="xs"
@@ -3128,6 +3822,13 @@ export default function Dashboard() {
                   onClick={() => setInsightTab("checklist")}
                 >
                   Checklist
+                </Button>
+                <Button
+                  size="xs"
+                  variant={insightTab === "plan" ? "secondary" : "ghost"}
+                  onClick={() => setInsightTab("plan")}
+                >
+                  Plan
                 </Button>
               </div>
               <Button
@@ -3229,6 +3930,165 @@ export default function Dashboard() {
                   {isRunning
                     ? "Plan is loading. We will show planner phases as soon as they are persisted."
                     : "No planner result available yet."}
+                </p>
+              )}
+            </div>
+          ) : insightTab === "information" ? (
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
+              {informationGatheringView ? (
+                <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
+                  {(() => {
+                    const topStatus = informationGatheringView.status === "completed"
+                      ? "complete"
+                      : awaitingInformationGatheringApproval || informationGatheringView.status === "organized"
+                        ? "not yet"
+                        : "working";
+                    return (
+                  <div className="rounded-md border border-border bg-surface-1/45 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-text-primary">
+                        Static Information Gathering
+                      </p>
+                      <span className="rounded border border-border bg-surface-0/55 px-2 py-0.5 text-xs capitalize text-text-muted">
+                        {topStatus}
+                      </span>
+                    </div>
+                    {awaitingInformationGatheringApproval ? (
+                      <div className="mt-3 flex items-center justify-end">
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          className="bg-blue-600 hover:bg-blue-700"
+                          onClick={() => {
+                            void handleApproveInformationGathering();
+                          }}
+                          loading={informationGatheringApprovalLoading}
+                          title="Approve static information gathering plan and continue"
+                        >
+                          <Check size={14} />
+                          Continue Information Gathering
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                    );
+                  })()}
+
+                  <div className="rounded-md border border-border bg-surface-1/45">
+                    <div className={`border-b border-border ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}>
+                      <p className="text-sm font-semibold text-text-primary">Final Static Blocks</p>
+                    </div>
+                    <div className={`${isInsightFullscreen ? "p-3 space-y-3" : "p-2 space-y-2"}`}>
+                      {(() => {
+                        const renderedBlocks = informationGatheringView.program.length > 0
+                          ? informationGatheringView.program.map((programBlock) => {
+                              const executedBlock = informationGatheringView.blocks.find(
+                                (block) => block.id === programBlock.id,
+                              );
+                              return {
+                                id: programBlock.id,
+                                name: programBlock.name,
+                                goal: programBlock.goal || executedBlock?.goal || "",
+                                decision: programBlock.status || executedBlock?.status || "keep",
+                                rationale: programBlock.selectionRationale || executedBlock?.selectionRationale || "",
+                                plannedTools: programBlock.plannedTools,
+                                skippedTools: programBlock.skippedTools,
+                                summary: executedBlock?.summary || "",
+                                executionStatus: informationGatheringCompletedIds.has(programBlock.id)
+                                  ? "complete"
+                                  : informationGatheringView.workingBlockId === programBlock.id
+                                    ? "working"
+                                    : "not yet",
+                              };
+                            })
+                          : informationGatheringView.blocks.map((block) => ({
+                              id: block.id,
+                              name: block.name,
+                              goal: block.goal,
+                              decision: block.status || "keep",
+                              rationale: block.selectionRationale,
+                              plannedTools: block.plannedTools.map((tool) => ({ label: tool, kind: "builtin" as const })),
+                              skippedTools: block.skippedTools,
+                              summary: block.summary,
+                              executionStatus: informationGatheringCompletedIds.has(block.id)
+                                ? "complete"
+                                : informationGatheringView.workingBlockId === block.id
+                                  ? "working"
+                                  : "not yet",
+                            }));
+
+                        if (renderedBlocks.length === 0) {
+                          return (
+                            <p className="text-sm text-text-muted">
+                              Information Gathering details are not available yet.
+                            </p>
+                          );
+                        }
+
+                        return renderedBlocks.map((block, blockIndex) => (
+                          <div
+                            key={`${block.id}-${blockIndex}`}
+                            className="rounded-md border border-border bg-surface-0/35 p-3"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-semibold text-text-primary">
+                                {blockIndex + 1}. {block.name}
+                              </p>
+                              <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-xs capitalize text-text-muted">
+                                {block.executionStatus}
+                              </span>
+                            </div>
+                            {block.goal ? (
+                              <div className="mt-2">
+                                <p className="text-xs font-medium text-text-primary">Scenario</p>
+                                <p className="mt-1 text-xs text-text-secondary">{block.goal}</p>
+                              </div>
+                            ) : null}
+                            <div className="mt-2">
+                              <p className="text-xs font-medium text-text-primary">Full tools</p>
+                              <div className="mt-1 flex flex-wrap gap-1.5">
+                                {block.plannedTools.length === 0 ? (
+                                  <span className="text-xs text-text-muted">No tools selected.</span>
+                                ) : (
+                                  block.plannedTools.map((tool, toolIndex) => (
+                                    <span
+                                      key={`${block.id}-tool-${toolIndex}`}
+                                      className={`rounded border px-2 py-1 text-xs ${tool.kind === "custom" ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-border bg-surface-1/55 text-text-secondary"}`}
+                                    >
+                                      {tool.label}
+                                    </span>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                            {block.skippedTools.length > 0 ? (
+                              <div className="mt-2">
+                                <p className="text-xs font-medium text-text-primary">Skipped tools</p>
+                                <p className="mt-1 text-xs text-text-muted">{block.skippedTools.join(", ")}</p>
+                              </div>
+                            ) : null}
+                            <div className="mt-2">
+                              <p className="text-xs font-medium text-text-primary">LLM remark</p>
+                              <p className="mt-1 text-xs text-text-muted capitalize">{block.decision || "keep"}</p>
+                              {block.rationale ? (
+                                <p className="mt-1 text-xs text-text-secondary">{block.rationale}</p>
+                              ) : null}
+                            </div>
+                            {block.summary ? (
+                              <div className="mt-2">
+                                <p className="text-xs font-medium text-text-primary">Result</p>
+                                <p className="mt-1 text-xs text-text-secondary">{block.summary}</p>
+                              </div>
+                            ) : null}
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <p className="px-1 py-2 text-sm text-text-muted">
+                  Information Gathering details are not available yet.
                 </p>
               )}
             </div>
@@ -3665,6 +4525,7 @@ export default function Dashboard() {
           target={activeProject.target}
           targetType={activeProject.targetType}
           agents={activeProject.agents}
+          history={activeProject.copilotHistory}
         />
       </div>
       <Button

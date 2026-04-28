@@ -1,5 +1,5 @@
 import { useConfig } from "@/stores/config";
-import type { Project } from "@/types";
+import type { CopilotMessage, Project } from "@/types";
 
 export interface ProjectTargetTypeOption {
   value: string;
@@ -158,21 +158,20 @@ export interface IntelForceUpdateStatus {
   error: string;
 }
 
-export interface StaticReconScenario {
-  task: string;
-  agent: string;
-  priority: number;
-  details: string;
-  methods: string[];
-  done?: boolean;
-  status?: string;
+export interface InformationGatheringProfileBlock {
+  id: string;
+  name: string;
+  interaction: string;
+  goal: string;
+  tools: string[];
 }
 
-export interface StaticReconPlan {
+export interface InformationGatheringProfile {
   target_type: string;
-  max_items: number;
+  version: string;
   generated_from: string;
-  scenarios: StaticReconScenario[];
+  max_blocks: number;
+  blocks: InformationGatheringProfileBlock[];
   created_at?: string;
   updated_at?: string;
 }
@@ -188,8 +187,9 @@ export interface AIAssistRequest {
 export interface AIAssistResponse {
   ok: boolean;
   blocked: boolean;
-  route: "planner" | "reporting" | "blocked";
+  route: "assistant" | "planner" | "reporting" | "blocked";
   reply: string;
+  next_context?: string;
   classification: {
     reason: string;
     confidence: number;
@@ -252,6 +252,48 @@ function normalizeProjectRow(value: unknown): Project | null {
     createdAt,
     updatedAt,
     description: typeof row.description === "string" ? row.description : undefined,
+    copilotHistory: Array.isArray(row.copilotHistory)
+      ? row.copilotHistory
+          .map((item) => {
+            if (typeof item !== "object" || item === null) {
+              return null;
+            }
+            const message = item as Record<string, unknown>;
+            const role = message.role === "user" || message.role === "assistant"
+              ? message.role
+              : null;
+            const text = typeof message.text === "string" ? message.text : "";
+            if (!role || !text.trim()) {
+              return null;
+            }
+            const normalized: CopilotMessage = {
+              id: typeof message.id === "string" && message.id.trim()
+                ? message.id
+                : `${role}-${Math.random().toString(36).slice(2, 10)}`,
+              role,
+              text,
+            };
+            if (typeof message.timestamp === "string" && message.timestamp.trim()) {
+              normalized.timestamp = message.timestamp;
+            }
+            if (
+              message.route === "assistant"
+              || message.route === "planner"
+              || message.route === "reporting"
+              || message.route === "blocked"
+            ) {
+              normalized.route = message.route;
+            }
+            if (typeof message.blocked === "boolean") {
+              normalized.blocked = message.blocked;
+            }
+            return normalized;
+          })
+          .filter((item): item is CopilotMessage => item !== null)
+      : undefined,
+    copilotContext: typeof row.copilotContext === "string"
+      ? row.copilotContext
+      : undefined,
     findings: Array.isArray(row.findings) ? (row.findings as Project["findings"]) : [],
     agents: Array.isArray(row.agents) ? (row.agents as Project["agents"]) : [],
     phases: Array.isArray(row.phases) ? (row.phases as Project["phases"]) : [],
@@ -401,6 +443,28 @@ export async function approvePlannerForProjectScanFromDesktop(
   );
 }
 
+export async function approveInformationGatheringForProjectScanFromDesktop(
+  projectId: string,
+): Promise<{
+  ok: boolean;
+  project_id?: string;
+  scan_id?: string;
+  status?: string;
+  awaiting_information_gathering_approval?: boolean;
+  already_approved?: boolean;
+}> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/scans/${encodeURIComponent(projectId)}/approve-information-gathering`,
+    {
+      method: "POST",
+    },
+    120000,
+  );
+}
+
 export async function approveToolForProjectScanFromDesktop(
   projectId: string,
   payload: {
@@ -432,6 +496,38 @@ export async function approveToolForProjectScanFromDesktop(
   // Keep the approval request alive slightly longer so the UI does not
   // report a false timeout if the browser/network is briefly delayed.
   return await requestJson(path, init, 310000);
+}
+
+export async function approvePasswordForProjectScanFromDesktop(
+  projectId: string,
+  payload: {
+    passwordId: string;
+    password: string;
+    approved: boolean;
+  },
+): Promise<{
+  ok: boolean;
+  project_id?: string;
+  scan_id?: string;
+  password_id?: string;
+  approved?: boolean;
+  tool_name?: string;
+}> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/scans/${encodeURIComponent(projectId)}/password-response`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        password_id: payload.passwordId,
+        password: payload.password,
+        approved: payload.approved,
+      }),
+    },
+    310000,
+  );
 }
 
 export async function clearProjectScanEventsCacheFromDesktop(projectId: string): Promise<void> {
@@ -580,71 +676,71 @@ export async function listProjectTargetFieldsFromDesktop(
   });
 }
 
-export async function listStaticReconPlansFromDesktop(): Promise<StaticReconPlan[]> {
+export async function listInformationGatheringProfilesFromDesktop(): Promise<InformationGatheringProfile[]> {
   if (!supportsDesktopProjectBridge()) {
     return [];
   }
 
-  const payload = await requestJson<{ plans?: unknown[] }>("/api/project-target-types/static-recon-plans");
-  const rows = Array.isArray(payload.plans) ? payload.plans : [];
+  const payload = await requestJson<{ profiles?: unknown[] }>("/api/project-target-types/information-gathering-profiles");
+  const rows = Array.isArray(payload.profiles) ? payload.profiles : [];
   return rows
-    .map((row) => toStaticReconPlan(row))
-    .filter((row): row is StaticReconPlan => row !== null);
+    .map((row) => toInformationGatheringProfile(row))
+    .filter((row): row is InformationGatheringProfile => row !== null);
 }
 
-export async function getStaticReconPlanFromDesktop(targetType: string): Promise<StaticReconPlan> {
+export async function getInformationGatheringProfileFromDesktop(targetType: string): Promise<InformationGatheringProfile> {
   if (!supportsDesktopProjectBridge()) {
     throw new Error("desktop project bridge is disabled");
   }
 
-  const payload = await requestJson<{ plan?: unknown }>(
-    `/api/project-target-types/${encodeURIComponent(targetType)}/static-recon-plan`,
+  const payload = await requestJson<{ profile?: unknown }>(
+    `/api/project-target-types/${encodeURIComponent(targetType)}/information-gathering-profile`,
   );
-  const plan = toStaticReconPlan(payload.plan);
-  if (!plan) {
-    throw new Error("Invalid static recon plan response");
+  const profile = toInformationGatheringProfile(payload.profile);
+  if (!profile) {
+    throw new Error("Invalid information gathering profile response");
   }
-  return plan;
+  return profile;
 }
 
-export async function saveStaticReconPlanFromDesktop(
+export async function saveInformationGatheringProfileFromDesktop(
   targetType: string,
-  payload: StaticReconPlan,
-): Promise<StaticReconPlan> {
+  payload: InformationGatheringProfile,
+): Promise<InformationGatheringProfile> {
   if (!supportsDesktopProjectBridge()) {
     throw new Error("desktop project bridge is disabled");
   }
 
-  const response = await requestJson<{ plan?: unknown }>(
-    `/api/project-target-types/${encodeURIComponent(targetType)}/static-recon-plan`,
+  const response = await requestJson<{ profile?: unknown }>(
+    `/api/project-target-types/${encodeURIComponent(targetType)}/information-gathering-profile`,
     {
       method: "PUT",
       body: JSON.stringify(payload),
     },
   );
-  const plan = toStaticReconPlan(response.plan);
-  if (!plan) {
-    throw new Error("Invalid static recon plan response");
+  const profile = toInformationGatheringProfile(response.profile);
+  if (!profile) {
+    throw new Error("Invalid information gathering profile response");
   }
-  return plan;
+  return profile;
 }
 
-export async function resetStaticReconPlanFromDesktop(targetType: string): Promise<StaticReconPlan> {
+export async function resetInformationGatheringProfileFromDesktop(targetType: string): Promise<InformationGatheringProfile> {
   if (!supportsDesktopProjectBridge()) {
     throw new Error("desktop project bridge is disabled");
   }
 
-  const response = await requestJson<{ plan?: unknown }>(
-    `/api/project-target-types/${encodeURIComponent(targetType)}/static-recon-plan`,
+  const response = await requestJson<{ profile?: unknown }>(
+    `/api/project-target-types/${encodeURIComponent(targetType)}/information-gathering-profile`,
     {
       method: "DELETE",
     },
   );
-  const plan = toStaticReconPlan(response.plan);
-  if (!plan) {
-    throw new Error("Invalid static recon plan response");
+  const profile = toInformationGatheringProfile(response.profile);
+  if (!profile) {
+    throw new Error("Invalid information gathering profile response");
   }
-  return plan;
+  return profile;
 }
 
 export async function createProjectShareLinkFromDesktop(
@@ -667,51 +763,51 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function toStaticReconScenario(value: unknown): StaticReconScenario | null {
+function toInformationGatheringProfileBlock(value: unknown): InformationGatheringProfileBlock | null {
   if (!isRecord(value)) {
     return null;
   }
   if (
-    typeof value.task !== "string"
-    || typeof value.agent !== "string"
-    || typeof value.priority !== "number"
-    || typeof value.details !== "string"
-    || !Array.isArray(value.methods)
+    typeof value.id !== "string"
+    || typeof value.name !== "string"
+    || typeof value.interaction !== "string"
+    || typeof value.goal !== "string"
+    || !Array.isArray(value.tools)
   ) {
     return null;
   }
 
   return {
-    task: value.task,
-    agent: value.agent,
-    priority: value.priority,
-    details: value.details,
-    methods: value.methods.filter((item): item is string => typeof item === "string"),
-    done: typeof value.done === "boolean" ? value.done : false,
-    status: typeof value.status === "string" ? value.status : "not yet",
+    id: value.id,
+    name: value.name,
+    interaction: value.interaction,
+    goal: value.goal,
+    tools: value.tools.filter((item): item is string => typeof item === "string"),
   };
 }
 
-function toStaticReconPlan(value: unknown): StaticReconPlan | null {
+function toInformationGatheringProfile(value: unknown): InformationGatheringProfile | null {
   if (!isRecord(value)) {
     return null;
   }
   if (
     typeof value.target_type !== "string"
-    || typeof value.max_items !== "number"
+    || typeof value.version !== "string"
     || typeof value.generated_from !== "string"
-    || !Array.isArray(value.scenarios)
+    || typeof value.max_blocks !== "number"
+    || !Array.isArray(value.blocks)
   ) {
     return null;
   }
 
   return {
     target_type: value.target_type,
-    max_items: value.max_items,
+    version: value.version,
     generated_from: value.generated_from,
-    scenarios: value.scenarios
-      .map((item) => toStaticReconScenario(item))
-      .filter((item): item is StaticReconScenario => item !== null),
+    max_blocks: value.max_blocks,
+    blocks: value.blocks
+      .map((item) => toInformationGatheringProfileBlock(item))
+      .filter((item): item is InformationGatheringProfileBlock => item !== null),
     created_at: typeof value.created_at === "string" ? value.created_at : undefined,
     updated_at: typeof value.updated_at === "string" ? value.updated_at : undefined,
   };
@@ -933,7 +1029,7 @@ export async function askAIAssistFromDesktop(
       target_type: request.targetType ?? "",
       context: request.context ?? "",
     }),
-  });
+  }, 120000);
 }
 
 export async function setIntelUpdateScheduleFromDesktop(

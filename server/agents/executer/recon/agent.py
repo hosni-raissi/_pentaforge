@@ -83,7 +83,12 @@ class ReconExecuterAgent(BaseExecuterAgent):
             context_window_max_tokens=RECON_CONTEXT_WINDOW_MAX_TOKENS,
         )
 
-    async def run(self, user_message: str) -> ExecuterResult:
+    async def run(
+        self,
+        user_message: str,
+        *,
+        max_tool_rounds_override: int | None = None,
+    ) -> ExecuterResult:
         context_block = "Context window disabled (missing project_id)."
         if self._context_window is not None:
             await self._context_window.ensure_token_budget(
@@ -95,19 +100,25 @@ class ReconExecuterAgent(BaseExecuterAgent):
         available_tools = sorted(self._tools.keys())
         normalized_targets = normalize_target_types(self._target_types)
         max_tool_calls_for_run = _max_tool_calls_per_round_for_message(user_message)
+        max_rounds_for_run = (
+            min(3, max(1, int(max_tool_rounds_override)))
+            if max_tool_rounds_override is not None
+            else MAX_TOOL_ROUNDS
+        )
         packet = build_recon_scenario_packet(
             scenario_and_target=user_message,
             context_block=context_block,
             available_tools=available_tools,
             target_types=normalized_targets,
             max_tool_calls_per_round=max_tool_calls_for_run,
+            max_rounds_per_scenario=max_rounds_for_run,
         )
         previous_timeout_cap = self._execution_tool_timeout_cap_seconds
         previous_max_tool_calls = self._max_tool_calls_per_round
         self._execution_tool_timeout_cap_seconds = _tool_timeout_cap_for_message(user_message)
         self._max_tool_calls_per_round = max_tool_calls_for_run
         try:
-            return await super().run(packet)
+            return await super().run(packet, max_tool_rounds_override=max_rounds_for_run)
         finally:
             self._execution_tool_timeout_cap_seconds = previous_timeout_cap
             self._max_tool_calls_per_round = previous_max_tool_calls
@@ -157,14 +168,18 @@ def build_recon_scenario_packet(
     available_tools: list[str],
     target_types: list[str],
     max_tool_calls_per_round: int,
+    max_rounds_per_scenario: int,
 ) -> str:
     return (
         "Recon scenario packet:\n"
         "1) Scenario + target info from operator follows below.\n"
         "   Operator info may include prior execution history for this agent.\n"
         "2) Use scoped recon tools to maximize useful recon signal for this scenario.\n"
-        f"3) Max tool executions per round: {max_tool_calls_per_round}. Max rounds per scenario: 3.\n"
-        "4) Always update context window with new findings each round.\n\n"
+        f"3) Max tool executions per round: {max_tool_calls_per_round}. Max rounds per scenario: {max_rounds_per_scenario}.\n"
+        "4) Every allowed round is a tool-execution round. Do not reserve a separate final JSON/reporting round.\n"
+        "5) If another round remains after this one, carry forward a concise summary of what ran and what was found before choosing the next tools.\n"
+        "6) After the last allowed tool round, the system will forward collected evidence and round summaries to the perceptor.\n"
+        "7) Always update context window with new findings each round.\n\n"
         "Current context window:\n"
         f"{context_block}\n\n"
         f"Target surface scope for this run: {', '.join(target_types) if target_types else 'unspecified'}\n\n"

@@ -101,6 +101,20 @@ async def approve_planner(project_id: str) -> dict[str, Any]:
     return result
 
 
+@router.post("/api/scans/{project_id}/approve-information-gathering")
+async def approve_information_gathering(project_id: str) -> dict[str, Any]:
+    try:
+        result = await scan_orchestrator.approve_information_gathering(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to approve information gathering: {exc}") from exc
+
+    return result
+
+
 @router.post("/api/scans/{project_id}/approve-tool")
 async def approve_tool(project_id: str, payload: ApproveToolPayload) -> dict[str, Any]:
     try:

@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Bot, SendHorizontal, Sparkles } from 'lucide-react';
 
 import { askAIAssistFromDesktop } from '@/lib/projectBridge';
+import type { CopilotMessage } from '@/types';
 import type { AgentInfo } from '../../types';
 import { Button } from '../ui/Button';
 import { Card, CardHeader, CardTitle } from '../ui/Card';
@@ -12,12 +13,7 @@ interface AIPromptPanelProps {
   target: string;
   targetType: string;
   agents: AgentInfo[];
-}
-
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  text: string;
+  history?: CopilotMessage[];
 }
 
 const quickPrompts = [
@@ -32,16 +28,30 @@ export function AIPromptPanel({
   target,
   targetType,
   agents,
+  history,
 }: AIPromptPanelProps) {
-  const [prompt, setPrompt] = useState('');
-  const [sending, setSending] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
+  const introMessage: CopilotMessage = useMemo(
+    () => ({
       id: 'intro',
       role: 'assistant',
-      text: `AI Copilot online for ${projectName}. Ask anything about ${target}.`,
-    },
-  ]);
+      text: `Echo online for ${projectName}. Ask anything about ${target}.`,
+    }),
+    [projectName, target]
+  );
+  const [prompt, setPrompt] = useState('');
+  const [sending, setSending] = useState(false);
+  const [messages, setMessages] = useState<CopilotMessage[]>(() => (
+    history && history.length > 0 ? history : [introMessage]
+  ));
+
+  useEffect(() => {
+    if (history && history.length > 0) {
+      setMessages(history);
+      return;
+    }
+    setMessages([introMessage]);
+  }, [history, introMessage]);
+
   const hasConversationStarted = messages.some((message) => message.role === 'user');
 
   const runningAgent = useMemo(
@@ -60,7 +70,7 @@ export function AIPromptPanel({
     const clean = text.trim();
     if (!clean || sending) return;
 
-    const userMessage: ChatMessage = {
+    const userMessage: CopilotMessage = {
       id: `u-${Date.now()}`,
       role: 'user',
       text: clean,
@@ -80,21 +90,16 @@ export function AIPromptPanel({
         targetType,
         context,
       });
-      const routeLabel =
-        response.route === 'planner'
-          ? 'Planner'
-          : response.route === 'reporting'
-            ? 'Reporting'
-            : 'Guard';
-      const decisionLine = `[${routeLabel}] confidence ${Math.round((response.classification.confidence ?? 0) * 100)}%`;
-      const aiMessage: ChatMessage = {
+      const aiMessage: CopilotMessage = {
         id: `a-${Date.now()}`,
         role: 'assistant',
-        text: `${decisionLine}\n${response.reply}`,
+        text: response.reply,
+        route: response.route,
+        blocked: response.blocked,
       };
       setMessages((prev) => [...prev, aiMessage]);
     } catch {
-      const aiMessage: ChatMessage = {
+      const aiMessage: CopilotMessage = {
         id: `a-${Date.now()}`,
         role: 'assistant',
         text: `${buildFallbackReply()}\n(backend AI assist unavailable, fallback mode)`,
@@ -106,7 +111,7 @@ export function AIPromptPanel({
   };
 
   return (
-    <Card className="flex h-[420px] flex-col">
+    <Card className="flex h-[520px] flex-col sm:h-[560px]">
       <CardHeader className="mb-2">
         <div>
           <CardTitle>Interact with AI</CardTitle>
@@ -127,10 +132,12 @@ export function AIPromptPanel({
             {message.role === 'assistant' && (
               <div className="mb-1 flex items-center gap-1 text-xs font-semibold text-pf-400">
                 <Bot size={11} />
-                Copilot
+                Echo
               </div>
             )}
-            <p>{message.text}</p>
+            <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-text-primary">
+              {message.text}
+            </p>
           </div>
         ))}
       </div>

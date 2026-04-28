@@ -8,7 +8,7 @@ MAX_TOOL_ROUNDS = 3  # Standard: R1/R2 tool execution, R3 consolidation only
 LLM_CALL_TIMEOUT_SECONDS = 300
 RETEST_CONTEXT_WINDOW_MAX_TOKENS = 15000
 RETEST_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS = 15000
-RETEST_MAX_TOOL_CALLS_PER_ROUND = 3
+RETEST_MAX_TOOL_CALLS_PER_ROUND = 2
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Payload Replay Configuration

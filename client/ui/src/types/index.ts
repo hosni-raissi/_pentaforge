@@ -6,6 +6,15 @@ export type AgentName = 'planner' | 'recon' | 'exploit' | 'verify' | 'report' | 
 export type AgentState = 'idle' | 'running' | 'success' | 'error' | 'waiting';
 export type PhaseName = 'Reconnaissance' | 'Enumeration' | 'Exploitation' | 'Post-Exploitation' | 'Reporting';
 
+export interface CopilotMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp?: string;
+  route?: 'assistant' | 'planner' | 'reporting' | 'blocked';
+  blocked?: boolean;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -18,6 +27,8 @@ export interface Project {
   createdAt: string;
   updatedAt: string;
   description?: string;
+  copilotHistory?: CopilotMessage[];
+  copilotContext?: string;
   findings: Finding[];
   agents: AgentInfo[];
   phases: PhaseInfo[];
@@ -43,6 +54,13 @@ export interface Project {
         needs?: unknown[];
         plan_data?: Record<string, unknown>;
       };
+      targetInfoGathering?: {
+        status?: string;
+        program?: unknown[];
+        blocks?: unknown[];
+        paths?: Record<string, unknown>;
+      };
+      targetMemory?: Record<string, unknown>;
       [key: string]: unknown;
     };
     [key: string]: unknown;

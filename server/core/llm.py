@@ -124,9 +124,12 @@ _ROLE_ALIASES: dict[str, str] = {
 _ROLE_GROUPS: dict[str, str] = {
     "intel": "INTEL_REPORT",
     "report": "INTEL_REPORT",
+    "assistant": "PLANNER",
+    "information_gathering": "INFO_MEMORY",
     "planner": "PLANNER",
     "recon": "RECON",
     "exploit": "EXPLOIT",
+    "system_memory": "INFO_MEMORY",
     "retest": "RETEST_VERIFY",
     "verify": "RETEST_VERIFY",
 }
@@ -423,13 +426,20 @@ class _MistralClient:
 class LLMClient:
     """Unified async client for all LLM providers."""
 
-    def __init__(self, config: LLMConfig | None = None, mode: str | None = None) -> None:
+    def __init__(
+        self,
+        config: LLMConfig | None = None,
+        mode: str | None = None,
+        *,
+        client_name: str | None = None,
+    ) -> None:
         # mode parameter is accepted for backward compatibility but ignored
         # (the config itself determines behavior)
         _ = mode
         self._config = config or get_config()
         self._provider = self._config.provider
         self._is_local = self._provider == "ollama"
+        self._client_name = str(client_name or "").strip()
 
         # Use Mistral SDK for native support (if available)
         self._use_mistral_sdk = False
@@ -453,6 +463,7 @@ class LLMClient:
 
         logger.debug(
             "llm_client_initialized",
+            client_name=self._client_name or None,
             provider=self._provider,
             model=self._config.model,
             api_url=self._config.api_url[:50] + "..." if len(self._config.api_url) > 50 else self._config.api_url,

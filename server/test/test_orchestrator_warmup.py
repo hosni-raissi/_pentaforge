@@ -3,6 +3,7 @@ import asyncio
 import json
 
 from server.app.orchestrator import (
+    _build_default_target_info_profile,
     _build_verified_finding_entry,
     _build_project_run_cache_dir,
     _build_post_warmup_intel_info,
@@ -58,6 +59,12 @@ from server.agents.planner.prompts import (
     WARMUP_RECON_SYSTEM_PROMPT,
 )
 from server.agents.planner.tools.pentest_plan import _merge_phases
+from server.nodes.system_memory import (
+    build_system_memory_prompt_block,
+    initialize_system_memory,
+    save_system_memory,
+)
+from server.nodes.information_gathering import load_target_info_profile_defaults
 from server.core.tool import Tool
 
 
@@ -71,6 +78,18 @@ def _count_plan_scenarios(plan_data: dict) -> int:
                 continue
             total += len(step.get("scenarios", []))
     return total
+
+
+def test_target_info_profile_defaults_load_from_information_gathering_json():
+    payload = load_target_info_profile_defaults()
+    assert "web_app" in payload
+    assert isinstance(payload["web_app"], list)
+    assert payload["web_app"][0]["name"] == "Passive Context"
+
+    profile = _build_default_target_info_profile("web_app")
+    assert profile["generated_from"] == "static_target_info_profile"
+    assert profile["blocks"][2]["name"] == "Surface Mapping"
+    assert "api_passive_enum" in profile["blocks"][2]["tools"]
 
 
 def test_build_warmup_recon_plan_normalizes_to_exactly_eight_recon_scenarios():
@@ -215,7 +234,7 @@ def test_static_recon_plan_is_capped_and_promptable():
 
 
 def test_warmup_planner_message_uses_target_description_and_disables_tools():
-    static_plan = _build_static_recon_plan("web_app")
+    target_info_profile = _build_default_target_info_profile("web_app")
 
     message = _build_warmup_planner_message(
         target="http://example.com",
@@ -227,7 +246,15 @@ def test_warmup_planner_message_uses_target_description_and_disables_tools():
             "Allowed: non-destructive testing.\n"
             "Not allowed: credential attacks."
         ),
-        static_recon_plan=static_plan,
+        target_info_profile=target_info_profile,
+        target_memory={
+            "overview": {"target": "http://example.com", "target_type": "web_app"},
+            "gathering": {
+                "blocks": [
+                    {"name": "Fingerprinting", "status": "completed", "results": [{"tool": "http_probe", "status": "completed"}]}
+                ]
+            },
+        },
     )
 
     assert "## Target Profile" in message
@@ -235,28 +262,95 @@ def test_warmup_planner_message_uses_target_description_and_disables_tools():
     assert "## Scope Rules" in message
     assert "Allowed / in-scope actions" in message
     assert "Not allowed / out-of-scope actions" in message
-    assert "Start from the stored static recon template" in message
-    assert "Preserve the original static scenario task names" in message
-    assert "Preserve the original static methods" in message
+    assert "Structured Target-Info Gathering Profile" in message
+    assert "Target Memory From Deterministic Gathering" in message
+    assert "Start from the structured target-info profile" in message
     assert "## Available Recon Tooling" in message
     assert "burp_suite" in message
     assert "Do NOT use tools in this planner pass." in message
 
 
 def test_warmup_planner_message_for_loopback_rejects_external_perimeter():
-    static_plan = _build_static_recon_plan("web_app")
+    target_info_profile = _build_default_target_info_profile("web_app")
 
     message = _build_warmup_planner_message(
         target="http://127.0.0.1:3001",
         target_type="web_app",
         scope="Allowed: local recon only.",
         info="Local training web app.",
-        static_recon_plan=static_plan,
+        target_info_profile=target_info_profile,
+        target_memory={},
     )
 
     assert "This target is loopback/local" in message
     assert "Do not include External Perimeter Mapping for loopback targets." in message
     assert "local web app perimeter mapping" in message
+
+
+def test_system_memory_save_writes_new_runtime_paths(tmp_path):
+    memory = initialize_system_memory(
+        project_id="proj-1",
+        scan_id="scan-1",
+        target="http://127.0.0.1",
+        target_type="web_app",
+        scope="safe local testing",
+        info="Local training app",
+        profile={"blocks": [{"name": "Fingerprinting", "tools": ["http_probe"]}]},
+    )
+    memory["gathering"]["blocks"] = [
+        {
+            "name": "Fingerprinting",
+            "status": "completed",
+            "summary": "Live HTTP service detected.",
+            "results": [{"tool": "http_probe", "status": "completed", "summary": "200 OK"}],
+        }
+    ]
+
+    saved = asyncio.run(save_system_memory(str(tmp_path), memory))
+
+    assert saved["paths"]["json"].endswith("/system_memory/memory.json")
+    assert saved["paths"]["markdown"].endswith("/system_memory/memory.md")
+
+
+def test_system_memory_prompt_block_uses_grouped_memory_and_compression_snapshot():
+    rendered = build_system_memory_prompt_block(
+        {
+            "overview": {"target": "http://example.com", "target_type": "web_app"},
+            "gathering": {
+                "blocks": [
+                    {
+                        "name": "Surface Mapping",
+                        "status": "completed",
+                        "summary": "Discovered API and JavaScript-exposed routes.",
+                    }
+                ]
+            },
+            "compression": {"summary": "Primary hotspots are API trust boundaries and admin/debug routes."},
+            "updates": [
+                {
+                    "stage": "warmup_recon",
+                    "title": "API & Endpoint Extraction",
+                    "summary": "Protected and debug endpoints were observed.",
+                }
+            ],
+            "checklist": {
+                "checklist": [
+                    {
+                        "phase": "1",
+                        "title": "Authentication",
+                        "items": [{"name": "Test auth bypass", "priority": 2}],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert "System memory overview" in rendered
+    assert "Grouped static gathering" in rendered
+    assert "Compressed memory snapshot" in rendered
+    assert "Primary hotspots are API trust boundaries and admin/debug routes." in rendered
+    assert "Stored checklist" in rendered
+    assert "Phase 1 Authentication" in rendered
 
 
 def test_warmup_scenario_tool_guidance_for_input_parameter_profiling_is_specific():
@@ -267,7 +361,7 @@ def test_warmup_scenario_tool_guidance_for_input_parameter_profiling_is_specific
 
 
 def test_full_planner_kickoff_message_includes_checklist_and_warmup_evidence():
-    static_plan = _build_static_recon_plan("web_app")
+    target_info_profile = _build_default_target_info_profile("web_app")
     message = _build_planner_kickoff_message(
         target="http://example.com",
         target_type="web_app",
@@ -295,7 +389,15 @@ def test_full_planner_kickoff_message_includes_checklist_and_warmup_evidence():
             "available_total": 2,
             "items_count": 2,
         },
-        static_recon_plan=static_plan,
+        target_info_profile=target_info_profile,
+        target_memory={
+            "overview": {"target": "http://example.com", "target_type": "web_app"},
+            "gathering": {
+                "blocks": [
+                    {"name": "Surface Mapping", "status": "completed", "results": [{"tool": "api_endpoint_discovery", "status": "completed"}]}
+                ]
+            },
+        },
         warmup_summaries=[
             {
                 "task": "Defensive & Tech Fingerprinting",
@@ -306,13 +408,15 @@ def test_full_planner_kickoff_message_includes_checklist_and_warmup_evidence():
     )
 
     assert "## Synthesized Checklist" in message
+    assert "## Structured Target-Info Gathering Profile" in message
+    assert "## Target Memory" in message
     assert "P2 Test default credentials" in message
     assert "P3 Review session token entropy" in message
     assert "## Warmup Recon Results" in message
     assert "## Evidence-Backed Follow-Up Hypotheses" in message
     assert "Apache/2.4.7 and missing HSTS discovered." in message
-    assert "Treat warmup recon results as the source of truth" in message
-    assert "Treat the evidence-backed follow-up hypotheses as candidate scenario seeds" in message
+    assert "If warmup recon results are present, treat them as the strongest source of truth" in message
+    assert "Treat deterministic target memory and evidence-backed follow-up hypotheses as candidate scenario seeds" in message
     assert "20 or fewer" in message
     assert "Do not leave Exploitation empty" in message
     assert "modern attack paths" in message
@@ -357,7 +461,7 @@ def test_followup_hypotheses_are_target_type_aware_for_web_targets():
 def test_warmup_planner_prompt_emphasizes_max_information_gain_and_preserving_good_baseline():
     assert "maximum information gain" in WARMUP_RECON_SYSTEM_PROMPT
     assert "Prefer scenarios that reveal the most unique surface early" in WARMUP_RECON_SYSTEM_PROMPT
-    assert "If the baseline is already strong for this target, preserve it." in WARMUP_RECON_SYSTEM_PROMPT
+    assert "If the profile and deterministic target memory are already strong for this target, preserve them." in WARMUP_RECON_SYSTEM_PROMPT
 
 
 def test_loop_replan_prompt_requires_evidence_supported_plan_updates():
@@ -528,9 +632,18 @@ def test_post_warmup_intel_info_includes_recon_plan_and_latest_cycle_cache():
                 "compact_summary": "Discovered /graphql with introspection hints and admin-linked mutations.",
             },
         ],
+        target_memory={
+            "overview": {"target": "http://example.com", "target_type": "web_app"},
+            "gathering": {
+                "blocks": [
+                    {"name": "Surface Mapping", "status": "completed", "results": [{"tool": "api_endpoint_discovery", "status": "completed"}]}
+                ]
+            },
+        },
     )
 
     assert "This is the recon plan to find max reconnaissance:" in info
+    assert "Deterministic target memory:" in info
     assert "[completed] Technology Fingerprinting" in info
     assert "This is the result (Perceptor cache) from cycle 2:" in info
     assert "Discovered /graphql with introspection hints and admin-linked mutations." in info
@@ -802,10 +915,10 @@ def test_warmup_recon_messages_enable_timeout_cap():
     assert _tool_timeout_cap_for_message("Normal recon scenario") is None
 
 
-def test_warmup_recon_messages_raise_tool_budget_to_three():
-    assert _max_tool_calls_per_round_for_message("Warmup scenario batch:\nScenario ID: s1") == 3
-    assert _max_tool_calls_per_round_for_message("Extra info: foo\nWarmup mode: recon-only surface discovery.") == 3
-    assert _max_tool_calls_per_round_for_message("Normal recon scenario") == 3
+def test_recon_messages_keep_fixed_tool_budget_of_two():
+    assert _max_tool_calls_per_round_for_message("Warmup scenario batch:\nScenario ID: s1") == 2
+    assert _max_tool_calls_per_round_for_message("Extra info: foo\nWarmup mode: recon-only surface discovery.") == 2
+    assert _max_tool_calls_per_round_for_message("Normal recon scenario") == 2
 
 
 def test_recon_scenario_packet_reflects_runtime_tool_budget():
@@ -814,10 +927,11 @@ def test_recon_scenario_packet_reflects_runtime_tool_budget():
         context_block="No stored context window entries.",
         available_tools=["nmap_scan", "linux_config_audit"],
         target_types=["linux_server"],
-        max_tool_calls_per_round=3,
+        max_tool_calls_per_round=2,
+        max_rounds_per_scenario=3,
     )
 
-    assert "Max tool executions per round: 3. Max rounds per scenario: 3." in packet
+    assert "Max tool executions per round: 2. Max rounds per scenario: 3." in packet
 
 
 def test_exploit_scenario_packet_reflects_runtime_tool_budget():
@@ -826,10 +940,11 @@ def test_exploit_scenario_packet_reflects_runtime_tool_budget():
         context_block="No stored context window entries.",
         available_tools=["run_custom", "payload_generator"],
         run_custom_catalog=["katana", "ffuf"],
-        max_tool_calls_per_round=3,
+        max_tool_calls_per_round=2,
+        max_rounds_per_scenario=3,
     )
 
-    assert "Max tool executions per round: 3. Max rounds per scenario: 3." in packet
+    assert "Max tool executions per round: 2. Max rounds per scenario: 3." in packet
 
 
 def test_base_executer_injects_and_clamps_warmup_timeout():
@@ -1952,6 +2067,7 @@ def test_execution_cycle_hands_info_findings_to_planner_without_cycle_number_cra
             scope="local web app",
             info="info",
             intel_checklist={},
+            project_cache_dir="/tmp",
         )
 
     should_continue, updated_plan = asyncio.run(_run())

@@ -1031,14 +1031,14 @@ export default function Settings() {
               <div className="space-y-4">
                 <Card>
                   <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
+                  <CardTitle className="flex items-center gap-2">
                       <ListTree size={14} />
-                      Recon Plan Library
+                      Information Gathering Library
                     </CardTitle>
                   </CardHeader>
                   <p className="text-sm text-text-secondary">
-                    Edit the saved recon baseline for each target type. These plans are stored in the database and used
-                    by the planner warmup before exploit work begins.
+                    Edit the JSON-backed static Information Gathering profile for each target type. These blocks are
+                    the exact baseline sent to the Information Gathering LLM before the first static scan runs.
                   </p>
                 </Card>
                 <StaticReconPlanSettings />

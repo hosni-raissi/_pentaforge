@@ -160,6 +160,22 @@ class ProjectsStore:
                 ON planner_static_recon_plans (updated_at DESC);
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS target_info_profiles (
+                    target_type TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_projects_target_info_profiles_updated_at
+                ON target_info_profiles (updated_at DESC);
+                """
+            )
             cur.execute("PRAGMA table_info(intel_resources);")
             intel_columns = {str(row[1]) for row in cur.fetchall()}
             if "content_type" not in intel_columns:
@@ -458,6 +474,79 @@ class ProjectsStore:
                 (project_id, payload),
             )
             conn.commit()
+
+    def append_project_copilot_history(
+        self,
+        project_id: str,
+        messages: list[dict[str, Any]],
+        *,
+        max_messages: int = 200,
+    ) -> None:
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            return
+        if not isinstance(messages, list) or not messages:
+            return
+
+        project = self.get_project(safe_project_id)
+        if not isinstance(project, dict):
+            return
+
+        existing = project.get("copilotHistory", [])
+        history: list[dict[str, Any]] = existing if isinstance(existing, list) else []
+        normalized_new: list[dict[str, Any]] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "")).strip().lower()
+            text = str(item.get("text", "")).strip()
+            if role not in {"user", "assistant"} or not text:
+                continue
+            entry = {
+                "id": str(item.get("id", "")).strip() or str(uuid.uuid4()),
+                "role": role,
+                "text": text,
+                "timestamp": str(item.get("timestamp", "")).strip()
+                or datetime.now(timezone.utc).isoformat(),
+            }
+            if role == "assistant":
+                route = str(item.get("route", "")).strip().lower()
+                if route:
+                    entry["route"] = route
+                if "blocked" in item:
+                    entry["blocked"] = bool(item.get("blocked"))
+            normalized_new.append(entry)
+
+        if not normalized_new:
+            return
+
+        history.extend(normalized_new)
+        if len(history) > max_messages:
+            history = history[-max_messages:]
+
+        project["copilotHistory"] = history
+        project["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        self.upsert_project(project)
+
+    def update_project_copilot_context(
+        self,
+        project_id: str,
+        context: str,
+        *,
+        max_chars: int = 4000,
+    ) -> None:
+        safe_project_id = str(project_id or "").strip()
+        safe_context = str(context or "").strip()
+        if not safe_project_id:
+            return
+
+        project = self.get_project(safe_project_id)
+        if not isinstance(project, dict):
+            return
+
+        project["copilotContext"] = safe_context[:max_chars] if safe_context else ""
+        project["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        self.upsert_project(project)
 
     def get_project_context_windows(self, project_id: str) -> dict[str, Any]:
         project = self.get_project(project_id)
@@ -792,6 +881,114 @@ class ProjectsStore:
             cur.execute(
                 """
                 DELETE FROM planner_static_recon_plans
+                WHERE target_type = ?;
+                """,
+                (clean_target_type,),
+            )
+            deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return deleted
+
+    def list_target_info_profiles(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT target_type, payload, created_at, updated_at
+                FROM target_info_profiles
+                ORDER BY updated_at DESC;
+                """
+            )
+            rows = cur.fetchall()
+
+        profiles: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            payload.setdefault("target_type", str(row["target_type"]))
+            payload.setdefault("created_at", str(row["created_at"]))
+            payload.setdefault("updated_at", str(row["updated_at"]))
+            profiles.append(payload)
+        return profiles
+
+    def get_target_info_profile(self, target_type: str) -> dict[str, Any] | None:
+        clean_target_type = _normalize_static_plan_target_type(target_type)
+        if not clean_target_type:
+            return None
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT target_type, payload, created_at, updated_at
+                FROM target_info_profiles
+                WHERE target_type = ?;
+                """,
+                (clean_target_type,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload.setdefault("target_type", str(row["target_type"]))
+        payload.setdefault("created_at", str(row["created_at"]))
+        payload.setdefault("updated_at", str(row["updated_at"]))
+        return payload
+
+    def upsert_target_info_profile(self, *, target_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        clean_target_type = _normalize_static_plan_target_type(target_type)
+        if not clean_target_type:
+            raise ValueError("target_type is required")
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a dict")
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        safe_payload = dict(payload)
+        safe_payload["target_type"] = clean_target_type
+        safe_payload.setdefault("updated_at", now_iso)
+        serialized = json.dumps(safe_payload, ensure_ascii=True)
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO target_info_profiles (
+                    target_type, payload, created_at, updated_at
+                )
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (target_type) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (clean_target_type, serialized),
+            )
+            conn.commit()
+
+        saved = self.get_target_info_profile(clean_target_type)
+        if saved is None:
+            raise RuntimeError("failed to save target info profile")
+        return saved
+
+    def delete_target_info_profile(self, target_type: str) -> int:
+        clean_target_type = _normalize_static_plan_target_type(target_type)
+        if not clean_target_type:
+            return 0
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM target_info_profiles
                 WHERE target_type = ?;
                 """,
                 (clean_target_type,),

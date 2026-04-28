@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
+import structlog
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from server.agents.assistant import AssistantAgent
+from server.api.dependencies import projects_store
 from server.layers.safety.prompt_guard import PromptInjectionGuard
 
 router = APIRouter(tags=["ai"])
 
 _prompt_guard = PromptInjectionGuard()
+_assistant_agent = AssistantAgent()
 _MAX_PROMPT_LEN = 8000
+logger = structlog.get_logger(__name__)
 
 
 class AIAssistPayload(BaseModel):
@@ -22,44 +25,30 @@ class AIAssistPayload(BaseModel):
     target_type: str = Field(default="", max_length=120)
     context: str = Field(default="", max_length=12000)
 
-
-def _build_assistant_reply(
-    *,
-    route: Literal["planner", "reporting", "blocked"],
-    blocked: bool,
-    reason: str,
-    prompt: str,
-) -> str:
-    if blocked or route == "blocked":
-        return (
-            "Potential prompt-injection detected. "
-            f"Request blocked by safety guard. Reason: {reason}"
-        )
-
-    if route == "planner":
-        return (
-            "Planner route selected. I can help transform this into actionable "
-            "scan tasks, ordered by priority and safety constraints."
-        )
-
-    prompt_preview = " ".join(prompt.split())[:120]
-    return (
-        "Reporting route selected. I can answer questions, summarize status, "
-        "and draft client-facing explanations.\n"
-        f"Prompt focus: {prompt_preview}"
-    )
-
-
 @router.post("/api/ai/assist")
 async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
     prompt = payload.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    saved_context = ""
+    saved_history: list[dict[str, object]] = []
+    if payload.project_id:
+        project = projects_store.get_project(payload.project_id)
+        if isinstance(project, dict):
+            saved_context = str(project.get("copilotContext", "") or "").strip()
+            raw_history = project.get("copilotHistory", [])
+            if isinstance(raw_history, list):
+                saved_history = [
+                    item for item in raw_history
+                    if isinstance(item, dict)
+                ]
+
     context_parts = [
         f"project_id={payload.project_id or ''}",
         f"target={payload.target}",
         f"target_type={payload.target_type}",
+        saved_context,
         payload.context,
     ]
     context = "\n".join(part for part in context_parts if part.strip())
@@ -70,18 +59,121 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
         use_llm=True,
     )
 
-    reply = _build_assistant_reply(
-        route=decision.route,
-        blocked=decision.is_injection,
-        reason=decision.reason,
-        prompt=prompt,
-    )
+    if decision.is_injection:
+        reply = (
+            "Potential prompt-injection detected. "
+            f"Request blocked by safety guard. Reason: {decision.reason}"
+        )
+        if payload.project_id:
+            projects_store.append_project_copilot_history(
+                payload.project_id,
+                [
+                    {
+                        "role": "user",
+                        "text": prompt,
+                    },
+                    {
+                        "role": "assistant",
+                        "text": reply,
+                        "route": "blocked",
+                        "blocked": True,
+                    },
+                ],
+            )
+        return {
+            "ok": True,
+            "blocked": True,
+            "route": "blocked",
+            "reply": reply,
+            "classification": {
+                "reason": decision.reason,
+                "confidence": decision.confidence,
+                "classifier": decision.classifier,
+                "detections": decision.detections,
+            },
+        }
+
+    try:
+        result = await _assistant_agent.answer(
+            prompt=prompt,
+            project_id=payload.project_id,
+            target=payload.target,
+            target_type=payload.target_type,
+            context=context,
+            saved_context=saved_context,
+            history=saved_history,
+        )
+    except Exception as exc:
+        logger.exception(
+            "assistant_ai_assist_failed",
+            project_id=payload.project_id,
+            target=payload.target,
+            target_type=payload.target_type,
+        )
+        reply = (
+            "I couldn't complete that assistant request cleanly. "
+            f"Backend error: {str(exc).strip() or type(exc).__name__}"
+        )
+        if payload.project_id:
+            projects_store.append_project_copilot_history(
+                payload.project_id,
+                [
+                    {
+                        "role": "user",
+                        "text": prompt,
+                    },
+                    {
+                        "role": "assistant",
+                        "text": reply,
+                        "route": "assistant",
+                        "blocked": False,
+                    },
+                ],
+            )
+            projects_store.update_project_copilot_context(
+                payload.project_id,
+                saved_context,
+            )
+        return {
+            "ok": True,
+            "blocked": False,
+            "route": "assistant",
+            "reply": reply,
+            "classification": {
+                "reason": decision.reason,
+                "confidence": decision.confidence,
+                "classifier": decision.classifier,
+                "detections": decision.detections,
+            },
+        }
+
+    if payload.project_id:
+        projects_store.append_project_copilot_history(
+            payload.project_id,
+            [
+                {
+                    "role": "user",
+                    "text": prompt,
+                },
+                {
+                    "role": "assistant",
+                    "text": result.reply,
+                    "route": "assistant",
+                    "blocked": False,
+                },
+            ],
+        )
+        projects_store.update_project_copilot_context(
+            payload.project_id,
+            result.next_context,
+        )
 
     return {
         "ok": True,
-        "blocked": decision.is_injection,
-        "route": decision.route,
-        "reply": reply,
+        "blocked": False,
+        "route": "assistant",
+        "reply": result.reply,
+        "next_context": result.next_context,
         "classification": {
             "reason": decision.reason,
             "confidence": decision.confidence,

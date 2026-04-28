@@ -236,7 +236,7 @@ OUTPUT FORMAT (strict JSON, always 4 keys):
             "id": "...",
             "description": "...",
             "scenarios": [
-              { "task": "...", "agent": "recon|exploit", "priority": 1-5, "done": false }
+              { "task": "...", "agent": "recon|exploit", "priority": 1-6, "done": false }
             ]
           }
         ]

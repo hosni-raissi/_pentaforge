@@ -1,4 +1,4 @@
-from server.agents.intel.agent import IntelAgent
+from server.nodes.intel.helpers import _collect_source_entries
 
 
 class _FakeProjectsStore:
@@ -37,10 +37,10 @@ class _FakeProjectsStore:
 
 
 def test_collect_source_entries_uses_updateable_resources_and_preserves_metadata():
-    agent = object.__new__(IntelAgent)
-    agent._projects_store = _FakeProjectsStore()
-
-    entries = agent._collect_source_entries("linux_server")
+    entries = _collect_source_entries(
+        "linux_server",
+        projects_store=_FakeProjectsStore(),
+    )
     by_name = {entry["name"]: entry for entry in entries}
 
     assert "PayloadsAllTheThings" in by_name

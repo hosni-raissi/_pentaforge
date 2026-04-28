@@ -149,6 +149,13 @@ class ExecuterCallback(Protocol):
         args: dict[str, Any],
         call_id: str,
     ) -> bool | dict[str, Any] | str | Any: ...
+    def request_password(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> str | None | Any: ...
 
 
 class _NoOpCallback:
@@ -171,6 +178,15 @@ class _NoOpCallback:
     ) -> bool:
         # Secure-by-default: explicit approval integration is required.
         return False
+
+    def request_password(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> str | None:
+        return None
 
 
 @dataclass
@@ -655,7 +671,12 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
             return "failed"
         if any(marker in summary_text for marker in blocked_summary_markers):
             return "blocked"
-        if has_findings or has_tools or any(marker in summary_text for marker in useful_summary_markers):
+        has_useful_summary = any(marker in summary_text for marker in useful_summary_markers)
+        if has_findings or has_useful_summary:
+            return "complete"
+        if has_tools and has_useful_summary:
+            return "complete"
+        if has_tools:
             return "blocked"
         return default
 
@@ -824,6 +845,10 @@ def _default_status_for_failed_consolidation(role: str) -> str:
     return "incomplete"
 
 
+def _role_uses_tool_round_model(role: str) -> bool:
+    return str(role or "").strip().lower() in {"recon", "exploit"}
+
+
 def _get_valid_params(tool: Tool) -> set[str] | None:
     parameters = tool.parameters if isinstance(tool.parameters, dict) else {}
     properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
@@ -884,14 +909,15 @@ class BaseExecuterAgent:
         self._tool_valid_params = {t.name: _get_valid_params(t) for t in tools}
         self._execution_tool_timeout_cap_seconds: int | None = None
         self._current_user_message: str = ""
+        self._run_max_tool_rounds_override: int | None = None
 
         if self._mode == "local":
             self._local_config = local_config or local_llm_config
-            self._llm = LLMClient(self._local_config, mode="local")
+            self._llm = LLMClient(self._local_config, mode="local", client_name=self._role)
             self._model_name = self._local_config.model
         else:
             self._config = config or get_public_agent_config(self._role)
-            self._llm = LLMClient(self._config, mode="public")
+            self._llm = LLMClient(self._config, mode="public", client_name=self._role)
             self._model_name = self._config.model
 
         self._context_window: ContextWindowManager | None = None
@@ -914,6 +940,12 @@ class BaseExecuterAgent:
             model=self._model_name,
             tools=len(self._tools),
         )
+
+    def _effective_max_tool_rounds(self) -> int:
+        override = self._run_max_tool_rounds_override
+        if isinstance(override, int) and override > 0:
+            return override
+        return self._max_tool_rounds
 
     def reset_context_window_for_cycle(self) -> None:
         """Clear context window entries to start fresh for this cycle.
@@ -1001,6 +1033,97 @@ class BaseExecuterAgent:
             lines.append(result)
             lines.append("")
         return "\n".join(lines).strip()
+
+    def _tool_result_excerpt(self, raw_result: Any, limit: int = 220) -> str:
+        text = str(raw_result or "").strip()
+        if not text:
+            return "No output returned."
+        compacted = _compact_tool_result_payload(text)
+        flattened = re.sub(r"\s+", " ", compacted).strip()
+        if len(flattened) <= limit:
+            return flattened
+        return flattened[: limit - 3] + "..."
+
+    def _build_round_execution_summary(
+        self,
+        *,
+        round_index: int,
+        tool_results: list[dict[str, Any]],
+    ) -> str:
+        if not tool_results:
+            return f"Round {round_index}: no tools executed."
+        tool_names = [str(item.get("name", "?")).strip() for item in tool_results]
+        joined_tools = ", ".join(name for name in tool_names if name) or "unknown tools"
+        evidence_bits: list[str] = []
+        for item in tool_results[:3]:
+            tool_name = str(item.get("name", "?")).strip() or "unknown"
+            evidence_bits.append(
+                f"{tool_name}: {self._tool_result_excerpt(item.get('result', ''))}"
+            )
+        return (
+            f"Round {round_index} executed {len(tool_results)} tool(s) [{joined_tools}]. "
+            f"Observed evidence: {' | '.join(evidence_bits)}"
+        )
+
+    def _build_tool_round_model_result(
+        self,
+        *,
+        rounds_executed: int,
+        round_summaries: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+    ) -> ExecuterResult:
+        normalized_role = str(self._role or "").strip().lower()
+        status = "inconclusive" if normalized_role == "exploit" else ("complete" if tool_results else "failed")
+
+        findings: list[dict[str, Any]] = []
+        summary_lines: list[str] = []
+        for item in round_summaries:
+            if not isinstance(item, dict):
+                continue
+            round_index = int(item.get("round", 0) or 0)
+            summary_text = str(item.get("summary", "")).strip()
+            tools = item.get("tools", [])
+            if summary_text:
+                summary_lines.append(summary_text)
+                findings.append(
+                    {
+                        "title": f"Round {round_index} evidence",
+                        "severity": "info",
+                        "details": summary_text,
+                        "tools": tools if isinstance(tools, list) else [],
+                    }
+                )
+
+        if not summary_lines and tool_results:
+            fallback_summary = self._format_tool_results(tool_results)
+            summary_lines.append(fallback_summary)
+            findings.append(
+                {
+                    "title": "Collected tool evidence",
+                    "severity": "info",
+                    "details": fallback_summary,
+                    "tools": [
+                        str(item.get("name", "?")).strip()
+                        for item in tool_results
+                        if str(item.get("name", "")).strip()
+                    ],
+                }
+            )
+
+        opener = (
+            f"Collected exploit evidence across {rounds_executed} tool round(s). Forwarding raw evidence and per-round summaries for verdicting."
+            if normalized_role == "exploit"
+            else f"Collected reconnaissance evidence across {rounds_executed} tool round(s). Forwarding raw evidence and per-round summaries for analysis."
+        )
+        joined_summary = "\n".join(summary_lines[:3]).strip()
+        summary = opener if not joined_summary else f"{opener}\n{joined_summary}"
+        return ExecuterResult(
+            status=status,
+            findings=findings,
+            summary=summary,
+            rounds_executed=rounds_executed,
+            round_labels=[f"r{n}" for n in range(1, rounds_executed + 1)],
+        )
 
     def _is_allowed_output_sink(self, value: str) -> bool:
         lowered = value.strip().lower()
@@ -1774,19 +1897,20 @@ class BaseExecuterAgent:
         Build an explicit reminder for consolidation-only rounds.
         This prevents context drift after seeing tool output and reinforces the JSON-only requirement.
         """
+        max_rounds = self._effective_max_tool_rounds()
         warmup_batch_mode = "Warmup scenario batch" in str(
             getattr(self, "_current_user_message", "") or ""
         )
         role_templates = {
             "verify": (
-                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
+                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/{max_rounds}). "
                 "You have analyzed all verification results. Now output ONLY valid JSON with two fields: "
                 '"verdict" (real_vulnerability|false_positive|inconclusive) and "summary" (1-2 sentences). '
                 "NO prose before or after JSON. NO markdown. Start with { and end with }. Example:\n"
                 '{"verdict": "real_vulnerability", "summary": "The vulnerability was confirmed through payload testing."}'
             ),
             "recon": (
-                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
+                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/{max_rounds}). "
                 "You have completed reconnaissance. "
                 + (
                     "Because this is warmup batch mode, output ONLY valid JSON with four top-level fields: "
@@ -1800,14 +1924,14 @@ class BaseExecuterAgent:
                 + "NO prose before or after JSON. NO markdown. Start with { and end with }."
             ),
             "exploit": (
-                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/3). "
+                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/{max_rounds}). "
                 "You have completed exploitation testing. Now output ONLY valid JSON with three fields: "
                 '"status" (vulnerable|not_vulnerable|blocked|inconclusive), "findings" (array), and "summary" (1-2 sentences). '
                 "NO prose before or after JSON. NO markdown. Start with { and end with }."
             ),
         }
         default_msg = (
-            f"[CONSOLIDATION ROUND {round_index}] This is your FINAL consolidation round ({round_index}/{self._max_tool_rounds}). "
+            f"[CONSOLIDATION ROUND {round_index}] This is your FINAL consolidation round ({round_index}/{self._effective_max_tool_rounds()}). "
             "Output ONLY valid JSON. NO tools. NO prose. NO markdown. Start with { and end with }."
         )
         return role_templates.get(self._role, default_msg)
@@ -1818,6 +1942,7 @@ class BaseExecuterAgent:
         round_index: int,
         last_content: str,
         tool_results: list[dict[str, Any]],
+        forced_due_to_final_round_tool_calls: bool,
     ) -> str:
         recent_tool_output = self._format_tool_results(tool_results[-8:])
         if len(recent_tool_output) > 5000:
@@ -1825,21 +1950,26 @@ class BaseExecuterAgent:
         warmup_batch_mode = "Warmup scenario batch" in str(
             getattr(self, "_current_user_message", "") or ""
         )
+        prefix = (
+            "You attempted tool calls in the final consolidation round, which is not allowed.\n"
+            if forced_due_to_final_round_tool_calls
+            else "Use only the already collected evidence below.\n"
+        )
 
         role_specific = {
             "verify": (
-                "You attempted tool calls in the final consolidation round, which is not allowed.\n"
-                "Do NOT call tools. Use only the already collected verification evidence below.\n"
+                prefix
+                + "Do NOT call tools. Use only the already collected verification evidence below.\n"
                 'Return ONLY strict JSON with: {"verdict":"real_vulnerability|false_positive|inconclusive","summary":"..."}'
             ),
             "retest": (
-                "You attempted tool calls in the final consolidation round, which is not allowed.\n"
-                "Do NOT call tools. Use only the already collected retest evidence below.\n"
+                prefix
+                + "Do NOT call tools. Use only the already collected retest evidence below.\n"
                 'Return ONLY strict JSON with: {"verdict":"real_vulnerability|false_positive|inconclusive","summary":"..."}'
             ),
             "recon": (
-                "You attempted tool calls in the final consolidation round, which is not allowed.\n"
-                "Do NOT call tools. Use only the already collected reconnaissance evidence below.\n"
+                prefix
+                + "Do NOT call tools. Use only the already collected reconnaissance evidence below.\n"
                 + (
                     'Return ONLY strict JSON with: {"status":"complete|blocked|failed","findings":[],"summary":"...","scenario_summaries":[{"scenario_id":"s1","task":"...","status":"complete|blocked|failed","summary":"...","findings":[],"tools":[]}]}'
                     if warmup_batch_mode
@@ -1847,8 +1977,8 @@ class BaseExecuterAgent:
                 )
             ),
             "exploit": (
-                "You attempted tool calls in the final consolidation round, which is not allowed.\n"
-                "Do NOT call tools. Use only the already collected exploitation evidence below.\n"
+                prefix
+                + "Do NOT call tools. Use only the already collected exploitation evidence below.\n"
                 'Return ONLY strict JSON with: {"status":"vulnerable|not_vulnerable|blocked|inconclusive","findings":[],"summary":"..."}'
             ),
         }.get(
@@ -1857,7 +1987,7 @@ class BaseExecuterAgent:
         )
 
         sections = [
-            f"[FORCED FINAL CONSOLIDATION] Round {round_index}/{self._max_tool_rounds}",
+            f"[FORCED FINAL CONSOLIDATION] Round {round_index}/{self._effective_max_tool_rounds()}",
             role_specific,
         ]
         if last_content.strip():
@@ -1885,10 +2015,16 @@ class BaseExecuterAgent:
         round_index: int,
         last_content: str,
         all_tool_results: list[dict[str, Any]],
+        forced_due_to_final_round_tool_calls: bool = True,
     ) -> ExecuterResult:
-        self._cb.on_warn(
-            f"[{self._role}] final round emitted tool calls; forcing one last JSON-only consolidation pass"
-        )
+        if forced_due_to_final_round_tool_calls:
+            self._cb.on_warn(
+                f"[{self._role}] final round emitted tool calls; forcing one last JSON-only consolidation pass"
+            )
+        else:
+            self._cb.on_step(
+                f"[{self._role}] consolidating collected evidence into final JSON"
+            )
 
         fallback_messages = list(messages[:-1]) if messages else []
         if str(last_content or "").strip():
@@ -1900,6 +2036,7 @@ class BaseExecuterAgent:
                     round_index=round_index,
                     last_content=last_content,
                     tool_results=all_tool_results,
+                    forced_due_to_final_round_tool_calls=forced_due_to_final_round_tool_calls,
                 ),
             }
         )
@@ -1926,10 +2063,16 @@ class BaseExecuterAgent:
             llm_exc = exc
 
         if response is None or llm_exc is not None:
-            summary = (
-                "Final consolidation failed after the model attempted tool calls in the last round "
-                f"and the forced JSON-only retry errored: {llm_exc}"
-            )
+            if forced_due_to_final_round_tool_calls:
+                summary = (
+                    "Final consolidation failed after the model attempted tool calls in the last round "
+                    f"and the forced JSON-only retry errored: {llm_exc}"
+                )
+            else:
+                summary = (
+                    "Final evidence consolidation failed after tool execution "
+                    f"because the JSON-only retry errored: {llm_exc}"
+                )
             logger.error(
                 "executer_forced_final_consolidation_failed",
                 role=self._role,
@@ -1969,9 +2112,19 @@ class BaseExecuterAgent:
             )
         return result
 
-    async def run(self, user_message: str) -> ExecuterResult:
+    async def run(
+        self,
+        user_message: str,
+        *,
+        max_tool_rounds_override: int | None = None,
+    ) -> ExecuterResult:
         self._cb.on_step(f"[{self._role}] starting run")
         self._current_user_message = str(user_message or "")
+        previous_round_override = self._run_max_tool_rounds_override
+        if max_tool_rounds_override is None:
+            self._run_max_tool_rounds_override = None
+        else:
+            self._run_max_tool_rounds_override = min(3, max(1, int(max_tool_rounds_override)))
         warmup_batch_mode = "Warmup scenario batch" in self._current_user_message
         if self._context_window is not None:
             await self._context_window.record(
@@ -1994,43 +2147,53 @@ class BaseExecuterAgent:
         all_tool_results: list[dict[str, Any]] = []
         all_discovered_target_types: set[str] = set()
         rounds_executed = 0
+        round_execution_summaries: list[dict[str, Any]] = []
+        tool_round_model = _role_uses_tool_round_model(self._role)
 
         async def _finalize_result(result: ExecuterResult) -> ExecuterResult:
-            result.tool_results = all_tool_results
-            merged_target_types = set(result.discovered_target_types or [])
-            merged_target_types.update(all_discovered_target_types)
-            if merged_target_types:
-                result.discovered_target_types = sorted(merged_target_types)
-            if result.rounds_executed <= 0:
-                result.rounds_executed = rounds_executed
-            if not result.round_labels and result.rounds_executed > 0:
-                result.round_labels = [
-                    f"r{n}" for n in range(1, result.rounds_executed + 1)
-                ]
-            if self._context_window is not None:
-                await self._context_window.record(
-                    kind="run_result",
-                    role="assistant",
-                    content=result.summary or last_content or result.status,
-                    metadata={
-                        "role": self._role,
-                        "status": result.status,
-                        "tool_results": len(all_tool_results),
-                    },
-                )
-            self._cb.on_done(f"[{self._role}] finished with status={result.status}")
-            return result
+            try:
+                result.tool_results = all_tool_results
+                merged_target_types = set(result.discovered_target_types or [])
+                merged_target_types.update(all_discovered_target_types)
+                if merged_target_types:
+                    result.discovered_target_types = sorted(merged_target_types)
+                if result.rounds_executed <= 0:
+                    result.rounds_executed = rounds_executed
+                if not result.round_labels and result.rounds_executed > 0:
+                    result.round_labels = [
+                        f"r{n}" for n in range(1, result.rounds_executed + 1)
+                    ]
+                if self._context_window is not None:
+                    await self._context_window.record(
+                        kind="run_result",
+                        role="assistant",
+                        content=result.summary or last_content or result.status,
+                        metadata={
+                            "role": self._role,
+                            "status": result.status,
+                            "tool_results": len(all_tool_results),
+                        },
+                    )
+                self._cb.on_done(f"[{self._role}] finished with status={result.status}")
+                return result
+            finally:
+                self._run_max_tool_rounds_override = previous_round_override
 
-        for round_index in range(1, self._max_tool_rounds + 1):
+        effective_max_tool_rounds = self._effective_max_tool_rounds()
+        for round_index in range(1, effective_max_tool_rounds + 1):
             rounds_executed = round_index
             self._cb.on_step(
-                f"[{self._role}] LLM round {round_index}/{self._max_tool_rounds}"
+                f"[{self._role}] LLM round {round_index}/{effective_max_tool_rounds}"
             )
 
             # CRITICAL: Before final consolidation round, inject explicit reminder to force JSON-only output
             # This prevents LLM context drift after seeing hundreds of lines of tool output
-            is_final_round = round_index >= self._max_tool_rounds
-            if is_final_round and len(messages) > 2:  # Only inject if we have tool results to consolidate
+            is_final_round = round_index >= effective_max_tool_rounds
+            if (
+                not tool_round_model
+                and is_final_round
+                and len(messages) > 2
+            ):  # Only inject if we have tool results to consolidate
                 consolidation_reminder = self._build_consolidation_reminder(round_index)
                 messages.append({"role": "user", "content": consolidation_reminder})
                 self._cb.on_step(
@@ -2169,6 +2332,7 @@ class BaseExecuterAgent:
                     circuit_breaker_triggered=True,
                 )
                 self._cb.on_warn(f"[{self._role}] LLM error (round {round_index}); circuit breaker triggered: {llm_exc}")
+                self._run_max_tool_rounds_override = previous_round_override
                 return ExecuterResult(
                     status="failed",
                     summary=f"LLM error after {max_attempts} attempt(s): {llm_exc}",
@@ -2227,18 +2391,23 @@ class BaseExecuterAgent:
 
             # CRITICAL: Round 3 consolidation is mandatory for ALL roles
             # Final round (Round 3/3) must ONLY output JSON, not execute tools
-            is_final_round = round_index >= self._max_tool_rounds
+            is_final_round = round_index >= effective_max_tool_rounds
             is_consolidation_role = self._role in ("verify", "retest")
 
             # ALL roles skip tools in final round (consolidation-only)
-            skip_tools_this_round = bool(is_final_round and tool_calls)
+            skip_tools_this_round = bool(
+                (not tool_round_model)
+                and is_final_round
+                and tool_calls
+                and effective_max_tool_rounds > 1
+            )
 
             # DEBUG: Log consolidation decision
             logger.info(
                 "consolidation_decision",
                 role=self._role,
                 round=round_index,
-                max_rounds=self._max_tool_rounds,
+                max_rounds=effective_max_tool_rounds,
                 is_final_round=is_final_round,
                 is_consolidation_role=is_consolidation_role,
                 has_tool_calls=bool(tool_calls),
@@ -2260,6 +2429,13 @@ class BaseExecuterAgent:
 
             if not tool_calls:
                 if is_final_round:
+                    if tool_round_model and all_tool_results:
+                        result = self._build_tool_round_model_result(
+                            rounds_executed=round_index,
+                            round_summaries=round_execution_summaries,
+                            tool_results=all_tool_results,
+                        )
+                        return await _finalize_result(result)
                     # Final round with no tool calls: consolidate now
                     result = _parse_executer_output(last_content, role=self._role)
                     return await _finalize_result(result)
@@ -2278,9 +2454,8 @@ class BaseExecuterAgent:
                         )
                     else:
                         nudge = (
-                            "You did not invoke any tools this round. If you are finished, you must still wait for the "
-                            "final consolidation round to output your JSON result. Please continue your analysis or "
-                            "invoke tools if necessary."
+                            "You did not invoke any tools this round. Please continue your analysis and invoke focused "
+                            "tools if another tool round is needed."
                         )
                     no_tool_message = (
                         f"[{self._role}] No tool calls on non-final round {round_index}; continuing to next round"
@@ -2303,6 +2478,36 @@ class BaseExecuterAgent:
             all_tool_results.extend(tool_results)
             all_discovered_target_types.update(discovered)
 
+            if tool_results:
+                round_summary = self._build_round_execution_summary(
+                    round_index=round_index,
+                    tool_results=tool_results,
+                )
+                round_execution_summaries.append(
+                    {
+                        "round": round_index,
+                        "summary": round_summary,
+                        "tools": [
+                            str(item.get("name", "?")).strip()
+                            for item in tool_results
+                            if str(item.get("name", "")).strip()
+                        ],
+                    }
+                )
+                if tool_round_model and round_index < effective_max_tool_rounds:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Round {round_index} evidence summary:\n{round_summary}\n\n"
+                                "If another tool round is useful, carry forward the most important findings from this "
+                                "summary and then choose the next focused tools or payloads. Do not produce final JSON; "
+                                "after the last allowed tool round, the system will forward all collected evidence and "
+                                "summaries to the perceptor."
+                            ),
+                        }
+                    )
+
             if halted_for_approval:
                 if self._context_window is not None:
                     await self._context_window.record(
@@ -2311,6 +2516,7 @@ class BaseExecuterAgent:
                         content="Execution paused awaiting user approval for a tool call.",
                         metadata={"role": self._role, "status": "awaiting_user_approval"},
                     )
+                self._run_max_tool_rounds_override = previous_round_override
                 return ExecuterResult(
                     status="awaiting_user_approval",
                     summary="Execution paused awaiting user approval for a tool call.",
@@ -2321,7 +2527,14 @@ class BaseExecuterAgent:
                 )
 
             # If we consumed the final allowed round, return the aggregated tool output.
-            if round_index >= self._max_tool_rounds:
+            if round_index >= effective_max_tool_rounds:
+                if tool_round_model and all_tool_results:
+                    result = self._build_tool_round_model_result(
+                        rounds_executed=round_index,
+                        round_summaries=round_execution_summaries,
+                        tool_results=all_tool_results,
+                    )
+                    return await _finalize_result(result)
                 result = _parse_executer_output(last_content, role=self._role)
                 if result.status == "incomplete" and all_tool_results:
                     result.summary = self._format_tool_results(all_tool_results)
@@ -2334,8 +2547,8 @@ class BaseExecuterAgent:
                 summary=self._format_tool_results(all_tool_results),
                 tool_results=all_tool_results,
                 discovered_target_types=sorted(all_discovered_target_types),
-                rounds_executed=self._max_tool_rounds,
-                round_labels=[f"r{n}" for n in range(1, self._max_tool_rounds + 1)],
+                rounds_executed=effective_max_tool_rounds,
+                round_labels=[f"r{n}" for n in range(1, effective_max_tool_rounds + 1)],
             )
             )
         result = _parse_executer_output(last_content, role=self._role)

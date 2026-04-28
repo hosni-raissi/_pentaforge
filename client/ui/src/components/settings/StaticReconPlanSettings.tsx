@@ -6,128 +6,150 @@ import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import {
-  getStaticReconPlanFromDesktop,
+  getInformationGatheringProfileFromDesktop,
+  listInformationGatheringProfilesFromDesktop,
   listProjectTargetTypesFromDesktop,
-  listStaticReconPlansFromDesktop,
-  resetStaticReconPlanFromDesktop,
-  saveStaticReconPlanFromDesktop,
+  resetInformationGatheringProfileFromDesktop,
+  saveInformationGatheringProfileFromDesktop,
+  type InformationGatheringProfile,
+  type InformationGatheringProfileBlock,
   type ProjectTargetTypeOption,
-  type StaticReconPlan,
-  type StaticReconScenario,
 } from "@/lib/projectBridge";
 
 function formatTargetTypeLabel(value: string): string {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function normalizeMethods(value: string): string[] {
+function normalizeList(value: string): string[] {
   return value
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
-function createEmptyScenario(): StaticReconScenario {
+function slugifyBlockId(value: string): string {
+  const clean = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return clean || "new_block";
+}
+
+function createEmptyBlock(): InformationGatheringProfileBlock {
   return {
-    task: "",
-    agent: "recon",
-    priority: 3,
-    details: "",
-    methods: [],
-    done: false,
-    status: "not yet",
+    id: "new_block",
+    name: "",
+    interaction: "active_safe",
+    goal: "",
+    tools: [],
   };
 }
 
 export function StaticReconPlanSettings() {
   const [targetOptions, setTargetOptions] = useState<ProjectTargetTypeOption[]>([]);
-  const [plans, setPlans] = useState<StaticReconPlan[]>([]);
+  const [profiles, setProfiles] = useState<InformationGatheringProfile[]>([]);
   const [selectedTargetType, setSelectedTargetType] = useState("web_app");
-  const [editingPlan, setEditingPlan] = useState<StaticReconPlan | null>(null);
-  const [expandedScenarioIndex, setExpandedScenarioIndex] = useState<number | null>(null);
+  const [editingProfile, setEditingProfile] = useState<InformationGatheringProfile | null>(null);
+  const [expandedBlockIndex, setExpandedBlockIndex] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  const loadPlans = useCallback(async () => {
+  const loadProfiles = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [nextTargetOptions, nextPlans] = await Promise.all([
+      const [nextTargetOptions, nextProfiles] = await Promise.all([
         listProjectTargetTypesFromDesktop(),
-        listStaticReconPlansFromDesktop(),
+        listInformationGatheringProfilesFromDesktop(),
       ]);
       const normalizedTargetOptions = nextTargetOptions.length > 0
         ? nextTargetOptions
         : [{ value: "web_app", label: "Web Application" }];
       setTargetOptions(normalizedTargetOptions);
-      setPlans(nextPlans);
+      setProfiles(nextProfiles);
       setSelectedTargetType((current) => {
         const preferred = current || normalizedTargetOptions[0]?.value || "web_app";
         const exists = normalizedTargetOptions.some((item) => item.value === preferred);
         return exists ? preferred : normalizedTargetOptions[0]?.value || "web_app";
       });
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load static recon plans");
+      setError(loadError instanceof Error ? loadError.message : "Failed to load information gathering profiles");
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void loadPlans();
-  }, [loadPlans]);
+    void loadProfiles();
+  }, [loadProfiles]);
 
   useEffect(() => {
-    const matched = plans.find((item) => item.target_type === selectedTargetType) ?? null;
-    setEditingPlan(matched ? JSON.parse(JSON.stringify(matched)) as StaticReconPlan : null);
-  }, [plans, selectedTargetType]);
+    const matched = profiles.find((item) => item.target_type === selectedTargetType) ?? null;
+    setEditingProfile(matched ? JSON.parse(JSON.stringify(matched)) as InformationGatheringProfile : null);
+    setExpandedBlockIndex(null);
+  }, [profiles, selectedTargetType]);
 
-  const selectedPlanSummary = useMemo(() => {
-    if (!editingPlan) {
+  const selectedProfileSummary = useMemo(() => {
+    if (!editingProfile) {
       return null;
     }
+    const toolCount = editingProfile.blocks.reduce((count, block) => count + block.tools.length, 0);
     return {
-      total: editingPlan.scenarios.length,
-      highPriority: editingPlan.scenarios.filter((item) => Number(item.priority) <= 2).length,
+      totalBlocks: editingProfile.blocks.length,
+      totalTools: toolCount,
     };
-  }, [editingPlan]);
+  }, [editingProfile]);
 
-  function updateScenario(index: number, patch: Partial<StaticReconScenario>) {
-    setEditingPlan((current) => {
+  function updateBlock(index: number, patch: Partial<InformationGatheringProfileBlock>) {
+    setEditingProfile((current) => {
       if (!current) {
         return current;
       }
-      const nextScenarios = current.scenarios.map((scenario, scenarioIndex) => (
-        scenarioIndex === index ? { ...scenario, ...patch } : scenario
-      ));
-      return { ...current, scenarios: nextScenarios };
+      const nextBlocks = current.blocks.map((block, blockIndex) => {
+        if (blockIndex !== index) {
+          return block;
+        }
+        const nextBlock = { ...block, ...patch };
+        if ("name" in patch && (!patch.id || patch.id === block.id)) {
+          nextBlock.id = slugifyBlockId(String(nextBlock.name || block.name));
+        }
+        return nextBlock;
+      });
+      return { ...current, max_blocks: nextBlocks.length, blocks: nextBlocks };
     });
   }
 
-  function addScenario() {
-    setEditingPlan((current) => {
+  function addBlock() {
+    setEditingProfile((current) => {
       if (!current) {
         return current;
       }
+      const nextBlocks = [...current.blocks, createEmptyBlock()];
       return {
         ...current,
-        scenarios: [...current.scenarios, createEmptyScenario()],
+        max_blocks: nextBlocks.length,
+        blocks: nextBlocks,
       };
     });
+    setExpandedBlockIndex(editingProfile?.blocks.length ?? 0);
   }
 
-  function removeScenario(index: number) {
-    setEditingPlan((current) => {
+  function removeBlock(index: number) {
+    setEditingProfile((current) => {
       if (!current) {
         return current;
       }
+      const nextBlocks = current.blocks.filter((_, blockIndex) => blockIndex !== index);
       return {
         ...current,
-        scenarios: current.scenarios.filter((_, scenarioIndex) => scenarioIndex !== index),
+        max_blocks: Math.max(1, nextBlocks.length),
+        blocks: nextBlocks,
       };
     });
+    setExpandedBlockIndex((current) => (current === index ? null : current));
   }
 
   async function handleReloadSelected() {
@@ -135,56 +157,58 @@ export function StaticReconPlanSettings() {
     setSuccess("");
     setLoading(true);
     try {
-      const plan = await getStaticReconPlanFromDesktop(selectedTargetType);
-      setPlans((current) => {
-        const others = current.filter((item) => item.target_type !== plan.target_type);
-        return [...others, plan].sort((a, b) => a.target_type.localeCompare(b.target_type));
+      const profile = await getInformationGatheringProfileFromDesktop(selectedTargetType);
+      setProfiles((current) => {
+        const others = current.filter((item) => item.target_type !== profile.target_type);
+        return [...others, profile].sort((a, b) => a.target_type.localeCompare(b.target_type));
       });
-      setEditingPlan(JSON.parse(JSON.stringify(plan)) as StaticReconPlan);
+      setEditingProfile(JSON.parse(JSON.stringify(profile)) as InformationGatheringProfile);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to reload plan");
+      setError(loadError instanceof Error ? loadError.message : "Failed to reload profile");
     } finally {
       setLoading(false);
     }
   }
 
   async function handleSave() {
-    if (!editingPlan) {
+    if (!editingProfile) {
       return;
     }
     setSaving(true);
     setError("");
     setSuccess("");
     try {
-      const payload: StaticReconPlan = {
-        ...editingPlan,
+      const payload: InformationGatheringProfile = {
+        ...editingProfile,
         target_type: selectedTargetType,
+        version: editingProfile.version || "1.0",
         generated_from: "ui_settings",
-        scenarios: editingPlan.scenarios.map((scenario) => ({
-          ...scenario,
-          task: scenario.task.trim(),
-          details: scenario.details.trim(),
-          methods: scenario.methods.map((method) => method.trim()).filter(Boolean),
-          agent: "recon",
-          priority: Number(scenario.priority) || 3,
+        max_blocks: editingProfile.blocks.length,
+        blocks: editingProfile.blocks.map((block) => ({
+          ...block,
+          id: slugifyBlockId(block.id || block.name),
+          name: block.name.trim(),
+          goal: block.goal.trim(),
+          interaction: block.interaction.trim() || "active_safe",
+          tools: block.tools.map((tool) => tool.trim()).filter(Boolean),
         })),
       };
-      const saved = await saveStaticReconPlanFromDesktop(selectedTargetType, payload);
-      setPlans((current) => {
+      const saved = await saveInformationGatheringProfileFromDesktop(selectedTargetType, payload);
+      setProfiles((current) => {
         const others = current.filter((item) => item.target_type !== saved.target_type);
         return [...others, saved].sort((a, b) => a.target_type.localeCompare(b.target_type));
       });
-      setEditingPlan(JSON.parse(JSON.stringify(saved)) as StaticReconPlan);
-      setSuccess("Static recon plan saved.");
+      setEditingProfile(JSON.parse(JSON.stringify(saved)) as InformationGatheringProfile);
+      setSuccess("Information Gathering profile saved.");
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Failed to save plan");
+      setError(saveError instanceof Error ? saveError.message : "Failed to save profile");
     } finally {
       setSaving(false);
     }
   }
 
   async function handleReset() {
-    const confirmed = window.confirm(`Reset the static recon plan for ${formatTargetTypeLabel(selectedTargetType)}?`);
+    const confirmed = window.confirm(`Reset the Information Gathering profile for ${formatTargetTypeLabel(selectedTargetType)}?`);
     if (!confirmed) {
       return;
     }
@@ -192,15 +216,15 @@ export function StaticReconPlanSettings() {
     setError("");
     setSuccess("");
     try {
-      const restored = await resetStaticReconPlanFromDesktop(selectedTargetType);
-      setPlans((current) => {
+      const restored = await resetInformationGatheringProfileFromDesktop(selectedTargetType);
+      setProfiles((current) => {
         const others = current.filter((item) => item.target_type !== restored.target_type);
         return [...others, restored].sort((a, b) => a.target_type.localeCompare(b.target_type));
       });
-      setEditingPlan(JSON.parse(JSON.stringify(restored)) as StaticReconPlan);
-      setSuccess("Static recon plan reset to default.");
+      setEditingProfile(JSON.parse(JSON.stringify(restored)) as InformationGatheringProfile);
+      setSuccess("Information Gathering profile reset to JSON default.");
     } catch (resetError) {
-      setError(resetError instanceof Error ? resetError.message : "Failed to reset plan");
+      setError(resetError instanceof Error ? resetError.message : "Failed to reset profile");
     } finally {
       setSaving(false);
     }
@@ -212,13 +236,13 @@ export function StaticReconPlanSettings() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <ListTree size={14} />
-            Static Recon Plans
+            Static Information Gathering
           </CardTitle>
         </CardHeader>
         <div className="space-y-3">
           <p className="text-sm text-text-secondary">
-            Each target type has a saved recon baseline in the database. You can update, add, or remove scenarios here,
-            and the planner warmup will use that saved version.
+            Edit the JSON-backed Information Gathering baseline for each target type. This is the exact block profile
+            loaded before the Information Gathering LLM organizes the first static scan.
           </p>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             <Select
@@ -231,43 +255,37 @@ export function StaticReconPlanSettings() {
               }))}
             />
             <Input
-              label="Max Items"
-              type="number"
-              min={1}
-              max={50}
-              value={String(editingPlan?.max_items ?? 20)}
-              onChange={(event) => {
-                const nextValue = Math.max(1, Math.min(50, Number(event.target.value) || 20));
-                setEditingPlan((current) => (current ? { ...current, max_items: nextValue } : current));
-              }}
-            />
-            <Input
-              label="Saved Scenarios"
-              value={String(selectedPlanSummary?.total ?? 0)}
+              label="Version"
+              value={editingProfile?.version ?? "1.0"}
               readOnly
             />
             <Input
-              label="High Priority (P1-P2)"
-              value={String(selectedPlanSummary?.highPriority ?? 0)}
+              label="Saved Blocks"
+              value={String(selectedProfileSummary?.totalBlocks ?? 0)}
+              readOnly
+            />
+            <Input
+              label="Total Tools"
+              value={String(selectedProfileSummary?.totalTools ?? 0)}
               readOnly
             />
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" onClick={handleSave} loading={saving} disabled={!editingPlan}>
+            <Button size="sm" onClick={handleSave} loading={saving} disabled={!editingProfile}>
               <Save size={12} />
-              Save Plan
+              Save Profile
             </Button>
             <Button size="sm" variant="ghost" onClick={() => void handleReloadSelected()} disabled={loading || saving}>
               <RefreshCcw size={12} />
               Reload
             </Button>
-            <Button size="sm" variant="ghost" onClick={handleReset} disabled={!editingPlan || saving}>
+            <Button size="sm" variant="ghost" onClick={handleReset} disabled={!editingProfile || saving}>
               <RotateCcw size={12} />
               Reset Default
             </Button>
-            <Button size="sm" variant="ghost" onClick={addScenario} disabled={!editingPlan || saving}>
+            <Button size="sm" variant="ghost" onClick={addBlock} disabled={!editingProfile || saving}>
               <Plus size={12} />
-              Add Scenario
+              Add Block
             </Button>
           </div>
           {error && (
@@ -284,73 +302,74 @@ export function StaticReconPlanSettings() {
       </Card>
 
       <div className="space-y-3">
-        {loading && <p className="text-sm text-text-muted">Loading static recon plans...</p>}
-        {!loading && editingPlan && editingPlan.scenarios.length === 0 && (
+        {loading && <p className="text-sm text-text-muted">Loading Information Gathering profiles...</p>}
+        {!loading && editingProfile && editingProfile.blocks.length === 0 && (
           <Card>
-            <p className="text-sm text-text-muted">No scenarios saved for this target type yet.</p>
+            <p className="text-sm text-text-muted">No blocks saved for this target type yet.</p>
           </Card>
         )}
-        {!loading && editingPlan?.scenarios.map((scenario, index) => {
-          const isExpanded = expandedScenarioIndex === index;
+        {!loading && editingProfile?.blocks.map((block, index) => {
+          const isExpanded = expandedBlockIndex === index;
           return (
             <Card key={`${selectedTargetType}-${index}`} className="overflow-hidden">
-              <div 
-                className="flex items-center justify-between p-3 cursor-pointer hover:bg-surface-0/50 transition-colors"
-                onClick={() => setExpandedScenarioIndex(isExpanded ? null : index)}
+              <div
+                className="flex cursor-pointer items-center justify-between p-3 transition-colors hover:bg-surface-0/50"
+                onClick={() => setExpandedBlockIndex(isExpanded ? null : index)}
               >
                 <div className="flex items-center gap-3">
                   {isExpanded ? <ChevronDown size={14} className="text-text-secondary" /> : <ChevronRight size={14} className="text-text-secondary" />}
                   <div className="flex flex-col">
-                    <span className="text-sm font-medium">Scenario {index + 1}: {scenario.task || "Untitled Scenario"}</span>
-                    <span className="text-xs text-text-secondary">Priority P{scenario.priority} • {scenario.methods.length} methods</span>
+                    <span className="text-sm font-medium">Block {index + 1}: {block.name || "Untitled Block"}</span>
+                    <span className="text-xs text-text-secondary">{block.id || "no_id"} • {block.interaction} • {block.tools.length} tools</span>
                   </div>
                 </div>
               </div>
-              
+
               {isExpanded && (
-                <div className="p-4 border-t border-border space-y-4 bg-surface-0/20">
+                <div className="space-y-4 border-t border-border bg-surface-0/20 p-4">
                   <div className="flex items-center justify-between">
-                    <h4 className="text-sm font-medium text-text-primary">Update Scenario</h4>
-                    <Button size="sm" variant="ghost" onClick={() => removeScenario(index)} disabled={saving} className="text-red-400 hover:text-red-300 hover:bg-red-500/10">
+                    <h4 className="text-sm font-medium text-text-primary">Update Block</h4>
+                    <Button size="sm" variant="ghost" onClick={() => removeBlock(index)} disabled={saving} className="text-red-400 hover:bg-red-500/10 hover:text-red-300">
                       <Trash2 size={12} />
                       Remove
                     </Button>
                   </div>
-                  
+
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                     <Input
-                      label="Task"
-                      value={scenario.task}
-                      onChange={(event) => updateScenario(index, { task: event.target.value })}
-                    />
-                    <Select
-                      label="Agent"
-                      value="recon"
-                      onChange={() => undefined}
-                      options={[{ value: "recon", label: "Recon" }]}
+                      label="Name"
+                      value={block.name}
+                      onChange={(event) => updateBlock(index, { name: event.target.value })}
                     />
                     <Input
-                      label="Priority"
-                      type="number"
-                      min={1}
-                      max={5}
-                      value={String(scenario.priority)}
-                      onChange={(event) => updateScenario(index, { priority: Math.max(1, Math.min(5, Number(event.target.value) || 3)) })}
+                      label="Block ID"
+                      value={block.id}
+                      onChange={(event) => updateBlock(index, { id: slugifyBlockId(event.target.value) })}
+                    />
+                    <Select
+                      label="Interaction"
+                      value={block.interaction}
+                      onChange={(event) => updateBlock(index, { interaction: event.target.value })}
+                      options={[
+                        { value: "passive", label: "Passive" },
+                        { value: "active_safe", label: "Active Safe" },
+                        { value: "active", label: "Active" },
+                      ]}
                     />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-medium text-text-secondary">Details</label>
+                    <label className="block text-xs font-medium text-text-secondary">Goal</label>
                     <textarea
                       className="min-h-24 w-full rounded-md border border-border bg-surface-0 px-3 py-2 text-sm text-text-primary transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-pf-500/50"
-                      value={scenario.details}
-                      onChange={(event) => updateScenario(index, { details: event.target.value })}
+                      value={block.goal}
+                      onChange={(event) => updateBlock(index, { goal: event.target.value })}
                     />
                   </div>
                   <Input
-                    label="Methods"
-                    hint="Comma-separated technique descriptions"
-                    value={scenario.methods.join(", ")}
-                    onChange={(event) => updateScenario(index, { methods: normalizeMethods(event.target.value) })}
+                    label="Tools"
+                    hint="Comma-separated baseline tools from the Information Gathering JSON profile"
+                    value={block.tools.join(", ")}
+                    onChange={(event) => updateBlock(index, { tools: normalizeList(event.target.value) })}
                   />
                 </div>
               )}

@@ -52,6 +52,9 @@ CONTENT_TYPES = ("strategies", "exploits", "tools", "standards", "attack_types")
 class QdrantVectorStore:
     """Qdrant adapter with per-content-type collections and domain metadata filtering."""
 
+    _shared_clients: dict[tuple[str, str | None], QdrantClient] = {}
+    _shared_ensured_collections: dict[tuple[str, str | None, str], set[str]] = {}
+
     def __init__(
         self,
         url: str | None = None,
@@ -63,13 +66,19 @@ class QdrantVectorStore:
         self._prefix = collection_prefix or db_config.qdrant_collection_prefix
         self._dimensions = db_config.embedding_dimensions
         self._client: QdrantClient | None = None
-        self._ensured_collections: set[str] = set()
+        shared_key = (self._url, self._api_key, self._prefix)
+        self._ensured_collections = self.__class__._shared_ensured_collections.setdefault(shared_key, set())
 
     # ── Connection ────────────────────────────────────────────────────────
 
     def _get_client(self) -> QdrantClient:
         """Lazy-init Qdrant client."""
         if self._client is None:
+            shared_key = (self._url, self._api_key)
+            shared_client = self.__class__._shared_clients.get(shared_key)
+            if shared_client is not None:
+                self._client = shared_client
+                return self._client
             kwargs: dict[str, Any] = {"url": self._url}
             if self._api_key:
                 kwargs["api_key"] = self._api_key
@@ -88,6 +97,7 @@ class QdrantVectorStore:
                     self._client = QdrantClient(**kwargs)
             else:
                 self._client = QdrantClient(**kwargs)
+            self.__class__._shared_clients[shared_key] = self._client
             logger.info("qdrant_initialized", url=self._url)
         return self._client
 
@@ -145,6 +155,7 @@ class QdrantVectorStore:
                     "domain": c.domain,
                     "content_type": content_type,
                     **c.to_vector_metadata(),
+                    **self._sanitize_extra_payload(c.extra),
                     "doc_content_hash": c.extra.get("doc_content_hash", c.content_hash),
                 },
             )
@@ -396,3 +407,25 @@ class QdrantVectorStore:
                 "score": hit.score,
             })
         return output
+
+    @staticmethod
+    def _sanitize_extra_payload(extra: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(extra, dict):
+            return {}
+
+        safe: dict[str, Any] = {}
+        for key, value in extra.items():
+            clean_key = str(key or "").strip()
+            if not clean_key or clean_key in {"content", "domain", "content_type"}:
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                safe[clean_key] = value
+                continue
+            if isinstance(value, list):
+                normalized = [
+                    item
+                    for item in value
+                    if isinstance(item, (str, int, float, bool)) or item is None
+                ]
+                safe[clean_key] = normalized[:20]
+        return safe

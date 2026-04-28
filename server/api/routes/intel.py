@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 import structlog
 
-from server.agents.intel.config import (
+from server.nodes.intel.config import (
     DEFAULT_VERIFY_SOURCES,
     RAG_REFRESH_DAYS,
     UPDATE_DAYS_BACK,
@@ -975,7 +975,7 @@ def set_intel_update_schedule(payload: IntelUpdateSchedulePayload) -> dict[str, 
 
 
 async def _run_force_update(target_type: str, info: str) -> None:
-    from server.agents.intel.agent import IntelAgent
+    from server.nodes.intel import IntelNode
 
     def _cancel_requested() -> bool:
         with _FORCE_UPDATE_LOCK:
@@ -1026,12 +1026,11 @@ async def _run_force_update(target_type: str, info: str) -> None:
     )
 
     progress.on_step(f"Starting intel enrichment for '{target_type}'")
-    agent = IntelAgent(callback=progress)
-    await agent.run(
+    node = IntelNode(callback=progress)
+    await node.refresh_rag(
         target_type=target_type,
         info=info,
         force_update=True,
-        update_only=True,
     )
 
 

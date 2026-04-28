@@ -1,0 +1,199 @@
+{
+  "web_app": [
+    {
+      "id": "passive_context",
+      "name": "Passive Context",
+      "interaction": "passive",
+      "goal": "Collect public-web context when the target is internet-facing.",
+      "tools": ["passive_web_recon", "dns_recon"]
+    },
+    {
+      "id": "fingerprinting",
+      "name": "Fingerprinting",
+      "interaction": "active_safe",
+      "goal": "Identify the live HTTP surface, framework, server, and defensive controls.",
+      "tools": ["http_probe", "detect_tech", "http_header_analysis"]
+    },
+    {
+      "id": "surface_mapping",
+      "name": "Surface Mapping",
+      "interaction": "active_safe",
+      "goal": "Map routes, JavaScript-exposed endpoints, and same-origin API surface.",
+      "tools": ["web_crawler", "api_passive_enum", "js_source_code_analyzer"]
+    },
+    {
+      "id": "trust_and_auth",
+      "name": "Trust And Auth",
+      "interaction": "active_safe",
+      "goal": "Check cross-origin trust behavior and visible session/authentication clues.",
+      "tools": ["cors_misconfig_check", "session_token_analysis"]
+    }
+  ],
+  "api": [
+    {
+      "id": "passive_context",
+      "name": "Passive Context",
+      "interaction": "passive",
+      "goal": "Collect passive DNS and archive context when the API is publicly reachable.",
+      "tools": ["passive_web_recon", "dns_recon"]
+    },
+    {
+      "id": "transport_and_headers",
+      "name": "Transport And Headers",
+      "interaction": "active_safe",
+      "goal": "Fingerprint transport behavior, headers, and visible controls.",
+      "tools": ["http_probe", "http_header_analysis", "detect_tech"]
+    },
+    {
+      "id": "api_surface",
+      "name": "API Surface",
+      "interaction": "active_safe",
+      "goal": "Enumerate API routes, versions, and client-exposed endpoints.",
+      "tools": ["api_passive_enum", "js_source_code_analyzer"]
+    },
+    {
+      "id": "trust_and_session",
+      "name": "Trust And Session",
+      "interaction": "active_safe",
+      "goal": "Inspect CORS, token, and session clues on visible endpoints.",
+      "tools": ["cors_misconfig_check", "session_token_analysis"]
+    }
+  ],
+  "mobile": [
+    {
+      "id": "artifact_profile",
+      "name": "Artifact Profile",
+      "interaction": "static",
+      "goal": "Extract static metadata, permissions, and code-level mobile findings.",
+      "tools": ["mobile_static_analysis"]
+    },
+    {
+      "id": "storage_review",
+      "name": "Storage Review",
+      "interaction": "static",
+      "goal": "Check storage-related exposure in extracted mobile artifacts when available.",
+      "tools": ["mobile_storage_check"]
+    }
+  ],
+  "infra": [
+    {
+      "id": "service_inventory",
+      "name": "Service Inventory",
+      "interaction": "active_safe",
+      "goal": "Map live hosts, ports, and reachable services.",
+      "tools": ["nmap_scan", "route_topology", "dns_recon"]
+    },
+    {
+      "id": "host_posture",
+      "name": "Host Posture",
+      "interaction": "active_safe",
+      "goal": "Gather high-level host configuration and exposure clues.",
+      "tools": ["linux_config_audit"]
+    }
+  ],
+  "network": [
+    {
+      "id": "service_inventory",
+      "name": "Service Inventory",
+      "interaction": "active_safe",
+      "goal": "Map the reachable network surface and service posture.",
+      "tools": ["nmap_scan", "route_topology", "dns_recon"]
+    },
+    {
+      "id": "local_discovery",
+      "name": "Local Discovery",
+      "interaction": "active_safe",
+      "goal": "Enumerate nearby hosts and broadcast-adjacent exposure when applicable.",
+      "tools": ["arp_scan"]
+    }
+  ],
+  "iot": [
+    {
+      "id": "service_inventory",
+      "name": "Service Inventory",
+      "interaction": "active_safe",
+      "goal": "Map reachable services and IoT-relevant network behavior.",
+      "tools": ["nmap_scan", "iot_protocol_scan", "arp_scan"]
+    },
+    {
+      "id": "firmware_context",
+      "name": "Firmware Context",
+      "interaction": "static",
+      "goal": "Analyze firmware artifacts when a firmware image is provided.",
+      "tools": ["firmware_analysis"]
+    }
+  ],
+  "linux_server": [
+    {
+      "id": "service_inventory",
+      "name": "Service Inventory",
+      "interaction": "active_safe",
+      "goal": "Map open services, routes, and transport exposure.",
+      "tools": ["nmap_scan", "route_topology", "dns_recon"]
+    },
+    {
+      "id": "host_posture",
+      "name": "Host Posture",
+      "interaction": "active_safe",
+      "goal": "Collect host configuration and Linux security posture clues.",
+      "tools": ["linux_config_audit"]
+    }
+  ],
+  "desktop": [
+    {
+      "id": "binary_profile",
+      "name": "Binary Profile",
+      "interaction": "static",
+      "goal": "Inspect the desktop binary and embedded dependencies when an artifact is available.",
+      "tools": ["binary_analysis"]
+    }
+  ],
+  "cloud": [
+    {
+      "id": "storage_exposure",
+      "name": "Storage Exposure",
+      "interaction": "passive_active_safe",
+      "goal": "Enumerate public cloud storage exposure and naming patterns.",
+      "tools": ["cloud_storage_enum"]
+    },
+    {
+      "id": "provider_posture",
+      "name": "Provider Posture",
+      "interaction": "active_safe",
+      "goal": "Collect high-level provider misconfiguration signals when the provider is known.",
+      "tools": ["cloud_misconfig_scan"]
+    }
+  ],
+  "container": [
+    {
+      "id": "image_profile",
+      "name": "Image Profile",
+      "interaction": "static",
+      "goal": "Inventory packages, vulnerabilities, and image-layer exposure from the container artifact.",
+      "tools": ["container_image_scan", "container_layer_analysis"]
+    },
+    {
+      "id": "runtime_posture",
+      "name": "Runtime Posture",
+      "interaction": "active_safe",
+      "goal": "Check runtime and orchestration posture when runtime access exists.",
+      "tools": ["container_runtime_audit", "container_registry_enum"]
+    }
+  ],
+  "repository": [
+    {
+      "id": "secret_and_history",
+      "name": "Secret And History",
+      "interaction": "static",
+      "goal": "Find exposed secrets, deleted sensitive files, and risky history.",
+      "tools": ["secret_scan", "git_history_audit", "sensitive_files_scan"]
+    },
+    {
+      "id": "code_and_pipeline",
+      "name": "Code And Pipeline",
+      "interaction": "static",
+      "goal": "Review source code, dependencies, and CI/CD configuration for security issues.",
+      "tools": ["sast_scan", "dependency_scan", "ci_cd_pipeline_audit", "iac_security_scan"]
+    }
+  ]
+}

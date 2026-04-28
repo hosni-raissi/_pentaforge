@@ -26,8 +26,27 @@ from urllib.parse import urlparse
 import structlog
 
 from server.db.projects import ProjectsStore
+from server.db.projects.project_rag import index_verified_finding
 from server.db.projects.runtime_cache import get_project_runtime_cache
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
+from server.nodes.information_gathering import (
+    InformationGatheringNode,
+    load_target_info_profile_defaults,
+)
+from server.nodes.intel import IntelNode
+from server.nodes.system_memory import (
+    SystemMemoryNode,
+    SystemMemoryLLM,
+    append_system_memory_updates as _append_system_memory_updates_external,
+    build_system_memory_prompt_block as _build_target_memory_prompt_block_external,
+    initialize_system_memory as _initialize_system_memory,
+    load_system_memory as _load_target_memory_external,
+    merge_system_memory_artifacts as _merge_target_memory_artifacts_external,
+    save_system_memory as _save_target_memory_external,
+    store_system_memory_checklist as _store_system_memory_checklist_external,
+    system_memory_dir as _system_memory_dir_external,
+    system_memory_paths as _system_memory_paths_external,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -170,22 +189,9 @@ def _build_target_execution_guidance(
     target: str,
     scenario_tasks: list[str] | None = None,
 ) -> str:
-    host = _extract_target_host(target)
     tasks = [str(item).strip() for item in (scenario_tasks or []) if str(item).strip()]
-    if not _is_loopback_or_local_target(target):
-        return "Target execution guidance: standard target. Use scenario-appropriate tools and avoid unnecessary duplicates."
-
     guidance_lines = [
-        "Target execution guidance: this is a loopback/local target.",
-        f"Resolved host: {host or 'localhost'}",
-        "Treat public-internet enumeration as inapplicable here.",
-        "Do NOT spend rounds on internet-perimeter or external OSINT tooling such as amass/subdomain/cloud/CDN discovery for this target.",
-        "Prefer local web evidence: detect_tech, http_probe, http_header_analysis, web_crawler, web_fuzz, directory_file_fuzzing, api_endpoint_discovery, api_passive_enum, js_source_code_analyzer, param_discovery, websocket_recon, cors_misconfig_check, session_token_analysis.",
-        "Use run_custom only for tightly scoped localhost HTTP/service checks when that adds direct evidence.",
-        "Do NOT use run_python in warmup recon unless there is no built-in tool that can summarize already collected evidence.",
-        "If the assigned scenario is inherently public-internet oriented, gather the minimal local evidence that still applies, then mark it blocked instead of retrying unrelated tools.",
-        "For Identity & Access Analysis, focus on discovered auth routes, cookies, headers, login/session artifacts, and access-control clues; if none exist after a minimal focused attempt, record that negative result and move on.",
-        "For Operational Synthesis, synthesize already discovered endpoints, headers, trust-boundary clues, rate-limit behavior, and artifact paths; do not restart broad discovery from scratch.",
+        "Target execution guidance: standard target. Use scenario-appropriate tools and avoid unnecessary duplicates.",
     ]
     if tasks:
         guidance_lines.append(f"Current assigned scenarios: {', '.join(tasks)}")
@@ -1091,6 +1097,422 @@ def _consume_warmup_perceptor_cache(
     return [item for item in summaries if isinstance(item, dict)]
 
 
+def _target_memory_dir(project_cache_dir: str) -> str:
+    return _system_memory_dir_external(project_cache_dir)
+
+
+def _target_memory_paths(project_cache_dir: str) -> tuple[str, str]:
+    return _system_memory_paths_external(project_cache_dir)
+
+
+def _compact_tool_output(raw: Any, *, limit: int = 1400) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        for key in ("llm_brief", "summary", "result", "status"):
+            value = str(parsed.get(key, "")).strip()
+            if value:
+                text = value
+                break
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _extract_artifact_candidates(*values: Any, limit: int = 20) -> list[str]:
+    pattern = re.compile(
+        r"(?:(?:https?://|wss?://)[^\s'\"<>]+|/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]{2,}|[A-Za-z0-9._-]+\.(?:js|json|txt|xml|yaml|yml|env|bak|old|zip))"
+    )
+    found: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        for match in pattern.findall(text):
+            clean = str(match).strip().rstrip(".,;)")
+            if len(clean) < 3:
+                continue
+            if clean.lower() in seen:
+                continue
+            seen.add(clean.lower())
+            found.append(clean)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _load_target_memory(project_cache_dir: str) -> dict[str, Any]:
+    return _load_target_memory_external(project_cache_dir)
+
+
+async def _save_target_memory(
+    project_cache_dir: str,
+    memory: dict[str, Any],
+    *,
+    memory_llm: SystemMemoryLLM | None = None,
+) -> dict[str, Any]:
+    return await _save_target_memory_external(
+        project_cache_dir,
+        memory,
+        memory_llm=memory_llm,
+    )
+
+
+async def _store_target_memory_checklist(
+    project_cache_dir: str,
+    *,
+    checklist: dict[str, Any],
+    memory_llm: SystemMemoryLLM | None = None,
+) -> dict[str, Any]:
+    return await _store_system_memory_checklist_external(
+        project_cache_dir,
+        checklist=checklist,
+        memory_llm=memory_llm,
+    )
+
+
+def _merge_target_memory_artifacts(memory: dict[str, Any], *values: Any) -> None:
+    _merge_target_memory_artifacts_external(memory, *values)
+
+
+async def _append_target_memory_updates(
+    project_cache_dir: str,
+    *,
+    stage: str,
+    updates: list[dict[str, Any]],
+    verified_findings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return await _append_system_memory_updates_external(
+        project_cache_dir,
+        stage=stage,
+        updates=updates,
+        verified_findings=verified_findings,
+    )
+
+
+def _build_target_memory_prompt_block(memory: dict[str, Any]) -> str:
+    return _build_target_memory_prompt_block_external(memory)
+
+
+def _infer_cloud_provider(*values: Any) -> str:
+    text = " ".join(str(value or "") for value in values).lower()
+    if any(marker in text for marker in ("aws", "amazon", "s3://", "cloudfront", ".amazonaws.com")):
+        return "aws"
+    if any(marker in text for marker in ("azure", "blob.core.windows.net", "azurecr.io")):
+        return "azure"
+    if any(marker in text for marker in ("gcp", "google cloud", "gs://", "gcr.io")):
+        return "gcp"
+    return ""
+
+
+def _build_target_info_tool_kwargs(
+    tool_name: str,
+    target: str,
+    target_type: str,
+    info: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_type = _normalize_target_type(target_type)
+    host = _extract_target_host(target)
+    target_text = str(target or "").strip()
+    repo_like = normalized_type == "repository" or os.path.exists(target_text)
+    mobile_artifact = target_text.lower().endswith((".apk", ".ipa", ".aab"))
+    container_artifact = bool(re.search(r"(dockerfile|\.tar$|:[A-Za-z0-9._-]+$|/)", target_text, re.IGNORECASE))
+    firmware_artifact = target_text.lower().endswith((".bin", ".img", ".fw", ".firmware"))
+
+    if tool_name == "passive_web_recon":
+        if not host:
+            return None, "skipped: passive recon requires a hostname or domain"
+        return {
+            "target": host,
+            "include_subdomains": True,
+            "include_historical_urls": True,
+            "max_urls": 120,
+            "threads": 4,
+        }, None
+    if tool_name == "dns_recon":
+        if not host:
+            return None, "skipped: DNS recon requires a hostname or domain"
+        return {"target": host, "mode": "records", "output_format": "text", "timeout": 90}, None
+    if tool_name == "http_probe":
+        return {"target": target_text, "args": ["-follow-redirects"], "use_cache": True, "timeout": 120}, None
+    if tool_name == "detect_tech":
+        return {"tool": "whatweb", "target": target_text, "use_cache": True}, None
+    if tool_name == "http_header_analysis":
+        return {"tool": "manual", "target": target_text, "methods": ["GET"]}, None
+    if tool_name == "web_crawler":
+        return {"tool": "katana", "target": target_text, "args": ["-jc"], "max_results": 150, "timeout": 60}, None
+    if tool_name == "api_endpoint_discovery":
+        return {"tool": "manual", "target": target_text, "compact_output": True}, None
+    if tool_name == "api_passive_enum":
+        return {"target": target_text}, None
+    if tool_name == "js_source_code_analyzer":
+        return {"tool": "getjs", "target": target_text}, None
+    if tool_name == "cors_misconfig_check":
+        return {
+            "tool": "manual",
+            "target": target_text,
+            "origins": ["https://example.com", "https://evil.example"],
+            "use_cache": True,
+            "timeout": 60,
+        }, None
+    if tool_name == "session_token_analysis":
+        return {"target": target_text, "sample_count": 5, "verify_tls": True, "timeout": 20}, None
+    if tool_name == "mobile_static_analysis":
+        if not mobile_artifact:
+            return None, "skipped: mobile static analysis requires an APK/IPA/AAB target artifact"
+        return {"tool": "manual", "target": target_text, "platform": "auto"}, None
+    if tool_name == "mobile_storage_check":
+        if not mobile_artifact:
+            return None, "skipped: mobile storage checks require an extracted mobile artifact or app context"
+        platform = "ios" if target_text.lower().endswith(".ipa") else "android"
+        return {"platform": platform, "checks": ["shared_prefs", "sqlite"]}, None
+    if tool_name == "nmap_scan":
+        if not host:
+            return None, "skipped: service inventory requires a host or IP target"
+        return {"target": host, "scan_mode": "tcp", "top_ports": 100, "output_format": "text", "timeout": 120}, None
+    if tool_name == "route_topology":
+        if not host:
+            return None, "skipped: route topology requires a host target"
+        return {"target": host, "output_format": "text"}, None
+    if tool_name == "arp_scan":
+        return None, "skipped: arp scan requires a local broadcast-domain execution context"
+    if tool_name == "iot_protocol_scan":
+        if not host:
+            return None, "skipped: IoT protocol scan requires a host target"
+        return {"target": host, "protocols": ["mqtt", "coap", "modbus"]}, None
+    if tool_name == "firmware_analysis":
+        if not firmware_artifact:
+            return None, "skipped: firmware analysis requires a firmware image target"
+        return {"firmware_path": target_text, "tools": ["strings"]}, None
+    if tool_name == "linux_config_audit":
+        if host:
+            return {"target": host, "mode": "quick", "timeout": 120}, None
+        return None, "skipped: linux audit requires a host target"
+    if tool_name == "binary_analysis":
+        if not os.path.exists(target_text):
+            return None, "skipped: binary analysis requires a local desktop artifact"
+        return {"target": target_text}, None
+    if tool_name == "cloud_storage_enum":
+        if not target_text:
+            return None, "skipped: cloud storage enumeration requires a keyword or target identifier"
+        return {"target": host or target_text}, None
+    if tool_name == "cloud_misconfig_scan":
+        provider = _infer_cloud_provider(target_text, info)
+        if not provider:
+            return None, "skipped: cloud provider could not be inferred from target info"
+        return {"tool": "scoutsuite", "provider": provider}, None
+    if tool_name == "container_image_scan":
+        if not container_artifact:
+            return None, "skipped: container image scan requires an image ref, tarball, or Dockerfile"
+        return {"tool": "syft", "target": target_text, "scan_type": "sbom"}, None
+    if tool_name == "container_layer_analysis":
+        if not container_artifact:
+            return None, "skipped: container layer analysis requires an image ref or tarball"
+        return {"target": target_text, "include_secrets": True, "timeout": 120}, None
+    if tool_name == "container_runtime_audit":
+        return {"tool": "custom", "target": "local"}, None
+    if tool_name == "container_registry_enum":
+        if not target_text:
+            return None, "skipped: registry enumeration requires a registry-like target"
+        return {"target": target_text, "registry_type": "auto", "timeout": 60}, None
+    if tool_name == "secret_scan":
+        if not repo_like:
+            return None, "skipped: secret scanning requires a repository path or URL"
+        return {"tool": "gitleaks", "target": target_text, "scan_scope": "repo"}, None
+    if tool_name == "git_history_audit":
+        if not repo_like:
+            return None, "skipped: git history audit requires a repository path"
+        return {"target": target_text, "analysis_depth": "quick", "include_deleted": True, "timeout": 120}, None
+    if tool_name == "sensitive_files_scan":
+        if not repo_like:
+            return None, "skipped: sensitive file scanning requires a repository or directory target"
+        return {"target": target_text, "include_backups": True, "include_ide_config": True, "timeout": 120}, None
+    if tool_name == "sast_scan":
+        if not repo_like:
+            return None, "skipped: SAST requires a repository or source path"
+        return {"tool": "semgrep", "target": target_text, "language": "auto", "scan_type": "security"}, None
+    if tool_name == "dependency_scan":
+        if not repo_like:
+            return None, "skipped: dependency scanning requires a repository or manifest path"
+        return {"tool": "safety", "target": target_text, "ecosystem": "auto", "scan_type": "vuln"}, None
+    if tool_name == "ci_cd_pipeline_audit":
+        if not repo_like:
+            return None, "skipped: CI/CD audit requires a repository or config path"
+        return {"target": target_text, "platform": "auto", "include_secrets": True, "timeout": 120}, None
+    if tool_name == "iac_security_scan":
+        if not repo_like:
+            return None, "skipped: IaC audit requires a repository or manifest path"
+        return {"tool": "checkov", "target": target_text, "include_secrets": True, "timeout": 120}, None
+    return None, f"skipped: no deterministic target-info runner configured for {tool_name}"
+
+
+async def _run_target_info_gathering(
+    *,
+    project_id: str,
+    scan_id: str,
+    target: str,
+    target_type: str,
+    scope: str,
+    info: str,
+    profile: dict[str, Any],
+    project_cache_dir: str,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    from server.agents.executer.recon.tools import ALL_RECON_TOOLS
+    from server.agents.executer.target_tool_routing import filter_tools_for_target_types
+
+    normalized_type = _normalize_target_type(target_type)
+    scoped_tools = filter_tools_for_target_types(
+        role="recon",
+        tools=ALL_RECON_TOOLS,
+        target_types=[normalized_type],
+    )
+    tool_map = {tool.name: tool for tool in scoped_tools}
+    blocks = profile.get("blocks", []) if isinstance(profile, dict) else []
+    memory_llm = SystemMemoryLLM()
+    memory = _initialize_system_memory(
+        project_id=project_id,
+        scan_id=scan_id,
+        target=target,
+        target_type=normalized_type,
+        scope=scope,
+        info=info,
+        profile=profile,
+    )
+    memory = await _save_target_memory(
+        project_cache_dir,
+        memory,
+        memory_llm=memory_llm,
+    )
+
+    valid_blocks = [block for block in blocks if isinstance(block, dict)]
+
+    for index, block in enumerate(valid_blocks, start=1):
+        if not isinstance(block, dict):
+            continue
+        block_name = str(block.get("name", "")).strip()
+        prepared_block = await memory_llm.prepare_block(
+            target=target,
+            target_type=normalized_type,
+            scope=scope,
+            info=info,
+            block=block,
+        )
+        prepared_name = str(prepared_block.get("name", block_name)).strip() or block_name
+        if progress_callback:
+            progress_callback(
+                "block_started",
+                {
+                    "id": str(prepared_block.get("id", block.get("id", ""))).strip(),
+                    "name": prepared_name,
+                    "goal": str(prepared_block.get("goal", block.get("goal", ""))).strip(),
+                    "index": index,
+                    "total": len(valid_blocks),
+                    "planned_tools": [
+                        str(item).strip()
+                        for item in prepared_block.get("tools", [])
+                        if str(item).strip()
+                    ],
+                },
+            )
+        tool_names = [str(item).strip() for item in prepared_block.get("tools", []) if str(item).strip()]
+        result_rows: list[dict[str, Any]] = []
+        for tool_name in tool_names:
+            kwargs, skip_reason = _build_target_info_tool_kwargs(
+                tool_name=tool_name,
+                target=target,
+                target_type=normalized_type,
+                info=info,
+            )
+            if skip_reason:
+                result_rows.append({
+                    "tool": tool_name,
+                    "status": "skipped",
+                    "summary": skip_reason,
+                    "args": kwargs or {},
+                })
+                continue
+            tool = tool_map.get(tool_name)
+            if tool is None or kwargs is None:
+                result_rows.append({
+                    "tool": tool_name,
+                    "status": "skipped",
+                    "summary": "skipped: tool is not registered for this target type",
+                    "args": kwargs or {},
+                })
+                continue
+            try:
+                raw_result = await tool.execute(**kwargs)
+                summary = _compact_tool_output(raw_result)
+                result_rows.append({
+                    "tool": tool_name,
+                    "status": "completed",
+                    "summary": summary,
+                    "args": kwargs,
+                })
+            except Exception as exc:
+                result_rows.append({
+                    "tool": tool_name,
+                    "status": "error",
+                    "summary": f"error: {str(exc)[:240]}",
+                    "args": kwargs,
+                })
+        organized_block = await memory_llm.organize_block(
+            target=target,
+            target_type=normalized_type,
+            scope=scope,
+            info=info,
+            block=prepared_block,
+            raw_results=result_rows,
+        )
+        gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+        block_rows = gathering.get("blocks", []) if isinstance(gathering.get("blocks"), list) else []
+        block_rows.append(organized_block)
+        gathering["blocks"] = block_rows
+        gathering["status"] = "running"
+        memory["gathering"] = gathering
+        _merge_target_memory_artifacts(
+            memory,
+            organized_block.get("name"),
+            organized_block.get("goal"),
+            organized_block.get("summary"),
+            *(organized_block.get("artifacts", []) if isinstance(organized_block.get("artifacts"), list) else []),
+        )
+        for result in organized_block.get("results", []) if isinstance(organized_block.get("results"), list) else []:
+            if not isinstance(result, dict):
+                continue
+            _merge_target_memory_artifacts(memory, result.get("summary"), *(result.get("artifacts", []) or []))
+        memory = await _save_target_memory(
+            project_cache_dir,
+            memory,
+            memory_llm=memory_llm,
+        )
+        if progress_callback:
+            progress_callback(
+                "block_completed",
+                {
+                    "id": str(organized_block.get("id", "")).strip(),
+                    "name": str(organized_block.get("name", "")).strip(),
+                    "status": str(organized_block.get("status", "")).strip(),
+                    "summary": str(organized_block.get("summary", "")).strip(),
+                    "index": index,
+                    "total": len(valid_blocks),
+                },
+            )
+
+    gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+    gathering["status"] = "completed"
+    memory["gathering"] = gathering
+    return await _save_target_memory(
+        project_cache_dir,
+        memory,
+        memory_llm=memory_llm,
+    )
+
+
 def _normalize_target_type(value: Any) -> str:
     clean = str(value or "").strip().lower().replace("-", "_")
     if not clean:
@@ -1105,6 +1527,24 @@ def _nested_get(data: dict[str, Any], dotted_key: str) -> str:
             return ""
         current = current.get(part)
     return str(current).strip() if isinstance(current, str) else ""
+
+
+def _merge_nested_records(
+    base: dict[str, Any] | None,
+    override: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(base) if isinstance(base, dict) else {}
+    if not isinstance(override, dict):
+        return merged
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_nested_records(
+                merged.get(key) if isinstance(merged.get(key), dict) else {},
+                value,
+            )
+        else:
+            merged[key] = value
+    return merged
 
 
 def _extract_target(project: dict[str, Any]) -> str:
@@ -1123,10 +1563,10 @@ def _extract_target(project: dict[str, Any]) -> str:
     return ""
 
 
-def _ensure_intel_agent_importable() -> None:
-    """Raise a clear runtime error when Intel Agent deps are missing."""
+def _ensure_intel_node_importable() -> None:
+    """Raise a clear runtime error when Intel node deps are missing."""
     try:
-        from server.agents.intel.agent import IntelAgent as _IntelAgent  # noqa: F401
+        from server.nodes.intel.node import IntelNode as _IntelNode  # noqa: F401
     except ModuleNotFoundError as exc:
         missing = str(exc.name or "").strip() or "unknown"
         raise RuntimeError(
@@ -1175,7 +1615,7 @@ def _coerce_priority(value: Any) -> int | None:
         p = int(value)
     except (TypeError, ValueError):
         return None
-    if 1 <= p <= 5:
+    if 1 <= p <= 6:
         return p
     return None
 
@@ -1183,6 +1623,13 @@ def _coerce_priority(value: Any) -> int | None:
 def _normalize_priority(value: Any) -> int:
     parsed = _coerce_priority(value)
     return parsed if parsed is not None else 3
+
+
+def _priority_sort_key(priority: int) -> tuple[int, int]:
+    normalized = _normalize_priority(priority)
+    if normalized == 6:
+        return (0, 0)
+    return (1, normalized)
 
 
 def _extract_prioritized_exec_scenarios(
@@ -1228,28 +1675,100 @@ def _extract_prioritized_exec_scenarios(
                 enriched["_scenario_index"] = scen_idx
                 indexed.append((priority, phase_idx, step_idx, scen_idx, enriched))
 
-    indexed.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    indexed.sort(key=lambda row: (_priority_sort_key(row[0]), row[1], row[2], row[3]))
     return [row[4] for row in indexed[: max(0, int(limit))]]
 
 
+def _enforce_runnable_now_priorities(plan_data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the plan so at most two pending recon/exploit scenarios are P6."""
+
+    phases = plan_data.get("phases", [])
+    if not isinstance(phases, list):
+        return plan_data
+
+    pending: list[dict[str, Any]] = []
+    runnable_now: list[dict[str, Any]] = []
+
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        for step in phase.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            for scenario in step.get("scenarios", []):
+                if not isinstance(scenario, dict):
+                    continue
+                agent = str(scenario.get("agent", "")).strip().lower()
+                if agent not in {"recon", "exploit"}:
+                    if _normalize_priority(scenario.get("priority", 5)) == 6:
+                        scenario["priority"] = 5
+                    continue
+                if bool(scenario.get("done", False)):
+                    if _normalize_priority(scenario.get("priority", 5)) == 6:
+                        scenario["priority"] = 5
+                    continue
+                pending.append(scenario)
+                if _normalize_priority(scenario.get("priority", 3)) == 6:
+                    runnable_now.append(scenario)
+
+    if len(runnable_now) > 2:
+        for scenario in runnable_now[2:]:
+            scenario["priority"] = 5
+        runnable_now = runnable_now[:2]
+
+    if len(runnable_now) < 2:
+        for scenario in pending:
+            if scenario in runnable_now:
+                continue
+            scenario["priority"] = 6
+            runnable_now.append(scenario)
+            if len(runnable_now) >= 2:
+                break
+
+    return plan_data
+
+
 def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Pick at most one recon and one exploit scenario (highest priority each)."""
+    """Pick up to two runnable-now scenarios, preferring the planner's P6 markers."""
+
+    plan_data = _enforce_runnable_now_priorities(plan_data)
     candidates = _extract_prioritized_exec_scenarios(plan_data, limit=50)
-    best_recon: dict[str, Any] | None = None
-    best_exploit: dict[str, Any] | None = None
-
+    seen_keys: set[tuple[str, str]] = set()
+    runnable_now: list[dict[str, Any]] = []
     for scenario in candidates:
-        role = str(scenario.get("agent", "")).strip().lower()
-        if role == "recon" and best_recon is None:
-            best_recon = scenario
-        elif role == "exploit" and best_exploit is None:
-            best_exploit = scenario
-        if best_recon is not None and best_exploit is not None:
+        if _normalize_priority(scenario.get("priority", 3)) != 6:
+            continue
+        scenario_key = (
+            str(scenario.get("agent", "")).strip().lower(),
+            str(scenario.get("task", "")).strip().lower(),
+        )
+        if not scenario_key[1] or scenario_key in seen_keys:
+            continue
+        seen_keys.add(scenario_key)
+        runnable_now.append(scenario)
+        if len(runnable_now) >= 2:
             break
+    if runnable_now:
+        runnable_now.sort(key=lambda s: (_priority_sort_key(_normalize_priority(s.get("priority", 3))),))
+        return runnable_now
 
-    selected = [s for s in [best_recon, best_exploit] if isinstance(s, dict)]
-    selected.sort(key=lambda s: _normalize_priority(s.get("priority", 3)))
-    return selected
+    fallback: list[dict[str, Any]] = []
+    seen_keys.clear()
+    for scenario in candidates:
+        if not isinstance(scenario, dict):
+            continue
+        scenario_key = (
+            str(scenario.get("agent", "")).strip().lower(),
+            str(scenario.get("task", "")).strip().lower(),
+        )
+        if not scenario_key[1] or scenario_key in seen_keys:
+            continue
+        seen_keys.add(scenario_key)
+        fallback.append(scenario)
+        if len(fallback) >= 2:
+            break
+    fallback.sort(key=lambda s: (_priority_sort_key(_normalize_priority(s.get("priority", 3))),))
+    return fallback
 
 
 def _normalize_perceptor_classification(
@@ -1314,6 +1833,14 @@ def _default_static_recon_scenarios(target_type: str) -> list[dict[str, Any]]:
     file_name = _STATIC_RECON_FILE_MAP.get(normalized, "common_web.json")
     file_path = os.path.join(static_data_dir, file_name)
 
+    if not os.path.exists(file_path):
+        logger.info(
+            "Legacy static recon file unavailable; skipping file-backed warmup scenarios",
+            file=file_name,
+            target_type=normalized,
+        )
+        return []
+
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             base = json.load(f)
@@ -1367,32 +1894,8 @@ def _adapt_warmup_scenario_for_target(
     *,
     target: str,
 ) -> dict[str, Any]:
-    """Keep warmup scenarios useful for loopback/local lab targets."""
-    if not _is_loopback_or_local_target(target):
-        return dict(scenario)
-
-    task = str(scenario.get("task") or scenario.get("scenario") or "").strip()
-    details = str(scenario.get("details") or scenario.get("objective") or "").strip()
-    methods = scenario.get("methods", []) if isinstance(scenario.get("methods"), list) else []
-    haystack = " ".join([task, details, " ".join(str(item) for item in methods)]).lower()
-
-    if not any(term in haystack for term in _LOCAL_WARMUP_EXTERNAL_TERMS):
-        return dict(scenario)
-
-    adapted = dict(scenario)
-    adapted["task"] = "Local Web App Perimeter Mapping"
-    adapted["details"] = (
-        "Map the local in-scope web application boundary, live service, exposed root paths, "
-        "same-origin APIs, and local HTTP behavior. Public-internet footprinting is not applicable "
-        "for this loopback target."
-    )
-    adapted["methods"] = [
-        "Local service reachability probing",
-        "Same-origin route and endpoint inventory",
-        "HTTP surface boundary mapping",
-    ]
-    adapted["priority"] = min(_normalize_priority(scenario.get("priority", 2)), 2)
-    return adapted
+    del target
+    return dict(scenario)
 
 
 def _build_static_recon_plan(target_type: str) -> dict[str, Any]:
@@ -1471,6 +1974,103 @@ def _resolve_static_recon_plan(projects_store: Any, target_type: str) -> dict[st
         )
     except Exception:
         return built_in
+
+
+def _build_default_target_info_profile(target_type: str) -> dict[str, Any]:
+    normalized = _normalize_target_type(target_type)
+    defaults = load_target_info_profile_defaults()
+    blocks = deepcopy(defaults.get(normalized, defaults["web_app"]))
+    return {
+        "target_type": normalized,
+        "version": "1.0",
+        "generated_from": "static_target_info_profile",
+        "max_blocks": len(blocks),
+        "blocks": blocks,
+    }
+
+
+def _is_user_managed_target_info_profile(profile: dict[str, Any]) -> bool:
+    generated_from = str(profile.get("generated_from", "")).strip().lower()
+    return generated_from in {"ui", "ui_settings", "user", "manual"}
+
+
+def _should_refresh_target_info_profile_from_defaults(
+    stored_profile: dict[str, Any],
+    built_in_profile: dict[str, Any],
+) -> bool:
+    if _is_user_managed_target_info_profile(stored_profile):
+        return False
+
+    stored_blocks = stored_profile.get("blocks", [])
+    built_in_blocks = built_in_profile.get("blocks", [])
+    if not isinstance(stored_blocks, list) or not stored_blocks:
+        return True
+    if not isinstance(built_in_blocks, list) or not built_in_blocks:
+        return False
+
+    stored_names = [
+        str(item.get("name", "")).strip()
+        for item in stored_blocks
+        if isinstance(item, dict)
+    ]
+    built_in_names = [
+        str(item.get("name", "")).strip()
+        for item in built_in_blocks
+        if isinstance(item, dict)
+    ]
+    return stored_names[: len(built_in_names)] != built_in_names
+
+
+def _resolve_target_info_profile(projects_store: Any, target_type: str) -> dict[str, Any]:
+    normalized = _normalize_target_type(target_type)
+    built_in = _build_default_target_info_profile(normalized)
+    try:
+        stored = projects_store.get_target_info_profile(normalized)
+    except Exception:
+        stored = None
+    if isinstance(stored, dict):
+        if _should_refresh_target_info_profile_from_defaults(stored, built_in):
+            try:
+                return projects_store.upsert_target_info_profile(
+                    target_type=normalized,
+                    payload=built_in,
+                )
+            except Exception:
+                return built_in
+
+        stored.setdefault("target_type", normalized)
+        stored.setdefault("version", "1.0")
+        stored.setdefault("generated_from", "database")
+        blocks = stored.get("blocks", [])
+        stored["blocks"] = blocks if isinstance(blocks, list) else list(built_in.get("blocks", []))
+        return stored
+    try:
+        return projects_store.upsert_target_info_profile(
+            target_type=normalized,
+            payload=built_in,
+        )
+    except Exception:
+        return built_in
+
+
+def _format_target_info_profile_for_prompt(profile: dict[str, Any]) -> str:
+    blocks = profile.get("blocks", []) if isinstance(profile, dict) else []
+    if not isinstance(blocks, list) or not blocks:
+        return "(no target-info gathering profile available)"
+    lines: list[str] = []
+    for idx, block in enumerate(blocks, start=1):
+        if not isinstance(block, dict):
+            continue
+        name = str(block.get("name", "")).strip()
+        goal = str(block.get("goal", "")).strip()
+        interaction = str(block.get("interaction", "")).strip()
+        tools = ", ".join(str(item).strip() for item in block.get("tools", []) if str(item).strip())
+        if name:
+            lines.append(
+                f"{idx}. {name} [{interaction or 'unspecified'}] :: {goal or '(no goal)'}"
+                + (f" | tools: {tools}" if tools else "")
+            )
+    return "\n".join(lines) if lines else "(no target-info gathering profile available)"
 
 
 def _format_static_recon_plan_for_prompt(static_plan: dict[str, Any]) -> str:
@@ -1671,7 +2271,8 @@ def _build_warmup_planner_message(
     target_type: str,
     scope: str,
     info: str,
-    static_recon_plan: dict[str, Any],
+    target_info_profile: dict[str, Any],
+    target_memory: dict[str, Any] | None = None,
 ) -> str:
     normalized_target_type = _normalize_target_type(target_type)
     allowed_actions = _extract_scope_clauses(
@@ -1726,26 +2327,20 @@ def _build_warmup_planner_message(
         f"{_format_prompt_bullets(allowed_actions, 'Use scope + operator notes as hard constraints and stay recon-only.')}\n"
         "Not allowed / out-of-scope actions:\n"
         f"{_format_prompt_bullets(disallowed_actions, 'Do not infer exploit or destructive work unless it is explicitly allowed later.')}\n\n"
-        "## Static Recon Template\n"
-        f"{_format_static_recon_plan_for_prompt(static_recon_plan)}\n\n"
+        "## Structured Target-Info Gathering Profile\n"
+        f"{_format_target_info_profile_for_prompt(target_info_profile)}\n\n"
+        "## Target Memory From Deterministic Gathering\n"
+        f"{_build_target_memory_prompt_block(target_memory or {})}\n\n"
         "## Available Recon Tooling\n"
         f"{_format_warmup_recon_tooling(normalized_target_type)}\n"
         "Use tool availability only as capability context. Do NOT mention tool names in methods[] and do NOT call tools in this planner pass.\n\n"
         "## Warmup Planner Task\n"
         "This is a recon-only warmup stage before the main pentest plan.\n"
         "Return a plan containing EXACTLY 8 reconnaissance scenarios and NO exploit/report work.\n"
-        + (
-            "This target is loopback/local. Replace public-internet perimeter scenarios "
-            "(subdomains, ASN, CDN, cloud buckets, passive OSINT) with local web app perimeter mapping "
-            "against the provided URL. Do not include External Perimeter Mapping for loopback targets.\n"
-            if _is_loopback_or_local_target(target)
-            else ""
-        )
-        + "Start from the stored static recon template for this target type.\n"
-        "Use the target profile, scope rules, static recon template, and available recon tooling to maximize information gain while staying in scope.\n"
-        "Using only the target description and scope rules, keep the plan as-is or adapt priorities/details/order so it better matches the target.\n"
-        "Preserve the original static scenario task names unless the target description clearly requires a small adjustment.\n"
-        "Preserve the original static methods unless the target description clearly justifies a small edit.\n"
+        + "Start from the structured target-info profile and the deterministic target-memory findings for this target type.\n"
+        "Use the target profile, scope rules, target-info profile, deterministic target memory, and available recon tooling to maximize information gain while staying in scope.\n"
+        "Using only the target description, target memory, and scope rules, keep the plan as-is or adapt priorities/details/order so it better matches the target.\n"
+        "Preserve the high-value intent of the structured gathering profile unless the target description clearly requires a small adjustment.\n"
         "Do NOT use tools in this planner pass.\n"
         "The 8 scenarios must maximize early reconnaissance coverage and information gain for this target type.\n"
         "Every scenario must use agent=recon, include priority, and stay evidence-seeking rather than exploitative.\n"
@@ -1758,12 +2353,17 @@ def _build_post_warmup_intel_info(
     info: str,
     warmup_summaries: list[dict[str, Any]],
     recon_plan_data: dict[str, Any] | None = None,
+    target_memory: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     base_info = str(info or "").strip()
     if base_info:
         lines.append("Target description / info:")
         lines.append(base_info)
+
+    target_memory_block = _build_target_memory_prompt_block(target_memory or {})
+    if target_memory_block.strip() and target_memory_block.strip() != "(no target memory available)":
+        lines.extend(["", "Deterministic target memory:", target_memory_block])
 
     recon_plan_lines: list[str] = []
     if isinstance(recon_plan_data, dict):
@@ -1835,6 +2435,78 @@ def _build_post_warmup_intel_info(
         "Use the recon plan and cache as the source of truth for a target-specific checklist. Stay strictly in scope."
     )
     return "\n".join(line for line in lines if line).strip()
+
+
+def _build_post_gathering_intel_info(
+    *,
+    info: str,
+    target_memory: dict[str, Any] | None = None,
+) -> str:
+    lines: list[str] = []
+    base_info = str(info or "").strip()
+    if base_info:
+        lines.append("Target description / info:")
+        lines.append(base_info)
+
+    target_memory_block = _build_target_memory_prompt_block(target_memory or {})
+    if target_memory_block.strip() and target_memory_block.strip() != "(no target memory available)":
+        lines.extend(["", "System memory from grouped information gathering:", target_memory_block])
+
+    lines.append(
+        "Use the grouped information-gathering results above as the primary evidence baseline for the target-specific checklist."
+    )
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _build_planner_checklist_message(
+    *,
+    target: str,
+    target_type: str,
+    scope: str,
+    info: str,
+    target_info_profile: dict[str, Any],
+    target_memory: dict[str, Any],
+    custom_checklist_text: str = "",
+    current_checklist: dict[str, Any] | None = None,
+) -> str:
+    lines = [
+        f"Target: {target}",
+        f"Target type: {target_type}",
+        f"Scope: {scope or '(not provided)'}",
+        f"Info: {info or '(not provided)'}",
+        "",
+        "Structured target-info gathering profile:",
+        _format_target_info_profile_for_prompt(target_info_profile),
+        "",
+        "System memory from grouped information gathering:",
+        _build_target_memory_prompt_block(target_memory or {}),
+    ]
+    if isinstance(current_checklist, dict) and current_checklist:
+        lines.extend(
+            [
+                "",
+                "Current checklist state:",
+                _format_structured_checklist_for_prompt(current_checklist),
+            ]
+        )
+    custom_text = str(custom_checklist_text or "").strip()
+    if custom_text:
+        lines.extend(
+            [
+                "",
+                "Operator-supplied custom checklist text:",
+                custom_text,
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Checklist generation task:",
+            "Generate or update the target-specific checklist using the grouped information-gathering results as the primary evidence baseline.",
+            "Preserve relevant current items, remove mismatched items, and merge custom checklist guidance only when it fits the observed surface.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _format_structured_checklist_for_prompt(checklist: dict[str, Any]) -> str:
@@ -2133,6 +2805,156 @@ def _count_done_scenarios(plan_data: dict[str, Any]) -> int:
     return total
 
 
+def _count_total_scenarios(plan_data: dict[str, Any]) -> int:
+    phases = plan_data.get("phases")
+    if not isinstance(phases, list):
+        return 0
+
+    total = 0
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        steps = phase.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            scenarios = step.get("scenarios")
+            if not isinstance(scenarios, list):
+                continue
+            total += len([scenario for scenario in scenarios if isinstance(scenario, dict)])
+    return total
+
+
+def _fallback_methods_for_checklist_item(
+    phase_name: str,
+    item_name: str,
+) -> list[str]:
+    base = str(item_name or "").strip()
+    normalized_phase = str(phase_name or "").strip().lower()
+    if normalized_phase == "reporting":
+        return [
+            "document reproducible steps, impact, and remediation evidence",
+            "attach the exact endpoint, request, response, and proof-of-concept details",
+        ]
+    if normalized_phase == "post-exploitation":
+        return [
+            "use only confirmed access paths and capture exact evidence",
+            "validate impact without repeating broad discovery",
+        ]
+    if normalized_phase == "exploitation":
+        return [
+            "confirm the exact endpoint, input, or artifact from observed evidence",
+            "execute the minimum scoped validation needed to prove exploitability",
+        ]
+    if normalized_phase == "enumeration":
+        return [
+            "map the exact endpoint, parameter, or route involved",
+            "collect request and response evidence that confirms the weakness hypothesis",
+        ]
+    return [
+        "gather concrete evidence from the identified route, asset, or response",
+        f"validate this objective directly: {base}",
+    ]
+
+
+def _phase_name_for_checklist_title(title: str, phase_number: str) -> str:
+    normalized_title = str(title or "").strip().lower()
+    if "report" in normalized_title or "cleanup" in normalized_title:
+        return "Reporting"
+    if "post" in normalized_title or "flag" in normalized_title:
+        return "Post-Exploitation"
+    if "exploit" in normalized_title:
+        return "Exploitation"
+    if "vulnerability" in normalized_title or "discovery" in normalized_title or "enum" in normalized_title:
+        return "Enumeration"
+    if str(phase_number).strip() == "1":
+        return "Reconnaissance"
+    if str(phase_number).strip() == "2":
+        return "Enumeration"
+    if str(phase_number).strip() == "3":
+        return "Exploitation"
+    if str(phase_number).strip() == "4":
+        return "Post-Exploitation"
+    if str(phase_number).strip() == "5":
+        return "Reporting"
+    return "Enumeration"
+
+
+def _build_fallback_plan_from_checklist(
+    *,
+    target: str,
+    scope: str,
+    target_type: str,
+    checklist: dict[str, Any],
+) -> dict[str, Any]:
+    phase_order = [
+        "Reconnaissance",
+        "Enumeration",
+        "Exploitation",
+        "Post-Exploitation",
+        "Reporting",
+    ]
+    phases: list[dict[str, Any]] = [
+        {"name": name, "priority": idx + 1, "steps": []}
+        for idx, name in enumerate(phase_order)
+    ]
+    phase_lookup = {phase["name"]: phase for phase in phases}
+
+    raw_blocks = checklist.get("checklist", []) if isinstance(checklist, dict) else []
+    step_counter = 0
+    for block in raw_blocks:
+        if not isinstance(block, dict):
+            continue
+        phase_number = str(block.get("phase", "")).strip()
+        title = str(block.get("title", "")).strip()
+        phase_name = _phase_name_for_checklist_title(title, phase_number)
+        target_phase = phase_lookup.get(phase_name)
+        if not target_phase:
+            continue
+        items = block.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            step_counter += 1
+            priority = _normalize_priority(item.get("priority", 3))
+            agent = "report" if phase_name == "Reporting" else ("exploit" if phase_name in {"Exploitation", "Post-Exploitation"} else "recon")
+            scenario_max_rounds = 2 if agent == "exploit" else 1
+            scenario = {
+                "task": name,
+                "agent": agent,
+                "priority": priority,
+                "max_rounds": scenario_max_rounds,
+                "details": f"Checklist-derived fallback scenario for {phase_name.lower()} based on approved checklist evidence.",
+                "methods": _fallback_methods_for_checklist_item(phase_name, name),
+                "done": False,
+                "status": "not yet",
+            }
+            target_phase["steps"].append(
+                {
+                    "id": f"{phase_name.lower().replace(' ', '-')}-step-{step_counter:02d}",
+                    "description": name,
+                    "scenarios": [scenario],
+                }
+            )
+
+    phases = [phase for phase in phases if isinstance(phase.get("steps"), list) and phase["steps"]]
+
+    return {
+        "target": target,
+        "scope": scope,
+        "target_types": [_normalize_target_type(target_type)],
+        "notes": "Fallback plan generated deterministically from the approved checklist because the planner did not persist runnable scenarios.",
+        "phases": phases,
+    }
+
+
 def _sync_plan_data_into_planner_state(plan_data: dict[str, Any]) -> bool:
     if not isinstance(plan_data, dict):
         return False
@@ -2145,6 +2967,14 @@ def _sync_plan_data_into_planner_state(plan_data: dict[str, Any]) -> bool:
     current_plan.clear()
     current_plan.update(deepcopy(plan_data))
     return True
+
+
+def _scenario_max_rounds(scenario: dict[str, Any], *, default: int) -> int:
+    try:
+        parsed = int(scenario.get("max_rounds", default))
+    except (TypeError, ValueError):
+        parsed = default
+    return min(3, max(1, parsed))
 
 
 def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[str, Any]:
@@ -2496,7 +3326,8 @@ def _build_planner_kickoff_message(
     intel_stats: dict[str, Any],
     intel_checklist: dict[str, Any],
     checklist_overview: dict[str, Any],
-    static_recon_plan: dict[str, Any],
+    target_info_profile: dict[str, Any],
+    target_memory: dict[str, Any],
     warmup_summaries: list[dict[str, Any]],
 ) -> str:
     warmup_lines = []
@@ -2522,11 +3353,6 @@ def _build_planner_kickoff_message(
         if completed_warmup_tasks
         else "(no completed warmup tasks recorded)"
     )
-    local_target_note = (
-        "This is a loopback/local target. Do not use public web search, passive internet OSINT, or internet-perimeter assumptions in the full-plan tool round.\n"
-        if _is_loopback_or_local_target(target)
-        else ""
-    )
     return (
         f"Target: {target}\n"
         f"Target type: {target_type}\n"
@@ -2534,9 +3360,10 @@ def _build_planner_kickoff_message(
         f"Info: {info}\n\n"
         "## Target Data\n"
         "Use the target, target type, scope, and info as hard planning constraints.\n\n"
-        f"{local_target_note}"
-        "## Static Recon Template\n"
-        f"{_format_static_recon_plan_for_prompt(static_recon_plan)}\n\n"
+        "## Structured Target-Info Gathering Profile\n"
+        f"{_format_target_info_profile_for_prompt(target_info_profile)}\n\n"
+        "## Target Memory\n"
+        f"{_build_target_memory_prompt_block(target_memory)}\n\n"
         "## Intel Input\n"
         f"Intel status: {intel_status}\n"
         f"Vulnerabilities: {intel_vulnerabilities}\n"
@@ -2553,9 +3380,9 @@ def _build_planner_kickoff_message(
         "Do NOT recreate these as fresh scenarios unless a warmup summary clearly shows an unresolved gap or a justified deeper follow-up.\n\n"
         "## Planner Task\n"
         "1. FIRST STEP: create a great pentest plan for this target.\n"
-        "2. Start from target data + static recon template + warmup results, then use the synthesized checklist to refine the full plan.\n"
-        "3. Treat warmup recon results as the source of truth for what the target actually exposes.\n"
-        "4. Treat the evidence-backed follow-up hypotheses as candidate scenario seeds whenever they map to concrete observed artifacts.\n"
+        "2. Start from target data + structured target-info profile + deterministic target memory, then use the synthesized checklist to refine the full plan.\n"
+        "3. If warmup recon results are present, treat them as the strongest source of truth for what the target actually exposes. If no warmup results are present, use deterministic target memory as the primary evidence baseline.\n"
+        "4. Treat deterministic target memory and evidence-backed follow-up hypotheses as candidate scenario seeds whenever they map to concrete observed artifacts.\n"
         "5. Use the synthesized checklist as prioritized coverage guidance, not as abstract theory.\n"
         "6. The initial full plan should be dense enough to cover the synthesized checklist in one plan, not a thin starter plan.\n"
         "7. Keep total scenarios across Phases 1-3 at 20 or fewer.\n"
@@ -2691,7 +3518,7 @@ class ExecuterScanCallback:
         tool_name: str,
         args: dict[str, Any],
         call_id: str,
-    ) -> bool:
+        ) -> bool:
         return await self._service.request_executer_tool_approval(
             project_id=self._project_id,
             scan_id=self._scan_id,
@@ -2708,10 +3535,73 @@ class ExecuterScanCallback:
         reason: str,
         call_id: str,
     ) -> str | None:
+        prompt_text = str(prompt or "").strip()
+        reason_text = str(reason or "").strip()
+        tool_name = "authentication"
+        for token_source in (prompt_text, reason_text):
+            first_token = token_source.split(" ", 1)[0].strip(" :").lower()
+            if first_token in {"ssh", "sudo", "mysql", "psql", "sqlite3", "ftp", "sshpass"}:
+                tool_name = first_token
+                break
+
         return await self._service.request_executer_password(
             project_id=self._project_id,
             scan_id=self._scan_id,
-            tool_name="ssh",  # Default to ssh, can be extracted from prompt
+            tool_name=tool_name,
+            prompt=prompt_text,
+            reason=reason_text,
+            call_id=call_id,
+        )
+
+
+class WorkerExecuterCallback:
+    """Prefixes executer callback logs with a stable worker label."""
+
+    def __init__(self, *, parent: ExecuterScanCallback, worker_index: int) -> None:
+        self._parent = parent
+        self._worker_index = worker_index
+        self._prefix = f"[worker {worker_index}]"
+
+    def _prefix_message(self, message: str) -> str:
+        text = str(message or "").strip()
+        if not text:
+            return self._prefix
+        if text.startswith(self._prefix):
+            return text
+        return f"{self._prefix} {text}"
+
+    def on_step(self, message: str) -> None:
+        self._parent.on_step(self._prefix_message(message))
+
+    def on_done(self, message: str) -> None:
+        self._parent.on_done(self._prefix_message(message))
+
+    def on_warn(self, message: str) -> None:
+        self._parent.on_warn(self._prefix_message(message))
+
+    async def request_tool_approval(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        return await self._parent.request_tool_approval(
+            role=f"{self._prefix} {role}",
+            tool_name=tool_name,
+            args=args,
+            call_id=call_id,
+        )
+
+    async def request_password(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> str | None:
+        return await self._parent.request_password(
             prompt=prompt,
             reason=reason,
             call_id=call_id,
@@ -2749,6 +3639,7 @@ class ScanOrchestratorService:
         self._vector_store = QdrantVectorStore()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._runs: dict[str, dict[str, Any]] = {}
+        self._info_gathering_approval_events: dict[str, asyncio.Event] = {}
         self._planner_approval_events: dict[str, asyncio.Event] = {}
         self._tool_approval_events: dict[str, dict[str, _PendingToolApproval]] = {}
         self._password_request_events: dict[str, dict[str, _PendingPasswordRequest]] = {}
@@ -2829,7 +3720,7 @@ class ScanOrchestratorService:
             custom_info,
         ]
         info_payload = "\n".join(part for part in info_parts if part).strip()
-        _ensure_intel_agent_importable()
+        _ensure_intel_node_importable()
         _ensure_planner_agent_importable()
 
         async with self._lock:
@@ -2867,6 +3758,7 @@ class ScanOrchestratorService:
                 "updated_at": started_at,
                 "finished_at": None,
                 "error": "",
+                "awaiting_information_gathering_approval": False,
                 "awaiting_planner_approval": False,
                 "awaiting_tool_approval": False,
                 "pending_tool_approval": None,
@@ -3073,9 +3965,17 @@ class ScanOrchestratorService:
         task = self._tasks.get(project_key)
         if task is not None and not task.done():
             task.cancel()
+        info_gate = self._info_gathering_approval_events.get(project_key)
+        if info_gate is not None:
+            info_gate.set()
         gate = self._planner_approval_events.get(project_key)
         if gate is not None:
             gate.set()
+        pending_tool_approvals = list(self._tool_approval_events.get(project_key, {}).items())
+        for _approval_id, pending in pending_tool_approvals:
+            pending.decision = "skip"
+            pending.event.set()
+        self._tool_approval_events.pop(project_key, None)
 
         now_iso = _utc_now_iso()
         run_state = self._runs.get(project_key, {})
@@ -3090,6 +3990,7 @@ class ScanOrchestratorService:
                 "updated_at": now_iso,
                 "finished_at": now_iso,
                 "error": "",
+                "awaiting_information_gathering_approval": False,
                 "awaiting_planner_approval": False,
                 "awaiting_tool_approval": False,
                 "pending_tool_approval": None,
@@ -3099,6 +4000,8 @@ class ScanOrchestratorService:
             if isinstance(last_scan, dict):
                 last_scan["status"] = "paused"
                 last_scan["finishedAt"] = last_scan.get("finishedAt") or now_iso
+                last_scan["awaitingToolApproval"] = False
+                last_scan["pendingToolApproval"] = None
                 project["lastScan"] = last_scan
             project["status"] = "paused"
             project["updatedAt"] = now_iso
@@ -3110,6 +4013,19 @@ class ScanOrchestratorService:
                 level="warn",
                 message="Scan paused by user.",
                 data={"status": "paused"},
+            )
+            self._emit_event(
+                project_key,
+                event="executer_tool_approval_cleared",
+                scan_id=scan_id,
+                level="info",
+                message="Executer [approval cleared] Cleared pending tool approvals because the scan was paused.",
+                data={
+                    "stage": "executer",
+                    "kind": "tool_approval_cleared",
+                    "awaiting_user_approval": False,
+                    "status": "paused",
+                },
             )
             return {
                 "ok": True,
@@ -3127,6 +4043,7 @@ class ScanOrchestratorService:
             "updated_at": now_iso,
             "finished_at": now_iso,
             "error": "",
+            "awaiting_information_gathering_approval": False,
             "awaiting_planner_approval": False,
             "awaiting_tool_approval": False,
             "pending_tool_approval": None,
@@ -3135,6 +4052,11 @@ class ScanOrchestratorService:
         project["status"] = "idle"
         project["scanProgress"] = 0
         project["updatedAt"] = now_iso
+        last_scan = project.get("lastScan")
+        if isinstance(last_scan, dict):
+            last_scan["awaitingToolApproval"] = False
+            last_scan["pendingToolApproval"] = None
+            project["lastScan"] = last_scan
         project.pop("lastScan", None)
         project.pop("contextWindows", None)
         self._reset_project_runtime_state(project)
@@ -3163,12 +4085,78 @@ class ScanOrchestratorService:
             message="Scan cancelled by user.",
             data={"status": "idle"},
         )
+        self._emit_event(
+            project_key,
+            event="executer_tool_approval_cleared",
+            scan_id=scan_id,
+            level="info",
+            message="Executer [approval cleared] Cleared pending tool approvals because the scan was cancelled.",
+            data={
+                "stage": "executer",
+                "kind": "tool_approval_cleared",
+                "awaiting_user_approval": False,
+                "status": "idle",
+            },
+        )
         return {
             "ok": True,
             "project_id": project_key,
             "scan_id": scan_id,
             "status": "idle",
         }
+
+    async def approve_information_gathering(self, project_id: str) -> dict[str, Any]:
+        project_key = str(project_id or "").strip()
+        if not project_key:
+            raise ValueError("project_id is required")
+
+        project = self._projects_store.get_project(project_key)
+        if project is None:
+            raise LookupError("project not found")
+
+        async with self._lock:
+            run_state = self._runs.get(project_key)
+            if not isinstance(run_state, dict):
+                raise ValueError("no active scan for project")
+
+            scan_id = str(run_state.get("scan_id", "")).strip()
+            status = str(run_state.get("status", "")).strip().lower()
+            waiting = bool(run_state.get("awaiting_information_gathering_approval"))
+
+            if status != "running":
+                raise ValueError("scan is not running")
+
+            if waiting:
+                gate = self._info_gathering_approval_events.get(project_key)
+                if gate is not None:
+                    gate.set()
+                now_iso = _utc_now_iso()
+                run_state["awaiting_information_gathering_approval"] = False
+                run_state["updated_at"] = now_iso
+                self._runs[project_key] = run_state
+
+                self._emit_event(
+                    project_key,
+                    event="target_info_gathering_approval_received",
+                    scan_id=scan_id,
+                    level="success",
+                    message="Information Gathering [approved] Static gathering program approved. Starting block execution now.",
+                    data={
+                        "stage": "information_gathering",
+                        "kind": "approved",
+                        "status": "running",
+                        "awaiting_user_approval": False,
+                    },
+                )
+
+            return {
+                "ok": True,
+                "project_id": project_key,
+                "scan_id": scan_id,
+                "status": "running",
+                "awaiting_information_gathering_approval": False,
+                "already_approved": not waiting,
+            }
 
     async def approve_planner(self, project_id: str) -> dict[str, Any]:
         project_key = str(project_id or "").strip()
@@ -3432,7 +4420,17 @@ class ScanOrchestratorService:
         pending_by_id = self._tool_approval_events.get(project_key, {})
         pending = pending_by_id.get(str(approval_id or "").strip())
         if pending is None:
-            raise ValueError("tool approval request not found")
+            run_state = self._runs.get(project_key, {})
+            status = str(run_state.get("status", "")).strip().lower()
+            return {
+                "ok": False,
+                "project_id": project_key,
+                "approval_id": approval_id,
+                "action": action_clean,
+                "status": status or "unknown",
+                "stale": True,
+                "message": "tool approval request not found",
+            }
 
         pending.decision = action_clean
         pending.event.set()
@@ -3588,6 +4586,25 @@ class ScanOrchestratorService:
         pending.password = password if approved else None
         pending.event.set()
 
+        self._emit_event(
+            project_key,
+            event="executer_password_response",
+            scan_id=pending.scan_id,
+            level="success" if approved else "warn",
+            message=(
+                f"Executer [password {'approved' if approved else 'denied'}] "
+                f"{pending.tool_name} authentication response received."
+            ),
+            data={
+                "stage": "executer",
+                "kind": "password_response",
+                "password_id": password_id,
+                "tool_name": pending.tool_name,
+                "approved": approved,
+                "call_id": pending.call_id,
+            },
+        )
+
         return {
             "ok": True,
             "project_id": project_key,
@@ -3677,6 +4694,7 @@ class ScanOrchestratorService:
             "updated_at": str(project.get("updatedAt", "")) or None,
             "finished_at": last_scan.get("finishedAt"),
             "error": str(last_scan.get("error", "")),
+            "awaiting_information_gathering_approval": bool(last_scan.get("awaitingInformationGatheringApproval")),
             "awaiting_planner_approval": bool(last_scan.get("awaitingPlannerApproval")),
             "awaiting_tool_approval": bool(last_scan.get("awaitingToolApproval")),
             "pending_tool_approval": last_scan.get("pendingToolApproval"),
@@ -3685,6 +4703,7 @@ class ScanOrchestratorService:
 
     def _on_task_done(self, project_id: str, task: asyncio.Task[None]) -> None:
         self._tasks.pop(project_id, None)
+        self._info_gathering_approval_events.pop(project_id, None)
         self._planner_approval_events.pop(project_id, None)
         self._tool_approval_events.pop(project_id, None)
         try:
@@ -4320,6 +5339,7 @@ class ScanOrchestratorService:
         scan_id: str,
         target: str,
         target_type: str,
+        project_cache_dir: str,
     ) -> None:
         """Run Retest agent in background to build PoC/report entries.
 
@@ -4370,6 +5390,22 @@ class ScanOrchestratorService:
                 retest_summary_length=len(retest_summary),
             )
 
+            await _append_target_memory_updates(
+                project_cache_dir,
+                stage="retest",
+                updates=[
+                    {
+                        "title": str(item.get("scenario", {}).get("task", "")).strip()
+                        or str(item.get("verify_summary", "")).strip()
+                        or "verified-vulnerability-retest",
+                        "summary": retest_summary
+                        or f"PoC/report evidence generated for verified finding: {str(item.get('verify_summary', '')).strip()}",
+                        "agent": "retest",
+                        "status": "retest_poc_generated",
+                    }
+                ],
+            )
+
         except Exception as e:
             logger.error(
                 "retest_background_error",
@@ -4395,11 +5431,13 @@ class ScanOrchestratorService:
         plan_data: dict[str, Any],
         scenario: dict[str, Any],
         recon_agent: Any,
+        recon_agent_worker_1: Any | None,
         exploit_agent: Any,
         target: str,
         target_type: str,
         scope: str,
         info: str,
+        recon_worker_index: int | None = None,
     ) -> dict[str, Any]:
         message = self._build_executer_message(
             plan_data=plan_data,
@@ -4411,13 +5449,25 @@ class ScanOrchestratorService:
         )
         role = str(scenario.get("agent", "recon")).strip().lower()
         if role == "exploit":
-            result = await exploit_agent.run(message)
+            result = await exploit_agent.run(
+                message,
+                max_tool_rounds_override=_scenario_max_rounds(scenario, default=2),
+            )
         else:
             role = "recon"
-            result = await recon_agent.run(message)
+            selected_recon_agent = (
+                recon_agent_worker_1
+                if recon_worker_index == 1 and recon_agent_worker_1 is not None
+                else recon_agent
+            )
+            result = await selected_recon_agent.run(
+                message,
+                max_tool_rounds_override=_scenario_max_rounds(scenario, default=1),
+            )
         return {
             "scenario": dict(scenario),
             "executor_agent": role,
+            "worker_index": recon_worker_index if role == "recon" else None,
             "result": {
                 "status": result.status,
                 "summary": result.summary,
@@ -4439,6 +5489,7 @@ class ScanOrchestratorService:
         cycle_number: int,
         plan_data: dict[str, Any],
         recon_agent: Any,
+        recon_agent_worker_1: Any | None,
         exploit_agent: Any,
         verify_agent: Any,
         retest_agent: Any,
@@ -4449,6 +5500,7 @@ class ScanOrchestratorService:
         scope: str,
         info: str,
         intel_checklist: dict[str, Any],
+        project_cache_dir: str,
     ) -> tuple[bool, dict[str, Any]]:
         """
         Execute one full cycle: select scenarios → run parallel → perceptor decides → verify/retest/plan.
@@ -4517,24 +5569,39 @@ class ScanOrchestratorService:
             )
 
         # Mark selected scenarios as working and emit state change
+        selected_with_workers: list[tuple[dict[str, Any], int | None]] = []
+        next_recon_worker = 0
         for scenario in selected:
+            worker_index: int | None = None
+            if str(scenario.get("agent", "recon")).strip().lower() == "recon":
+                worker_index = min(next_recon_worker, 1)
+                next_recon_worker += 1
+            selected_with_workers.append((scenario, worker_index))
+
+        for scenario, worker_index in selected_with_workers:
             _update_scenario_runtime_state(
                 plan_data,
                 scenario,
                 status="working",
                 done=False,
             )
+            scenario_task = str(scenario.get("task", "unknown")).strip() or "unknown"
+            if worker_index is not None:
+                scenario_message = f"[worker {worker_index}] Scenario started execution: {scenario_task}"
+            else:
+                scenario_message = f"Scenario started execution: {scenario_task}"
             self._emit_event(
                 project_id,
                 event="scenario_state_change",
                 scan_id=scan_id,
                 level="info",
-                message=f"Scenario started execution: {scenario.get('task', 'unknown')}",
+                message=scenario_message,
                 data={
                     "stage": "executer",
                     "kind": "scenario_working",
                     "scenario_task": scenario.get("task", ""),
                     "agent": scenario.get("agent", ""),
+                    "worker_index": worker_index,
                     "state": "working",
                     "plan_data": plan_data,
                 },
@@ -4542,19 +5609,21 @@ class ScanOrchestratorService:
 
         # Run selected scenarios in parallel (true async with asyncio.gather)
         execution_rows: list[dict[str, Any]] = []
-        if selected:
+        if selected_with_workers:
             results = await asyncio.gather(*[
                 self._execute_scenario_with_agent(
                     plan_data=plan_data,
                     scenario=scenario,
                     recon_agent=recon_agent,
+                    recon_agent_worker_1=recon_agent_worker_1,
                     exploit_agent=exploit_agent,
                     target=target,
                     target_type=target_type,
                     scope=scope,
                     info=info,
+                    recon_worker_index=worker_index,
                 )
-                for scenario in selected
+                for scenario, worker_index in selected_with_workers
             ])
             execution_rows.extend(results)
 
@@ -4659,6 +5728,26 @@ class ScanOrchestratorService:
             "false_positives": [],
             "inconclusives": [],
         }
+
+        info_only_memory_updates: list[dict[str, Any]] = []
+        for item in assessments_organized["info_only"]:
+            row_result = item.get("row_result", {}) if isinstance(item.get("row_result"), dict) else {}
+            info_summary = (
+                str(item.get("compact_summary", "")).strip()
+                or str(row_result.get("summary", "")).strip()
+            )
+            info_only_memory_updates.append({
+                "title": str(item.get("scenario", {}).get("task", "")).strip() or f"info-{item.get('idx', '')}",
+                "summary": info_summary,
+                "agent": str(item.get("scenario", {}).get("agent", "")).strip(),
+                "status": "info_only",
+            })
+        if info_only_memory_updates:
+            await _append_target_memory_updates(
+                project_cache_dir,
+                stage="perceptor",
+                updates=info_only_memory_updates,
+            )
 
         try:
             logger.info(
@@ -4933,6 +6022,21 @@ class ScanOrchestratorService:
                 )
 
                 for saved_finding in saved_finding_entries:
+                    try:
+                        await index_verified_finding(
+                            project_id=project_key,
+                            target=target,
+                            target_type=target_type,
+                            finding=saved_finding,
+                            project_store=self._projects_store,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "verify_finding_project_rag_index_failed",
+                            project_id=project_key,
+                            finding_id=saved_finding.get("id"),
+                            exc_info=True,
+                        )
                     self._emit_event(
                         project_id,
                         event="verify_finding_saved",
@@ -4981,6 +6085,7 @@ class ScanOrchestratorService:
         for row in execution_rows:
             row_result = row.get("result", {}) if isinstance(row, dict) else {}
             row_status = str(row_result.get("status", "")).strip().lower() if isinstance(row_result, dict) else ""
+            worker_index = row.get("worker_index") if isinstance(row, dict) else None
 
             scenario = row.get("scenario", {})
             if isinstance(scenario, dict):
@@ -5032,17 +6137,23 @@ class ScanOrchestratorService:
                     route=route,
                 )
                 _mark_scenario_done_in_plan(plan_data, scenario)
+                completed_task = str(scenario.get("task", "unknown")).strip() or "unknown"
                 self._emit_event(
                     project_id,
                     event="scenario_state_change",
                     scan_id=scan_id,
                     level="info",
-                    message=f"Scenario completed: {scenario.get('task', 'unknown')}",
+                    message=(
+                        f"[worker {worker_index}] Scenario completed: {completed_task}"
+                        if isinstance(worker_index, int)
+                        else f"Scenario completed: {completed_task}"
+                    ),
                     data={
                         "stage": "executer",
                         "kind": "scenario_done",
                         "scenario_task": scenario.get("task", ""),
                         "agent": scenario.get("agent", ""),
+                        "worker_index": worker_index,
                         "state": "completed",
                         "route": route,
                         "round_label": f"r{rounds_executed}" if rounds_executed > 0 else "",
@@ -5089,6 +6200,7 @@ class ScanOrchestratorService:
                         scan_id=scan_id,
                         target=target,
                         target_type=target_type,
+                        project_cache_dir=project_cache_dir,
                     )
                 )
                 retest_background_tasks.append(retest_task)
@@ -5124,6 +6236,29 @@ class ScanOrchestratorService:
                 info_section += f"\n- [{item['idx']}] {item['compact_summary']}"
             planner_sections.append(info_section)
 
+        target_memory_updates: list[dict[str, Any]] = []
+        for bucket_name in ("false_positives", "inconclusives", "real_vulnerabilities"):
+            for item in verify_results_organized[bucket_name]:
+                target_memory_updates.append({
+                    "title": str(item.get("scenario", {}).get("task", "")).strip() or bucket_name,
+                    "summary": str(item.get("verify_summary", "")).strip() or str(item.get("compact_summary", "")).strip(),
+                    "agent": str(item.get("scenario", {}).get("agent", "")).strip(),
+                    "status": bucket_name,
+                })
+        target_memory = await _append_target_memory_updates(
+            project_cache_dir,
+            stage="execution_cycle",
+            updates=target_memory_updates,
+            verified_findings=[
+                {
+                    "title": str(item.get("verify_summary", "")).strip() or str(item.get("compact_summary", "")).strip(),
+                    "summary": str(item.get("scenario", {}).get("task", "")).strip(),
+                    "status": "real_vulnerability",
+                }
+                for item in verify_results_organized["real_vulnerabilities"]
+            ],
+        )
+
         # Build single aggregated message
         aggregated_planner_message = (
             f"Target: {target}\n"
@@ -5131,6 +6266,9 @@ class ScanOrchestratorService:
             f"Scope: {scope}\n\n"
             "BATCH FINDINGS SUMMARY:\n"
             + ("\n\n".join(planner_sections) if planner_sections else "No findings classified in this cycle. Continue enumeration.")
+            + "\n\n"
+            "TARGET MEMORY UPDATE:\n"
+            + _build_target_memory_prompt_block(target_memory)
             + "\n\n"
             "Review all findings above. Update plan accordingly:\n"
             "- For real vulnerabilities: mark as discovered and continue testing\n"
@@ -5414,6 +6552,11 @@ class ScanOrchestratorService:
             self._projects_store,
             target_type,
         )
+        target_info_profile: dict[str, Any] = _resolve_target_info_profile(
+            self._projects_store,
+            target_type,
+        )
+        target_memory: dict[str, Any] = {}
         project_cache_dir = ""
         custom_checklist_text = ""
         print_steps = _is_truthy_env("INTEL_PRINT_STEPS", "1")
@@ -5435,10 +6578,10 @@ class ScanOrchestratorService:
             )
             if isinstance(project, dict):
                 project["plannerStaticPlan"] = static_recon_plan
+                project["targetInfoProfile"] = target_info_profile
                 self._projects_store.upsert_project(project)
 
             # Lazy import avoids loading heavy agent modules at app boot.
-            from server.agents.intel.agent import IntelAgent
             from server.agents.planner.agent import PlannerAgent
             from server.agents.planner.tools.pentest_plan import _current_plan
 
@@ -5451,20 +6594,21 @@ class ScanOrchestratorService:
                     raw_message=message,
                 ),
             )
-            intel_agent = IntelAgent(callback=callback, project_id=project_id)
+            intel_agent = IntelNode(callback=callback, project_id=project_id)
+            memory_node = SystemMemoryNode()
+            info_gathering_node = InformationGatheringNode(memory_node=memory_node)
 
             self._emit_event(
                 project_id,
                 event="intel_update_started",
                 scan_id=scan_id,
                 level="info",
-                message="Intel [start] refreshing RAG state before warmup reconnaissance.",
+                message="Intel [start] refreshing RAG state before grouped information gathering.",
                 data={"stage": "intel", "kind": "update_only_start"},
             )
-            intel_update_result = await intel_agent.run(
+            intel_update_result = await intel_agent.refresh_rag(
                 target_type=target_type,
                 info=info,
-                update_only=True,
             )
             intel_stats = intel_update_result.stats if isinstance(intel_update_result.stats, dict) else {}
             self._emit_event(
@@ -5480,7 +6624,262 @@ class ScanOrchestratorService:
                 },
             )
 
-            planner_callback = PrintCallback(
+            self._emit_event(
+                project_id,
+                event="target_info_gathering_started",
+                scan_id=scan_id,
+                level="info",
+                message="Information Gathering [start] running grouped static target-info gathering before checklist generation and planning.",
+                data={"stage": "information_gathering", "kind": "target_info_gathering_start"},
+            )
+
+            def _emit_system_memory_progress(stage: str, payload: dict[str, Any]) -> None:
+                block_name = str(payload.get("name", "")).strip() or "Unnamed Block"
+                if stage == "program_organized":
+                    self._emit_event(
+                        project_id,
+                        event="target_info_gathering_program_organized",
+                        scan_id=scan_id,
+                        level="info",
+                        message=(
+                            f"Information Gathering [group] organized the full static gathering program "
+                            f"with target info ({payload.get('total', '?')} blocks) before sequential block execution."
+                        ),
+                        data={
+                            "stage": "information_gathering",
+                            "kind": "target_info_gathering_program_organized",
+                            "program": payload,
+                        },
+                    )
+                elif stage == "block_started":
+                    self._emit_event(
+                        project_id,
+                        event="target_info_gathering_block_started",
+                        scan_id=scan_id,
+                        level="info",
+                        message=f"Information Gathering [group] gathering block {payload.get('index', '?')}/{payload.get('total', '?')}: {block_name}.",
+                        data={
+                            "stage": "information_gathering",
+                            "kind": "target_info_gathering_block_started",
+                            "block": payload,
+                        },
+                    )
+                elif stage == "block_completed":
+                    self._emit_event(
+                        project_id,
+                        event="target_info_gathering_block_completed",
+                        scan_id=scan_id,
+                        level="success",
+                        message=f"Information Gathering [group] completed block {payload.get('index', '?')}/{payload.get('total', '?')}: {block_name}.",
+                        data={
+                            "stage": "information_gathering",
+                            "kind": "target_info_gathering_block_completed",
+                            "block": payload,
+                        },
+                    )
+                elif stage == "memory_compacting":
+                    self._emit_event(
+                        project_id,
+                        event="system_memory_compacting",
+                        scan_id=scan_id,
+                        level="info",
+                        message="System Memory [working] Automatically compacting context.",
+                        data={
+                            "stage": "system_memory",
+                            "kind": "system_memory_compacting",
+                            "memory": payload,
+                        },
+                    )
+                elif stage == "memory_compacted":
+                    self._emit_event(
+                        project_id,
+                        event="system_memory_compacted",
+                        scan_id=scan_id,
+                        level="success",
+                        message="System Memory [completed] Context compaction complete.",
+                        data={
+                            "stage": "system_memory",
+                            "kind": "system_memory_compacted",
+                            "memory": payload,
+                        },
+                    )
+
+            from server.agents.executer.recon.tools import ALL_RECON_TOOLS
+            from server.agents.executer.target_tool_routing import filter_tools_for_target_types
+
+            scoped_tools = filter_tools_for_target_types(
+                role="recon",
+                tools=ALL_RECON_TOOLS,
+                target_types=[_normalize_target_type(target_type)],
+            )
+            tool_map = {tool.name: tool for tool in scoped_tools}
+
+            def _build_target_info_gathering_result(memory: dict[str, Any]) -> dict[str, Any]:
+                gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering", {}), dict) else {}
+                return {
+                    "status": str(gathering.get("status", "")).strip(),
+                    "program": gathering.get("program", []) if isinstance(gathering.get("program", []), list) else [],
+                    "blocks": gathering.get("blocks", []) if isinstance(gathering.get("blocks", []), list) else [],
+                    "paths": memory.get("paths", {}) if isinstance(memory.get("paths", {}), dict) else {},
+                }
+
+            async def _await_information_gathering_plan_approval(memory: dict[str, Any]) -> None:
+                target_info_gathering_result = _build_target_info_gathering_result(memory)
+                self._persist_project_status(
+                    project_id,
+                    status="running",
+                    scan_progress=18,
+                    scan_meta={
+                        "scanId": scan_id,
+                        "status": "running",
+                        "startedAt": started_at,
+                        "finishedAt": None,
+                        "error": "",
+                        "awaitingInformationGatheringApproval": True,
+                        "awaitingPlannerApproval": False,
+                        "result": {
+                            "target": target,
+                            "targetType": target_type,
+                            "intel": {
+                                "status": "complete",
+                                "summary": "Update-only Intel pass complete.",
+                                "stats": intel_stats,
+                                "checklist": {},
+                            },
+                            "plannerStaticPlan": static_recon_plan,
+                            "targetInfoProfile": target_info_profile,
+                            "targetMemory": memory.get("paths", {}),
+                            "targetInfoGathering": target_info_gathering_result,
+                            "warmup": {
+                                "status": "skipped",
+                                "plan": {},
+                                "summaries": [],
+                            },
+                        },
+                    },
+                )
+
+                run_state = self._runs.get(project_id)
+                if isinstance(run_state, dict):
+                    run_state["awaiting_information_gathering_approval"] = True
+                    run_state["updated_at"] = _utc_now_iso()
+                    self._runs[project_id] = run_state
+
+                gate = asyncio.Event()
+                self._info_gathering_approval_events[project_id] = gate
+
+                self._emit_event(
+                    project_id,
+                    event="target_info_gathering_waiting_approval",
+                    scan_id=scan_id,
+                    level="warn",
+                    message=(
+                        "Information Gathering [waiting approval] Static information gathering plan is ready. "
+                        "Review the organized blocks, then click Continue Information Gathering."
+                    ),
+                    data={
+                        "stage": "information_gathering",
+                        "kind": "waiting_approval",
+                        "status": "running",
+                        "awaiting_user_approval": True,
+                        "program": target_info_gathering_result,
+                    },
+                )
+
+                try:
+                    await gate.wait()
+                except asyncio.CancelledError:
+                    raise
+                finally:
+                    self._info_gathering_approval_events.pop(project_id, None)
+
+            target_memory = await info_gathering_node.run(
+                project_id=project_id,
+                scan_id=scan_id,
+                target=target,
+                target_type=_normalize_target_type(target_type),
+                scope=scope_text,
+                info=info,
+                profile=target_info_profile,
+                project_cache_dir=project_cache_dir,
+                tool_map=tool_map,
+                tool_arg_builder=_build_target_info_tool_kwargs,
+                progress_callback=_emit_system_memory_progress,
+                pre_execution_gate=_await_information_gathering_plan_approval,
+            )
+            target_info_gathering_result = _build_target_info_gathering_result(target_memory)
+            self._emit_event(
+                project_id,
+                event="target_info_gathering_complete",
+                scan_id=scan_id,
+                level="success",
+                message="Information Gathering [completed] grouped static target-info gathering saved to system memory.",
+                data={
+                    "stage": "information_gathering",
+                    "kind": "target_info_gathering_complete",
+                    "gathering": target_memory.get("gathering", {}),
+                    "target_memory": target_memory.get("paths", {}),
+                    "block_count": len(target_memory.get("gathering", {}).get("blocks", []))
+                    if isinstance(target_memory.get("gathering", {}), dict)
+                    else 0,
+                },
+            )
+
+            self._persist_project_status(
+                project_id,
+                status="running",
+                scan_progress=35,
+                scan_meta={
+                    "scanId": scan_id,
+                    "status": "running",
+                    "startedAt": started_at,
+                    "finishedAt": None,
+                    "error": "",
+                    "awaitingInformationGatheringApproval": False,
+                    "awaitingPlannerApproval": False,
+                    "result": {
+                        "target": target,
+                        "targetType": target_type,
+                        "intel": {
+                            "status": "complete",
+                            "summary": "Update-only Intel pass complete.",
+                            "stats": intel_stats,
+                            "checklist": {},
+                        },
+                        "plannerStaticPlan": static_recon_plan,
+                        "targetInfoProfile": target_info_profile,
+                        "targetMemory": target_memory.get("paths", {}),
+                        "targetInfoGathering": target_info_gathering_result,
+                        "warmup": {
+                            "status": "skipped",
+                            "plan": {},
+                            "summaries": [],
+                        },
+                    },
+                },
+            )
+
+            synthesis_info = _build_post_gathering_intel_info(
+                info=info,
+                target_memory=target_memory,
+            )
+            self._emit_event(
+                project_id,
+                event="planner_checklist_started",
+                scan_id=scan_id,
+                level="info",
+                message="Planner [start] generating prioritized checklist from grouped information gathering, target info, and any user checklist input.",
+                data={
+                    "stage": "planner",
+                    "kind": "checklist_start",
+                    "warmup_summary_count": 0,
+                    "warmup_cache_path": "",
+                    "project_cache_dir": project_cache_dir,
+                },
+            )
+            from server.agents.planner.agent import PlannerAgent
+
+            checklist_callback = PrintCallback(
                 enabled=print_steps,
                 on_log=lambda level, message: self._emit_planner_callback_event(
                     project_id=project_id,
@@ -5489,181 +6888,33 @@ class ScanOrchestratorService:
                     raw_message=message,
                 ),
             )
-            warmup_planner_input = _build_warmup_planner_message(
+            checklist_input = _build_planner_checklist_message(
                 target=target,
                 target_type=target_type,
                 scope=scope_text,
-                info=info,
-                static_recon_plan=static_recon_plan,
-            )
-            self._emit_event(
-                project_id,
-                event="warmup_planner_started",
-                scan_id=scan_id,
-                level="info",
-                message="Planner [start] building warmup recon-only plan.",
-                data={"stage": "warmup", "kind": "planner_start"},
+                info=synthesis_info,
+                target_info_profile=target_info_profile,
+                target_memory=target_memory,
+                custom_checklist_text=custom_checklist_text,
+                current_checklist={},
             )
             async with PlannerAgent(
-                callback=planner_callback,
+                callback=checklist_callback,
                 project_id=project_id,
                 projects_store=self._projects_store,
                 vector_store=self._vector_store,
-            ) as warmup_planner:
-                await warmup_planner.run(
-                    warmup_planner_input,
-                    is_loop=False,
-                    intel_checklist={},
-                    plan_mode="warmup",
+            ) as checklist_planner:
+                planner_checklist_result = await checklist_planner.generate_checklist(
+                    checklist_input,
+                    current_checklist={},
+                    target_type=target_type,
                 )
-                warmup_seed_plan = dict(_current_plan) if isinstance(_current_plan, dict) else {}
-            warmup_plan_data = _build_warmup_recon_plan(
-                target=target,
-                scope=scope_text,
-                target_type=target_type,
-                seed_scenarios=_select_recon_only_scenarios(
-                    warmup_seed_plan,
-                    limit=WARMUP_RECON_SCENARIO_COUNT,
-                ),
-            )
-            self._emit_event(
-                project_id,
-                event="warmup_plan_ready",
-                scan_id=scan_id,
-                level="success",
-                message="Planner [completed] warmup recon plan normalized to 8 prioritized scenarios.",
-                data={
-                    "stage": "warmup",
-                    "kind": "planner_completed",
-                    "scenario_count": len(
-                        _select_recon_only_scenarios(
-                            warmup_plan_data,
-                            limit=WARMUP_RECON_SCENARIO_COUNT,
-                        )
-                    ),
-                    "plan_data": warmup_plan_data,
-                },
-            )
-
-            self._persist_project_status(
-                project_id,
-                status="running",
-                scan_progress=30,
-                scan_meta={
-                    "scanId": scan_id,
-                    "status": "running",
-                    "startedAt": started_at,
-                    "finishedAt": None,
-                    "error": "",
-                    "awaitingPlannerApproval": False,
-                    "result": {
-                        "target": target,
-                        "targetType": target_type,
-                        "intel": {
-                            "status": "complete",
-                            "summary": "Update-only Intel pass complete.",
-                            "stats": intel_stats,
-                            "checklist": {},
-                        },
-                        "plannerStaticPlan": static_recon_plan,
-                        "warmup": {
-                            "status": "running",
-                            "plan": warmup_plan_data,
-                            "summaries": [],
-                        },
-                    },
-                },
-            )
-
-            executer_callback = ExecuterScanCallback(
-                service=self,
-                project_id=project_id,
-                scan_id=scan_id,
-                enabled=print_steps,
-            )
-            warmup_plan_data, warmup_summaries = await self._run_warmup_recon_cycles(
-                project_id=project_id,
-                scan_id=scan_id,
-                plan_data=warmup_plan_data,
-                target=target,
-                target_type=target_type,
-                scope=scope_text,
-                info=info,
-                callback=executer_callback,
-                cycle_offset=0,
-                project_cache_dir=project_cache_dir,
-            )
-
-            self._persist_project_status(
-                project_id,
-                status="running",
-                scan_progress=45,
-                scan_meta={
-                    "scanId": scan_id,
-                    "status": "running",
-                    "startedAt": started_at,
-                    "finishedAt": None,
-                    "error": "",
-                    "awaitingPlannerApproval": False,
-                    "result": {
-                        "target": target,
-                        "targetType": target_type,
-                        "intel": {
-                            "status": "complete",
-                            "summary": "Update-only Intel pass complete.",
-                            "stats": intel_stats,
-                            "checklist": {},
-                        },
-                        "plannerStaticPlan": static_recon_plan,
-                        "warmup": {
-                            "status": "completed",
-                            "plan": warmup_plan_data,
-                            "summaries": warmup_summaries,
-                        },
-                    },
-                },
-            )
-
-            warmup_cache_path = _write_warmup_perceptor_cache(
-                project_id=project_id,
-                target=target,
-                project_name=project_name,
-                created_at=started_at,
-                warmup_summaries=warmup_summaries,
-                recon_plan_data=warmup_plan_data,
-                project_cache_dir=project_cache_dir,
-            )
-            warmup_summaries_for_intel = (
-                _consume_warmup_perceptor_cache(warmup_cache_path)
-                or warmup_summaries
-            )
-
-            synthesis_info = _build_post_warmup_intel_info(
-                info=info,
-                warmup_summaries=warmup_summaries_for_intel,
-                recon_plan_data=warmup_plan_data,
-            )
-            self._emit_event(
-                project_id,
-                event="intel_synthesis_started",
-                scan_id=scan_id,
-                level="info",
-                message="Intel [start] synthesizing prioritized checklist from warmup recon, current recon plan, perceptor cache, resources, and user checklist.",
-                data={
-                    "stage": "intel",
-                    "kind": "synthesis_start",
-                    "warmup_summary_count": len(warmup_summaries_for_intel),
-                    "warmup_cache_path": warmup_cache_path,
-                    "project_cache_dir": project_cache_dir,
-                },
-            )
-            intel_result = await intel_agent.run(
-                target_type=target_type,
-                info=synthesis_info,
-                custom_checklist_text=custom_checklist_text,
-                merge_custom_checklist=True,
-                max_checklist_items=MAX_SYNTH_INTEL_CHECKLIST_ITEMS,
-                skip_rag_check=True,
+            intel_summary = planner_checklist_result.summary
+            intel_status = planner_checklist_result.status
+            intel_checklist = (
+                planner_checklist_result.checklist
+                if isinstance(planner_checklist_result.checklist, dict)
+                else {}
             )
             info = synthesis_info
         except asyncio.CancelledError:
@@ -5676,34 +6927,29 @@ class ScanOrchestratorService:
         except Exception as exc:
             self._emit_event(
                 project_id,
-                event="intel_crashed",
+                event="planner_checklist_crashed",
                 scan_id=scan_id,
                 level="error",
-                message=f"Intel/Warmup [crashed] {exc}",
+                message=f"Planner checklist generation [crashed] {exc}",
                 data={
-                    "stage": "intel",
+                    "stage": "planner",
                     "kind": "crashed",
                     "error": str(exc),
                 },
             )
-            self._mark_failed(project_id, scan_id, f"intel warmup runtime error: {exc}")
+            self._mark_failed(project_id, scan_id, f"planner checklist runtime error: {exc}")
             return
 
-        intel_summary = intel_result.summary
-        intel_status = intel_result.status
-        if isinstance(intel_result.stats, dict) and intel_result.stats:
-            intel_stats = intel_result.stats
-        intel_checklist = intel_result.checklist if isinstance(intel_result.checklist, dict) else {}
         checklist_items_count = _count_checklist_items(intel_checklist)
         self._emit_event(
             project_id,
-            event="intel_complete",
+            event="planner_checklist_complete",
             scan_id=scan_id,
             level="success",
-            message="Intel [completed] synthesized checklist ready after warmup reconnaissance.",
+            message="Planner [completed] synthesized checklist ready after grouped information gathering.",
             data={
-                "stage": "intel",
-                "kind": "completed",
+                "stage": "planner",
+                "kind": "checklist_completed",
                 "intel_status": intel_status,
                 "summary_length": len(intel_summary),
                 "summary": intel_summary,
@@ -5719,6 +6965,7 @@ class ScanOrchestratorService:
             "startedAt": started_at,
             "finishedAt": None,
             "error": "",
+            "awaitingInformationGatheringApproval": False,
             "awaitingPlannerApproval": True,
             "result": {
                 "target": target,
@@ -5730,9 +6977,12 @@ class ScanOrchestratorService:
                     "checklist": intel_checklist,
                 },
                 "plannerStaticPlan": static_recon_plan,
+                "targetInfoProfile": target_info_profile,
+                "targetMemory": target_memory.get("paths", {}),
+                "targetInfoGathering": target_info_gathering_result,
                 "warmup": {
-                    "status": "completed",
-                    "plan": warmup_plan_data,
+                    "status": "skipped",
+                    "plan": {},
                     "summaries": warmup_summaries,
                 },
             },
@@ -5758,7 +7008,7 @@ class ScanOrchestratorService:
             scan_id=scan_id,
             level="warn",
             message=(
-                "Planner [waiting approval] Intel checklist is ready. "
+                "Planner [waiting approval] Planner-generated checklist is ready. "
                 "Review/edit checklist, then click Continue to Planner."
             ),
             data={
@@ -5768,6 +7018,9 @@ class ScanOrchestratorService:
                 "awaiting_user_approval": True,
                 "checklist_items_count": checklist_items_count,
                 "warmup_summary_count": len(warmup_summaries),
+                "checklist": intel_checklist,
+                "summary": intel_summary,
+                "intel_status": intel_status,
             },
         )
         logger.info(
@@ -5808,6 +7061,11 @@ class ScanOrchestratorService:
                             intel_checklist = latest_checklist
                             checklist_items_count = _count_checklist_items(intel_checklist)
 
+        target_memory = await memory_node.store_checklist(
+            project_cache_dir,
+            checklist=intel_checklist,
+        )
+
         self._persist_project_status(
             project_id,
             status="running",
@@ -5829,9 +7087,12 @@ class ScanOrchestratorService:
                         "checklist": intel_checklist,
                     },
                     "plannerStaticPlan": static_recon_plan,
+                    "targetInfoProfile": target_info_profile,
+                    "targetMemory": target_memory.get("paths", {}),
+                    "targetInfoGathering": target_info_gathering_result,
                     "warmup": {
-                        "status": "completed",
-                        "plan": warmup_plan_data,
+                        "status": "skipped",
+                        "plan": {},
                         "summaries": warmup_summaries,
                     },
                 },
@@ -5844,7 +7105,7 @@ class ScanOrchestratorService:
             scope=scope_text,
             info=info,
             intel_status=intel_status,
-            intel_vulnerabilities=list(intel_result.vulnerabilities),
+            intel_vulnerabilities=[],
             intel_stats=intel_stats,
             intel_checklist=intel_checklist,
             checklist_overview={
@@ -5852,7 +7113,8 @@ class ScanOrchestratorService:
                 "available_total": int(intel_checklist.get("available_total", 0) or 0),
                 "items_count": checklist_items_count,
             },
-            static_recon_plan=static_recon_plan,
+            target_info_profile=target_info_profile,
+            target_memory=target_memory,
             warmup_summaries=warmup_summaries,
         )
         self._emit_event(
@@ -5919,6 +7181,36 @@ class ScanOrchestratorService:
                     phases_count=len(phases),
                     scenario_breakdown=scenario_counts if scenario_counts else "NO SCENARIOS FOUND",
                 )
+
+                if _count_total_scenarios(plan_data) <= 0:
+                    fallback_plan_data = _build_fallback_plan_from_checklist(
+                        target=target,
+                        scope=scope_text,
+                        target_type=target_type,
+                        checklist=intel_checklist,
+                    )
+                    plan_data = _sanitize_plan_remove_forbidden_agents(fallback_plan_data)
+                    _sync_plan_data_into_planner_state(plan_data)
+                    logger.warning(
+                        "planner_fallback_plan_applied",
+                        project_id=project_id,
+                        scan_id=scan_id,
+                        checklist_items=_count_checklist_items(intel_checklist),
+                        fallback_scenarios=_count_total_scenarios(plan_data),
+                    )
+                    self._emit_event(
+                        project_id,
+                        event="planner_fallback_plan_applied",
+                        scan_id=scan_id,
+                        level="warn",
+                        message="Planner [fallback] No runnable scenarios were persisted. Built a fallback plan from the approved checklist.",
+                        data={
+                            "stage": "planner",
+                            "kind": "fallback_plan",
+                            "plan_data": plan_data,
+                            "scenario_count": _count_total_scenarios(plan_data),
+                        },
+                    )
         except asyncio.CancelledError:
             current = self._runs.get(project_id, {})
             if str(current.get("status")) in {"paused", "idle"}:
@@ -6036,6 +7328,7 @@ class ScanOrchestratorService:
             from server.agents.executer.retest.agent import RetestExecuterAgent
             from server.agents.perceptor.agent import PerceptorAgent
             from server.agents.planner.agent import PlannerAgent
+            from server.config.agent import get_public_agent_config
 
             executer_callback = ExecuterScanCallback(
                 service=self,
@@ -6043,12 +7336,21 @@ class ScanOrchestratorService:
                 scan_id=scan_id,
                 enabled=print_steps,
             )
+            recon_worker_0_callback = WorkerExecuterCallback(parent=executer_callback, worker_index=0)
+            recon_worker_1_callback = WorkerExecuterCallback(parent=executer_callback, worker_index=1)
 
             recon_agent = ReconExecuterAgent(
-                callback=executer_callback,
+                callback=recon_worker_0_callback,
                 target_types=[target_type],
                 project_id=project_id,
                 project_cache_dir=project_cache_dir,
+            )
+            recon_agent_worker_1 = ReconExecuterAgent(
+                callback=recon_worker_1_callback,
+                target_types=[target_type],
+                project_id=project_id,
+                project_cache_dir=project_cache_dir,
+                config=get_public_agent_config("exploit"),
             )
             exploit_agent = ExploitExecuterAgent(
                 callback=executer_callback,
@@ -6083,6 +7385,7 @@ class ScanOrchestratorService:
                 vector_store=self._vector_store,
             )
             await recon_agent.clear_context_window()
+            await recon_agent_worker_1.clear_context_window()
             await exploit_agent.clear_context_window()
             await verify_agent.clear_context_window()
             await retest_agent.clear_context_window()
@@ -6114,6 +7417,7 @@ class ScanOrchestratorService:
                     # FRESH CONTEXT PER CYCLE: Reset context windows for executer agents
                     # (only Planner keeps context across cycles)
                     recon_agent.reset_context_window_for_cycle()
+                    recon_agent_worker_1.reset_context_window_for_cycle()
                     exploit_agent.reset_context_window_for_cycle()
                     verify_agent.reset_context_window_for_cycle()
                     retest_agent.reset_context_window_for_cycle()
@@ -6141,6 +7445,7 @@ class ScanOrchestratorService:
                             cycle_number=display_cycle_count,
                             plan_data=plan_data,
                             recon_agent=recon_agent,
+                            recon_agent_worker_1=recon_agent_worker_1,
                             exploit_agent=exploit_agent,
                             verify_agent=verify_agent,
                             retest_agent=retest_agent,
@@ -6151,6 +7456,7 @@ class ScanOrchestratorService:
                             scope=exec_scope,
                             info=info,
                             intel_checklist=intel_checklist,
+                            project_cache_dir=project_cache_dir,
                         )
                     except Exception as cycle_exc:
                         # Safety: If execution cycle fails, emit warning and continue loop
@@ -6248,6 +7554,7 @@ class ScanOrchestratorService:
                 )
             finally:
                 await recon_agent.close()
+                await recon_agent_worker_1.close()
                 await exploit_agent.close()
                 await verify_agent.close()
                 await retest_agent.close()
@@ -6293,6 +7600,9 @@ class ScanOrchestratorService:
                     "checklist": intel_checklist,
                 },
                 "plannerStaticPlan": static_recon_plan,
+                "targetInfoProfile": target_info_profile,
+                "targetMemory": target_memory.get("paths", {}),
+                "targetInfoGathering": target_info_gathering_result,
                 "warmup": {
                     "status": "completed",
                     "plan": warmup_plan_data,
@@ -6323,6 +7633,7 @@ class ScanOrchestratorService:
             "updated_at": finished_at,
             "finished_at": finished_at,
             "error": "",
+            "awaiting_information_gathering_approval": False,
             "awaiting_planner_approval": False,
             "awaiting_tool_approval": False,
             "pending_tool_approval": None,
@@ -6367,6 +7678,7 @@ class ScanOrchestratorService:
             "updated_at": finish_time,
             "finished_at": finish_time,
             "error": error_message,
+            "awaiting_information_gathering_approval": False,
             "awaiting_planner_approval": False,
             "awaiting_tool_approval": False,
             "pending_tool_approval": None,
@@ -6407,20 +7719,25 @@ class ScanOrchestratorService:
         project["status"] = status
         project["scanProgress"] = scan_progress
         project["updatedAt"] = _utc_now_iso()
-        if isinstance(scan_meta, dict):
-            result = scan_meta.get("result", {})
-            if not isinstance(result, dict):
-                result = {}
-            context_windows = project.get("contextWindows", {})
-            if isinstance(context_windows, dict) and context_windows:
-                result["contextWindows"] = dict(context_windows)
-            scan_meta["result"] = result
-        project["lastScan"] = scan_meta
+        existing_last_scan = project.get("lastScan", {})
+        merged_scan_meta = (
+            _merge_nested_records(existing_last_scan, scan_meta)
+            if isinstance(scan_meta, dict)
+            else dict(existing_last_scan) if isinstance(existing_last_scan, dict) else {}
+        )
+        result = merged_scan_meta.get("result", {})
+        if not isinstance(result, dict):
+            result = {}
+        context_windows = project.get("contextWindows", {})
+        if isinstance(context_windows, dict) and context_windows:
+            result["contextWindows"] = dict(context_windows)
+        merged_scan_meta["result"] = result
+        project["lastScan"] = merged_scan_meta
         self._projects_store.upsert_project(project)
         self._emit_event(
             project_id,
             event="project_status",
-            scan_id=str(scan_meta.get("scanId", "")),
+            scan_id=str(merged_scan_meta.get("scanId", "")),
             level="warn" if status == "error" else "success" if status == "completed" else "info",
             message=f"Project status updated to {status}.",
             data={

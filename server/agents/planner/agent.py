@@ -60,12 +60,12 @@ from .config import (
 from .context_window import build_planner_context_window
 from .context_builder import PlannerContextBuilder
 from .prompts import (
-    FULL_PLAN_SYSTEM_PROMPT,
-    LOOP_REPLAN_SYSTEM_PROMPT,
-    WARMUP_RECON_SYSTEM_PROMPT,
+    CHECKLIST_GENERATOR_SYSTEM_PROMPT,
+    PLAN_CREATE_UPDATE_SYSTEM_PROMPT,
 )
 from .tools import ALL_PLANNER_TOOLS
 from .tools.pentest_plan import _current_plan, update_pentest_plan
+from .tools.get_checklists import _default_priority_for_item
 
 logger = structlog.get_logger(__name__)
 
@@ -130,6 +130,13 @@ class PlannerResult:
     summary: str = ""
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     action_plan: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PlannerChecklistResult:
+    status: str = "complete"
+    summary: str = ""
+    checklist: dict[str, Any] = field(default_factory=dict)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -311,6 +318,11 @@ def _deep_repair_plan_from_truncated(raw_args: dict[str, Any]) -> dict[str, Any]
             for sc in valid_scenarios:
                 sc.setdefault("agent", "recon")
                 sc.setdefault("priority", 3)
+                default_rounds = 1 if str(sc.get("agent", "recon")).strip().lower() != "exploit" else 2
+                try:
+                    sc["max_rounds"] = min(3, max(1, int(sc.get("max_rounds", default_rounds))))
+                except (TypeError, ValueError):
+                    sc["max_rounds"] = default_rounds
                 sc.setdefault("details", "")
                 sc.setdefault("methods", [])
                 sc.setdefault("done", False)
@@ -1217,6 +1229,199 @@ def _coerce_checklist_priority(value: Any) -> int | None:
     return None
 
 
+def _calibrate_checklist_priority(name: str, phase: str, priority: int) -> int:
+    title = str(name or "").strip().lower()
+    phase_str = str(phase or "").strip()
+    calibrated = int(priority)
+
+    if "x-recruiting" in title:
+        calibrated = max(calibrated, 4)
+
+    if "cors" in title and any(
+        needle in title
+        for needle in (
+            "csrf",
+            "credentialed",
+            "bypass same-origin",
+            "extract sensitive data",
+            "sensitive data",
+        )
+    ):
+        calibrated = max(calibrated, 3)
+
+    if any(
+        needle in title
+        for needle in (
+            "maintain access",
+            "persistence",
+            "extract admin credential",
+            "extract admin token",
+            "escalate privileges",
+            "escalate from low-privilege",
+        )
+    ):
+        calibrated = max(calibrated, 3)
+
+    if phase_str in {"1", "2"} and any(
+        needle in title for needle in ("review ", "analyze ", "map ", "check ", "verify ")
+    ):
+        calibrated = max(calibrated, 2)
+
+    return min(5, max(1, calibrated))
+
+
+def _default_checklist_phase_title(phase: str) -> str:
+    return {
+        "1": "Reconnaissance",
+        "2": "Enumeration",
+        "3": "Configuration & Infrastructure Testing",
+        "4": "Authentication, Authorization & Injection Testing",
+        "5": "Session Management Testing",
+        "6": "Exploitation & Validation",
+        "7": "Post-Exploitation",
+        "8": "Reporting",
+    }.get(str(phase).strip(), f"Phase {phase or 'unknown'}")
+
+
+def _normalize_structured_checklist_payload(
+    payload: dict[str, Any] | None,
+    *,
+    fallback_target_type: str,
+    fallback_checklist: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    fallback = fallback_checklist if isinstance(fallback_checklist, dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    candidate = payload.get("checklist") if isinstance(payload.get("checklist"), dict) else payload
+
+    raw_blocks = candidate.get("checklist", [])
+    blocks: list[dict[str, Any]] = []
+    if isinstance(raw_blocks, list):
+        for idx, raw_block in enumerate(raw_blocks, start=1):
+            if not isinstance(raw_block, dict):
+                continue
+            phase = str(raw_block.get("phase", idx)).strip() or str(idx)
+            title = str(raw_block.get("title", "")).strip() or _default_checklist_phase_title(phase)
+            raw_items = raw_block.get("items", [])
+            if not isinstance(raw_items, list):
+                continue
+            items: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in raw_items:
+                if isinstance(item, dict):
+                    name = str(item.get("name", item.get("title", ""))).strip()
+                    raw_priority = item.get("priority")
+                else:
+                    name = str(item).strip()
+                    raw_priority = None
+                if not name:
+                    continue
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                priority = _coerce_checklist_priority(raw_priority)
+                if priority is None:
+                    priority = _default_priority_for_item(name, phase)
+                priority = _calibrate_checklist_priority(name, phase, priority)
+                items.append({"name": name, "priority": priority})
+            if items:
+                blocks.append(
+                    {
+                        "phase": str(len(blocks) + 1),
+                        "title": title,
+                        "items": items,
+                    }
+                )
+
+    if not blocks and isinstance(fallback.get("checklist"), list):
+        blocks = fallback["checklist"]
+
+    available_total = sum(
+        len(block.get("items", []))
+        for block in blocks
+        if isinstance(block, dict)
+    )
+    return {
+        "target_type": str(candidate.get("target_type", "") or fallback.get("target_type", "") or fallback_target_type),
+        "available_total": int(available_total),
+        "checklist": blocks,
+    }
+
+
+def _extract_checklist_result_from_text(
+    raw: str,
+    *,
+    fallback_target_type: str,
+    fallback_checklist: dict[str, Any] | None = None,
+) -> PlannerChecklistResult:
+    text = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.DOTALL).strip()
+    if not text:
+        return PlannerChecklistResult(
+            status="failed",
+            summary="Planner checklist generator returned empty output.",
+            checklist=_normalize_structured_checklist_payload(
+                {},
+                fallback_target_type=fallback_target_type,
+                fallback_checklist=fallback_checklist,
+            ),
+        )
+
+    candidates: list[dict[str, Any]] = []
+
+    def _collect(obj: Any) -> None:
+        if isinstance(obj, dict):
+            candidates.append(obj)
+
+    try:
+        _collect(json.loads(text))
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    if not candidates:
+        for block in re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE):
+            candidate = block.strip()
+            if not candidate:
+                continue
+            try:
+                _collect(json.loads(candidate))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+    if not candidates:
+        marker_idx = text.find('"checklist"')
+        if marker_idx >= 0:
+            start = text.rfind("{", 0, marker_idx)
+            while start >= 0:
+                obj_text = _extract_json_object_at(text, start)
+                if not obj_text:
+                    break
+                try:
+                    parsed = json.loads(obj_text)
+                    _collect(parsed)
+                    if candidates:
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                start = text.rfind("{", 0, start)
+
+    payload = candidates[0] if candidates else {}
+    status = str(payload.get("status", "complete")).strip().lower() if isinstance(payload, dict) else "complete"
+    if status not in {"complete", "blocked", "failed"}:
+        status = "complete"
+    checklist = _normalize_structured_checklist_payload(
+        payload,
+        fallback_target_type=fallback_target_type,
+        fallback_checklist=fallback_checklist,
+    )
+    summary = (
+        f"Planner checklist ready with {checklist.get('available_total', 0)} items."
+        if checklist.get("checklist")
+        else "Planner checklist generation returned no items."
+    )
+    return PlannerChecklistResult(status=status, summary=summary, checklist=checklist)
+
+
 def _normalize_intel_checklist(
     checklist_payload: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1561,11 +1766,11 @@ class PlannerAgent:
 
         if self._mode == "local":
             self._local_config = local_config or local_llm_config
-            self._llm = LLMClient(self._local_config, mode="local")
+            self._llm = LLMClient(self._local_config, mode="local", client_name="planner")
             self._model_name = self._local_config.model
         else:
             self._config = config or get_public_agent_config("planner")
-            self._llm = LLMClient(self._config, mode="public")
+            self._llm = LLMClient(self._config, mode="public", client_name="planner")
             self._model_name = self._config.model
 
         self._context_window = build_planner_context_window(
@@ -1578,15 +1783,61 @@ class PlannerAgent:
             self._context_builder = PlannerContextBuilder(
                 projects_store=self._projects_store,
                 vector_store=self._vector_store,
-                system_prompt=LOOP_REPLAN_SYSTEM_PROMPT,
+                system_prompt=PLAN_CREATE_UPDATE_SYSTEM_PROMPT,
             )
         else:
             self._context_builder = None
 
-        logger.info("planner_initialized", mode=self._mode, model=self._model_name)
+        logger.info(
+            "planner_initialized",
+            mode=self._mode,
+            model=self._model_name,
+            provider=(self._local_config.provider if self._mode == "local" else self._config.provider),
+        )
         self._graph = self._build_graph()
         self._last_state_hash: str = ""
         self._last_plan_result: PlannerResult | None = None
+
+    async def generate_checklist(
+        self,
+        user_message: str,
+        *,
+        current_checklist: dict[str, Any] | None = None,
+        target_type: str = "",
+    ) -> PlannerChecklistResult:
+        self._cb.on_step("Planner checklist generator starting")
+        system_content = CHECKLIST_GENERATOR_SYSTEM_PROMPT
+        if _needs_nothink(self._model_name):
+            system_content = "/nothink\n" + system_content
+        fallback_checklist = current_checklist if isinstance(current_checklist, dict) else {}
+        try:
+            response = await self._llm.chat(
+                [
+                    ChatMessage(role="system", content=system_content),
+                    ChatMessage(role="user", content=user_message),
+                ],
+                temperature=0,
+                max_tokens=min(PLANNER_MAX_TOKENS_PER_REQUEST, 5000),
+            )
+            result = _extract_checklist_result_from_text(
+                response.content or "",
+                fallback_target_type=target_type,
+                fallback_checklist=fallback_checklist,
+            )
+            self._cb.on_done(result.summary)
+            return result
+        except Exception as exc:
+            logger.warning("planner_checklist_generation_failed", error=str(exc))
+            checklist = _normalize_structured_checklist_payload(
+                {},
+                fallback_target_type=target_type,
+                fallback_checklist=fallback_checklist,
+            )
+            return PlannerChecklistResult(
+                status="failed",
+                summary="Planner checklist generation failed; using fallback checklist state.",
+                checklist=checklist,
+            )
 
     def _tool_schemas_for_mode(self, is_loop: bool) -> list[dict[str, Any]]:
         if not is_loop:
@@ -1645,7 +1896,7 @@ class PlannerAgent:
                 if isinstance(compact_summary, dict) and compact_summary:
                     checklist_ctx = _build_intel_checklist_compact_message(compact_summary)
                     if checklist_ctx:
-                        self._cb.on_step("Planner checklist compact summary injected")
+                        self._cb.on_step("Planner checklist planning context prepared")
                         messages_raw = [
                             *messages_raw,
                             {"role": "user", "content": checklist_ctx},
@@ -2492,11 +2743,9 @@ class PlannerAgent:
             )
 
         if normalized_plan_mode == "loop":
-            system_content = LOOP_REPLAN_SYSTEM_PROMPT
-        elif normalized_plan_mode == "warmup":
-            system_content = WARMUP_RECON_SYSTEM_PROMPT
+            system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
         else:
-            system_content = FULL_PLAN_SYSTEM_PROMPT
+            system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
 
         # For loop rounds, use the 6-part context builder if available
         if normalized_plan_mode == "loop" and self._context_builder:
@@ -2510,7 +2759,7 @@ class PlannerAgent:
             except Exception as exc:
                 logger.warning("context_builder_failed", error=str(exc))
                 # Fall back to static prompt if context builder fails
-                system_content = LOOP_REPLAN_SYSTEM_PROMPT
+                system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
 
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content

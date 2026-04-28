@@ -19,9 +19,71 @@ from ..config import (
     VISION_CONFIDENCE_THRESHOLD,
     FALSE_POSITIVE_THRESHOLD,
 )
-from ..prompts import VISION_ANALYSIS_PROMPT, EVIDENCE_COMPARISON_PROMPT
 
 log = structlog.get_logger(__name__)
+
+
+VISION_ANALYSIS_PROMPT = """\
+Analyze this screenshot of an exploitation result.
+
+Context:
+- Vulnerability Type: {vuln_type}
+- Expected Indicator: {expected_indicator}
+- Target: {target}
+
+Determine:
+1. Is there visual evidence of successful exploitation?
+2. Are there false positive indicators such as encoding, blocking, or generic errors?
+3. What bounding boxes should highlight the important evidence?
+
+Return JSON:
+{
+  "vulnerability_confirmed": true|false,
+  "confidence": 0.0-1.0,
+  "indicators_found": ["..."],
+  "false_positive_indicators": ["..."],
+  "bounding_boxes": [
+    {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0,
+      "label": "Description of what this highlights"
+    }
+  ],
+  "analysis_notes": "Detailed explanation of findings",
+  "severity_assessment": "info|low|medium|high|critical",
+  "needs_manual_review": false,
+  "manual_review_reason": ""
+}"""
+
+
+EVIDENCE_COMPARISON_PROMPT = """\
+Compare the BEFORE and AFTER screenshots to identify exploitation evidence.
+
+BEFORE Screenshot: Shows the page state before exploitation
+AFTER Screenshot: Shows the page state after exploitation
+
+Context:
+- Vulnerability Type: {vuln_type}
+- Expected Change: {expected_change}
+- Original Finding: {original_finding}
+
+Determine:
+1. What changed between before and after?
+2. Does the change indicate successful exploitation?
+3. Could the change be normal application behavior?
+4. What is the confidence level?
+
+Return JSON:
+{
+  "changes_detected": ["..."],
+  "exploitation_evident": true|false,
+  "confidence": 0.0-1.0,
+  "alternative_explanations": ["..."],
+  "verification_status": "confirmed|rejected|inconclusive",
+  "notes": "..."
+}"""
 
 
 def _load_image_as_base64(image_path: str) -> str:
