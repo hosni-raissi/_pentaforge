@@ -7,6 +7,11 @@ import re
 from typing import Any
 
 from server.core.tool import Tool
+from server.agents.executer.recon.tools.index import load_recon_tool_scope_index
+from server.utils.known_vuln_intelligence import (
+    recommend_nuclei_hints,
+    recommend_run_custom_tools,
+)
 
 _TARGET_TYPE_ALIASES: dict[str, str] = {
     "web": "web_app",
@@ -48,24 +53,26 @@ _VALID_TARGET_TYPES: set[str] = {
     "shared",
 }
 
+_RECON_TOOL_SCOPE_INDEX = load_recon_tool_scope_index()
+_WEB_SCOPE_RECON_TOOL_TARGET_TYPES: dict[str, set[str]] = {
+    tool_name: {"web_app", "api"}
+    for tool_name in _RECON_TOOL_SCOPE_INDEX.get("web", [])
+}
+_WEB_SCOPE_RECON_TOOL_TARGET_TYPES["ssl_tls_analysis"] = {"web_app", "api", "network"}
+
 RECON_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     "api_endpoint_discovery": {"api", "web_app"},
     "api_passive_enum": {"api", "web_app"},
     "api_response_analyzer": {"api", "web_app"},
     "arp_scan": {"network", "infra", "iot"},
     "binary_analysis": {"desktop"},
-    "burp_suite": {"web_app", "api"},
-    "build_config_analyze": {"repository"},
-    "cdn_origin_detect": {"web_app", "api"},
     "ci_cd_pipeline_audit": {"repository"},
     "cloud_misconfig_scan": {"cloud"},
     "cloud_storage_enum": {"cloud"},
-    "cms_detect_and_scan": {"web_app"},
     "container_image_scan": {"container"},
     "container_layer_analysis": {"container"},
     "container_registry_enum": {"cloud", "container"},
     "container_runtime_audit": {"container"},
-    "cors_misconfig_check": {"api", "web_app"},
     "db_enum_and_audit": {
         "web_app",
         "api",
@@ -80,50 +87,27 @@ RECON_TOOL_TARGET_TYPES: dict[str, set[str]] = {
         "iot",
     },
     "dependency_scan": {"repository"},
-    "desktop_traffic_intercept": {"desktop"},
-    "detect_tech": {"web_app", "api"},
-    "directory_file_fuzzing": {"web_app", "api"},
-    "dns_enum_fuzzing": {"web_app", "api", "network"},
     "dns_recon": {"network", "infra", "web_app"},
     "firmware_analysis": {"iot"},
     "git_history_audit": {"repository"},
     "graphql_recon": {"api", "web_app"},
-    "grpc_recon": {"api", "web_app"},
-    "http_header_analysis": {"web_app", "api"},
-    "http_probe": {"web_app", "api"},
     "iac_security_scan": {"repository", "infra"},
     "iot_protocol_scan": {"iot", "network"},
-    "js_source_code_analyzer": {"web_app", "api"},
-    "linux_config_audit": {"linux_server", "infra"},
-    "linux_privesc_audit": {"linux_server", "infra"},
     "mobile_dynamic_analysis": {"mobile"},
     "mobile_static_analysis": {"mobile"},
     "mobile_storage_check": {"mobile"},
-    "network_enum": {"network", "infra", "linux_server"},
-    "network_vuln_scan": {"network", "infra", "linux_server"},
-    "nmap_scan": {"network", "infra", "linux_server", "iot"},
+    "known_vuln_lookup": {"web_app", "api", "linux_server", "infra", "network", "cloud"},
     "oauth_oidc_check": {"api", "web_app"},
-    "passive_web_recon": {"web_app", "api"},
-    "param_discovery": {"web_app", "api"},
-    "port_scan_service_enum": {"network", "infra", "linux_server", "iot"},
     "run_custom": {"shared"},
     "run_python": {"shared"},
     "sast_scan": {"repository"},
     "secret_scan": {"repository", "cloud"},
     "sensitive_files_scan": {"repository"},
-    "session_token_analysis": {"web_app", "api"},
-    "ssl_tls_analysis": {"web_app", "api", "network"},
     "soap_wsdl_recon": {"api", "web_app"},
-    "subdomain_takeover_check": {"web_app", "api"},
     "traffic_analyze": {"network", "infra"},
-    "waf_detection": {"web_app", "api"},
-    "web_crawler": {"web_app", "api"},
-    "web_fuzz": {"web_app", "api"},
-    "web_proxy_capture": {"web_app", "api"},
-    "websocket_recon": {"web_app", "api"},
     "wireless_scan": {"network", "iot"},
-    "dns_recon": {"network", "infra", "web_app", "api"},
     "route_topology": {"network", "infra", "linux_server"},
+    **_WEB_SCOPE_RECON_TOOL_TARGET_TYPES,
 }
 
 EXPLOIT_TOOL_TARGET_TYPES: dict[str, set[str]] = {
@@ -148,6 +132,7 @@ EXPLOIT_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     "encode_payload": {"shared"},
     "file_upload_api_abuse": {"api", "web_app"},
     "generate_payload": {"shared"},
+    "generate_oob_payload": {"web_app", "api"},
     "generate_waf_bypass_variants": {"shared"},
     "graphql_attack": {"api", "web_app"},
     "hydra_bruteforce": {"network", "infra", "linux_server", "iot", "web_app", "api"},
@@ -187,6 +172,7 @@ EXPLOIT_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     },
     "ssrf_detect": {"web_app", "api"},
     "ssti_detect": {"web_app", "api"},
+    "check_oob_callbacks": {"web_app", "api"},
     "web_payload_injection": {"web_app", "api"},
     "web_auth_brute": {"web_app", "api"},
     "webhook_security_test": {"api", "web_app"},
@@ -281,6 +267,27 @@ def mapped_tool_names_for_target_type(*, role: str, target_type: str) -> list[st
             names.append(name)
     names.sort()
     return names
+
+
+def recommend_product_tooling(
+    *,
+    role: str,
+    target_type: str,
+    tech_inventory: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    del role
+    normalized_target = normalize_target_type(target_type)
+    if not normalized_target:
+        return {
+            "target_type": "",
+            "recommended_run_custom_tools": [],
+            "nuclei_hints": {},
+        }
+    return {
+        "target_type": normalized_target,
+        "recommended_run_custom_tools": recommend_run_custom_tools(tech_inventory),
+        "nuclei_hints": recommend_nuclei_hints(tech_inventory),
+    }
 
 
 def _collect_target_types_from_obj(obj: Any, out: set[str]) -> None:

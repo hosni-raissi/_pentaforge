@@ -14,6 +14,7 @@ from server.agents.executer.tools_registry import (
     discover_module_names,
     load_tools_from_module_names,
 )
+from .index import enabled_recon_module_names
 
 log = structlog.get_logger(__name__)
 
@@ -68,6 +69,8 @@ def _load_recon_registry() -> tuple[list[Tool], dict[str, str]]:
         exclude=excluded_modules,
         recursive=True,
     )
+    module_names.extend(enabled_recon_module_names(__name__))
+    module_names = list(dict.fromkeys(module_names))
 
     tools, errors = load_tools_from_module_names(module_names)
     if errors:  # pragma: no cover - environment dependent imports

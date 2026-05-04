@@ -21,6 +21,126 @@ from .prompts import (
 )
 
 
+def _structured_snapshot(tool_name: str, raw_result: Any) -> dict[str, Any] | None:
+    if isinstance(raw_result, dict):
+        payload = raw_result
+    else:
+        text = str(raw_result or "").strip()
+        if not text or not text.startswith(("{", "[")):
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    clean_tool_name = str(tool_name or "").strip().lower()
+    if clean_tool_name == "detect_tech":
+        rows = []
+        for item in payload.get("technologies", []) if isinstance(payload.get("technologies"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                {
+                    "name": str(item.get("name", "")).strip(),
+                    "version": str(item.get("version", "")).strip(),
+                    "version_normalized": str(item.get("version_normalized", "")).strip(),
+                    "category": str(item.get("category", "")).strip(),
+                    "confidence": item.get("confidence"),
+                }
+            )
+        return {
+            "tool": clean_tool_name,
+            "http_status": payload.get("http_status"),
+            "technologies": rows[:24],
+        }
+
+    if clean_tool_name == "http_probe":
+        hosts = []
+        for item in payload.get("hosts", []) if isinstance(payload.get("hosts"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            hosts.append(
+                {
+                    "url": str(item.get("url", "")).strip(),
+                    "status_code": item.get("status_code"),
+                    "webserver": str(item.get("webserver", "")).strip(),
+                    "tech": [
+                        str(value).strip()
+                        for value in item.get("tech", [])
+                        if str(value).strip()
+                    ][:10]
+                    if isinstance(item.get("tech"), list)
+                    else [],
+                }
+            )
+        return {
+            "tool": clean_tool_name,
+            "hosts": hosts[:10],
+            "total_alive": payload.get("total_alive"),
+        }
+
+    if clean_tool_name == "http_header_analysis":
+        endpoints = []
+        for item in payload.get("endpoints", []) if isinstance(payload.get("endpoints"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            endpoints.append(
+                {
+                    "url": str(item.get("url", "")).strip(),
+                    "status_code": item.get("status_code"),
+                    "server": str(item.get("server", "")).strip(),
+                    "x_powered_by": str(item.get("x_powered_by", "")).strip(),
+                    "grade": str(item.get("grade", "")).strip(),
+                    "vulnerable": bool(item.get("vulnerable")),
+                    "missing_headers": [
+                        str(value).strip()
+                        for value in item.get("missing_headers", [])
+                        if str(value).strip()
+                    ][:8]
+                    if isinstance(item.get("missing_headers"), list)
+                    else [],
+                }
+            )
+        return {
+            "tool": clean_tool_name,
+            "average_grade": str(payload.get("average_grade", "")).strip(),
+            "total_vulnerable": payload.get("total_vulnerable"),
+            "endpoints": endpoints[:10],
+        }
+
+    if clean_tool_name == "js_source_code_analyzer":
+        return {
+            "tool": clean_tool_name,
+            "js_urls": [
+                str(value).strip()
+                for value in payload.get("js_urls", [])
+                if str(value).strip()
+            ][:20]
+            if isinstance(payload.get("js_urls"), list)
+            else [],
+            "endpoints": [
+                str(value).strip()
+                for value in payload.get("endpoints", [])
+                if str(value).strip()
+            ][:20]
+            if isinstance(payload.get("endpoints"), list)
+            else [],
+        }
+
+    if clean_tool_name == "known_vuln_lookup":
+        return {
+            "tool": clean_tool_name,
+            "products": payload.get("products", []) if isinstance(payload.get("products"), list) else [],
+            "signals": payload.get("signals", []) if isinstance(payload.get("signals"), list) else [],
+            "nuclei_hints": payload.get("nuclei_hints", {}) if isinstance(payload.get("nuclei_hints"), dict) else {},
+        }
+
+    return None
+
+
 class InformationGatheringNode:
     """Grouped deterministic gathering with LLM-guided block preparation."""
 
@@ -229,11 +349,12 @@ class InformationGatheringNode:
         self,
         *,
         prepared_block: dict[str, Any],
+        memory: dict[str, Any],
         target: str,
         target_type: str,
         info: str,
         tool_map: dict[str, Any],
-        tool_arg_builder: Callable[[str, str, str, str], tuple[dict[str, Any] | None, str | None]],
+        tool_arg_builder: Callable[[str, str, str, str, dict[str, Any]], tuple[dict[str, Any] | None, str | None]],
     ) -> list[dict[str, Any]]:
         result_rows: list[dict[str, Any]] = []
         if str(prepared_block.get("status", "")).strip().lower() == "skip":
@@ -267,7 +388,7 @@ class InformationGatheringNode:
                 skip_reason = None if kwargs["command"] else "skipped: run_custom command was empty"
             else:
                 tool_name = str(entry).strip()
-                kwargs, skip_reason = tool_arg_builder(tool_name, target, target_type, info)
+                kwargs, skip_reason = tool_arg_builder(tool_name, target, target_type, info, memory)
 
             if skip_reason:
                 result_rows.append({
@@ -291,12 +412,14 @@ class InformationGatheringNode:
                 summary = str(raw_result or "").strip()
                 if len(summary) > 600:
                     summary = summary[:597].rstrip() + "..."
+                structured = _structured_snapshot(tool_name, raw_result)
                 result_rows.append({
                     "tool": tool_name,
                     "status": "completed",
                     "summary": summary,
                     "args": kwargs,
                     "command": self._format_tool_execution_command(tool_name, kwargs),
+                    "structured": structured,
                 })
             except Exception as exc:
                 result_rows.append({
@@ -374,7 +497,7 @@ class InformationGatheringNode:
         profile: dict[str, Any],
         project_cache_dir: str,
         tool_map: dict[str, Any],
-        tool_arg_builder: Callable[[str, str, str, str], tuple[dict[str, Any] | None, str | None]],
+        tool_arg_builder: Callable[[str, str, str, str, dict[str, Any]], tuple[dict[str, Any] | None, str | None]],
         progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
         pre_execution_gate: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
@@ -442,6 +565,12 @@ class InformationGatheringNode:
         )
         if pre_execution_gate is not None:
             await pre_execution_gate(memory)
+            # Re-read organized program from memory after approval gate
+            # in case the user edited the blocks/tools in the UI.
+            gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+            prepared_blocks = gathering.get("program", prepared_blocks)
+            if not isinstance(prepared_blocks, list):
+                prepared_blocks = []
 
         pending_organized_task: asyncio.Task[dict[str, Any]] | None = None
         pending_meta: dict[str, Any] | None = None
@@ -465,6 +594,7 @@ class InformationGatheringNode:
 
             result_rows = await self._execute_block(
                 prepared_block=prepared_block,
+                memory=memory,
                 target=target,
                 target_type=target_type,
                 info=info,

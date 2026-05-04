@@ -15,6 +15,13 @@
       "tools": ["http_probe", "detect_tech", "http_header_analysis"]
     },
     {
+      "id": "known_vuln_fast_lane",
+      "name": "Known Vulnerability Fast Lane",
+      "interaction": "active_safe",
+      "goal": "Immediately correlate corroborated product and version fingerprints with known-vulnerability intelligence before planner starts.",
+      "tools": ["known_vuln_lookup"]
+    },
+    {
       "id": "surface_mapping",
       "name": "Surface Mapping",
       "interaction": "active_safe",
@@ -43,6 +50,13 @@
       "interaction": "active_safe",
       "goal": "Fingerprint transport behavior, headers, and visible controls.",
       "tools": ["http_probe", "http_header_analysis", "detect_tech"]
+    },
+    {
+      "id": "known_vuln_fast_lane",
+      "name": "Known Vulnerability Fast Lane",
+      "interaction": "active_safe",
+      "goal": "Immediately correlate corroborated product and version fingerprints with known-vulnerability intelligence before planner starts.",
+      "tools": ["known_vuln_lookup"]
     },
     {
       "id": "api_surface",
@@ -81,14 +95,14 @@
       "name": "Service Inventory",
       "interaction": "active_safe",
       "goal": "Map live hosts, ports, and reachable services.",
-      "tools": ["nmap_scan", "route_topology", "dns_recon"]
+      "tools": ["route_topology", "dns_recon"]
     },
     {
-      "id": "host_posture",
-      "name": "Host Posture",
+      "id": "exposure_posture",
+      "name": "Exposure Posture",
       "interaction": "active_safe",
-      "goal": "Gather high-level host configuration and exposure clues.",
-      "tools": ["linux_config_audit"]
+      "goal": "Check for reachable database and service exposure clues on the infrastructure target.",
+      "tools": ["db_enum_and_audit"]
     }
   ],
   "network": [
@@ -97,7 +111,7 @@
       "name": "Service Inventory",
       "interaction": "active_safe",
       "goal": "Map the reachable network surface and service posture.",
-      "tools": ["nmap_scan", "route_topology", "dns_recon"]
+      "tools": ["route_topology", "dns_recon"]
     },
     {
       "id": "local_discovery",
@@ -113,7 +127,7 @@
       "name": "Service Inventory",
       "interaction": "active_safe",
       "goal": "Map reachable services and IoT-relevant network behavior.",
-      "tools": ["nmap_scan", "iot_protocol_scan", "arp_scan"]
+      "tools": ["route_topology", "iot_protocol_scan", "arp_scan"]
     },
     {
       "id": "firmware_context",
@@ -129,14 +143,14 @@
       "name": "Service Inventory",
       "interaction": "active_safe",
       "goal": "Map open services, routes, and transport exposure.",
-      "tools": ["nmap_scan", "route_topology", "dns_recon"]
+      "tools": ["route_topology", "dns_recon"]
     },
     {
-      "id": "host_posture",
-      "name": "Host Posture",
+      "id": "exposure_posture",
+      "name": "Exposure Posture",
       "interaction": "active_safe",
-      "goal": "Collect host configuration and Linux security posture clues.",
-      "tools": ["linux_config_audit"]
+      "goal": "Check for reachable database and service exposure clues on the Linux server target.",
+      "tools": ["db_enum_and_audit"]
     }
   ],
   "desktop": [

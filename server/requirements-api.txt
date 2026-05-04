@@ -9,3 +9,5 @@ structlog>=23.1,<25.0
 httpx>=0.25,<1.0
 dnspython>=2.6,<3.0
 openai
+markdown
+spacy

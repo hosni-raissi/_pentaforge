@@ -30,8 +30,8 @@ export const useConfig = create<ConfigStore>()(
       activeLLM: 'default-groq',
       serverUrl: 'http://localhost',
       serverPort: 8000,
-      autoApprove: false,
-      stealthMode: false,
+      privacyGate: true,
+      isAssistantOpen: false,
 
       updateConfig: (updates) => set(updates),
 
@@ -76,8 +76,8 @@ export const useConfig = create<ConfigStore>()(
           activeLLM,
           serverUrl: typeof state.serverUrl === 'string' ? state.serverUrl : current.serverUrl,
           serverPort: typeof state.serverPort === 'number' ? state.serverPort : current.serverPort,
-          autoApprove: typeof state.autoApprove === 'boolean' ? state.autoApprove : current.autoApprove,
-          stealthMode: typeof state.stealthMode === 'boolean' ? state.stealthMode : current.stealthMode,
+          privacyGate: typeof state.privacyGate === 'boolean' ? state.privacyGate : current.privacyGate,
+          isAssistantOpen: typeof state.isAssistantOpen === 'boolean' ? state.isAssistantOpen : current.isAssistantOpen,
         };
       },
     }

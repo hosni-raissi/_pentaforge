@@ -462,11 +462,8 @@ export default function Projects() {
       findings: [],
       agents: [
         { name: 'planner', state: 'idle' },
-        { name: 'recon', state: 'idle' },
-        { name: 'exploit', state: 'idle' },
-        { name: 'verify', state: 'idle' },
-        { name: 'report', state: 'idle' },
-        { name: 'retest', state: 'idle' },
+        { name: 'executer', state: 'idle' },
+        { name: 'analyzer', state: 'idle' },
       ],
       phases: [
         { name: 'Reconnaissance', status: 'pending', progress: 0 },
@@ -537,7 +534,8 @@ export default function Projects() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-4">
+    <div className="h-full overflow-auto p-4">
+      <div className="max-w-4xl mx-auto space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -1088,6 +1086,7 @@ export default function Projects() {
           </div>
         </div>
       </Dialog>
+      </div>
     </div>
   );
 }

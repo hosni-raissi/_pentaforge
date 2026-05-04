@@ -143,6 +143,15 @@ export const useProjects = create<ProjectStore>()(
                 status: 'running',
                 startedAt: previousLastScan.startedAt || nowIso,
                 finishedAt: undefined,
+                elapsedSeconds: shouldResume
+                  ? (
+                    typeof previousLastScan.elapsedSeconds === 'number'
+                    && Number.isFinite(previousLastScan.elapsedSeconds)
+                      ? previousLastScan.elapsedSeconds
+                      : 0
+                  )
+                  : 0,
+                durationSeconds: undefined,
                 error: '',
                 // Fresh runs clear prior result; resume keeps it.
                 result: shouldResume ? previousLastScan.result : undefined,
@@ -221,6 +230,8 @@ export const useProjects = create<ProjectStore>()(
                           status: 'running',
                           startedAt: response.started_at ?? nowIso,
                           finishedAt: undefined,
+                          elapsedSeconds: 0,
+                          durationSeconds: undefined,
                           error: '',
                         }
                         : project.lastScan,
@@ -251,6 +262,11 @@ export const useProjects = create<ProjectStore>()(
                       ...(project.lastScan ?? {}),
                       status: 'error',
                       finishedAt: nowIso,
+                      durationSeconds:
+                        typeof project.lastScan?.elapsedSeconds === 'number'
+                        && Number.isFinite(project.lastScan.elapsedSeconds)
+                          ? project.lastScan.elapsedSeconds
+                          : undefined,
                       error: errorMessage,
                     },
                   }

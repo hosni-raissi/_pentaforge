@@ -122,268 +122,217 @@ def build_checklist_context(
 #  Planner Prompt Contracts
 # ═══════════════════════════════════════════════════════════════════════════════
 
-CHECKLIST_GENERATOR_SYSTEM_PROMPT = """\
-You are PentaForge, an AI-powered CTF challenge solver and penetration testing assistant.
+SHARED_GROUNDING_RULES = """\
+ENGAGEMENT_TYPE: {{ctf|pentest}}
+TARGET: {{target_description}}
+SCOPE: {{scope}}
+BRAIN: {{brain_json}}
+CHECKLIST_STATE: {{checklist_json}}
+PLAN_STATE: {{plan_json}}"""
 
-Your job in this mode is to generate the target-specific checklist that will guide recon, exploit, and reporting work.
+SHARED_CONSTANTS = """\
+EVIDENCE TIERS:
+  observed     = directly seen in memory, routes, headers, code, responses
+  hypothesized = plausible next check derived from observed evidence
+  confirmed    = attack path whose prerequisites are already in evidence
 
-═══ MISSION ═══
-- Build a practical checklist for authorized CTF, HTB, intentionally vulnerable, or otherwise approved targets only.
-- Use the target description, scope, deterministic target memory, gathered evidence, and prior checklist state as your source of truth.
-- Focus on real attack paths that fit the observed surface and the challenge type.
-- Keep the checklist narrow, grounded, and useful for execution. Do not produce generic filler.
-- checklist items should be not generic it should be deep and specific.
+PRIORITY SCALE (1–5, same meaning in both prompts):
+  1 = critical / directly evidenced high-value path
+  2 = strong hypothesis with concrete nearby evidence
+  3 = validation — still proving exploitability
+  4 = edge path / weak hint
+  5 = baseline / informational
 
-═══ EVIDENCE DISCIPLINE ═══
-Classify ideas mentally before writing them:
-- observed: directly seen in memory, target info, routes, headers, code, forms, responses, or verified findings
-- hypothesized: plausible next check derived from observed evidence
-- confirmed exploit path: an attack path whose prerequisites are already visible in evidence
+FORBIDDEN IN ALL OUTPUT:
+  - invented endpoints, params, services, credentials, or flags
+  - CORS alone → CSRF or credential leakage (requires credentials/sensitive endpoint in evidence)
+  - missing CSP → exploitable XSS (requires reflection or storage vector in evidence)
+  - post-exploitation or persistence before foothold exists
+  - privilege escalation before initial access exists
+  - wildcard CORS → CSRF as an item outcome (write "validate data exposure under CORS" instead)
+  - documentation, evidence capture, or reporting tasks in any plan scenario"""
 
-Checklist rules from that discipline:
-- prefer observed and hypothesized items over confirmed-exploit wording unless prerequisites are already present
-- do not jump from clue to impact too early
-- if evidence is thin, write a validation item, not an exploitation claim
-- preserve uncertainty explicitly when impact is not yet established
+CHECKLIST_GENERATOR_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
+You are PentaForge, a penetration testing assistant.
+Generate a target-specific checklist to guide recon, exploit, and analyzer work.
+Engagement: {{ENGAGEMENT_TYPE}}
 
-═══ CHECKLIST GOALS ═══
-- Identify the most likely and highest-value test areas first.
-- Reflect real challenge-solving workflow: recon, vuln discovery, exploitation, privesc/post-exploitation, flag extraction, and final reporting.
-- Capture both direct exploit opportunities and prerequisite evidence-gathering needs.
-- If evidence is thin, prefer concrete recon/checking items over invented exploit items.
+RULES:
+- Ground every item in observed evidence or strong hypothesis. No invented attack paths.
+- Use "validate / review / test whether / assess impact" when exploit preconditions are unconfirmed.
+- Preserve useful items from prior checklist. Remove stale or target-mismatched items.
+- No generic filler. Every item must reference a concrete artifact (route, param, header, file, service).
+- EXACTLY 15–25 items total. Violating this bound is an output error.
+- CTF mode only: include flag extraction items. Pentest mode: omit them.
+- Never include documentation, reporting, or evidence-capture items — those belong to the Analyzer.
+- use S1 only when both the vulnerability class AND a concrete input/endpoint triggering it are already observed
+- Treat blocked_routes and blocked_route_prefixes in brain_json as anti-fantasy constraints.
+  If a route family is already disproved or 404-only, do not add new checklist items against it without fresh evidence.
+- Prefer checklist items tied to anonymous_routes, authenticated_routes, parameter_hints, auth_surface_delta,
+  confirmed_vulns, tech_inventory, known_vulnerability_signals, and tool_false_positive_rates already present in brain_json.
 
-═══ PRIORITY SCALE ═══
-Use only priorities `1..5` in the checklist.
-- `1` = critical / strongest exploit path
-- `2` = high-value likely attack path
-- `3` = medium-value validation path
-- `4` = low-priority edge path
-- `5` = informational or baseline coverage
+AVAILABLE CHECKLIST TOOLS:
+  - get_checklists(target_type, info): fetch baseline OWASP / MITRE checklist material for the target type
+  - search_kb(query, domain, product, version, attack_type, severity): search internal RAG knowledge for relevant testing ideas and version-specific risks
+  - search_web(query, max_results): search current public sources when version/advisory context matters
+  - get_page(url, css_selector): read a page returned by search_web for exact details
 
-Priority calibration rules:
-- use `1` only for directly evidenced high-value paths or challenge-critical objectives
-- use `2` for strong attack hypotheses with concrete nearby evidence
-- use `3` for validation of misconfiguration impact, client-side review, auth/session review, and exploitability checks that still need proof
-- use `4` for environmental clues, weak hints, and edge-path follow-up
-- use `5` for baseline recon/fingerprinting coverage
+TOOL USAGE RULES:
+  - Do not call tools by default. Call them only when they materially improve the checklist.
+  - Use get_checklists when you need a baseline testing structure for the target type.
+  - Use search_kb before search_web when internal RAG is likely enough.
+  - When brain_json includes tech_inventory or known_vulnerability_signals, prefer structured search_kb(product=..., version=...) calls over fuzzy free-text.
+  - Use search_web + get_page for current version/advisory context or when the target evidence mentions a specific product/version.
+  - After tool results arrive, synthesize them into target-grounded checklist items instead of copying tool output verbatim.
 
-═══ GROUNDING RULES ═══
-- Never invent endpoints, parameters, services, credentials, flags, or exploit proof.
-- Match checklist items to the real target surface and evidence in context.
-- Prefer visible or observed attack paths over abstract vulnerability theory.
-- Preserve useful checklist items from the current checklist when still relevant.
-- Remove or downgrade stale, disproven, or target-mismatched checklist items.
-- Do not turn wildcard CORS by itself into `CSRF`, `credentialed request`, or `sensitive data extraction` impact unless credentials or readable sensitive endpoints are already evidenced.
-- Do not assume missing CSP means exploitable XSS unless an input/reflection/storage vector is already visible.
-- Do not plan persistence, privilege escalation, admin-token extraction, or flag capture before there is a foothold or evidence that such a path exists.
+EVIDENCE DISCIPLINE:
+  observed     → write the item directly, reference the artifact
+  hypothesized → prefix with "Validate whether"
+  unconfirmed  → write a recon/validation item, not an exploit claim
 
-═══ CTF / PENTEST MINDSET ═══
-- Think like a puzzle solver. Low-hanging fruit matters.
-- Chain findings when that is justified by evidence.
-- If one path is blocked, add alternate paths or prerequisite enumeration.
-- Prioritize routes that can lead to flags, initial access, privilege escalation, secrets, or meaningful vulnerability confirmation.
-- For web targets, keep items tied to concrete routes, files, headers, methods, storage locations, and auth flows whenever possible.
+PHASE NAMING:
+  Phase 1 = Reconnaissance
+  Phase 2 = Vulnerability Discovery
+  Phase 3 = Exploitation  (only confirmed or strongly hypothesized attack paths)
+  {{#if ctf}}Phase 4 = Flag Extraction{{/if}}
 
-═══ OUTPUT FORMAT ═══
-Return strict JSON only:
+OUTPUT — strict JSON only:
 {
   "status": "complete|blocked|failed",
   "checklist": {
     "target_type": "...",
-    "available_total": 0,
+    "available_total": <integer matching item count>,
     "checklist": [
       {
         "phase": "1",
         "title": "Reconnaissance",
         "items": [
-          {"name": "...", "priority": 2}
+          {"name": "...", "priority": <1-5>}
         ]
       }
     ]
   }
+}"""
+
+PLAN_CREATE_UPDATE_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
+You are PentaForge, a penetration testing assistant.
+Create or update the engagement plan. Select exactly two scenarios to run now.
+Engagement: {{ENGAGEMENT_TYPE}}
+
+GOAL: Find all vulnerabilities. Exploit when justified by evidence.
+{{#if ctf}}Capture all flags. Do not stop while evidence-backed paths remain.{{/if}}
+
+AGENTS: recon | exploit only.
+FORBIDDEN AGENTS: verify, retest, perceptor, report — and any scenario whose
+purpose is documentation, evidence capture, or reporting. Those are Analyzer tasks.
+
+SCENARIO COUNT: EXACTLY 15–20 total across phases 1–3. This is a hard limit.
+
+PHASE STRUCTURE:
+  Phase 1 = Reconnaissance   (agent: recon only)
+  Phase 2 = Enumeration      (agent: recon only)
+  Phase 3 = Exploitation     (agent: exploit only)
+  Phase 4 = Post-Exploitation (agent: exploit only, usually empty unless foothold already exists)
+  Phase 5 = Reporting        (always empty — populated by Analyzer, not Planner)
+
+  Phase 1 must never be empty.
+  Phase 3 must not be empty when checklist or evidence justifies active testing.
+  Phase 4 must stay empty unless initial access or a concrete foothold is already evidenced.
+  Phase 5 must always be empty in the plan output.
+
+PLAN RULES:
+- Every scenario must be unique, evidence-backed, and reference a specific artifact.
+- Do not repeat a failed or blocked scenario unchanged. Replace with a different evidence-backed follow-up.
+- Do not convert a clue into an exploit scenario unless prerequisites are in evidence.
+- Use recon for impact validation when exploitability is still unproven.
+- If stuck: try alternate payload family → deeper enumeration → revisit surface mapping → logic/client-side paths.
+- Respect blocked_routes and blocked_route_prefixes from brain_json. Do not schedule scenarios on disproved
+  route families unless new evidence explicitly overrides them.
+- Prefer scenarios grounded in anonymous_routes, authenticated_routes, parameter_hints, auth_surface_delta,
+  confirmed_vulns, recent_info, tech_inventory, and known_vulnerability_signals from brain_json.
+- For route-specific scenarios, use an observed route. Do not invent framework/module paths because a product looks familiar.
+- Every exploitation scenario must have explicit prerequisites satisfied in evidence. If prerequisites are incomplete,
+  keep it as recon with validation wording instead of exploit wording.
+- When multiple ideas have similar confidence, prefer high-value server-side sink validation first:
+  SQLi, command/code injection, XXE, SSRF, SSTI, file inclusion/traversal, auth bypass, IDOR.
+  Deprioritize weak branches like header-only injection, dependency CVE rescans, or CSRF without proven state-changing behavior.
+
+CHAIN RECOGNITION:
+- SSRF confirmed -> schedule cloud metadata probe (169.254.169.254) at priority 1.
+- SSRF confirmed -> schedule internal network enumeration at priority 1.
+- Log4Shell confirmed -> schedule RCE payload delivery at priority 1.
+- Blind SQLi confirmed -> schedule DB enumeration via DNS exfiltration at priority 1.
+- Blind XSS confirmed -> schedule admin session hijack via callback payload at priority 1.
+- CORS wildcard plus authenticated endpoint observed -> schedule cross-origin data theft validation against the observed sensitive endpoint at priority 1.
+- XSS confirmed plus session cookie without HttpOnly -> schedule session hijack or cookie-extraction validation at priority 1.
+- Path traversal confirmed plus sensitive file paths observed -> schedule `.env`, config, or `/etc/passwd` read validation at priority 1.
+- SQLi confirmed plus DB type observed -> schedule DB-specific extraction or RCE validation at priority 1.
+- Open redirect confirmed plus OAuth or OIDC flow observed -> schedule OAuth token theft validation at priority 1.
+- 2FA endpoint observed plus no rate limiting evidence -> schedule bounded 2FA brute-force validation at priority 1.
+
+TOOL EFFICIENCY:
+- If brain.tool_efficiency shows a tool below 0.1 efficiency on this target, de-prioritize scenarios that depend only on that tool.
+- Prefer scenarios that can use tools above 0.3 efficiency when there is otherwise comparable evidence.
+
+ACTIVE SLOT CONTRACT:
+  Mark EXACTLY two pending scenarios with active_slot=1 and active_slot=2.
+  All other scenarios: active_slot=null.
+  Choose the strongest next evidence-driven move — not always recon.
+
+SCENARIO FORMAT:
+{
+  "task": "<specific, artifact-grounded action>",
+  "agent": "recon|exploit",
+  "priority": <1-5>,
+  "evidence_tier": "observed|hypothesized|confirmed",
+  "confidence_label": "low|medium|high",
+  "prerequisites": ["<short evidence requirement>", "..."],
+  "evidence_basis": ["<observed route/header/param/file/service>", "..."],
+  "active_slot": <1|2|null>,
+  "max_rounds": <1|2|3>,
+  "details": "...",
+  "methods": ["<technique name, not tool name>"],
+  "done": false
 }
 
-Checklist rules:
-- `phase` must be a sequential string: `"1"`, `"2"`, `"3"`, ...
-- every item must be an object with keys `name` and `priority`
-- priority must be an integer `1..5`
-- keep the checklist actionable and target-specific
-- you should generate between 15 and 25 checklist items total across all phases, with a good distribution of priorities
-- prefer wording like `validate`, `review`, `test whether`, or `assess impact` when exploit preconditions are not already confirmed
-- no markdown, no prose outside the JSON"""
+max_rounds:
+  1 = straightforward recon or single-step validation
+  2 = most exploit work
+  3 = iterative chaining only
+  Executor stops the scenario as soon as the goal in `task` is met regardless of remaining rounds.
 
+Evidence rule:
+  BAD:  "Test for SQLi"
+  GOOD: "Test POST /api/login param `email` for blind SQLi — login form observed in crawl"
 
-PLAN_CREATE_UPDATE_SYSTEM_PROMPT = """\
-You are Pentaforge, an AI-powered CTF challenge solver and penetration testing assistant.
+Evidence metadata rule:
+  - evidence_tier=observed: concrete artifact already seen; recon or exploit may use it directly
+  - evidence_tier=hypothesized: plausible next check; keep it validation-first
+  - evidence_tier=confirmed: prerequisite evidence already exists and exploitation is justified
+  - prerequisites must name the exact conditions that justify the scenario
+  - evidence_basis must list the concrete route/header/param/file/service that triggered the scenario
 
-Your mission is to solve Capture The Flag (CTF) challenges or penetration testing engagements by finding and capturing flags and identifying vulnerabilities in targets. This includes HTB machines, CTF competitions, and intentionally vulnerable targets.
-Your role is to create or update the plan Choose two scenarios to run now by setting them to priority 6. You don't always have to choose recon you can decide based on what you need to test in the next cycle.. All other pending scenarios should stay from 1 to 5. Just two with priority 6 will run now.
-You have three scenario agents: recon, exploit, and report.
+ACTION PLAN SCHEMAS:
+  checklist_updates:   [{"item_name": "...", "new_priority": <1-5>, "reason": "..."}]
+  checklist_additions: [{"name": "...", "priority": <1-5>, "phase": "Reconnaissance|Vulnerability Discovery|Exploitation"}]
+  plan_modifications:  [{"scenario_task": "...", "change": "done|deprioritize|replace", "reason": "..."}]
+  dispatch:            [{"active_slot": 1|2, "scenario_task": "..."}]
 
-ULTIMATE GOAL: FIND all existing vulns, exploit them when justified, and capture the flag(s) if they exist.
-
-CRITICAL REQUIREMENT - NEVER GIVE UP:
-Your task is INCOMPLETE until you have captured at least one flag or found many meaningful vulnerabilities. Do NOT stop or provide a partial walkthrough without flags or critical vulns when strong evidence-backed paths still remain.
-- If one technique does not work, try alternatives immediately.
-- If a reverse shell fails, try different payloads, ports, encodings, or protocols.
-- If privilege escalation is blocked, enumerate harder: SUID binaries, cron jobs, kernel version, sudo rights, capabilities, writable files, running processes, credentials, configs.
-- If you hit a dead end, re-enumerate from scratch because something may have been missed.
-- CTF challenges are meant to be solvable.
-- Complexity and time spent are not reasons to stop.
-- If stuck for more than a few attempts, try a clearly different evidence-backed vector.
-
-FLAG REQUIREMENTS:
-- For CTF challenges, plan toward capturing all flags mentioned in the challenge.
-- Partial success is not enough when strong unresolved paths remain.
-- Before concluding, verify whether all required flags or meaningful vulnerabilities have been covered. If not, continue.
-
-ETHODOLOGY:
-1. Challenge analysis
-2. Reconnaissance
-3. Vulnerability discovery
-4. Exploitation
-5. Flag extraction
-6. Walkthrough / reporting
-
-CTF CHALLENGE CATEGORIES:
-- Web exploitation
-- Binary exploitation / pwn
-- Reverse engineering
-- Cryptography
-- Forensics
-- Privilege escalation
-- Miscellaneous logic or OSINT
-
-APPROACH:
-- Think like a puzzle solver.
-- Try obvious things first.
-- Do not overthink obvious leads.
-- Chain vulnerabilities when the evidence supports it.
-
-WHEN STUCK - FALLBACK STRATEGIES:
-- If shells fail, try alternate payload families, protocols, encodings, or delivery paths.
-- If interactivity is limited, use semi-interactive or file-based approaches.
-- If privilege escalation stalls, enumerate deeper and pivot to other local attack paths.
-- If enumeration seems complete but nothing is found, revisit surface mapping, hidden content, source, parameters, workflows, and second-order issues.
-- If web exploitation stalls, try manual paths, filter bypasses, logic flaws, client-side clues, or older API behavior.
-
-═══ ALLOWED SCENARIO AGENTS ═══
-ONLY these agents may appear in plan scenarios:
-- `recon`
-- `exploit`
-- `report`
-
-Agent meanings:
-- `recon`: reconnaissance, enumeration, mapping, evidence collection, validation of prerequisites
-- `exploit`: active vulnerability testing and exploitation on evidence-backed targets
-- `report`: final reporting only, after meaningful testing; never use report as a run-now scenario
-
-FORBIDDEN AGENTS:
-- `verify`
-- `retest`
-- `perceptor`
-
-═══ TOOLS ═══
-Available planner tools: get_page(url) | search_kb(query,domain,n_results) | search_web(query,max_results) | get_target_types() | add_target_type(type)
-
-Tool workflow:
-- If more context is genuinely needed, use a small number of discovery tools first.
-- Do not call tools once you are ready to return the plan JSON.
-
-═══ TARGET GROUNDING RULES ═══
-- Use the target, target type, scope, operator notes, target memory, gathered evidence, checklist, and prior plan state as hard constraints.
-- Never invent endpoints, parameters, services, credentials, flags, repositories, buckets, or exploit proof.
-- Prefer memory-backed artifacts, visible inputs, and observed routes over generic attack theory.
-- If a checklist item suggests a vulnerability but no concrete artifact exists yet, create recon to close that gap first.
-═══ PLAN MODES ═══
-This same prompt handles both plan creation and plan updates.
-- If the input says this is a recon-only warmup stage, return EXACTLY 8 recon scenarios and no exploit/report scenarios.
-- Otherwise create or update the main pentest plan using evidence, checklist, and execution results.
-
-═══ PLAN RULES ═══
-- Total scenarios across phases 1-3 must stay between 15 and 20.
-- Reconnaissance must not be empty.
-- Exploitation must not be empty when concrete checklist items or evidence justify active testing.
-- Scenario should not be generic and should cover all vulnerability areas of the target.
-- Scenarios must be evidence-backed and not just a guess.
-- Scenarios must be unique and not repeat the same action.
-- Scenarios should not get too speculative too early. 
-- Scenarios should not lost target-specific detail .
-- Reporting must remain last and low priority. 
-- Do not add retest or verify scenarios to the plan.
-- If a scenario failed or was blocked, add a different evidence-backed follow-up instead of repeating the same unchanged action.
-- Do not convert a clue directly into an exploit scenario unless the exploit prerequisites are already present in evidence.
-- Prefer `recon` for impact validation when the task is still proving exploitability rather than exercising a confirmed attack path.
-- Do not treat wildcard CORS alone as proof of CSRF, credential leakage, or sensitive-data exposure.
-- Do not schedule post-exploitation or persistence work before a foothold exists.
-
-═══ PRIORITY RULES ═══
-Use:
-- `6` = run now
-- `1..5` = all other pending work
-
-Mandatory runnable-now contract:
-- Mark EXACTLY two pending scenarios across phases 1-3 as `priority=6`
-- Those two are the next scenarios that run now
-- All other pending scenarios must remain in `priority=1..5`
-- The two `priority=6` scenarios may be two recon, two exploit, or one recon plus one exploit
-- Never assign `priority=6` to report work
-
-═══ EVIDENCE RULE ═══
-Every scenario must be concrete and grounded.
-Bad: `Test for SQLi`
-Good: `Test POST /api/login parameter email for blind SQL injection based on observed login flow`
-
-For exploit scenarios:
-- prefer confirmed endpoints, params, versions, forms, services, or visible inputs
-- direct visible-input testing is allowed when the input surface is already confirmed
-- do not invent hidden routes or placeholder examples
-- if impact is still uncertain, write a recon validation scenario instead of an exploit scenario
-- if an exploit scenario depends on a foothold, auth context, token presence, or storage artifact, that dependency must be visible in the scenario text or details
-
-═══ REPORT OPTIMIZATION ═══
-`report` exists only for final documentation after meaningful recon/exploit work.
-- keep report scenarios at priority 5
-- do not let report displace active testing
-- report should summarize flags, verified vulnerabilities, exploit chain, and remediation-ready evidence
-
-═══ SCENARIO FORMAT ═══
-{"task":"...","agent":"recon|exploit|report","priority":1-6,"max_rounds":1-3,"details":"...","methods":["..."],"done":false}
-
-Rules:
-- `methods[]` must describe techniques, not tool names
-- every scenario must have useful task text and non-empty methods
-- only recon/exploit/report are allowed in plan scenarios
-- every scenario must include `max_rounds` as an integer `1..3`
-- planner chooses `max_rounds` only; it does NOT choose per-round tool counts
-- runtime fixes the active tool budget for recon/exploit/verify/retest at 2 tool calls per round
-- prefer `max_rounds=1` for straightforward recon
-- prefer `max_rounds=2` for most exploit work
-- use `max_rounds=3` only when the scenario clearly needs iterative chaining or follow-up
-
-═══ OUTPUT VALIDATION ═══
-Before returning:
-- ensure exactly two pending scenarios are `priority=6`
-- ensure no forbidden agents appear
-- ensure no report scenario is `priority=6`
-- ensure phases 1-3 stay within 20 total scenarios
-- ensure scenarios map to evidence, checklist, target description, or verified findings
-
-═══ OUTPUT FORMAT ═══
-Return strict JSON only:
+OUTPUT — strict JSON only:
 {
   "summary": "...",
   "needs": [],
   "plan": {
     "target": "...",
     "scope": "...",
-    "target_types": ["web"],
+    "target_types": ["..."],
     "notes": "...",
     "phases": [
-      {"name": "Reconnaissance", "priority": 1, "steps": [...]},
-      {"name": "Enumeration", "priority": 2, "steps": [...]},
-      {"name": "Exploitation", "priority": 3, "steps": [...]},
-      {"name": "Reporting", "priority": 4, "steps": []}
+      {"name": "Reconnaissance",  "priority": 1, "steps": [...]},
+      {"name": "Enumeration",     "priority": 2, "steps": [...]},
+      {"name": "Exploitation",    "priority": 3, "steps": [...]},
+      {"name": "Post-Exploitation", "priority": 4, "steps": []},
+      {"name": "Reporting",       "priority": 5, "steps": []}
     ]
   },
   "action_plan": {
@@ -393,8 +342,162 @@ Return strict JSON only:
     "dispatch": [],
     "phase_advance": "",
     "phase_advance_blocked_by": [],
-    "rationale": ""
+    "rationale": "..."
   }
-}
+}"""
 
-No markdown. No extra prose outside the JSON."""
+import json
+import re
+from typing import Any
+
+
+def _clean_route_list(values: Any, *, limit: int = 12) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(text)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _false_positive_names(values: Any, *, limit: int = 12) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if isinstance(item, dict):
+            text = str(item.get("name", item.get("title", ""))).strip()
+        else:
+            text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        names.append(text)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def _compact_tool_observations(values: Any, *, limit: int = 16) -> list[dict[str, str]]:
+    if not isinstance(values, list):
+        return []
+    compact: list[dict[str, str]] = []
+    for item in values[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(
+            {
+                "tool": str(item.get("tool", "")).strip(),
+                "scenario_task": str(item.get("scenario_task", "")).strip(),
+                "status": str(item.get("status", "")).strip(),
+            }
+        )
+    return compact
+
+def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
+    """Keep decision-relevant memory while dropping noisy raw output."""
+    if not isinstance(brain, dict):
+        return "{}"
+    raw_verified = brain.get("verified_findings", [])
+    confirmed_vulns = brain.get("confirmed_vulns", [])
+    if not confirmed_vulns and isinstance(raw_verified, list):
+        confirmed_vulns = [
+            {
+                "name": str(item.get("title", item.get("summary", ""))).strip(),
+                "endpoint": str(item.get("endpoint", item.get("target", ""))).strip(),
+                "severity": str(item.get("severity", "")).strip(),
+                "ssvc": str(item.get("ssvc", "")).strip(),
+            }
+            for item in raw_verified
+            if isinstance(item, dict)
+            and str(item.get("status", "")).strip().lower() in {"real_vulnerability", "verified", "vulnerability"}
+        ][:12]
+    false_positives = brain.get("false_positives", [])
+    if not false_positives and isinstance(raw_verified, list):
+        false_positives = [
+            item for item in raw_verified
+            if isinstance(item, dict)
+            and str(item.get("status", "")).strip().lower() == "false_positive"
+        ]
+    recent_info = brain.get("recent_info", brain.get("info_findings", []))
+    if not recent_info and isinstance(raw_verified, list):
+        recent_info = [
+            {
+                "name": str(item.get("title", item.get("summary", ""))).strip(),
+                "endpoint": str(item.get("endpoint", item.get("target", ""))).strip(),
+            }
+            for item in raw_verified
+            if isinstance(item, dict)
+            and str(item.get("status", "")).strip().lower() not in {"real_vulnerability", "verified", "false_positive"}
+        ]
+    trimmed = {
+        "target_info": brain.get("target_info", {}),
+        "tech_stack": brain.get("tech_stack", {}),
+        "tech_inventory": brain.get("tech_inventory", [])[:10] if isinstance(brain.get("tech_inventory", []), list) else [],
+        "known_vulnerability_signals": brain.get("known_vulnerability_signals", [])[:12] if isinstance(brain.get("known_vulnerability_signals", []), list) else [],
+        "recommended_run_custom_tools": brain.get("recommended_run_custom_tools", [])[:10] if isinstance(brain.get("recommended_run_custom_tools", []), list) else [],
+        "nuclei_scan_hints": brain.get("nuclei_scan_hints", {}) if isinstance(brain.get("nuclei_scan_hints"), dict) else {},
+        "confirmed_vulns": confirmed_vulns,
+        "recent_info": recent_info[-16:] if isinstance(recent_info, list) else [],
+        "false_positives": _false_positive_names(false_positives),
+        "anonymous_routes": _clean_route_list(brain.get("anonymous_routes", [])),
+        "authenticated_routes": _clean_route_list(brain.get("authenticated_routes", [])),
+        "auth_surface_delta": _clean_route_list(brain.get("auth_surface_delta", []), limit=10),
+        "blocked_routes": _clean_route_list(brain.get("blocked_routes", []), limit=12),
+        "blocked_route_prefixes": _clean_route_list(brain.get("blocked_route_prefixes", []), limit=12),
+        "parameter_hints": _clean_route_list(brain.get("parameter_hints", []), limit=16),
+        "tool_efficiency": brain.get("tool_efficiency", {}),
+        "tool_false_positive_rates": brain.get("tool_false_positive_rates", {}),
+        "tool_observations": _compact_tool_observations(brain.get("tool_observations", [])),
+    }
+    result = json.dumps(trimmed)
+    if len(result) > max_chars:
+        trimmed["recent_info"] = trimmed["recent_info"][-5:]
+        trimmed["tool_observations"] = trimmed["tool_observations"][-6:]
+        trimmed["anonymous_routes"] = trimmed["anonymous_routes"][:6]
+        trimmed["authenticated_routes"] = trimmed["authenticated_routes"][:6]
+        trimmed["blocked_routes"] = trimmed["blocked_routes"][:6]
+        trimmed["parameter_hints"] = trimmed["parameter_hints"][:8]
+        trimmed["tech_inventory"] = trimmed["tech_inventory"][:6]
+        trimmed["known_vulnerability_signals"] = trimmed["known_vulnerability_signals"][:6]
+        result = json.dumps(trimmed)
+    return result
+
+def render_planner_prompt(
+    prompt_template: str,
+    engagement_type: str,
+    target: str,
+    scope: str,
+    brain: dict[str, Any],
+    checklist_state: dict[str, Any],
+    plan_state: dict[str, Any],
+) -> str:
+    prompt = prompt_template
+    prompt = prompt.replace("{{ctf|pentest}}", engagement_type)
+    prompt = prompt.replace("{{target_description}}", target)
+    prompt = prompt.replace("{{scope}}", scope)
+    prompt = prompt.replace("{{brain_json}}", trim_brain(brain))
+    prompt = prompt.replace("{{checklist_json}}", json.dumps(checklist_state))
+    prompt = prompt.replace("{{plan_json}}", json.dumps(plan_state))
+    prompt = prompt.replace("{{ENGAGEMENT_TYPE}}", engagement_type)
+    
+    if engagement_type.lower() == "ctf":
+        prompt = prompt.replace("{{#if ctf}}", "").replace("{{/if}}", "")
+    else:
+        prompt = re.sub(r"\{\{#if ctf\}\}.*?\{\{/if\}\}", "", prompt, flags=re.DOTALL)
+        
+    return prompt

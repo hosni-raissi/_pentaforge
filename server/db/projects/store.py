@@ -76,10 +76,16 @@ class ProjectsStore:
                     one_time INTEGER NOT NULL DEFAULT 0,
                     view_count INTEGER NOT NULL DEFAULT 0,
                     revoked INTEGER NOT NULL DEFAULT 0,
+                    tunnel_url TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
+            # Migration: Ensure tunnel_url column exists if table was already created
+            try:
+                cur.execute("ALTER TABLE share_links ADD COLUMN tunnel_url TEXT")
+            except sqlite3.OperationalError:
+                pass # Already exists
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_projects_share_links_project_id
@@ -211,6 +217,43 @@ class ProjectsStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_projects_scan_event_cache_project_id_id
                 ON scan_event_cache (project_id, id DESC);
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS project_reports (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    format TEXT NOT NULL DEFAULT 'markdown',
+                    content TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(project_id, format)
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_reports_project_id
+                ON project_reports (project_id);
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS client_messages (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    sender TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_client_messages_project_id_created_at
+                ON client_messages (project_id, created_at ASC);
                 """
             )
             conn.commit()
@@ -481,6 +524,7 @@ class ProjectsStore:
         messages: list[dict[str, Any]],
         *,
         max_messages: int = 200,
+        scope_key: str | None = None,
     ) -> None:
         safe_project_id = str(project_id or "").strip()
         if not safe_project_id:
@@ -492,8 +536,12 @@ class ProjectsStore:
         if not isinstance(project, dict):
             return
 
+        active_scope = str(scope_key or "").strip()
+        stored_scope = str(project.get("copilotHistoryScope", "")).strip()
         existing = project.get("copilotHistory", [])
         history: list[dict[str, Any]] = existing if isinstance(existing, list) else []
+        if active_scope and stored_scope != active_scope:
+            history = []
         normalized_new: list[dict[str, Any]] = []
         for item in messages:
             if not isinstance(item, dict):
@@ -525,6 +573,8 @@ class ProjectsStore:
             history = history[-max_messages:]
 
         project["copilotHistory"] = history
+        if active_scope:
+            project["copilotHistoryScope"] = active_scope
         project["updatedAt"] = datetime.now(timezone.utc).isoformat()
         self.upsert_project(project)
 
@@ -534,6 +584,7 @@ class ProjectsStore:
         context: str,
         *,
         max_chars: int = 4000,
+        scope_key: str | None = None,
     ) -> None:
         safe_project_id = str(project_id or "").strip()
         safe_context = str(context or "").strip()
@@ -544,100 +595,47 @@ class ProjectsStore:
         if not isinstance(project, dict):
             return
 
+        active_scope = str(scope_key or "").strip()
+        if active_scope:
+            project["copilotContextScope"] = active_scope
         project["copilotContext"] = safe_context[:max_chars] if safe_context else ""
         project["updatedAt"] = datetime.now(timezone.utc).isoformat()
         self.upsert_project(project)
 
-    def get_project_context_windows(self, project_id: str) -> dict[str, Any]:
-        project = self.get_project(project_id)
-        if not isinstance(project, dict):
-            return {}
-        windows = project.get("contextWindows", {})
-        return dict(windows) if isinstance(windows, dict) else {}
-
-    def upsert_project_context_window(
+    def clear_project_copilot_state(
         self,
         project_id: str,
-        agent_key: str,
-        payload: dict[str, Any],
+        *,
+        scope_key: str | None = None,
     ) -> None:
         safe_project_id = str(project_id or "").strip()
-        safe_agent_key = str(agent_key or "").strip()
         if not safe_project_id:
-            raise ValueError("project_id is required")
-        if not safe_agent_key:
-            raise ValueError("agent_key is required")
+            return
 
         project = self.get_project(safe_project_id)
         if not isinstance(project, dict):
-            raise ValueError("project not found")
+            return
 
-        context_windows = project.get("contextWindows", {})
-        if not isinstance(context_windows, dict):
-            context_windows = {}
-        context_windows[safe_agent_key] = dict(payload)
-        project["contextWindows"] = context_windows
+        active_scope = str(scope_key or "").strip()
+        history_scope = str(project.get("copilotHistoryScope", "")).strip()
+        context_scope = str(project.get("copilotContextScope", "")).strip()
+
+        if not active_scope or history_scope == active_scope:
+            project["copilotHistory"] = []
+            if active_scope:
+                project["copilotHistoryScope"] = active_scope
+            else:
+                project["copilotHistoryScope"] = ""
+
+        if not active_scope or context_scope == active_scope:
+            project["copilotContext"] = ""
+            if active_scope:
+                project["copilotContextScope"] = active_scope
+            else:
+                project["copilotContextScope"] = ""
+
         project["updatedAt"] = datetime.now(timezone.utc).isoformat()
-
-        last_scan = project.get("lastScan")
-        if isinstance(last_scan, dict):
-            result = last_scan.get("result", {})
-            if not isinstance(result, dict):
-                result = {}
-            result_windows = result.get("contextWindows", {})
-            if not isinstance(result_windows, dict):
-                result_windows = {}
-            result_windows[safe_agent_key] = dict(payload)
-            result["contextWindows"] = result_windows
-            last_scan["result"] = result
-            project["lastScan"] = last_scan
-
         self.upsert_project(project)
-
-    def clear_project_context_windows(
-        self,
-        project_id: str,
-        agent_key: str | None = None,
-    ) -> int:
-        safe_project_id = str(project_id or "").strip()
-        safe_agent_key = str(agent_key or "").strip()
-        if not safe_project_id:
-            return 0
-
-        project = self.get_project(safe_project_id)
-        if not isinstance(project, dict):
-            return 0
-
-        removed = 0
-        context_windows = project.get("contextWindows", {})
-        if isinstance(context_windows, dict):
-            if safe_agent_key:
-                if safe_agent_key in context_windows:
-                    context_windows.pop(safe_agent_key, None)
-                    removed += 1
-            elif context_windows:
-                removed += len(context_windows)
-                context_windows = {}
-            project["contextWindows"] = context_windows
-
-        last_scan = project.get("lastScan")
-        if isinstance(last_scan, dict):
-            result = last_scan.get("result", {})
-            if isinstance(result, dict):
-                result_windows = result.get("contextWindows", {})
-                if isinstance(result_windows, dict):
-                    if safe_agent_key:
-                        result_windows.pop(safe_agent_key, None)
-                    else:
-                        result_windows = {}
-                    result["contextWindows"] = result_windows
-                    last_scan["result"] = result
-                    project["lastScan"] = last_scan
-
-        if removed > 0:
-            project["updatedAt"] = datetime.now(timezone.utc).isoformat()
-            self.upsert_project(project)
-        return removed
 
     def delete_project(self, project_id: str) -> None:
         with self._connect() as conn:
@@ -654,6 +652,7 @@ class ProjectsStore:
         expires_hours: int = 24,
         password: str | None = None,
         one_time: bool = False,
+        tunnel_url: str | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if project is None:
@@ -672,12 +671,16 @@ class ProjectsStore:
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
+                "UPDATE share_links SET revoked = 1 WHERE project_id = ? AND token != ?",
+                (project_id, token)
+            )
+            cur.execute(
                 """
                 INSERT INTO share_links (
                     token, project_id, payload, expires_at,
-                    password_hash, password_salt, one_time
+                    password_hash, password_salt, one_time, tunnel_url
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     token,
@@ -687,6 +690,7 @@ class ProjectsStore:
                     password_hash,
                     password_salt,
                     1 if one_time else 0,
+                    tunnel_url
                 ),
             )
             conn.commit()
@@ -696,6 +700,34 @@ class ProjectsStore:
             "expires_at": expires_at.isoformat(),
             "one_time": one_time,
             "password_protected": bool(password_hash),
+        }
+
+    def get_active_share_link(self, project_id: str) -> dict[str, Any] | None:
+        """Return the most recent non-revoked, non-expired share link for a project."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT token, expires_at, one_time, password_hash, tunnel_url
+                FROM share_links
+                WHERE project_id = ?
+                  AND revoked = 0
+                  AND expires_at > ?
+                ORDER BY expires_at DESC
+                LIMIT 1;
+                """,
+                (project_id, now),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "token": row["token"],
+            "expires_at": row["expires_at"],
+            "one_time": bool(int(row["one_time"])),
+            "password_protected": bool(row["password_hash"]),
+            "tunnel_url": row["tunnel_url"],
         }
 
     def access_share_link(self, token: str, *, password: str | None = None) -> dict[str, Any]:
@@ -760,6 +792,51 @@ class ProjectsStore:
                 "password_protected": bool(password_hash),
             },
         }
+
+    def add_client_message(self, project_id: str, sender: str, content: str) -> dict[str, Any]:
+        message_id = str(uuid.uuid4())
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO client_messages (id, project_id, sender, content, created_at)
+                VALUES (?, ?, ?, ?, ?);
+                """,
+                (message_id, project_id, sender, content, created_at)
+            )
+            conn.commit()
+        return {
+            "id": message_id,
+            "project_id": project_id,
+            "sender": sender,
+            "content": content,
+            "created_at": created_at
+        }
+
+    def list_client_messages(self, project_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, project_id, sender, content, created_at
+                FROM client_messages
+                WHERE project_id = ?
+                ORDER BY created_at ASC;
+                """,
+                (project_id,)
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id": row["id"],
+                "project_id": row["project_id"],
+                "sender": row["sender"],
+                "content": row["content"],
+                "created_at": row["created_at"]
+            }
+            for row in rows
+        ]
 
     def get_project(self, project_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -1434,6 +1511,140 @@ class ProjectsStore:
             "enabled": bool(int(row["enabled"] or 0)),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
+        }
+
+    # ── Report Persistence ──────────────────────────────────────
+
+    def save_report(
+        self,
+        project_id: str,
+        *,
+        report_id: str,
+        format: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Upsert a report for a project + format."""
+        safe_project_id = str(project_id or "").strip()
+        safe_format = str(format or "markdown").strip().lower()
+        if not safe_project_id:
+            raise ValueError("project_id is required")
+        if safe_format not in {"markdown", "html", "pdf"}:
+            raise ValueError(f"unsupported report format: {safe_format}")
+
+        meta_json = json.dumps(metadata or {}, ensure_ascii=True)
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO project_reports (id, project_id, format, content, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (project_id, format) DO UPDATE SET
+                    id = EXCLUDED.id,
+                    content = EXCLUDED.content,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (report_id, safe_project_id, safe_format, content, meta_json),
+            )
+            conn.commit()
+
+    def get_report(
+        self,
+        project_id: str,
+        format: str = "markdown",
+    ) -> dict[str, Any] | None:
+        """Retrieve a report by project and format."""
+        safe_project_id = str(project_id or "").strip()
+        safe_format = str(format or "markdown").strip().lower()
+        if not safe_project_id:
+            return None
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, project_id, format, content, metadata, created_at, updated_at
+                FROM project_reports
+                WHERE project_id = ? AND format = ?;
+                """,
+                (safe_project_id, safe_format),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        try:
+            meta = json.loads(row["metadata"])
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+
+        return {
+            "id": str(row["id"]),
+            "project_id": str(row["project_id"]),
+            "format": str(row["format"]),
+            "content": str(row["content"]),
+            "metadata": meta if isinstance(meta, dict) else {},
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def delete_report(self, project_id: str, format: str = "markdown") -> bool:
+        """Delete a specific report format for a project."""
+        safe_project_id = str(project_id or "").strip()
+        safe_format = str(format or "markdown").strip().lower()
+        if not safe_project_id:
+            return False
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM project_reports
+                WHERE project_id = ? AND format = ?;
+                """,
+                (safe_project_id, safe_format),
+            )
+            deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return deleted > 0
+
+    def list_report_status(self, project_id: str) -> dict[str, Any]:
+        """Return which report formats exist for a project."""
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            return {
+                "markdown": False,
+                "html": False,
+                "pdf": False,
+                "generated_at": None,
+            }
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT format, created_at
+                FROM project_reports
+                WHERE project_id = ?;
+                """,
+                (safe_project_id,),
+            )
+            rows = cur.fetchall()
+
+        formats_present = {str(row["format"]).strip().lower() for row in rows}
+        latest_date: str | None = None
+        for row in rows:
+            ts = str(row["created_at"])
+            if latest_date is None or ts > latest_date:
+                latest_date = ts
+
+        return {
+            "markdown": "markdown" in formats_present,
+            "html": "html" in formats_present,
+            "pdf": "pdf" in formats_present,
+            "generated_at": latest_date,
         }
 
     @staticmethod

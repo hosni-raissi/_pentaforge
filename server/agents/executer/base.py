@@ -15,8 +15,8 @@ from typing import Any, Protocol
 
 import structlog
 
-from server.agents.context_window_manager import ContextWindowManager
 from server.agents.rate_limiter import LLMRateLimiter, get_global_llm_queue, get_backup_llm_fallback
+from server.agents.executer.sandbox import ensure_sandbox_environment
 from server.agents.executer.target_tool_routing import extract_discovered_target_types
 from server.config.agent import (
     LocalLLMConfig,
@@ -891,9 +891,8 @@ class BaseExecuterAgent:
         local_config: LocalLLMConfig | None = None,
         project_id: str | None = None,
         project_cache_dir: str | None = None,
-        context_window_key: str | None = None,
-        context_window_max_tokens: int = 0,
     ) -> None:
+        self._sandbox_root = ensure_sandbox_environment()
         self._role = role
         self._system_prompt = system_prompt
         self._max_tool_rounds = max_tool_rounds
@@ -920,15 +919,6 @@ class BaseExecuterAgent:
             self._llm = LLMClient(self._config, mode="public", client_name=self._role)
             self._model_name = self._config.model
 
-        self._context_window: ContextWindowManager | None = None
-        if str(project_id or "").strip() and str(context_window_key or "").strip():
-            self._context_window = ContextWindowManager(
-                project_id=str(project_id),
-                agent_key=str(context_window_key),
-                max_tokens=max(512, int(context_window_max_tokens or 0)),
-                llm=self._llm,
-            )
-
         # Initialize rate limiter to prevent Mistral 429 errors (4 req/min limit)
         # We limit to 3 req/min to leave buffer
         self._rate_limiter = LLMRateLimiter(max_calls_per_minute=3)
@@ -939,6 +929,7 @@ class BaseExecuterAgent:
             mode=self._mode,
             model=self._model_name,
             tools=len(self._tools),
+            sandbox=str(self._sandbox_root),
         )
 
     def _effective_max_tool_rounds(self) -> int:
@@ -948,33 +939,12 @@ class BaseExecuterAgent:
         return self._max_tool_rounds
 
     def reset_context_window_for_cycle(self) -> None:
-        """Clear context window entries to start fresh for this cycle.
-
-        Called at the start of each execution cycle to ensure agents don't carry
-        forward stale information from previous cycles. Only Planner keeps context.
-        """
-        if self._context_window is not None:
-            # Clear the in-memory entries (don't save - let DB reset)
-            self._context_window._entries = []
-            self._context_window._compression_count = 0
-            logger.info(
-                "executer_context_reset",
-                role=self._role,
-                reason="cycle_start_fresh_context",
-            )
+        """Legacy hook retained as a no-op after context-window removal."""
+        return
 
     async def clear_context_window(self) -> None:
-        """Clear persisted and in-memory context window state for this agent."""
-        if self._context_window is None:
-            return
-        await self._context_window.clear()
-        self._context_window._entries = []
-        self._context_window._compression_count = 0
-        logger.info(
-            "executer_context_cleared",
-            role=self._role,
-            reason="phase_transition_fresh_context",
-        )
+        """Legacy hook retained as a no-op after context-window removal."""
+        return
 
     def _filter_tool_args(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         valid_params = self._tool_valid_params.get(tool_name)
@@ -2087,18 +2057,6 @@ class BaseExecuterAgent:
             )
 
         forced_raw = response.content or ""
-        if self._context_window is not None:
-            await self._context_window.record_llm_turn(
-                prompt_excerpt=f"{self._role} forced final consolidation round {round_index}",
-                response_excerpt=forced_raw or "forced final answer",
-                usage=response.usage if isinstance(response.usage, dict) else {},
-                metadata={
-                    "role": self._role,
-                    "round": round_index,
-                    "forced_final_consolidation": True,
-                },
-            )
-
         result = _parse_executer_output(forced_raw, role=self._role)
         if result.status == "incomplete":
             summary = forced_raw.strip() or (
@@ -2126,13 +2084,6 @@ class BaseExecuterAgent:
         else:
             self._run_max_tool_rounds_override = min(3, max(1, int(max_tool_rounds_override)))
         warmup_batch_mode = "Warmup scenario batch" in self._current_user_message
-        if self._context_window is not None:
-            await self._context_window.record(
-                kind="run_input",
-                role="user",
-                content=user_message,
-                metadata={"role": self._role},
-            )
 
         system_prompt = self._system_prompt
         if _needs_nothink(self._model_name):
@@ -2163,17 +2114,6 @@ class BaseExecuterAgent:
                     result.round_labels = [
                         f"r{n}" for n in range(1, result.rounds_executed + 1)
                     ]
-                if self._context_window is not None:
-                    await self._context_window.record(
-                        kind="run_result",
-                        role="assistant",
-                        content=result.summary or last_content or result.status,
-                        metadata={
-                            "role": self._role,
-                            "status": result.status,
-                            "tool_results": len(all_tool_results),
-                        },
-                    )
                 self._cb.on_done(f"[{self._role}] finished with status={result.status}")
                 return result
             finally:
@@ -2368,19 +2308,6 @@ class BaseExecuterAgent:
                 tool_calls_after_limit=len(tool_calls),
             )
 
-            if self._context_window is not None:
-                logger.info("context_window_recording_start", role=self._role, round=round_index)
-                await self._context_window.record_llm_turn(
-                    prompt_excerpt=user_message if round_index == 1 else f"{self._role} round {round_index}",
-                    response_excerpt=last_content or f"tool_calls={len(tool_calls)}",
-                    usage=response.usage if isinstance(response.usage, dict) else {},
-                    metadata={
-                        "role": self._role,
-                        "round": round_index,
-                        "tool_calls": len(tool_calls),
-                    },
-                )
-                logger.info("context_window_recording_done", role=self._role, round=round_index)
             messages.append(
                 {
                     "role": "assistant",
@@ -2447,7 +2374,7 @@ class BaseExecuterAgent:
                             "You did not invoke any tools this non-final round. In your next response, call at least one "
                             "focused scenario-locked recon tool with `_scenario_id`, unless every assigned scenario is "
                             "objectively impossible for this target. For loopback/local web targets, prefer focused "
-                            "local tools such as http_probe, detect_tech, http_header_analysis, web_crawler, web_fuzz, "
+                            "local tools such as http_probe, detect_tech, http_header_analysis, web_crawler, "
                             "directory_file_fuzzing, api_endpoint_discovery, api_passive_enum, js_source_code_analyzer, "
                             "param_discovery, websocket_recon, cors_misconfig_check, or session_token_analysis. "
                             "Do not spend another non-final round only thinking."
@@ -2509,13 +2436,6 @@ class BaseExecuterAgent:
                     )
 
             if halted_for_approval:
-                if self._context_window is not None:
-                    await self._context_window.record(
-                        kind="run_result",
-                        role="assistant",
-                        content="Execution paused awaiting user approval for a tool call.",
-                        metadata={"role": self._role, "status": "awaiting_user_approval"},
-                    )
                 self._run_max_tool_rounds_override = previous_round_override
                 return ExecuterResult(
                     status="awaiting_user_approval",

@@ -7,8 +7,6 @@ __all__ = [
     "ExecuterResult",
     "ReconExecuterAgent",
     "ExploitExecuterAgent",
-    "VerifyExecuterAgent",
-    "ReportExecuterAgent",
 ]
 
 def __getattr__(name: str):
@@ -29,22 +27,5 @@ def __getattr__(name: str):
         from .exploit.agent import ExploitExecuterAgent
 
         return ExploitExecuterAgent
-
-    if name == "VerifyExecuterAgent":
-        from .verify.agent import VerifyExecuterAgent
-
-        return VerifyExecuterAgent
-
-    if name == "ReportExecuterAgent":
-        from .report.agent import ReportExecuterAgent
-
-        return ReportExecuterAgent
-
-    if name == "RetestExecuterAgent":
-        try:  # pragma: no cover
-            from .retest.agent import RetestExecuterAgent
-        except Exception as exc:  # pragma: no cover
-            raise AttributeError(name) from exc
-        return RetestExecuterAgent
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

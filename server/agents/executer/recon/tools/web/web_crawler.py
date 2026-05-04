@@ -236,6 +236,8 @@ class WebCrawlerRequest(BaseModel):
     tool: str
     target: str
     args: list[str] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
+    cookies: dict[str, str] = Field(default_factory=dict)
     timeout: int = Field(default=900, ge=10, le=3600)
     max_results: int = Field(default=500, description="Max URLs returned to LLM to prevent context limit errors")
 
@@ -257,6 +259,21 @@ class WebCrawlerRequest(BaseModel):
             for char in [";", "&&", "||", "|", "`", "$(", ">"]:
                 if char in arg: raise ValueError(f"Dangerous char '{char}' in arg")
         return v
+
+    @field_validator("headers", "cookies")
+    def validate_header_maps(cls, v):
+        if not isinstance(v, dict):
+            raise ValueError("headers/cookies must be objects")
+        cleaned: dict[str, str] = {}
+        for key, value in v.items():
+            clean_key = str(key or "").strip()
+            clean_value = str(value or "").strip()
+            if not clean_key:
+                continue
+            if any(char in clean_key or char in clean_value for char in ["\n", "\r", "\x00"]):
+                raise ValueError("headers/cookies may not contain control characters")
+            cleaned[clean_key] = clean_value
+        return cleaned
 
 
 class WebCrawlerResult(BaseModel):
@@ -301,6 +318,39 @@ def _build_katana_cmd(args: list[str], target: str) -> list[str]:
 
     cmd.extend(final_args)
     return cmd
+
+
+def _merge_request_headers(headers: dict[str, str], cookies: dict[str, str]) -> dict[str, str]:
+    merged = {
+        str(key).strip(): str(value).strip()
+        for key, value in headers.items()
+        if str(key).strip() and str(value).strip()
+    }
+    if cookies:
+        cookie_value = "; ".join(
+            f"{str(key).strip()}={str(value).strip()}"
+            for key, value in cookies.items()
+            if str(key).strip()
+        )
+        if cookie_value:
+            existing = str(merged.get("Cookie", "")).strip()
+            merged["Cookie"] = f"{existing}; {cookie_value}".strip("; ") if existing else cookie_value
+    return merged
+
+
+def _inject_headers_for_tool(tool: str, args: list[str], headers: dict[str, str], cookies: dict[str, str]) -> list[str]:
+    merged = _merge_request_headers(headers, cookies)
+    if not merged:
+        return list(args)
+
+    enriched = list(args)
+    if tool in {"katana", "gospider"}:
+        for key, value in merged.items():
+            enriched.extend(["-H", f"{key}: {value}"])
+    elif tool == "hakrawler":
+        for key, value in merged.items():
+            enriched.extend(["-h", f"{key}: {value}"])
+    return enriched
 
 
 def _build_gospider_cmd(args: list[str], target: str) -> list[str]:
@@ -412,6 +462,8 @@ def web_crawler(
     tool: str,
     target: str,
     args: Optional[list[str]] = None,
+    headers: Optional[dict[str, str]] = None,
+    cookies: Optional[dict[str, str]] = None,
     max_results: int = 500,
     timeout: int = 120,
 ) -> dict:
@@ -423,15 +475,26 @@ def web_crawler(
     """
     start = time.time()
     args = list(args or [])
+    headers = dict(headers or {})
+    cookies = dict(cookies or {})
     
     try:
-        req = WebCrawlerRequest(tool=tool, target=target, args=args, max_results=max_results, timeout=timeout)
+        req = WebCrawlerRequest(
+            tool=tool,
+            target=target,
+            args=args,
+            headers=headers,
+            cookies=cookies,
+            max_results=max_results,
+            timeout=timeout,
+        )
     except Exception as e:
         return WebCrawlerResult(success=False, tool=tool, target=target, command="", working_dir="", error=str(e)).model_dump()
 
     # ── BUILD COMMAND ──
     try:
         clean_args, scope = _extract_scope_from_args(args, target)
+        clean_args = _inject_headers_for_tool(tool, clean_args, req.headers, req.cookies)
     except Exception as e:
         return WebCrawlerResult(success=False, tool=tool, target=target, command="", working_dir="", error=str(e)).model_dump()
 
@@ -527,6 +590,16 @@ WEB_CRAWLER_TOOL_DEFINITION = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Raw args. Use wrapper-level scope: ['--scope', 'example.com']. Depth is auto-clamped to max 5. Katana auto-enables -jc if omitted."
+            },
+            "headers": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": "Optional HTTP headers for session-aware or authenticated crawling."
+            },
+            "cookies": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": "Optional cookies to replay during authenticated crawling."
             },
             "max_results": {
                 "type": "integer",

@@ -11,7 +11,6 @@ DEFAULT_BLOCKED_STATIC_TOOLS: tuple[str, ...] = (
     "directory_file_fuzzing",
     "dns_enum_fuzzing",
     "param_discovery",
-    "web_fuzz",
 )
 
 DEFAULT_BLOCKED_STATIC_COMMANDS: tuple[str, ...] = (

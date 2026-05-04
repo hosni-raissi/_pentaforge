@@ -12,6 +12,7 @@ import structlog
 from server.db.knowledge.models.chunk import KnowledgeChunk
 from server.db.knowledge.storage.embedding import EmbeddingGenerator
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
+from server.utils.target_scope import normalize_target_scope
 
 logger = structlog.get_logger(__name__)
 
@@ -279,6 +280,7 @@ async def _upsert_project_artifact(
             "title": safe_title,
             "target": _coerce_text(target),
             "target_type": _coerce_text(target_type),
+            "target_scope": normalize_target_scope(target, target_type),
             "updated_at": _utc_now_iso(),
             "content_hash": content_hash,
         },
@@ -372,6 +374,8 @@ async def search_project_vectors(
     query: str,
     limit: int = 5,
     kinds: list[str] | None = None,
+    target: str = "",
+    target_type: str = "",
 ) -> dict[str, Any]:
     safe_project_id = _coerce_text(project_id)
     safe_query = _coerce_text(query)
@@ -386,6 +390,8 @@ async def search_project_vectors(
     if not safe_query:
         return {"success": False, "error": "query is required", "matches": []}
 
+    active_target_scope = normalize_target_scope(target, target_type)
+
     content_types = sorted(
         {
             _ARTIFACT_KIND_TO_CONTENT_TYPE.get(kind, "")
@@ -399,11 +405,12 @@ async def search_project_vectors(
     embedder = _get_embedder()
     vector_store = _get_vector_store()
     query_embedding = await embedder.embed_single(safe_query, is_query=True)
+    search_limit = safe_limit if not active_target_scope else max(safe_limit * 4, 12)
 
     hits = vector_store.search_multi(
         query_embedding=query_embedding,
         content_types=content_types,
-        n_results=safe_limit,
+        n_results=search_limit,
         where={"project_id": safe_project_id},
     )
 
@@ -413,6 +420,13 @@ async def search_project_vectors(
         kind = _coerce_text(metadata.get("artifact_kind")).lower()
         if normalized_kinds and kind not in normalized_kinds:
             continue
+        if active_target_scope:
+            hit_scope = normalize_target_scope(
+                _coerce_text(metadata.get("target")),
+                _coerce_text(metadata.get("target_type")),
+            )
+            if hit_scope != active_target_scope:
+                continue
         content = _coerce_text(hit.get("content"))
         matches.append(
             {
@@ -430,6 +444,7 @@ async def search_project_vectors(
         "success": True,
         "project_id": safe_project_id,
         "query": safe_query,
+        "target_scope": active_target_scope,
         "matches": matches[:safe_limit],
         "count": min(len(matches), safe_limit),
     }

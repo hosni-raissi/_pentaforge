@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -369,19 +369,26 @@ async def refresh_rag(
         refresh_days = int(custom_days)
 
     last_update = intel_state.get_last_update(normalized_target)
+    next_update = (
+        last_update + timedelta(days=refresh_days)
+        if last_update is not None
+        else None
+    )
     needs_update = (
         force_update
         or last_update is None
-        or (now - last_update).total_seconds() >= refresh_days * 86400
+        or (next_update is not None and now >= next_update)
     )
     if not needs_update:
         days_ago = (now - last_update).total_seconds() / 86400 if last_update else 0.0
         message = (
             f"RAG is fresh (updated {days_ago:.1f} days ago, interval={refresh_days}d) "
-            "— skipping update"
+            f"— next update at {next_update.isoformat() if next_update else 'unknown'} — skipping update"
         )
         _notify(callback, "on_done", message)
         stats["update_status"] = "fresh"
+        stats["last_update"] = last_update.isoformat() if last_update else None
+        stats["next_update"] = next_update.isoformat() if next_update else None
         return IntelResult(
             status="complete",
             summary=message,
@@ -391,7 +398,16 @@ async def refresh_rag(
     if force_update:
         _notify(callback, "on_step", f"Force update requested — bypassing cooldown ({refresh_days} day window)")
 
-    _notify(callback, "on_step", "RAG update needed — updating knowledge base")
+    if last_update is None:
+        _notify(callback, "on_step", "RAG update needed — no previous update found, updating knowledge base")
+    else:
+        _notify(
+            callback,
+            "on_step",
+            "RAG update needed — "
+            f"last update {last_update.isoformat()}, "
+            f"cooldown ended at {next_update.isoformat() if next_update else 'unknown'}",
+        )
     _notify(callback, "on_step", f"Update: Verifying sources for '{normalized_target}'")
 
     source_entries = _collect_source_entries(normalized_target, projects_store=projects)
@@ -482,6 +498,10 @@ async def refresh_rag(
         f"embedded={stats['total_embedded']}, "
         f"payload_store_added={payload_store_added}, "
         f"status={stats['update_status']}."
+    )
+    stats["last_update"] = last_update.isoformat() if last_update else None
+    stats["next_update"] = (
+        (datetime.now(timezone.utc) + timedelta(days=refresh_days)).isoformat()
     )
     intel_state.set_last_update(
         normalized_target,

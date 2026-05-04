@@ -29,16 +29,17 @@ from server.db.projects import ProjectsStore
 from server.db.projects.project_rag import index_verified_finding
 from server.db.projects.runtime_cache import get_project_runtime_cache
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
-from server.nodes.information_gathering import (
-    InformationGatheringNode,
-    load_target_info_profile_defaults,
-)
+from server.agents.executer.payload_filter import get_payloads as _get_filtered_payloads
+from server.nodes.information_gathering import load_target_info_profile_defaults
 from server.nodes.intel import IntelNode
 from server.nodes.system_memory import (
+    Brain,
+    BrainBuilderNode,
     SystemMemoryNode,
     SystemMemoryLLM,
     append_system_memory_updates as _append_system_memory_updates_external,
     build_system_memory_prompt_block as _build_target_memory_prompt_block_external,
+    compute_tool_efficiency_snapshot as _compute_tool_efficiency_snapshot,
     initialize_system_memory as _initialize_system_memory,
     load_system_memory as _load_target_memory_external,
     merge_system_memory_artifacts as _merge_target_memory_artifacts_external,
@@ -47,6 +48,7 @@ from server.nodes.system_memory import (
     system_memory_dir as _system_memory_dir_external,
     system_memory_paths as _system_memory_paths_external,
 )
+from server.tools.session.session_manager import SessionContext, SessionManager
 
 logger = structlog.get_logger(__name__)
 
@@ -206,7 +208,7 @@ def _build_warmup_scenario_tool_guidance(task: str) -> str:
     guidance_map: list[tuple[str, str]] = [
         (
             "local web app perimeter mapping",
-            "Preferred tools: http_probe, web_crawler, web_fuzz, api_endpoint_discovery. Avoid repeating broad discovery once core routes are confirmed.",
+            "Preferred tools: http_probe, web_crawler, directory_file_fuzzing, api_endpoint_discovery. Avoid repeating broad discovery once core routes are confirmed.",
         ),
         (
             "defensive & tech fingerprinting",
@@ -214,7 +216,7 @@ def _build_warmup_scenario_tool_guidance(task: str) -> str:
         ),
         (
             "structural content discovery",
-            "Preferred tools: web_crawler, directory_file_fuzzing, web_fuzz, js_source_code_analyzer. Focus on hidden paths, metadata, and client-side route clues.",
+            "Preferred tools: web_crawler, directory_file_fuzzing, js_source_code_analyzer. Focus on hidden paths, metadata, and client-side route clues.",
         ),
         (
             "api & endpoint extraction",
@@ -230,7 +232,7 @@ def _build_warmup_scenario_tool_guidance(task: str) -> str:
         ),
         (
             "data handling & trust review",
-            "Preferred tools: cors_misconfig_check, http_header_analysis, api_response_analyzer, web_fuzz on upload or file-processing routes. Avoid restarting perimeter discovery.",
+            "Preferred tools: cors_misconfig_check, http_header_analysis, api_response_analyzer, directory_file_fuzzing on upload or file-processing routes. Avoid restarting perimeter discovery.",
         ),
         (
             "operational synthesis",
@@ -352,11 +354,39 @@ def _build_target_type_followup_hypotheses(
         for markers, hypothesis in grouped_rules.get(group, [])
         if has_any(*markers)
     ]
+    if has_any("cors", "access-control-allow-origin", "wildcard cors") and has_any("login", "auth", "cookie", "session", "jwt", "protected"):
+        hypotheses.append(
+            "Chain recognition applies: validate cross-origin data exposure or CSRF-adjacent impact only against authenticated or sensitive endpoints already observed in evidence."
+        )
+    if has_any("xss", "cross-site scripting") and has_any("httponly missing", "without httponly", "cookie", "session token"):
+        hypotheses.append(
+            "Chain recognition applies: if XSS is confirmed and cookies lack HttpOnly, validate session theft or account-hijack impact on the concrete affected route."
+        )
+    if has_any("path traversal", "directory traversal", "/etc/passwd", ".env", "sensitive file"):
+        hypotheses.append(
+            "Chain recognition applies: escalate the confirmed traversal path to concrete sensitive-file reads such as app config, `.env`, or `/etc/passwd` only where the file path is already evidenced."
+        )
+    if has_any("sqli", "sql injection") and has_any("mysql", "postgres", "mssql", "oracle", "mongodb"):
+        hypotheses.append(
+            "Chain recognition applies: use the observed database fingerprint to schedule DB-specific extraction or RCE validation rather than generic SQLi retests."
+        )
+    if has_any("open redirect", "redirect_uri", "redirect url") and has_any("oauth", "oidc", "authorize", "callback"):
+        hypotheses.append(
+            "Chain recognition applies: validate OAuth or token-theft impact through the observed open redirect and authorization flow rather than treating it as a standalone low-signal issue."
+        )
+    if has_any("2fa", "mfa", "otp") and has_any("no rate limit", "missing rate limit", "rate limiting absent"):
+        hypotheses.append(
+            "Chain recognition applies: prioritize bounded 2FA brute-force validation only on the observed 2FA flow when rate limiting evidence is absent."
+        )
+    if has_any("form", "parameter", "query", "api", "graphql", "search", "filter"):
+        hypotheses.append(
+            "Hidden parameter discovery is high-value here: schedule `param_discovery` once against the confirmed dynamic endpoints instead of repeating broad crawls."
+        )
     if not hypotheses and evidence_text:
         hypotheses.append(
             "Use the strongest concrete warmup evidence to create one deeper follow-up scenario that validates the observed weakness before restarting broad discovery."
         )
-    return hypotheses[:6]
+    return hypotheses[:8]
 
 
 def _compact_preview(value: Any, limit: int = 220) -> str:
@@ -848,6 +878,63 @@ def _build_verified_finding_entry(
     commands = _extract_commands_from_tool_results(verify_data.get("tool_results", []))
     tool_executions = _extract_tool_execution_entries(verify_data.get("tool_results", []))
     tools_used = _extract_tool_names(verify_data.get("tool_results", []))
+    analyzer_chain = (
+        verify_data.get("analysis_chain", [])
+        if isinstance(verify_data.get("analysis_chain"), list)
+        else []
+    )
+    normalized_outputs = (
+        verify_data.get("normalized_outputs", [])
+        if isinstance(verify_data.get("normalized_outputs"), list)
+        else []
+    )
+    normalized_summary = str(
+        (
+            verify_data.get("evidence", {}).get("normalized_summary", "")
+            if isinstance(verify_data.get("evidence"), dict)
+            else ""
+        )
+        or verify_data.get("normalized_summary", "")
+        or ""
+    ).strip()
+    evidence_status = str(
+        (
+            verify_data.get("evidence", {}).get("evidence_status", "")
+            if isinstance(verify_data.get("evidence"), dict)
+            else ""
+        )
+        or verify_data.get("evidence_status", "")
+        or ""
+    ).strip().lower() or "evidence_backed"
+    proof_quality = str(
+        (
+            verify_data.get("evidence", {}).get("proof_quality", "")
+            if isinstance(verify_data.get("evidence"), dict)
+            else ""
+        )
+        or verify_data.get("proof_quality", "")
+        or ""
+    ).strip().lower() or "moderate"
+    deterministic_validation = bool(
+        (
+            verify_data.get("evidence", {}).get("deterministic_validation")
+            if isinstance(verify_data.get("evidence"), dict)
+            else None
+        )
+        if (
+            isinstance(verify_data.get("evidence"), dict)
+            and "deterministic_validation" in verify_data.get("evidence", {})
+        )
+        else verify_data.get("deterministic_validation", False)
+    )
+    verification_methods = _coerce_string_list(
+        (
+            verify_data.get("evidence", {}).get("verification_methods")
+            if isinstance(verify_data.get("evidence"), dict)
+            else None
+        )
+        or verify_data.get("verification_methods")
+    )
     cve_candidates = _extract_cve_candidates_from_text(
         scenario.get("cve"),
         verify_summary,
@@ -863,6 +950,9 @@ def _build_verified_finding_entry(
         verify_summary or "Verified vulnerability confirmed by the Verify agent.",
         "",
         "Verification Status: CONFIRMED",
+        f"Evidence Tier: {evidence_status.replace('_', ' ').upper()}",
+        f"Proof Quality: {proof_quality.upper()}",
+        f"Deterministic Validation: {'YES' if deterministic_validation else 'NO'}",
         f"Severity Level: {severity.upper()}",
     ]
     if verify_confidence is not None:
@@ -877,6 +967,14 @@ def _build_verified_finding_entry(
     if tools_used:
         description_parts.extend(["", "Tools Used:"])
         description_parts.append(f"  - {', '.join(tools_used[:8])}")
+    if verification_methods:
+        description_parts.extend(["", "Verification Methods:"])
+        description_parts.append(f"  - {', '.join(verification_methods[:8])}")
+    if analyzer_chain:
+        description_parts.extend(["", "Analyzer Chain:"])
+        description_parts.append(f"  - {' -> '.join(str(step) for step in analyzer_chain[:8])}")
+    if normalized_summary:
+        description_parts.extend(["", "Normalized Evidence Summary:", normalized_summary])
     if cve_candidates:
         description_parts.extend(["", "CVE Candidates:"])
         description_parts.extend(f"  - {candidate}" for candidate in cve_candidates)
@@ -888,6 +986,19 @@ def _build_verified_finding_entry(
     evidence_map.setdefault("commands", commands)
     evidence_map.setdefault("tools_used", tools_used)
     evidence_map.setdefault("tool_executions", tool_executions)
+    evidence_map.setdefault("analyzer_chain", analyzer_chain)
+    evidence_map.setdefault("normalized_outputs", normalized_outputs)
+    evidence_map.setdefault("normalized_summary", normalized_summary)
+    evidence_map.setdefault("ssvc", verify_data.get("ssvc"))
+    evidence_map.setdefault("ssvc_action", verify_data.get("ssvc_action"))
+    evidence_map.setdefault("hitl_required", verify_data.get("hitl_required"))
+    evidence_map.setdefault("vulnerability_type", verify_data.get("vulnerability_type"))
+    evidence_map.setdefault("expected_indicator", verify_data.get("expected_indicator"))
+    evidence_map.setdefault("evidence_status", evidence_status)
+    evidence_map.setdefault("proof_quality", proof_quality)
+    evidence_map.setdefault("deterministic_validation", deterministic_validation)
+    evidence_map.setdefault("verification_methods", verification_methods)
+    evidence_map.setdefault("artifact_quality", verify_data.get("artifact_quality"))
     if cve_candidates:
         evidence_map.setdefault("cve_candidates", cve_candidates)
 
@@ -904,6 +1015,11 @@ def _build_verified_finding_entry(
         "status": "verified",
         "cvss": scenario.get("cvss"),
         "cve": cve_candidates[0] if cve_candidates else scenario.get("cve"),
+        "ssvc": verify_data.get("ssvc"),
+        "evidence_status": evidence_status,
+        "proof_quality": proof_quality,
+        "deterministic_validation": deterministic_validation,
+        "verification_methods": verification_methods,
         "description": "\n".join(description_parts),
         "evidence": evidence_map,
         "remediation": remediation,
@@ -1184,17 +1300,918 @@ async def _append_target_memory_updates(
     stage: str,
     updates: list[dict[str, Any]],
     verified_findings: list[dict[str, Any]] | None = None,
+    tool_observations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return await _append_system_memory_updates_external(
         project_cache_dir,
         stage=stage,
         updates=updates,
         verified_findings=verified_findings,
+        tool_observations=tool_observations,
     )
 
 
 def _build_target_memory_prompt_block(memory: dict[str, Any]) -> str:
     return _build_target_memory_prompt_block_external(memory)
+
+
+def _coerce_string_dict(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for key, raw_value in value.items():
+        clean_key = str(key or "").strip()
+        clean_value = str(raw_value or "").strip()
+        if clean_key and clean_value:
+            cleaned[clean_key] = clean_value
+    return cleaned
+
+
+def _parse_cookie_header(value: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for part in str(value or "").split(";"):
+        if "=" not in part:
+            continue
+        name, cookie_value = part.split("=", 1)
+        clean_name = str(name or "").strip()
+        clean_value = str(cookie_value or "").strip()
+        if clean_name and clean_value:
+            cookies[clean_name] = clean_value
+    return cookies
+
+
+def _build_auth_runtime_context(
+    *,
+    target_type: str,
+    target_config: dict[str, Any] | None,
+    target: str,
+) -> tuple[SessionManager, dict[str, str], dict[str, str]]:
+    manager = SessionManager()
+    if not isinstance(target_config, dict):
+        return manager, {}, {}
+
+    headers = _coerce_string_dict(target_config.get("headers"))
+    cookies = _coerce_string_dict(target_config.get("cookies"))
+    normalized_type = _normalize_target_type(target_type)
+
+    if normalized_type == "api":
+        auth = target_config.get("auth", {}) if isinstance(target_config.get("auth"), dict) else {}
+        auth_type = str(auth.get("type", "")).strip().lower()
+        token = str(auth.get("token", "")).strip()
+        if auth_type == "bearer" and token:
+            headers.setdefault("Authorization", f"Bearer {token}")
+        elif auth_type == "api_key":
+            header_name = str(auth.get("api_key_header", "")).strip() or "X-API-Key"
+            api_key = str(auth.get("api_key", "")).strip()
+            if api_key:
+                headers.setdefault(header_name, api_key)
+        elif auth_type == "cookie" and token:
+            cookies.update(_parse_cookie_header(token))
+
+    if headers or cookies:
+        manager.register(
+            SessionContext(
+                label="authenticated_primary",
+                cookies=cookies,
+                headers=headers,
+                base_url=str(target or "").strip(),
+            )
+        )
+
+    credentials = target_config.get("credentials")
+    if isinstance(credentials, list):
+        for idx, item in enumerate(credentials[:3], start=1):
+            if not isinstance(item, dict):
+                continue
+            username = str(item.get("username", item.get("email", ""))).strip()
+            if username:
+                manager.register(
+                    SessionContext(
+                        label=f"credential_{idx}:{username}",
+                        base_url=str(target or "").strip(),
+                    )
+                )
+
+    return manager, headers, cookies
+
+
+def _iter_memory_text_fragments(memory: dict[str, Any]) -> list[str]:
+    fragments: list[str] = []
+    if not isinstance(memory, dict):
+        return fragments
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                visit(value)
+            return
+        if isinstance(node, list):
+            for value in node:
+                visit(value)
+            return
+        text = str(node or "").strip()
+        if text:
+            fragments.append(text)
+
+    visit(memory.get("gathering", {}))
+    visit(memory.get("artifacts", []))
+    visit(memory.get("updates", []))
+    return fragments
+
+
+def _extract_backticked_paths(*values: Any) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for match in re.findall(r"`([^`]+)`", str(value or "")):
+            clean = str(match or "").strip()
+            if not clean.startswith("/"):
+                continue
+            if clean.lower() in seen:
+                continue
+            seen.add(clean.lower())
+            paths.append(clean)
+    return paths
+
+
+def _extract_routes_from_memory(memory: dict[str, Any]) -> list[str]:
+    routes: list[str] = []
+    seen: set[str] = set()
+    fragments = _iter_memory_text_fragments(memory)
+    for fragment in fragments:
+        for match in re.findall(r"https?://[^\s\"'<>`]+", fragment):
+            clean = match.rstrip(".,);]")
+            if clean.lower() in seen:
+                continue
+            seen.add(clean.lower())
+            routes.append(clean)
+        for path in _extract_backticked_paths(fragment):
+            if path.lower() in seen:
+                continue
+            seen.add(path.lower())
+            routes.append(path)
+    return routes[:250]
+
+
+def _normalize_route_token(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http://") or text.startswith("https://"):
+        text = re.sub(r"^[a-z][a-z0-9+.-]*://[^/]+", "", text, flags=re.IGNORECASE)
+    text = text.strip()
+    if not text.startswith("/"):
+        return ""
+    text = re.split(r"[?#]", text, maxsplit=1)[0].strip()
+    text = text.rstrip(".,);]>\"'")
+    if not text.startswith("/"):
+        return ""
+    text = re.sub(r"/{2,}", "/", text)
+    if len(text) > 1:
+        text = text.rstrip("/")
+    return text or "/"
+
+
+def _extract_route_tokens(*values: Any) -> list[str]:
+    routes: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        candidates = re.findall(r"https?://[^\s\"'<>`]+|/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)+", text)
+        candidates.extend(_extract_backticked_paths(text))
+        for candidate in candidates:
+            route = _normalize_route_token(candidate)
+            if not route:
+                continue
+            lowered = route.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            routes.append(route)
+    return routes
+
+
+def _route_family_prefixes(route: str) -> list[str]:
+    normalized = _normalize_route_token(route)
+    if not normalized or normalized == "/":
+        return []
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return []
+    families: list[str] = []
+    if len(parts) >= 2:
+        prefix = "/" + "/".join(parts[:2])
+        if prefix != normalized:
+            families.append(prefix)
+    return families
+
+
+def _verify_summary_indicates_blocked_route(summary: str) -> bool:
+    lowered = str(summary or "").strip().lower()
+    if not lowered:
+        return False
+    blocked_markers = (
+        "404 not found",
+        "403 forbidden",
+        "405 method not allowed",
+        "does not exist",
+        "is inaccessible",
+        "returned 404",
+        "returned 403",
+        "not exposed",
+        "no sensitive data exposure exists at",
+        "endpoint returned http 404",
+        "route is forbidden",
+        "base path is forbidden",
+    )
+    return any(marker in lowered for marker in blocked_markers)
+
+
+def _extract_blocked_route_memory_updates(
+    items: list[dict[str, Any]],
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    blocked_routes: list[str] = []
+    blocked_prefixes: list[str] = []
+    updates: list[dict[str, Any]] = []
+    route_seen: set[str] = set()
+    prefix_seen: set[str] = set()
+    root_prefix_counts: dict[str, int] = {}
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        verify_summary = str(item.get("verify_summary", "")).strip()
+        scenario = item.get("scenario", {}) if isinstance(item.get("scenario"), dict) else {}
+        if not _verify_summary_indicates_blocked_route(verify_summary):
+            continue
+        routes = _extract_route_tokens(
+            scenario.get("endpoint", ""),
+            scenario.get("task", ""),
+            scenario.get("details", ""),
+            verify_summary,
+        )
+        if not routes:
+            continue
+        for route in routes:
+            lowered = route.lower()
+            if lowered not in route_seen:
+                route_seen.add(lowered)
+                blocked_routes.append(route)
+            root_parts = [part for part in route.split("/") if part]
+            if root_parts:
+                root_prefix = "/" + root_parts[0]
+                root_prefix_counts[root_prefix] = root_prefix_counts.get(root_prefix, 0) + 1
+            for prefix in _route_family_prefixes(route):
+                prefix_lower = prefix.lower()
+                if prefix_lower not in prefix_seen:
+                    prefix_seen.add(prefix_lower)
+                    blocked_prefixes.append(prefix)
+    for prefix, count in root_prefix_counts.items():
+        if count >= 2 and prefix.lower() not in prefix_seen:
+            prefix_seen.add(prefix.lower())
+            blocked_prefixes.append(prefix)
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        verify_summary = str(item.get("verify_summary", "")).strip()
+        scenario = item.get("scenario", {}) if isinstance(item.get("scenario"), dict) else {}
+        if not _verify_summary_indicates_blocked_route(verify_summary):
+            continue
+        routes = _extract_route_tokens(
+            scenario.get("endpoint", ""),
+            scenario.get("task", ""),
+            scenario.get("details", ""),
+            verify_summary,
+        )
+        if not routes:
+            continue
+        updates.append(
+            {
+                "title": "Blocked route family recorded",
+                "summary": (
+                    f"Verification disproved route(s) {', '.join(routes[:4])}. "
+                    f"Do not schedule follow-up scenarios against this path family without new evidence."
+                ),
+                "routes": routes[:8],
+                "route_prefixes": [prefix for prefix in blocked_prefixes[:8]],
+                "kind": "blocked_route",
+            }
+        )
+
+    return blocked_routes, blocked_prefixes, updates
+
+
+def _scenario_references_blocked_route(
+    scenario: dict[str, Any],
+    *,
+    blocked_routes: list[str],
+    blocked_route_prefixes: list[str],
+) -> bool:
+    routes = _extract_route_tokens(
+        scenario.get("endpoint", ""),
+        scenario.get("task", ""),
+        scenario.get("details", ""),
+        scenario.get("notes", ""),
+    )
+    if not routes:
+        return False
+    blocked_exact = {item.lower() for item in blocked_routes if str(item).strip()}
+    blocked_prefix = {item.lower() for item in blocked_route_prefixes if str(item).strip()}
+    for route in routes:
+        lowered = route.lower()
+        if lowered in blocked_exact:
+            return True
+        if any(lowered == prefix or lowered.startswith(prefix + "/") for prefix in blocked_prefix):
+            return True
+    return False
+
+
+def _scenario_requires_evidence_gate(scenario: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(part or "")
+        for part in (
+            scenario.get("task", ""),
+            scenario.get("details", ""),
+            " ".join(str(item or "") for item in scenario.get("methods", []) if isinstance(item, str))
+            if isinstance(scenario.get("methods"), list)
+            else "",
+        )
+    ).lower()
+    cues = (
+        "sql injection",
+        "sqli",
+        "xss",
+        "cross-site scripting",
+        "csrf",
+        "command injection",
+        "ssti",
+        "ssrf",
+        "rce",
+        "default credential",
+        "session fixation",
+        "file upload",
+        "method tampering",
+        "authentication bypass",
+        "exploit",
+    )
+    return any(cue in text for cue in cues)
+
+
+def _memory_prerequisite_evidence(target_memory: dict[str, Any]) -> set[str]:
+    if not isinstance(target_memory, dict):
+        return set()
+    memory_text = _build_target_memory_evidence_text(target_memory)
+    evidence: set[str] = set()
+    observed_routes = {
+        _normalize_route_token(item)
+        for item in (
+            (target_memory.get("anonymous_routes", []) if isinstance(target_memory.get("anonymous_routes"), list) else [])
+            + (target_memory.get("authenticated_routes", []) if isinstance(target_memory.get("authenticated_routes"), list) else [])
+            + _extract_routes_from_memory(target_memory)
+        )
+    }
+    observed_routes = {item for item in observed_routes if item}
+    if observed_routes:
+        evidence.add("route_observed")
+    parameter_hints = (
+        target_memory.get("parameter_hints", [])
+        if isinstance(target_memory.get("parameter_hints"), list)
+        else []
+    )
+    if parameter_hints:
+        evidence.add("parameter_observed")
+        evidence.add("file_parameter_observed")
+    if any(marker in memory_text for marker in ("reflect", "reflected", "echoed", "sink", "xss")):
+        evidence.add("input_or_reflection_observed")
+    if any(marker in memory_text for marker in ("phpsessid", "set-cookie", "cookie", "jwt", "bearer", "authorization")):
+        evidence.add("session_cookie_observed")
+        evidence.add("auth_surface_observed")
+    if any(marker in memory_text for marker in ("login", "signin", "sign-in", "register", "signup", "username", "password", "session")):
+        evidence.add("auth_surface_observed")
+    if any(marker in memory_text for marker in ("content-security-policy", "csp", "missing csp")):
+        evidence.add("missing_csp_observed")
+    if any(marker in memory_text for marker in ("sql", "database", "mysql", "postgres", "oracle", "sqlite", "syntax error", "union select")):
+        evidence.add("sql_signal_observed")
+    if any(marker in memory_text for marker in ("command injection", "shell", "rce", "ping", "exec")):
+        evidence.add("command_surface_observed")
+    if any(marker in memory_text for marker in ("upload", "multipart", "filename", "attachment")):
+        evidence.add("upload_surface_observed")
+    if any(marker in memory_text for marker in ("cors", "access-control-allow-origin")):
+        evidence.add("cors_signal_observed")
+    return evidence
+
+
+def _scenario_missing_prerequisites(
+    scenario: dict[str, Any],
+    *,
+    target_memory: dict[str, Any],
+) -> list[str]:
+    prerequisites = scenario.get("prerequisites", [])
+    if not isinstance(prerequisites, list):
+        return []
+    required = [
+        str(item or "").strip().lower()
+        for item in prerequisites
+        if str(item or "").strip()
+    ]
+    if not required:
+        return []
+    available = _memory_prerequisite_evidence(target_memory)
+    return [item for item in required if item not in available]
+
+
+def _build_target_memory_evidence_text(target_memory: dict[str, Any]) -> str:
+    if not isinstance(target_memory, dict):
+        return ""
+
+    evidence_fragments: list[str] = []
+
+    for key in (
+        "overview",
+        "tech_stack",
+        "target_info",
+        "profile",
+        "checklist",
+        "parameter_hints",
+        "anonymous_routes",
+        "authenticated_routes",
+        "auth_surface_delta",
+        "session_contexts",
+        "blocked_routes",
+        "blocked_route_prefixes",
+    ):
+        value = target_memory.get(key)
+        if value is not None:
+            evidence_fragments.append(json.dumps(value, ensure_ascii=True))
+
+    verified_findings = target_memory.get("verified_findings", [])
+    if isinstance(verified_findings, list):
+        compact_findings: list[dict[str, Any]] = []
+        for item in verified_findings[:40]:
+            if not isinstance(item, dict):
+                continue
+            compact_findings.append(
+                {
+                    "title": str(item.get("title", "")).strip(),
+                    "summary": str(item.get("summary", "")).strip(),
+                    "status": str(item.get("status", "")).strip(),
+                }
+            )
+        if compact_findings:
+            evidence_fragments.append(json.dumps(compact_findings, ensure_ascii=True))
+
+    tool_observations = target_memory.get("tool_observations", [])
+    if isinstance(tool_observations, list):
+        compact_observations: list[dict[str, Any]] = []
+        for item in tool_observations[-80:]:
+            if not isinstance(item, dict):
+                continue
+            compact_observations.append(
+                {
+                    "tool": str(item.get("tool", "")).strip(),
+                    "scenario_task": str(item.get("scenario_task", "")).strip(),
+                    "status": str(item.get("status", "")).strip(),
+                }
+            )
+        if compact_observations:
+            evidence_fragments.append(json.dumps(compact_observations, ensure_ascii=True))
+
+    return "\n".join(fragment for fragment in evidence_fragments if fragment).lower()
+
+
+def _scenario_has_unbacked_assumption(
+    scenario: dict[str, Any],
+    *,
+    target_memory: dict[str, Any],
+) -> bool:
+    if not _scenario_requires_evidence_gate(scenario):
+        return False
+
+    evidence_tier = str(scenario.get("evidence_tier", "")).strip().lower()
+    confidence_label = str(scenario.get("confidence_label", "")).strip().lower()
+    missing_prereqs = _scenario_missing_prerequisites(
+        scenario,
+        target_memory=target_memory,
+    )
+    if evidence_tier == "confirmed" and missing_prereqs:
+        return True
+    if confidence_label == "low" and str(scenario.get("agent", "")).strip().lower() == "exploit":
+        return True
+
+    scenario_text = " ".join(
+        str(part or "")
+        for part in (
+            scenario.get("task", ""),
+            scenario.get("details", ""),
+            " ".join(str(item or "") for item in scenario.get("methods", []) if isinstance(item, str))
+            if isinstance(scenario.get("methods"), list)
+            else "",
+        )
+    ).lower()
+    memory_text = _build_target_memory_evidence_text(target_memory)
+    observed_routes = {
+        _normalize_route_token(item)
+        for item in (
+            (target_memory.get("anonymous_routes", []) if isinstance(target_memory.get("anonymous_routes"), list) else [])
+            + (target_memory.get("authenticated_routes", []) if isinstance(target_memory.get("authenticated_routes"), list) else [])
+            + _extract_routes_from_memory(target_memory)
+        )
+    }
+    observed_routes = {item for item in observed_routes if item}
+
+    route_tokens = _extract_route_tokens(
+        scenario.get("endpoint", ""),
+        scenario.get("task", ""),
+        scenario.get("details", ""),
+    )
+    if route_tokens:
+        route_matches = 0
+        for route in route_tokens:
+            lowered = route.lower()
+            candidate_parts = [part for part in lowered.split("/") if part]
+            for observed in observed_routes:
+                observed_lower = observed.lower()
+                observed_parts = [part for part in observed_lower.split("/") if part]
+                if lowered == observed_lower:
+                    route_matches += 1
+                    break
+                if lowered.startswith(observed_lower + "/") and len(observed_parts) >= min(2, len(candidate_parts)):
+                    route_matches += 1
+                    break
+                if observed_lower.startswith(lowered + "/") and len(candidate_parts) >= min(2, len(observed_parts)):
+                    route_matches += 1
+                    break
+            if route_matches > 0:
+                continue
+        if route_matches == 0 and (
+            "login.php" in scenario_text
+            or "vulnerabilities/" in scenario_text
+            or "/graphql" in scenario_text
+            or "/api/" in scenario_text
+            or "/admin" in scenario_text
+            or "/dvwa/" in scenario_text
+        ):
+            return True
+
+        if (
+            any("vulnerabilities/" in route.lower() for route in route_tokens)
+            and not any(
+                route.lower() in {observed.lower() for observed in observed_routes}
+                for route in route_tokens
+            )
+        ):
+            return True
+
+    if ("security=low" in scenario_text or "security low" in scenario_text) and "security=low" not in memory_text and "security low" not in memory_text:
+        return True
+
+    if "phpsessid" in scenario_text and "phpsessid" not in memory_text:
+        return True
+
+    if ("default credential" in scenario_text or "login form" in scenario_text or "registration form" in scenario_text or "signup" in scenario_text or "register" in scenario_text) and not any(
+        marker in memory_text
+        for marker in ("login", "signin", "sign-in", "register", "signup", "sign-up", "/login", "/register", "username", "password")
+    ):
+        return True
+
+    if ("missing csp" in scenario_text or "without csp" in scenario_text or "no csp" in scenario_text) and not any(
+        marker in memory_text
+        for marker in ("content-security-policy", "csp", "missing csp")
+    ):
+        return True
+
+    return False
+
+
+def _prune_plan_blocked_route_scenarios(
+    plan_data: dict[str, Any],
+    *,
+    target_memory: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    if not isinstance(plan_data, dict) or not isinstance(target_memory, dict):
+        return plan_data, 0
+    blocked_routes = (
+        target_memory.get("blocked_routes", [])
+        if isinstance(target_memory.get("blocked_routes"), list)
+        else []
+    )
+    blocked_route_prefixes = (
+        target_memory.get("blocked_route_prefixes", [])
+        if isinstance(target_memory.get("blocked_route_prefixes"), list)
+        else []
+    )
+    if not blocked_routes and not blocked_route_prefixes:
+        return plan_data, 0
+
+    removed = 0
+    phases = plan_data.get("phases", [])
+    if not isinstance(phases, list):
+        return plan_data, 0
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        steps = phase.get("steps", [])
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            scenarios = step.get("scenarios", [])
+            if not isinstance(scenarios, list):
+                continue
+            kept: list[dict[str, Any]] = []
+            for scenario in scenarios:
+                if not isinstance(scenario, dict):
+                    continue
+                if _scenario_references_blocked_route(
+                    scenario,
+                    blocked_routes=blocked_routes,
+                    blocked_route_prefixes=blocked_route_prefixes,
+                ):
+                    removed += 1
+                    continue
+                kept.append(scenario)
+            step["scenarios"] = kept
+        phase["steps"] = [
+            step for step in steps
+            if isinstance(step, dict) and isinstance(step.get("scenarios"), list) and step.get("scenarios")
+        ]
+    plan_data["phases"] = [
+        phase for phase in phases
+        if isinstance(phase, dict) and isinstance(phase.get("steps"), list) and phase.get("steps")
+    ]
+    return plan_data, removed
+
+
+def _prune_plan_unbacked_assumption_scenarios(
+    plan_data: dict[str, Any],
+    *,
+    target_memory: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    if not isinstance(plan_data, dict) or not isinstance(target_memory, dict):
+        return plan_data, 0
+    phases = plan_data.get("phases", [])
+    if not isinstance(phases, list):
+        return plan_data, 0
+    removed = 0
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        steps = phase.get("steps", [])
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            scenarios = step.get("scenarios", [])
+            if not isinstance(scenarios, list):
+                continue
+            kept: list[dict[str, Any]] = []
+            for scenario in scenarios:
+                if not isinstance(scenario, dict):
+                    continue
+                if _scenario_has_unbacked_assumption(scenario, target_memory=target_memory):
+                    removed += 1
+                    continue
+                kept.append(scenario)
+            step["scenarios"] = kept
+        phase["steps"] = [
+            step for step in steps
+            if isinstance(step, dict) and isinstance(step.get("scenarios"), list) and step.get("scenarios")
+        ]
+    plan_data["phases"] = [
+        phase for phase in phases
+        if isinstance(phase, dict) and isinstance(phase.get("steps"), list) and phase.get("steps")
+    ]
+    return plan_data, removed
+
+
+def _extract_parameter_hints_from_routes(routes: list[str]) -> list[str]:
+    hints: list[str] = []
+    seen: set[str] = set()
+    for route in routes:
+        parsed = urlparse(route if route.startswith("http") else f"https://example.invalid{route}")
+        if parsed.query:
+            for key in parsed.query.split("&"):
+                name = str(key.split("=", 1)[0] or "").strip()
+                if not name:
+                    continue
+                lowered = name.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                hints.append(name)
+    return hints[:40]
+
+
+def _derive_tech_stack_from_memory(memory: dict[str, Any]) -> dict[str, str]:
+    text = " ".join(_iter_memory_text_fragments(memory)).lower()
+    tech_stack: dict[str, str] = {}
+
+    framework_markers = {
+        "django": "django",
+        "flask": "flask",
+        "fastapi": "fastapi",
+        "spring": "spring",
+        "express": "express",
+        "next.js": "next.js",
+        "nextjs": "next.js",
+        "laravel": "laravel",
+        "rails": "rails",
+        "wordpress": "wordpress",
+        "drupal": "drupal",
+    }
+    database_markers = {
+        "postgresql": "postgresql",
+        "postgres": "postgresql",
+        "mysql": "mysql",
+        "mariadb": "mysql",
+        "mssql": "mssql",
+        "sql server": "mssql",
+        "mongodb": "mongodb",
+        "sqlite": "sqlite",
+        "oracle": "oracle",
+    }
+    frontend_markers = {
+        "react": "react",
+        "angular": "angular",
+        "vue": "vue",
+        "svelte": "svelte",
+        "html5": "html5",
+    }
+    waf_markers = {
+        "cloudflare": "cloudflare",
+        "modsecurity": "modsecurity",
+        "akamai": "akamai",
+        "aws waf": "aws waf",
+    }
+
+    for marker, value in framework_markers.items():
+        if marker in text:
+            tech_stack["framework"] = value
+            break
+    for marker, value in database_markers.items():
+        if marker in text:
+            tech_stack["database"] = value
+            break
+    for marker, value in frontend_markers.items():
+        if marker in text:
+            tech_stack["frontend"] = value
+            break
+    for marker, value in waf_markers.items():
+        if marker in text:
+            tech_stack["waf"] = value
+            break
+
+    framework = tech_stack.get("framework", "")
+    if framework in {"django", "flask", "fastapi"}:
+        tech_stack["backend_language"] = "python"
+    elif framework in {"spring"}:
+        tech_stack["backend_language"] = "java"
+    elif framework in {"express", "next.js"}:
+        tech_stack["backend_language"] = "node"
+    elif framework in {"laravel", "wordpress", "drupal"}:
+        tech_stack["backend_language"] = "php"
+    elif framework == "rails":
+        tech_stack["backend_language"] = "ruby"
+
+    server_match = re.search(r"\b(nginx(?:/[0-9.]+)?|apache(?:/[0-9.]+)?|iis(?:/[0-9.]+)?|caddy(?:/[0-9.]+)?)\b", text)
+    if server_match:
+        tech_stack["server"] = server_match.group(1)
+
+    return tech_stack
+
+
+def _apply_memory_enrichment(memory: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(memory, dict):
+        return {}
+    enriched = dict(memory)
+    anonymous_routes = _extract_routes_from_memory(enriched)
+    parameter_hints = _extract_parameter_hints_from_routes(anonymous_routes)
+    tech_stack = _derive_tech_stack_from_memory(enriched)
+
+    if anonymous_routes:
+        enriched["anonymous_routes"] = anonymous_routes
+    if parameter_hints:
+        enriched["parameter_hints"] = parameter_hints
+    if tech_stack:
+        current = enriched.get("tech_stack", {})
+        current_map = dict(current) if isinstance(current, dict) else {}
+        current_map.update({key: value for key, value in tech_stack.items() if value})
+        enriched["tech_stack"] = current_map
+    return enriched
+
+
+def _infer_payload_family_from_scenario(scenario: dict[str, Any]) -> str:
+    text = " ".join(
+        [
+            str(scenario.get("task", "")).strip(),
+            str(scenario.get("details", "")).strip(),
+            " ".join(str(item) for item in scenario.get("methods", []) if str(item).strip())
+            if isinstance(scenario.get("methods"), list)
+            else "",
+        ]
+    ).lower()
+    if "sql" in text or "sqli" in text:
+        return "sqli"
+    if "template" in text or "ssti" in text:
+        return "ssti"
+    if "xss" in text or "cross-site scripting" in text:
+        return "xss"
+    if "ssrf" in text or "server-side request forgery" in text:
+        return "ssrf"
+    return ""
+
+
+async def _run_authenticated_surface_enrichment(
+    *,
+    project_cache_dir: str,
+    target_memory: dict[str, Any],
+    target: str,
+    target_type: str,
+    target_config: dict[str, Any] | None,
+    tool_map: dict[str, Any],
+) -> dict[str, Any]:
+    manager, headers, cookies = _build_auth_runtime_context(
+        target_type=target_type,
+        target_config=target_config,
+        target=target,
+    )
+    memory = dict(target_memory) if isinstance(target_memory, dict) else {}
+    session_labels = manager.all_labels()
+    if session_labels:
+        memory["session_contexts"] = session_labels
+    if not (headers or cookies):
+        return memory
+
+    crawler = tool_map.get("web_crawler")
+    if crawler is None:
+        return memory
+
+    try:
+        raw = await crawler.execute(
+            tool="katana",
+            target=target,
+            args=["-jc"],
+            headers=headers,
+            cookies=cookies,
+            max_results=200,
+            timeout=60,
+        )
+        payload = json.loads(raw)
+    except Exception:
+        logger.warning("authenticated_crawl_failed", target=target, exc_info=True)
+        return memory
+
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        return memory
+
+    routes = [
+        str(item).strip()
+        for item in payload.get("urls", [])
+        if str(item).strip()
+    ] if isinstance(payload.get("urls"), list) else []
+    if not routes:
+        return memory
+
+    anonymous_routes = memory.get("anonymous_routes", []) if isinstance(memory.get("anonymous_routes"), list) else []
+    anonymous_seen = {str(item).strip().lower() for item in anonymous_routes if str(item).strip()}
+    auth_delta = [route for route in routes if route.lower() not in anonymous_seen]
+    memory["authenticated_routes"] = routes[:250]
+    memory["auth_surface_delta"] = auth_delta[:120]
+    parameter_hints = _extract_parameter_hints_from_routes(routes)
+    if parameter_hints:
+        combined_hints = list(dict.fromkeys((memory.get("parameter_hints", []) if isinstance(memory.get("parameter_hints"), list) else []) + parameter_hints))
+        memory["parameter_hints"] = combined_hints[:40]
+    return memory
+
+
+def _build_tool_observation_entries(
+    *,
+    scenario: dict[str, Any],
+    row_result: dict[str, Any],
+    status: str,
+    confidence: Any,
+    false_positive_count: int = 0,
+) -> list[dict[str, Any]]:
+    tool_names = _extract_tool_names(row_result.get("tool_results", []))
+    if not tool_names:
+        return []
+    observations: list[dict[str, Any]] = []
+    normalized_confidence = _coerce_confidence(confidence)
+    for tool_name in tool_names:
+        observations.append(
+            {
+                "tool": tool_name,
+                "scenario_task": str(scenario.get("task", "")).strip(),
+                "status": status,
+                "confidence": normalized_confidence if normalized_confidence is not None else 0.0,
+                "false_positive_count": int(false_positive_count or 0),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    return observations
 
 
 def _infer_cloud_provider(*values: Any) -> str:
@@ -1213,6 +2230,7 @@ def _build_target_info_tool_kwargs(
     target: str,
     target_type: str,
     info: str,
+    memory: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_type = _normalize_target_type(target_type)
     host = _extract_target_host(target)
@@ -1240,6 +2258,37 @@ def _build_target_info_tool_kwargs(
         return {"target": target_text, "args": ["-follow-redirects"], "use_cache": True, "timeout": 120}, None
     if tool_name == "detect_tech":
         return {"tool": "whatweb", "target": target_text, "use_cache": True}, None
+    if tool_name == "known_vuln_lookup":
+        raw_inventory = memory.get("tech_inventory", []) if isinstance(memory, dict) and isinstance(memory.get("tech_inventory"), list) else []
+        products: list[dict[str, Any]] = []
+        for item in raw_inventory:
+            if not isinstance(item, dict):
+                continue
+            product = str(item.get("product", "")).strip()
+            confidence = str(item.get("confidence_label", "")).strip().lower()
+            version = str(item.get("version_normalized", item.get("version", ""))).strip()
+            source_count = int(item.get("source_count", 0) or 0)
+            if not product:
+                continue
+            if confidence == "low" and not version and source_count < 2:
+                continue
+            products.append(
+                {
+                    "product": product,
+                    "version": version,
+                    "confidence_label": confidence or "medium",
+                    "source_count": source_count,
+                    "kb_query": str(item.get("kb_query", "")).strip(),
+                }
+            )
+        if not products:
+            return None, "skipped: no corroborated product/version fingerprints available for known-vulnerability lookup"
+        return {
+            "products": products[:8],
+            "target_type": normalized_type or target_type,
+            "severity": "HIGH",
+            "max_results_per_product": 4,
+        }, None
     if tool_name == "http_header_analysis":
         return {"tool": "manual", "target": target_text, "methods": ["GET"]}, None
     if tool_name == "web_crawler":
@@ -1291,6 +2340,10 @@ def _build_target_info_tool_kwargs(
         if host:
             return {"target": host, "mode": "quick", "timeout": 120}, None
         return None, "skipped: linux audit requires a host target"
+    if tool_name == "db_enum_and_audit":
+        if not host:
+            return None, "skipped: database exposure checks require a host target"
+        return {"target": host, "timeout": 20, "max_workers": 10}, None
     if tool_name == "binary_analysis":
         if not os.path.exists(target_text):
             return None, "skipped: binary analysis requires a local desktop artifact"
@@ -1426,6 +2479,7 @@ async def _run_target_info_gathering(
                 target=target,
                 target_type=normalized_type,
                 info=info,
+                memory=memory,
             )
             if skip_reason:
                 result_rows.append({
@@ -1547,6 +2601,62 @@ def _merge_nested_records(
     return merged
 
 
+def _merge_scan_metadata(
+    existing_last_scan: dict[str, Any] | None,
+    scan_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    existing = existing_last_scan if isinstance(existing_last_scan, dict) else {}
+    incoming = scan_meta if isinstance(scan_meta, dict) else {}
+    incoming_scan_id = str(incoming.get("scanId", "")).strip()
+    existing_scan_id = str(existing.get("scanId", "")).strip()
+
+    # A fresh scan must not inherit planner/checklist/result payloads from a
+    # previous scan on the same project record.
+    if incoming_scan_id and incoming_scan_id != existing_scan_id:
+        merged = deepcopy(incoming)
+    else:
+        merged = _merge_nested_records(existing, incoming)
+
+    result = merged.get("result", {})
+    if not isinstance(result, dict):
+        result = {}
+    merged["result"] = result
+    return merged
+
+
+def _compute_scan_elapsed_seconds(scan_meta: dict[str, Any]) -> int:
+    if not isinstance(scan_meta, dict):
+        return 0
+
+    started_at_raw = str(scan_meta.get("startedAt", "") or "").strip()
+    if not started_at_raw:
+        return max(0, int(scan_meta.get("elapsedSeconds", 0) or 0))
+
+    try:
+        started_at = datetime.fromisoformat(started_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return max(0, int(scan_meta.get("elapsedSeconds", 0) or 0))
+
+    finished_at_raw = str(
+        scan_meta.get("finishedAt", "") or scan_meta.get("completedAt", "") or ""
+    ).strip()
+    if finished_at_raw:
+        try:
+            finished_at = datetime.fromisoformat(finished_at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            finished_at = datetime.now(timezone.utc)
+    else:
+        finished_at = datetime.now(timezone.utc)
+
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+
+    elapsed_seconds = int(max(0.0, (finished_at - started_at).total_seconds()))
+    return elapsed_seconds
+
+
 def _extract_target(project: dict[str, Any]) -> str:
     primary = project.get("target")
     if isinstance(primary, str) and primary.strip():
@@ -1627,9 +2737,234 @@ def _normalize_priority(value: Any) -> int:
 
 def _priority_sort_key(priority: int) -> tuple[int, int]:
     normalized = _normalize_priority(priority)
-    if normalized == 6:
-        return (0, 0)
     return (1, normalized)
+
+
+def _evidence_tier_sort_value(value: Any) -> int:
+    normalized = str(value or "").strip().lower()
+    return {
+        "confirmed": 3,
+        "observed": 2,
+        "hypothesized": 1,
+    }.get(normalized, 1)
+
+
+def _confidence_label_sort_value(value: Any) -> int:
+    normalized = str(value or "").strip().lower()
+    return {
+        "high": 3,
+        "medium": 2,
+        "low": 1,
+    }.get(normalized, 1)
+
+
+def _display_cycle_number(cycle_number: int, *, prior_cycles: int = 0) -> int:
+    try:
+        normalized_cycle = int(cycle_number)
+    except (TypeError, ValueError):
+        normalized_cycle = 1
+    try:
+        normalized_prior = int(prior_cycles)
+    except (TypeError, ValueError):
+        normalized_prior = 0
+    return max(1, normalized_cycle + max(0, normalized_prior))
+
+
+_SCENARIO_FAMILY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("sqli", ("sql injection", "sqli", "union select", "boolean-based", "time-based", "sql error")),
+    ("command_injection", ("command injection", "os command", "rce", "remote code execution", "commix", "shell payload")),
+    ("code_injection", ("code injection", "eval(", "/eval", "template injection", "ssti", "deserialization", "php object injection")),
+    ("xxe", ("xxe", "xml external entity", "<!doctype", "xml parser", "svg upload", "soap xml")),
+    ("ssrf", ("ssrf", "server-side request forgery", "169.254.169.254", "metadata endpoint", "internal ip", "localhost fetch")),
+    ("file_inclusion", ("lfi", "rfi", "file inclusion", "path traversal", "directory traversal", "/etc/passwd", "php://input", ".env")),
+    ("auth_bypass", ("auth bypass", "authentication bypass", "login bypass", "default credential", "password reset bypass")),
+    ("idor", ("idor", "insecure direct object reference", "mass assignment", "access control bypass", "forced browsing")),
+    ("upload_abuse", ("file upload", "upload bypass", "multipart", "polyglot upload", "web shell upload")),
+    ("xss", ("xss", "cross-site scripting", "dom xss", "reflected xss", "stored xss")),
+    ("session_abuse", ("session fixation", "session hijacking", "cookie theft", "jwt", "phpsessid")),
+    ("csrf", ("csrf", "cross-site request forgery", "origin bypass", "same-site request")),
+    ("header_injection", ("header injection", "x-forwarded-for", "host header", "referer", "user-agent", "injected_header")),
+    ("dependency_cve", ("dependency", "third-party", "javascript library", "tailwind", "popper", "alpine", "fathom", "known cve", "cve scan")),
+    ("info_disclosure", ("readme", "documentation", "phpinfo", "config file", "backup file", "directory listing")),
+)
+
+_SCENARIO_FAMILY_STRENGTH: dict[str, int] = {
+    "sqli": 10,
+    "command_injection": 10,
+    "code_injection": 9,
+    "xxe": 9,
+    "ssrf": 9,
+    "file_inclusion": 8,
+    "auth_bypass": 8,
+    "idor": 8,
+    "upload_abuse": 8,
+    "xss": 7,
+    "session_abuse": 6,
+    "info_disclosure": 5,
+    "csrf": 4,
+    "header_injection": 3,
+    "dependency_cve": 2,
+    "generic_recon": 5,
+}
+
+_LOW_SIGNAL_SCENARIO_FAMILIES = {"header_injection", "csrf", "dependency_cve"}
+_REPEAT_FAILURE_STATUSES = {
+    "blocked",
+    "failed",
+    "unknown",
+    "inconclusive",
+    "not_vulnerable",
+    "false_positive",
+}
+_SUCCESSFUL_SCENARIO_STATUSES = {
+    "complete",
+    "completed",
+    "success",
+    "succeeded",
+    "vulnerable",
+    "real_vulnerability",
+    "confirmed",
+    "verified",
+}
+
+
+def _scenario_text_blob(scenario: dict[str, Any]) -> str:
+    return " ".join(
+        str(part or "")
+        for part in (
+            scenario.get("task", ""),
+            scenario.get("details", ""),
+            scenario.get("endpoint", ""),
+            " ".join(str(item or "") for item in scenario.get("methods", []) if isinstance(item, str))
+            if isinstance(scenario.get("methods"), list)
+            else "",
+        )
+    ).lower()
+
+
+def _scenario_family_tags(scenario: dict[str, Any]) -> list[str]:
+    text = _scenario_text_blob(scenario)
+    tags: list[str] = []
+    for family, markers in _SCENARIO_FAMILY_PATTERNS:
+        if any(marker in text for marker in markers):
+            tags.append(family)
+    if not tags:
+        return ["generic_recon"]
+    return tags
+
+
+def _scenario_primary_family(scenario: dict[str, Any]) -> str:
+    tags = _scenario_family_tags(scenario)
+    return tags[0] if tags else "generic_recon"
+
+
+def _scenario_family_strength(scenario: dict[str, Any]) -> int:
+    return max(
+        (_SCENARIO_FAMILY_STRENGTH.get(tag, _SCENARIO_FAMILY_STRENGTH["generic_recon"]) for tag in _scenario_family_tags(scenario)),
+        default=_SCENARIO_FAMILY_STRENGTH["generic_recon"],
+    )
+
+
+def _build_family_history_stats(plan_data: dict[str, Any]) -> dict[str, dict[str, int]]:
+    stats: dict[str, dict[str, int]] = {}
+    for scenario in _iter_plan_scenarios(plan_data):
+        if not isinstance(scenario, dict):
+            continue
+        family = _scenario_primary_family(scenario)
+        bucket = stats.setdefault(
+            family,
+            {"attempts": 0, "failures": 0, "successes": 0},
+        )
+        history = scenario.get("execution_history", [])
+        if not isinstance(history, list):
+            history = []
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            bucket["attempts"] += 1
+            status = str(entry.get("status", "")).strip().lower()
+            if status in _SUCCESSFUL_SCENARIO_STATUSES:
+                bucket["successes"] += 1
+            elif status in _REPEAT_FAILURE_STATUSES:
+                bucket["failures"] += 1
+    return stats
+
+
+def _scenario_repeat_penalty(
+    scenario: dict[str, Any],
+    *,
+    family_stats: dict[str, dict[str, int]],
+) -> int:
+    history = scenario.get("execution_history", [])
+    if not isinstance(history, list):
+        history = []
+
+    failures = 0
+    successes = 0
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status", "")).strip().lower()
+        if status in _SUCCESSFUL_SCENARIO_STATUSES:
+            successes += 1
+        elif status in _REPEAT_FAILURE_STATUSES:
+            failures += 1
+
+    family = _scenario_primary_family(scenario)
+    family_bucket = family_stats.get(family, {})
+    family_failures = int(family_bucket.get("failures", 0) or 0)
+    family_successes = int(family_bucket.get("successes", 0) or 0)
+    scenario_text = _scenario_text_blob(scenario)
+
+    penalty = 0
+    if failures >= 1 and successes == 0:
+        penalty += 1
+    if failures >= 2 and successes == 0:
+        penalty += 1
+    if family_failures >= 3 and family_successes == 0:
+        penalty += 1
+    if (
+        any(marker in scenario_text for marker in ("re-test", "retest", "refined payload", "alternative payload"))
+        and failures >= 1
+        and successes == 0
+    ):
+        penalty += 1
+    return penalty
+
+
+def _scenario_effective_priority(
+    scenario: dict[str, Any],
+    *,
+    family_stats: dict[str, dict[str, int]],
+) -> int:
+    priority = _normalize_priority(scenario.get("priority", 3))
+    family = _scenario_primary_family(scenario)
+    strength = _scenario_family_strength(scenario)
+    evidence_tier = str(scenario.get("evidence_tier", "")).strip().lower()
+    confidence_label = str(scenario.get("confidence_label", "")).strip().lower()
+    repeat_penalty = _scenario_repeat_penalty(scenario, family_stats=family_stats)
+
+    adjusted = priority
+    if strength >= 9 and evidence_tier in {"observed", "confirmed"}:
+        adjusted -= 1
+    elif strength >= 8 and confidence_label == "high":
+        adjusted -= 1
+
+    if family in _LOW_SIGNAL_SCENARIO_FAMILIES and evidence_tier == "hypothesized":
+        adjusted += 1
+    if family in {"dependency_cve", "header_injection"} and confidence_label != "high":
+        adjusted += 1
+
+    adjusted += repeat_penalty
+    return max(1, min(6, adjusted))
+
+
+def _normalize_execution_slot(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed in {1, 2} else None
 
 
 def _extract_prioritized_exec_scenarios(
@@ -1641,6 +2976,7 @@ def _extract_prioritized_exec_scenarios(
     if not isinstance(phases, list):
         return []
 
+    family_stats = _build_family_history_stats(plan_data)
     indexed: list[tuple[int, int, int, int, dict[str, Any]]] = []
     for phase_idx, phase in enumerate(phases):
         if not isinstance(phase, dict):
@@ -1673,21 +3009,46 @@ def _extract_prioritized_exec_scenarios(
                 enriched["_phase_index"] = phase_idx
                 enriched["_step_index"] = step_idx
                 enriched["_scenario_index"] = scen_idx
+                enriched["active_slot"] = _normalize_execution_slot(enriched.get("active_slot"))
+                enriched["_family_tags"] = _scenario_family_tags(enriched)
+                enriched["_primary_family"] = _scenario_primary_family(enriched)
+                enriched["_family_strength"] = _scenario_family_strength(enriched)
+                enriched["_repeat_penalty"] = _scenario_repeat_penalty(
+                    enriched,
+                    family_stats=family_stats,
+                )
+                enriched["_effective_priority"] = _scenario_effective_priority(
+                    enriched,
+                    family_stats=family_stats,
+                )
                 indexed.append((priority, phase_idx, step_idx, scen_idx, enriched))
 
-    indexed.sort(key=lambda row: (_priority_sort_key(row[0]), row[1], row[2], row[3]))
+    indexed.sort(
+        key=lambda row: (
+            _priority_sort_key(row[4].get("_effective_priority", row[0])),
+            row[4].get("_repeat_penalty", 0),
+            -int(row[4].get("_family_strength", 0) or 0),
+            -_evidence_tier_sort_value(row[4].get("evidence_tier")),
+            -_confidence_label_sort_value(row[4].get("confidence_label")),
+            row[1],
+            row[2],
+            row[3],
+        )
+    )
     return [row[4] for row in indexed[: max(0, int(limit))]]
 
 
-def _enforce_runnable_now_priorities(plan_data: dict[str, Any]) -> dict[str, Any]:
-    """Normalize the plan so at most two pending recon/exploit scenarios are P6."""
+def _ensure_execution_slots(plan_data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the plan so at most two pending recon/exploit scenarios hold active slots."""
 
     phases = plan_data.get("phases", [])
     if not isinstance(phases, list):
         return plan_data
 
     pending: list[dict[str, Any]] = []
-    runnable_now: list[dict[str, Any]] = []
+    slotted: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    used_slots: set[int] = set()
 
     for phase in phases:
         if not isinstance(phase, dict):
@@ -1699,44 +3060,68 @@ def _enforce_runnable_now_priorities(plan_data: dict[str, Any]) -> dict[str, Any
                 if not isinstance(scenario, dict):
                     continue
                 agent = str(scenario.get("agent", "")).strip().lower()
+                scenario["active_slot"] = _normalize_execution_slot(scenario.get("active_slot"))
                 if agent not in {"recon", "exploit"}:
-                    if _normalize_priority(scenario.get("priority", 5)) == 6:
-                        scenario["priority"] = 5
+                    scenario["active_slot"] = None
                     continue
                 if bool(scenario.get("done", False)):
-                    if _normalize_priority(scenario.get("priority", 5)) == 6:
-                        scenario["priority"] = 5
+                    scenario["active_slot"] = None
                     continue
                 pending.append(scenario)
-                if _normalize_priority(scenario.get("priority", 3)) == 6:
-                    runnable_now.append(scenario)
+                slot = _normalize_execution_slot(scenario.get("active_slot"))
+                key = (
+                    agent,
+                    str(scenario.get("task", "")).strip().lower(),
+                )
+                if slot is None or not key[1]:
+                    continue
+                if slot in used_slots or key in seen_keys:
+                    scenario["active_slot"] = None
+                    continue
+                used_slots.add(slot)
+                seen_keys.add(key)
+                slotted.append(scenario)
 
-    if len(runnable_now) > 2:
-        for scenario in runnable_now[2:]:
-            scenario["priority"] = 5
-        runnable_now = runnable_now[:2]
-
-    if len(runnable_now) < 2:
+    if len(slotted) < 2:
         for scenario in pending:
-            if scenario in runnable_now:
+            key = (
+                str(scenario.get("agent", "")).strip().lower(),
+                str(scenario.get("task", "")).strip().lower(),
+            )
+            if not key[1] or key in seen_keys:
                 continue
-            scenario["priority"] = 6
-            runnable_now.append(scenario)
-            if len(runnable_now) >= 2:
+            next_slot = 1 if 1 not in used_slots else 2
+            scenario["active_slot"] = next_slot
+            used_slots.add(next_slot)
+            seen_keys.add(key)
+            slotted.append(scenario)
+            if len(slotted) >= 2:
                 break
+
+    slotted_ids = {id(item) for item in slotted}
+    for scenario in pending:
+        key = (
+            str(scenario.get("agent", "")).strip().lower(),
+            str(scenario.get("task", "")).strip().lower(),
+        )
+        slot = _normalize_execution_slot(scenario.get("active_slot"))
+        if slot is None:
+            continue
+        if key not in seen_keys or id(scenario) not in slotted_ids:
+            scenario["active_slot"] = None
 
     return plan_data
 
 
 def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Pick up to two runnable-now scenarios, preferring the planner's P6 markers."""
+    """Pick up to two runnable-now scenarios, preferring explicit active slots."""
 
-    plan_data = _enforce_runnable_now_priorities(plan_data)
+    plan_data = _ensure_execution_slots(plan_data)
     candidates = _extract_prioritized_exec_scenarios(plan_data, limit=50)
     seen_keys: set[tuple[str, str]] = set()
     runnable_now: list[dict[str, Any]] = []
     for scenario in candidates:
-        if _normalize_priority(scenario.get("priority", 3)) != 6:
+        if _normalize_execution_slot(scenario.get("active_slot")) is None:
             continue
         scenario_key = (
             str(scenario.get("agent", "")).strip().lower(),
@@ -1749,7 +3134,12 @@ def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[
         if len(runnable_now) >= 2:
             break
     if runnable_now:
-        runnable_now.sort(key=lambda s: (_priority_sort_key(_normalize_priority(s.get("priority", 3))),))
+        runnable_now.sort(
+            key=lambda s: (
+                _normalize_execution_slot(s.get("active_slot")) or 99,
+                _priority_sort_key(int(s.get("_effective_priority", _normalize_priority(s.get("priority", 3))))),
+            )
+        )
         return runnable_now
 
     fallback: list[dict[str, Any]] = []
@@ -1767,7 +3157,15 @@ def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[
         fallback.append(scenario)
         if len(fallback) >= 2:
             break
-    fallback.sort(key=lambda s: (_priority_sort_key(_normalize_priority(s.get("priority", 3))),))
+    fallback.sort(
+        key=lambda s: (
+            _priority_sort_key(int(s.get("_effective_priority", _normalize_priority(s.get("priority", 3))))),
+            int(s.get("_repeat_penalty", 0) or 0),
+            -int(s.get("_family_strength", 0) or 0),
+            -_evidence_tier_sort_value(s.get("evidence_tier")),
+            -_confidence_label_sort_value(s.get("confidence_label")),
+        )
+    )
     return fallback
 
 
@@ -2336,7 +3734,7 @@ def _build_warmup_planner_message(
         "Use tool availability only as capability context. Do NOT mention tool names in methods[] and do NOT call tools in this planner pass.\n\n"
         "## Warmup Planner Task\n"
         "This is a recon-only warmup stage before the main pentest plan.\n"
-        "Return a plan containing EXACTLY 8 reconnaissance scenarios and NO exploit/report work.\n"
+        "Return a plan containing EXACTLY 8 reconnaissance scenarios and NO exploit work.\n"
         + "Start from the structured target-info profile and the deterministic target-memory findings for this target type.\n"
         "Use the target profile, scope rules, target-info profile, deterministic target memory, and available recon tooling to maximize information gain while staying in scope.\n"
         "Using only the target description, target memory, and scope rules, keep the plan as-is or adapt priorities/details/order so it better matches the target.\n"
@@ -2583,6 +3981,14 @@ def _is_version_disclosure_summary(summary: str) -> bool:
 
 
 def _coerce_confidence(value: Any) -> float | None:
+    text = str(value or "").strip().lower()
+    if text in {"low", "medium", "high"}:
+        mapping = {
+            "low": 0.25,
+            "medium": 0.6,
+            "high": 0.9,
+        }
+        return mapping[text]
     try:
         confidence = float(value)
     except (TypeError, ValueError):
@@ -2833,11 +4239,6 @@ def _fallback_methods_for_checklist_item(
 ) -> list[str]:
     base = str(item_name or "").strip()
     normalized_phase = str(phase_name or "").strip().lower()
-    if normalized_phase == "reporting":
-        return [
-            "document reproducible steps, impact, and remediation evidence",
-            "attach the exact endpoint, request, response, and proof-of-concept details",
-        ]
     if normalized_phase == "post-exploitation":
         return [
             "use only confirmed access paths and capture exact evidence",
@@ -2922,9 +4323,11 @@ def _build_fallback_plan_from_checklist(
             name = str(item.get("name", "")).strip()
             if not name:
                 continue
+            if phase_name == "Reporting":
+                continue
             step_counter += 1
             priority = _normalize_priority(item.get("priority", 3))
-            agent = "report" if phase_name == "Reporting" else ("exploit" if phase_name in {"Exploitation", "Post-Exploitation"} else "recon")
+            agent = "exploit" if phase_name in {"Exploitation", "Post-Exploitation"} else "recon"
             scenario_max_rounds = 2 if agent == "exploit" else 1
             scenario = {
                 "task": name,
@@ -2980,12 +4383,12 @@ def _scenario_max_rounds(scenario: dict[str, Any], *, default: int) -> int:
 def _sanitize_plan_remove_forbidden_agents(plan_data: dict[str, Any]) -> dict[str, Any]:
     """Remove any scenarios with forbidden agents and speculative exploit examples from plan.
 
-    Returns cleaned plan_data with only recon/exploit/report scenarios.
+    Returns cleaned plan_data with only recon/exploit scenarios.
     """
     if not isinstance(plan_data, dict):
         return plan_data
 
-    FORBIDDEN_AGENTS = {"verify", "retest", "perceptor"}
+    FORBIDDEN_AGENTS = {"verify", "retest", "perceptor", "report"}
 
     def _strip_speculative_examples(text: str) -> tuple[str, bool]:
         raw = str(text or "").strip()
@@ -3554,6 +4957,46 @@ class ExecuterScanCallback:
         )
 
 
+class AnalyzerScanCallback(ExecuterScanCallback):
+    """Analyzer callback bridged to scan event bus + approval workflow."""
+
+    def on_step(self, message: str) -> None:
+        if self._enabled:
+            print(f"  → {message} {self._ts()}", flush=True)
+        self._service._emit_event(  # noqa: SLF001
+            self._project_id,
+            event="analyzer_step",
+            scan_id=self._scan_id,
+            level="info",
+            message=f"Analyzer [step] {message}",
+            data={"stage": "analyzer", "kind": "step", "raw_message": message},
+        )
+
+    def on_done(self, message: str) -> None:
+        if self._enabled:
+            print(f"  ✓ {message}", flush=True)
+        self._service._emit_event(  # noqa: SLF001
+            self._project_id,
+            event="analyzer_done",
+            scan_id=self._scan_id,
+            level="success",
+            message=f"Analyzer [done] {message}",
+            data={"stage": "analyzer", "kind": "done", "raw_message": message},
+        )
+
+    def on_warn(self, message: str) -> None:
+        if self._enabled:
+            print(f"  ⚠ {message}", flush=True)
+        self._service._emit_event(  # noqa: SLF001
+            self._project_id,
+            event="analyzer_warn",
+            scan_id=self._scan_id,
+            level="warn",
+            message=f"Analyzer [warn] {message}",
+            data={"stage": "analyzer", "kind": "warn", "raw_message": message},
+        )
+
+
 class WorkerExecuterCallback:
     """Prefixes executer callback logs with a stable worker label."""
 
@@ -3731,6 +5174,13 @@ class ScanOrchestratorService:
                 return current
 
             if not resume:
+                from server.agents.planner.tools.pentest_plan import reset_pentest_plan_state
+
+                reset_pentest_plan_state()
+                self._reset_project_runtime_state(project)
+                project["scanProgress"] = 0
+                project["updatedAt"] = _utc_now_iso()
+                self._projects_store.upsert_project(project)
                 try:
                     self._projects_store.clear_scan_event_cache(project_key)
                 except Exception as exc:  # pragma: no cover - defensive
@@ -3739,15 +5189,6 @@ class ScanOrchestratorService:
                         project_id=project_key,
                         error=str(exc),
                     )
-                try:
-                    self._projects_store.clear_project_context_windows(project_key)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning(
-                        "project_context_windows_clear_failed",
-                        project_id=project_key,
-                        error=str(exc),
-                    )
-
             scan_id = str(uuid.uuid4())
             started_at = _utc_now_iso()
             run_state = {
@@ -4069,14 +5510,6 @@ class ScanOrchestratorService:
                 project_id=project_key,
                 error=str(exc),
             )
-        try:
-            self._projects_store.clear_project_context_windows(project_key)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "project_context_windows_clear_failed",
-                project_id=project_key,
-                error=str(exc),
-            )
         self._emit_event(
             project_key,
             event="scan_cancelled",
@@ -4105,7 +5538,11 @@ class ScanOrchestratorService:
             "status": "idle",
         }
 
-    async def approve_information_gathering(self, project_id: str) -> dict[str, Any]:
+    async def approve_information_gathering(
+        self, 
+        project_id: str, 
+        modified_program: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         project_key = str(project_id or "").strip()
         if not project_key:
             raise ValueError("project_id is required")
@@ -4127,11 +5564,21 @@ class ScanOrchestratorService:
                 raise ValueError("scan is not running")
 
             if waiting:
+                # Apply modified program if provided
+                if modified_program is not None:
+                    memory = run_state.get("active_memory")
+                    if isinstance(memory, dict):
+                        gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+                        gathering["program"] = modified_program
+                        memory["gathering"] = gathering
+                        logger.info("orchestrator_gathering_plan_updated", project_id=project_key)
+
                 gate = self._info_gathering_approval_events.get(project_key)
                 if gate is not None:
                     gate.set()
                 now_iso = _utc_now_iso()
                 run_state["awaiting_information_gathering_approval"] = False
+                run_state.pop("active_memory", None)  # Clean up reference
                 run_state["updated_at"] = now_iso
                 self._runs[project_key] = run_state
 
@@ -4279,6 +5726,7 @@ class ScanOrchestratorService:
             "sqlmap": 1200,                # 20 minutes - SQL injection testing
             "run_custom": 900,             # 15 minutes - generic CLI commands
             "run_python": 600,             # 10 minutes - Python scripts
+            "payload_generator": 300,      # 5 minutes - user approval should not auto-skip quickly
         }
         # OPTIMIZATION: Default to 60 seconds for approval timeout (was 1800s/30min)
         # This prevents artificial delays while keeping tool-specific longer timeouts
@@ -4720,7 +6168,10 @@ class ScanOrchestratorService:
         target_type: str,
         scope: str,
         info: str,
+        target_memory: dict[str, Any] | None = None,
     ) -> str:
+        from server.agents.executer.target_tool_routing import recommend_product_tooling
+
         history_block = _format_agent_execution_history_for_prompt(
             plan_data,
             agent_role=str(scenario.get("agent", "")).strip().lower() or "recon",
@@ -4730,10 +6181,28 @@ class ScanOrchestratorService:
             target=target,
             scenario_tasks=[str(scenario.get("task", "")).strip()],
         )
+        brain = Brain.from_system_memory(target_memory or {})
+        executor_projection = brain.for_executor()
+        product_tooling = recommend_product_tooling(
+            role=str(scenario.get("agent", "")).strip().lower() or "recon",
+            target_type=target_type,
+            tech_inventory=executor_projection.get("tech_inventory", []),
+        )
+        payload_family = _infer_payload_family_from_scenario(scenario if isinstance(scenario, dict) else {})
+        suggested_payloads = (
+            _get_filtered_payloads(payload_family, executor_projection.get("tech_stack"), max_payloads=5)
+            if payload_family
+            else []
+        )
+        tool_efficiency = _compute_tool_efficiency_snapshot(target_memory or {})
         return (
             f"Scenario: {str(scenario.get('task', '')).strip()}\n"
             f"Agent: {str(scenario.get('agent', '')).strip()}\n"
             f"Priority: {_normalize_priority(scenario.get('priority', 3))}\n"
+            f"Evidence tier: {str(scenario.get('evidence_tier', 'observed')).strip()}\n"
+            f"Confidence label: {str(scenario.get('confidence_label', 'medium')).strip()}\n"
+            f"Prerequisites: {json.dumps(scenario.get('prerequisites', []), ensure_ascii=True)}\n"
+            f"Evidence basis: {json.dumps(scenario.get('evidence_basis', []), ensure_ascii=True)}\n"
             f"Details: {str(scenario.get('details', '')).strip()}\n"
             f"Methods: {json.dumps(scenario.get('methods', []), ensure_ascii=True)}\n"
             f"Target: {target}\n"
@@ -4741,6 +6210,11 @@ class ScanOrchestratorService:
             f"Scope: {scope}\n"
             f"Extra info: {info}\n"
             f"{target_guidance}\n"
+            f"Executor brain projection: {json.dumps(executor_projection, ensure_ascii=True)}\n"
+            f"Recommended product tooling: {json.dumps(product_tooling, ensure_ascii=True)}\n"
+            f"Suggested payload family: {payload_family or 'generic'}\n"
+            f"Suggested payloads: {json.dumps(suggested_payloads, ensure_ascii=True)}\n"
+            f"Observed tool efficiency: {json.dumps(tool_efficiency, ensure_ascii=True)}\n"
             f"Prior execution history:\n{history_block}\n"
         )
 
@@ -4818,16 +6292,16 @@ class ScanOrchestratorService:
         project_id: str,
         scan_id: str,
         plan_data: dict[str, Any],
-        perceptor_agent: Any,
+        analyzer_agent: Any,
         scenario: dict[str, Any],
         row_result: dict[str, Any],
         cycle_number: int,
         worker_number: int,
     ) -> dict[str, Any]:
-        # Run Perceptor analysis on tool results
+        # Run Analyzer classification on tool results
         tool_results = row_result.get("tool_results", []) if isinstance(row_result, dict) else []
         if isinstance(tool_results, list) and tool_results:
-            assessment = await perceptor_agent.assess_tool_results(
+            assessment = await analyzer_agent.assess_tool_results(
                 scenario=scenario if isinstance(scenario, dict) else {},
                 tool_results=tool_results,
                 asset_context={
@@ -4836,7 +6310,7 @@ class ScanOrchestratorService:
                 },
             )
         else:
-            assessment = await perceptor_agent.assess_text(
+            assessment = await analyzer_agent.assess_text(
                 str(row_result.get("summary", "")).strip(),
                 scenario=scenario if isinstance(scenario, dict) else {},
                 tool_name="warmup_summary",
@@ -4870,11 +6344,11 @@ class ScanOrchestratorService:
             scan_id=scan_id,
             level="info",
             message=(
-                f"Perceptor [cached] cycle {cycle_number} worker {worker_number} "
+                f"Analyzer [cached] cycle {cycle_number} worker {worker_number} "
                 f"→ scenario: {scenario_task[:60]} → {recon_summary[:100]}"
             ),
             data={
-                "stage": "perceptor",
+                "stage": "analyzer",
                 "kind": "warmup_cached",
                 "iteration": cycle_number,
                 "worker": worker_number,
@@ -4893,8 +6367,8 @@ class ScanOrchestratorService:
         scan_id: str,
         plan_data: dict[str, Any],
         recon_agent: Any,
-        perceptor_agent: Any,
-        perceptor_lock: asyncio.Lock,
+        analyzer_agent: Any,
+        analyzer_lock: asyncio.Lock,
         scenarios: list[dict[str, Any]],
         target: str,
         target_type: str,
@@ -4950,6 +6424,7 @@ class ScanOrchestratorService:
                 target_type=target_type,
                 scope=scope,
                 info=warmup_info,
+                target_memory=None,
             )
             result = await recon_agent.run(message)
             row_result = {
@@ -5112,8 +6587,8 @@ class ScanOrchestratorService:
         cycle_offset: int = 0,
         project_cache_dir: str = "",
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        from server.agents.analyzer import AnalyzerAgent
         from server.agents.executer.recon.agent import ReconExecuterAgent
-        from server.agents.perceptor.agent import PerceptorAgent
         from server.config.agent import get_public_agent_config
 
         import re as _re
@@ -5192,15 +6667,16 @@ class ScanOrchestratorService:
                     config=override_config,
                 )
             )
-        # Warmup caching is deterministic and per-scenario; avoid persisted perceptor
-        # context/compression here so the loop moves directly into cached summaries.
-        perceptor_agent = PerceptorAgent()
-        perceptor_lock = asyncio.Lock()
+        analyzer_agent = AnalyzerAgent()
+        analyzer_lock = asyncio.Lock()
         cached_summaries: list[dict[str, Any]] = []
 
         try:
             for cycle_number in range(1, WARMUP_RECON_CYCLES + 1):
-                display_cycle_number = cycle_offset + cycle_number
+                display_cycle_number = _display_cycle_number(
+                    cycle_number,
+                    prior_cycles=cycle_offset,
+                )
                 batches = _select_warmup_recon_batches(plan_data)
                 if not batches:
                     break
@@ -5251,8 +6727,8 @@ class ScanOrchestratorService:
                             scan_id=scan_id,
                             plan_data=plan_data,
                             recon_agent=warmup_recon_agents[worker_idx - 1],
-                            perceptor_agent=perceptor_agent,
-                            perceptor_lock=perceptor_lock,
+                            analyzer_agent=analyzer_agent,
+                            analyzer_lock=analyzer_lock,
                             scenarios=batch,
                             target=target,
                             target_type=target_type,
@@ -5273,7 +6749,7 @@ class ScanOrchestratorService:
                             project_id=project_id,
                             scan_id=scan_id,
                             plan_data=plan_data,
-                            perceptor_agent=perceptor_agent,
+                            analyzer_agent=analyzer_agent,
                             scenario=scenario,
                             row_result=row_result,
                             cycle_number=cycle_number,
@@ -5322,104 +6798,94 @@ class ScanOrchestratorService:
         finally:
             for agent in warmup_recon_agents:
                 await agent.clear_context_window()
-            await perceptor_agent.clear_context_window()
+            await analyzer_agent.clear_context_window()
             for agent in warmup_recon_agents:
                 await agent.close()
-            await perceptor_agent.close()
+            await analyzer_agent.close()
 
         return plan_data, cached_summaries
 
-    async def _run_retest_background(
+    async def _run_poc_background(
         self,
         *,
         item: dict[str, Any],
-        retest_agent: Any,
-        retest_message: str,
+        analyzer_agent: Any,
         project_id: str,
         scan_id: str,
         target: str,
         target_type: str,
         project_cache_dir: str,
     ) -> None:
-        """Run Retest agent in background to build PoC/report entries.
+        """Run Analyzer PoC generation in background.
 
         This method runs independently and does NOT block other operations.
-        - Takes verified vulnerability description
-        - Executes PoC to gather evidence
-        - Emits event for UI (tracking purpose only)
-        - Does NOT save findings (Verify already saved them)
         """
         try:
-            # Run retest agent (takes screenshot + detailed PoC)
-            retest_result = await retest_agent.run(retest_message)
-
-            # Build report entry from retest result
-            retest_summary = str(retest_result.summary or "").strip()
-            retest_data = (
-                asdict(retest_result)
-                if hasattr(retest_result, '__dataclass_fields__')
-                else retest_result
+            poc_data = await analyzer_agent.build_poc(
+                target=target,
+                target_type=target_type,
+                scope="",
+                item=item,
             )
+            poc_summary = str(poc_data.get("poc") or poc_data.get("summary") or "").strip()
 
-            # Emit event for UI tracking (informational only)
-            # Do NOT save to findings - Verify already saved the finding
             self._emit_event(
                 project_id,
-                event="retest_poc_generated",
+                event="analyzer_poc_generated",
                 scan_id=scan_id,
                 level="info",
                 message=f"Generated PoC for verified finding: {item['verify_summary'][:80]}",
                 data={
-                    "stage": "retest",
+                    "stage": "analyzer",
                     "kind": "poc_generated",
                     "verify_summary": item["verify_summary"],
-                    "retest_summary": retest_summary,
+                    "poc_summary": poc_summary,
                     "severity": _normalize_finding_severity(item["scenario"].get("priority", "medium")),
                     "vulnerability_type": item["scenario"].get("vulnerability_type", "unknown"),
                     "endpoint": item["scenario"].get("endpoint", ""),
-                    "evidence_available": bool(retest_data.get("evidence")),
-                    "tools_executed": len(retest_data.get("tool_results", [])),
+                    "evidence_available": bool(poc_data.get("evidence")),
+                    "tools_executed": len(poc_data.get("tool_results", [])) if isinstance(poc_data.get("tool_results"), list) else 0,
                 },
             )
 
             logger.info(
-                "retest_background_poc_generated",
+                "analyzer_background_poc_generated",
                 project_id=project_id,
                 scan_id=scan_id,
                 vulnerability_type=item["scenario"].get("vulnerability_type", "unknown"),
-                retest_summary_length=len(retest_summary),
+                poc_summary_length=len(poc_summary),
             )
 
             await _append_target_memory_updates(
                 project_cache_dir,
-                stage="retest",
+                stage="analyzer",
                 updates=[
                     {
                         "title": str(item.get("scenario", {}).get("task", "")).strip()
                         or str(item.get("verify_summary", "")).strip()
-                        or "verified-vulnerability-retest",
-                        "summary": retest_summary
+                        or "verified-vulnerability-poc",
+                        "summary": poc_summary
                         or f"PoC/report evidence generated for verified finding: {str(item.get('verify_summary', '')).strip()}",
-                        "agent": "retest",
-                        "status": "retest_poc_generated",
+                        "agent": "analyzer",
+                        "status": "poc_generated",
                     }
                 ],
             )
 
         except Exception as e:
             logger.error(
-                "retest_background_error",
+                "analyzer_background_poc_error",
                 project_id=project_id,
                 error=str(e),
             )
             self._emit_event(
                 project_id,
-                event="retest_poc_error",
+                event="analyzer_poc_error",
                 scan_id=scan_id,
                 level="warn",
                 message=f"PoC generation failed: {str(e)[:100]}",
                 data={
-                    "stage": "retest",
+                    "stage": "analyzer",
                     "kind": "error",
                     "error": str(e),
                 },
@@ -5437,6 +6903,7 @@ class ScanOrchestratorService:
         target_type: str,
         scope: str,
         info: str,
+        target_memory: dict[str, Any] | None = None,
         recon_worker_index: int | None = None,
     ) -> dict[str, Any]:
         message = self._build_executer_message(
@@ -5446,6 +6913,7 @@ class ScanOrchestratorService:
             target_type=target_type,
             scope=scope,
             info=info,
+            target_memory=target_memory,
         )
         role = str(scenario.get("agent", "recon")).strip().lower()
         if role == "exploit":
@@ -5491,9 +6959,7 @@ class ScanOrchestratorService:
         recon_agent: Any,
         recon_agent_worker_1: Any | None,
         exploit_agent: Any,
-        verify_agent: Any,
-        retest_agent: Any,
-        perceptor_agent: Any,
+        analyzer_agent: Any,
         loop_planner: Any,
         target: str,
         target_type: str,
@@ -5501,13 +6967,24 @@ class ScanOrchestratorService:
         info: str,
         intel_checklist: dict[str, Any],
         project_cache_dir: str,
+        target_memory: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         """
-        Execute one full cycle: select scenarios → run parallel → perceptor decides → verify/retest/plan.
+        Execute one full cycle: select scenarios -> run parallel -> analyze -> plan.
 
         Returns: (should_continue, updated_plan_data)
             should_continue=False means Planner said "done"
         """
+        plan_data, pre_cycle_pruned = _prune_plan_blocked_route_scenarios(
+            plan_data,
+            target_memory=target_memory,
+        )
+        plan_data, pre_cycle_unbacked_pruned = _prune_plan_unbacked_assumption_scenarios(
+            plan_data,
+            target_memory=target_memory,
+        )
+        if pre_cycle_pruned > 0 or pre_cycle_unbacked_pruned > 0:
+            _sync_plan_data_into_planner_state(plan_data)
         # Select at most 1 recon + 1 exploit from pending scenarios
         selected = _select_recon_exploit_parallel_scenarios(plan_data)
 
@@ -5621,6 +7098,7 @@ class ScanOrchestratorService:
                     target_type=target_type,
                     scope=scope,
                     info=info,
+                    target_memory=target_memory,
                     recon_worker_index=worker_index,
                 )
                 for scenario, worker_index in selected_with_workers
@@ -5648,28 +7126,17 @@ class ScanOrchestratorService:
             # when both agents failed. This prevented proper assessment.
 
             scenario = row.get("scenario", {})
-            tool_results = (
-                row.get("result", {}).get("tool_results", [])
-                if isinstance(row.get("result"), dict)
-                else []
+            analyzed = await analyzer_agent.classify(
+                idx=idx,
+                row=row if isinstance(row, dict) else {},
+                target_type=target_type,
             )
-
-            # Perceptor analyzes findings (sequential - required for Verify)
-            assessment = await perceptor_agent.assess_tool_results(
-                scenario=scenario if isinstance(scenario, dict) else {},
-                tool_results=tool_results if isinstance(tool_results, list) else [],
-                asset_context={
-                    "criticality": (
-                        "high"
-                        if _normalize_priority((scenario or {}).get("priority", 3)) <= 2
-                        else "medium"
-                    ),
-                    "internet_exposed": target_type in {"web_app", "api"},
-                },
-            )
+            assessment = analyzed.assessment
+            scenario = analyzed.scenario
+            row_result = analyzed.row_result
+            compact_summary = analyzed.compact_summary
             perceptor_rows.append(assessment)
 
-            compact_summary = str(assessment.get("compact_summary", "")).strip()
             finding_type = str(assessment.get("finding_type", "info")).strip().lower()
             agent_role = str(scenario.get("agent", "")).strip().lower() if isinstance(scenario, dict) else ""
             finding_type, compact_summary = _normalize_perceptor_classification(
@@ -5681,19 +7148,19 @@ class ScanOrchestratorService:
                 scenario=scenario if isinstance(scenario, dict) else {},
             )
 
-            # Emit perceptor_classified event
+            # Emit analyzer_classified event
             self._emit_event(
                 project_id,
-                event="perceptor_classified",
+                event="analyzer_classified",
                 scan_id=scan_id,
                 level="info",
                 message=(
-                    f"Perceptor [classified] scenario #{idx} → "
+                    f"Analyzer [classified] scenario #{idx} → "
                     f"{assessment.get('overall', {}).get('ssvc', 'TRACK')} "
                     f"(type={finding_type})"
                 ),
                 data={
-                    "stage": "perceptor",
+                    "stage": "analyzer",
                     "kind": "classified",
                     "iteration": idx,
                     "assessment": assessment,
@@ -5745,7 +7212,7 @@ class ScanOrchestratorService:
         if info_only_memory_updates:
             await _append_target_memory_updates(
                 project_cache_dir,
-                stage="perceptor",
+                stage="analyzer",
                 updates=info_only_memory_updates,
             )
 
@@ -5760,18 +7227,17 @@ class ScanOrchestratorService:
                     assessments_organized["vulnerabilities"],
                     start=1,
                 ):
-                    verify_agent.reset_context_window_for_cycle()
                     self._emit_event(
                         project_id,
-                        event="verify_batch_progress",
+                        event="analyzer_batch_progress",
                         scan_id=scan_id,
                         level="info",
                         message=(
-                            f"Verify [batch] processing finding {verify_index}/"
+                            f"Analyzer [verify] processing finding {verify_index}/"
                             f"{len(assessments_organized['vulnerabilities'])}."
                         ),
                         data={
-                            "stage": "verify",
+                            "stage": "analyzer",
                             "kind": "batch_progress",
                             "current": verify_index,
                             "total": len(assessments_organized["vulnerabilities"]),
@@ -5785,12 +7251,12 @@ class ScanOrchestratorService:
                     )
                     self._emit_event(
                         project_id,
-                        event="verify_finding_working",
+                        event="analyzer_finding_working",
                         scan_id=scan_id,
                         level="info",
                         message=f"Verifying finding: {item.get('compact_summary', 'Unknown')[:100]}",
                         data={
-                            "stage": "verify",
+                            "stage": "analyzer",
                             "kind": "finding_working",
                             "title": item.get('compact_summary', 'Finding'),
                             "severity": severity,
@@ -5801,19 +7267,13 @@ class ScanOrchestratorService:
                         },
                     )
 
-                    verify_message = (
-                        f"Target: {target}\n"
-                        f"Target type: {target_type}\n"
-                        f"Scope: {scope}\n"
-                        f"Original scenario: {json.dumps(item['scenario'], ensure_ascii=True)}\n\n"
-                        "Finding to verify:\n"
-                        f"{item['compact_summary']}\n\n"
-                        "Execution row:\n"
-                        f"{json.dumps(item['row'], ensure_ascii=True)}"
-                    )
-
                     try:
-                        verify_result = await verify_agent.run(verify_message)
+                        verify_data = await analyzer_agent.verify(
+                            target=target,
+                            target_type=target_type,
+                            scope=scope,
+                            candidate=item,
+                        )
                     except Exception as verify_exc:
                         logger.error(
                             "verify_task_exception",
@@ -5832,8 +7292,6 @@ class ScanOrchestratorService:
                         continue
 
                     try:
-                        verify_data = asdict(verify_result) if hasattr(verify_result, '__dataclass_fields__') else verify_result
-
                         # CRITICAL FIX: Defensive verdict extraction with fallback mapping
                         # Handles: status=incomplete, verdict=..., summary=..., unknown fields
                         verdict = str(verify_data.get("verdict", "")).strip().lower()
@@ -6165,37 +7623,16 @@ class ScanOrchestratorService:
         _sync_plan_data_into_planner_state(plan_data)
 
         # ============================================================================
-        # PHASE 3A: Launch Retest (PARALLEL - fire and forget)
-        # PHASE 3B: Launch Planner (PARALLEL - immediate)
+        # PHASE 3A: Launch Analyzer PoC generation (background)
+        # PHASE 3B: Launch Planner immediately
         # ============================================================================
-        # Both run independently and concurrently
-
-        # Create Retest tasks (fire-and-forget, non-blocking)
-        retest_background_tasks = []
+        poc_background_tasks = []
         if retest_candidates:
             for item in retest_candidates:
-                retest_message = (
-                    f"Target: {target}\n"
-                    f"Target type: {target_type}\n"
-                    f"Scope: {scope}\n\n"
-                    "VERIFIED VULNERABILITY - Build Report Entry:\n"
-                    f"{item['verify_summary']}\n\n"
-                    f"Verify confidence: {item.get('verify_confidence', 'n/a')}\n\n"
-                    "Verify Evidence:\n"
-                    f"{json.dumps(item['verify_data'].get('evidence', {}), ensure_ascii=True)}\n\n"
-                    "Instructions:\n"
-                    "1. Take screenshot of vulnerability\n"
-                    "2. Capture detailed PoC proof (request/response/output)\n"
-                    "3. Build report entry with all details\n"
-                    "4. Return structured JSON for database storage"
-                )
-
-                # Create task but don't await it yet
-                retest_task = asyncio.create_task(
-                    self._run_retest_background(
+                poc_task = asyncio.create_task(
+                    self._run_poc_background(
                         item=item,
-                        retest_agent=retest_agent,
-                        retest_message=retest_message,
+                        analyzer_agent=analyzer_agent,
                         project_id=project_id,
                         scan_id=scan_id,
                         target=target,
@@ -6203,7 +7640,7 @@ class ScanOrchestratorService:
                         project_cache_dir=project_cache_dir,
                     )
                 )
-                retest_background_tasks.append(retest_task)
+                poc_background_tasks.append(poc_task)
 
         # Build aggregated planner message with all findings
         planner_sections = []
@@ -6237,18 +7674,54 @@ class ScanOrchestratorService:
             planner_sections.append(info_section)
 
         target_memory_updates: list[dict[str, Any]] = []
+        tool_observations: list[dict[str, Any]] = []
+        for item in assessments_organized["info_only"]:
+            scenario = item.get("scenario", {}) if isinstance(item.get("scenario"), dict) else {}
+            row_result = item.get("row_result", {}) if isinstance(item.get("row_result"), dict) else {}
+            confidence = (
+                item.get("assessment", {}).get("overall", {}).get("confidence", 0.0)
+                if isinstance(item.get("assessment"), dict)
+                else 0.0
+            )
+            tool_observations.extend(
+                _build_tool_observation_entries(
+                    scenario=scenario,
+                    row_result=row_result,
+                    status="info",
+                    confidence=confidence,
+                )
+            )
         for bucket_name in ("false_positives", "inconclusives", "real_vulnerabilities"):
             for item in verify_results_organized[bucket_name]:
+                scenario = item.get("scenario", {}) if isinstance(item.get("scenario"), dict) else {}
+                row_result = item.get("row_result", {}) if isinstance(item.get("row_result"), dict) else {}
                 target_memory_updates.append({
-                    "title": str(item.get("scenario", {}).get("task", "")).strip() or bucket_name,
+                    "title": str(scenario.get("task", "")).strip() or bucket_name,
                     "summary": str(item.get("verify_summary", "")).strip() or str(item.get("compact_summary", "")).strip(),
-                    "agent": str(item.get("scenario", {}).get("agent", "")).strip(),
+                    "agent": str(scenario.get("agent", "")).strip(),
                     "status": bucket_name,
                 })
+                observation_status = "success" if bucket_name == "real_vulnerabilities" else "failed"
+                false_positive_count = 1 if bucket_name == "false_positives" else 0
+                tool_observations.extend(
+                    _build_tool_observation_entries(
+                        scenario=scenario,
+                        row_result=row_result,
+                        status=observation_status,
+                        confidence=item.get("verify_confidence", 0.0),
+                        false_positive_count=false_positive_count,
+                    )
+                )
+        blocked_routes, blocked_route_prefixes, blocked_route_updates = _extract_blocked_route_memory_updates(
+            verify_results_organized["false_positives"]
+        )
+        if blocked_route_updates:
+            target_memory_updates.extend(blocked_route_updates)
         target_memory = await _append_target_memory_updates(
             project_cache_dir,
             stage="execution_cycle",
             updates=target_memory_updates,
+            tool_observations=tool_observations,
             verified_findings=[
                 {
                     "title": str(item.get("verify_summary", "")).strip() or str(item.get("compact_summary", "")).strip(),
@@ -6258,6 +7731,12 @@ class ScanOrchestratorService:
                 for item in verify_results_organized["real_vulnerabilities"]
             ],
         )
+        if blocked_routes:
+            logger.info(
+                "blocked_routes_recorded",
+                blocked_routes=blocked_routes[:8],
+                blocked_route_prefixes=blocked_route_prefixes[:8],
+            )
 
         # Build single aggregated message
         aggregated_planner_message = (
@@ -6333,6 +7812,16 @@ class ScanOrchestratorService:
         from server.agents.planner.tools.pentest_plan import _current_plan as current
         plan_data = dict(current) if isinstance(current, dict) else plan_data
         plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+        plan_data, replanner_pruned = _prune_plan_blocked_route_scenarios(
+            plan_data,
+            target_memory=target_memory,
+        )
+        plan_data, replanner_unbacked_pruned = _prune_plan_unbacked_assumption_scenarios(
+            plan_data,
+            target_memory=target_memory,
+        )
+        if replanner_pruned > 0 or replanner_unbacked_pruned > 0:
+            _sync_plan_data_into_planner_state(plan_data)
 
         # Log single planner update
         logger.info(
@@ -6367,10 +7856,9 @@ class ScanOrchestratorService:
         )
 
         # ============================================================================
-        # PHASE 3C: Retest continues in background (already running)
+        # PHASE 3C: Analyzer PoC generation continues in background
         # ============================================================================
-        # Retest tasks are already executing while Planner updates plan
-        # No need to wait for them here - they save to database independently
+        # PoC tasks are already executing while Planner updates plan.
 
         # Add real vulnerabilities to log
         for item in verify_results_organized["real_vulnerabilities"]:
@@ -6412,7 +7900,7 @@ class ScanOrchestratorService:
         for item in assessments_organized["info_only"]:
             planner_loop_rows.append({
                 "iteration": item["idx"],
-                "route": "perceptor->planner(info_only,batch)",
+                "route": "analyzer->planner(info_only,batch)",
                 "summary": str(planner_loop_result.summary or "").strip(),
                 "compact_bridge": item["compact_summary"],
             })
@@ -6421,6 +7909,16 @@ class ScanOrchestratorService:
         from server.agents.planner.tools.pentest_plan import _current_plan
         updated_plan = dict(_current_plan) if isinstance(_current_plan, dict) else plan_data
         updated_plan = _sanitize_plan_remove_forbidden_agents(updated_plan)
+        updated_plan, updated_pruned = _prune_plan_blocked_route_scenarios(
+            updated_plan,
+            target_memory=target_memory,
+        )
+        updated_plan, updated_unbacked_pruned = _prune_plan_unbacked_assumption_scenarios(
+            updated_plan,
+            target_memory=target_memory,
+        )
+        if updated_pruned > 0 or updated_unbacked_pruned > 0:
+            _sync_plan_data_into_planner_state(updated_plan)
 
         # CRITICAL FIX: Check if Planner indicated completion during batch processing
         # If any planner result says "done" or "complete", return False to stop looping
@@ -6595,8 +8093,7 @@ class ScanOrchestratorService:
                 ),
             )
             intel_agent = IntelNode(callback=callback, project_id=project_id)
-            memory_node = SystemMemoryNode()
-            info_gathering_node = InformationGatheringNode(memory_node=memory_node)
+            brain_builder = BrainBuilderNode(memory_node=SystemMemoryNode())
 
             self._emit_event(
                 project_id,
@@ -6715,13 +8212,7 @@ class ScanOrchestratorService:
             tool_map = {tool.name: tool for tool in scoped_tools}
 
             def _build_target_info_gathering_result(memory: dict[str, Any]) -> dict[str, Any]:
-                gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering", {}), dict) else {}
-                return {
-                    "status": str(gathering.get("status", "")).strip(),
-                    "program": gathering.get("program", []) if isinstance(gathering.get("program", []), list) else [],
-                    "blocks": gathering.get("blocks", []) if isinstance(gathering.get("blocks", []), list) else [],
-                    "paths": memory.get("paths", {}) if isinstance(memory.get("paths", {}), dict) else {},
-                }
+                return brain_builder.build_structured_brain(memory)
 
             async def _await_information_gathering_plan_approval(memory: dict[str, Any]) -> None:
                 target_info_gathering_result = _build_target_info_gathering_result(memory)
@@ -6763,6 +8254,7 @@ class ScanOrchestratorService:
                 if isinstance(run_state, dict):
                     run_state["awaiting_information_gathering_approval"] = True
                     run_state["updated_at"] = _utc_now_iso()
+                    run_state["active_memory"] = memory  # Store for updates during approval
                     self._runs[project_id] = run_state
 
                 gate = asyncio.Event()
@@ -6793,7 +8285,7 @@ class ScanOrchestratorService:
                 finally:
                     self._info_gathering_approval_events.pop(project_id, None)
 
-            target_memory = await info_gathering_node.run(
+            target_memory = await brain_builder.run(
                 project_id=project_id,
                 scan_id=scan_id,
                 target=target,
@@ -6807,7 +8299,27 @@ class ScanOrchestratorService:
                 progress_callback=_emit_system_memory_progress,
                 pre_execution_gate=_await_information_gathering_plan_approval,
             )
+            target_memory = _apply_memory_enrichment(target_memory)
+            target_memory = await _run_authenticated_surface_enrichment(
+                project_cache_dir=project_cache_dir,
+                target_memory=target_memory,
+                target=target,
+                target_type=target_type,
+                target_config=project.get("targetConfig") if isinstance(project.get("targetConfig"), dict) else None,
+                tool_map=tool_map,
+            )
+            target_memory = _apply_memory_enrichment(target_memory)
+            target_memory = await _save_target_memory(
+                project_cache_dir,
+                target_memory,
+                memory_llm=SystemMemoryLLM(),
+            )
             target_info_gathering_result = _build_target_info_gathering_result(target_memory)
+            detected_tech = [
+                str(value).strip()
+                for value in (target_memory.get("tech_stack", {}) or {}).values()
+                if str(value).strip()
+            ] if isinstance(target_memory.get("tech_stack"), dict) else []
             self._emit_event(
                 project_id,
                 event="target_info_gathering_complete",
@@ -6837,6 +8349,7 @@ class ScanOrchestratorService:
                     "error": "",
                     "awaitingInformationGatheringApproval": False,
                     "awaitingPlannerApproval": False,
+                    "detectedTech": detected_tech[:10],
                     "result": {
                         "target": target,
                         "targetType": target_type,
@@ -7061,7 +8574,7 @@ class ScanOrchestratorService:
                             intel_checklist = latest_checklist
                             checklist_items_count = _count_checklist_items(intel_checklist)
 
-        target_memory = await memory_node.store_checklist(
+        target_memory = await brain_builder.memory_node.store_checklist(
             project_cache_dir,
             checklist=intel_checklist,
         )
@@ -7155,6 +8668,38 @@ class ScanOrchestratorService:
                 plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
                 # Sanitize plan: remove any forbidden agents (verify, retest, perceptor)
                 plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
+                plan_data, pruned_blocked_count = _prune_plan_blocked_route_scenarios(
+                    plan_data,
+                    target_memory=target_memory,
+                )
+                plan_data, pruned_unbacked_count = _prune_plan_unbacked_assumption_scenarios(
+                    plan_data,
+                    target_memory=target_memory,
+                )
+                if pruned_blocked_count > 0 or pruned_unbacked_count > 0:
+                    _sync_plan_data_into_planner_state(plan_data)
+                    logger.info(
+                        "planner_initial_scenario_guardrail_prune",
+                        removed_scenarios=pruned_blocked_count,
+                        removed_unbacked_scenarios=pruned_unbacked_count,
+                    )
+                    self._emit_event(
+                        project_id,
+                        event="planner_scenario_guardrail_prune",
+                        scan_id=scan_id,
+                        level="info",
+                        message=(
+                            "Planner [guardrail] Removed "
+                            f"{pruned_blocked_count + pruned_unbacked_count} scenario(s) "
+                            "that targeted disproven routes or relied on unobserved assumptions."
+                        ),
+                        data={
+                            "stage": "planner",
+                            "kind": "scenario_guardrail_prune",
+                            "removed_blocked_route_scenarios": pruned_blocked_count,
+                            "removed_unbacked_scenarios": pruned_unbacked_count,
+                        },
+                    )
 
                 # Log plan structure for debugging (why 0 scenarios?)
                 phases = plan_data.get("phases", [])
@@ -7190,6 +8735,14 @@ class ScanOrchestratorService:
                         checklist=intel_checklist,
                     )
                     plan_data = _sanitize_plan_remove_forbidden_agents(fallback_plan_data)
+                    plan_data, fallback_pruned_count = _prune_plan_blocked_route_scenarios(
+                        plan_data,
+                        target_memory=target_memory,
+                    )
+                    plan_data, fallback_unbacked_pruned_count = _prune_plan_unbacked_assumption_scenarios(
+                        plan_data,
+                        target_memory=target_memory,
+                    )
                     _sync_plan_data_into_planner_state(plan_data)
                     logger.warning(
                         "planner_fallback_plan_applied",
@@ -7197,6 +8750,8 @@ class ScanOrchestratorService:
                         scan_id=scan_id,
                         checklist_items=_count_checklist_items(intel_checklist),
                         fallback_scenarios=_count_total_scenarios(plan_data),
+                        pruned_blocked_routes=fallback_pruned_count,
+                        pruned_unbacked_scenarios=fallback_unbacked_pruned_count,
                     )
                     self._emit_event(
                         project_id,
@@ -7322,15 +8877,19 @@ class ScanOrchestratorService:
         )
 
         try:
+            from server.agents.analyzer import AnalyzerAgent
             from server.agents.executer.recon.agent import ReconExecuterAgent
             from server.agents.executer.exploit.agent import ExploitExecuterAgent
-            from server.agents.executer.verify.agent import VerifyExecuterAgent
-            from server.agents.executer.retest.agent import RetestExecuterAgent
-            from server.agents.perceptor.agent import PerceptorAgent
             from server.agents.planner.agent import PlannerAgent
             from server.config.agent import get_public_agent_config
 
             executer_callback = ExecuterScanCallback(
+                service=self,
+                project_id=project_id,
+                scan_id=scan_id,
+                enabled=print_steps,
+            )
+            analyzer_callback = AnalyzerScanCallback(
                 service=self,
                 project_id=project_id,
                 scan_id=scan_id,
@@ -7358,17 +8917,11 @@ class ScanOrchestratorService:
                 project_id=project_id,
                 project_cache_dir=project_cache_dir,
             )
-            verify_agent = VerifyExecuterAgent(
-                callback=executer_callback,
+            analyzer_agent = AnalyzerAgent(
+                callback=analyzer_callback,
                 project_id=project_id,
                 project_cache_dir=project_cache_dir,
             )
-            retest_agent = RetestExecuterAgent(
-                callback=executer_callback,
-                project_id=project_id,
-                project_cache_dir=project_cache_dir,
-            )
-            perceptor_agent = PerceptorAgent(project_id=project_id)
             loop_planner_callback = PrintCallback(
                 enabled=print_steps,
                 on_log=lambda level, message: self._emit_planner_callback_event(
@@ -7387,9 +8940,7 @@ class ScanOrchestratorService:
             await recon_agent.clear_context_window()
             await recon_agent_worker_1.clear_context_window()
             await exploit_agent.clear_context_window()
-            await verify_agent.clear_context_window()
-            await retest_agent.clear_context_window()
-            await perceptor_agent.clear_context_window()
+            await analyzer_agent.clear_context_window()
 
             try:
                 execution_rows: list[dict[str, Any]] = []
@@ -7412,16 +8963,14 @@ class ScanOrchestratorService:
 
                 while cycle_count < max_cycles:
                     cycle_count += 1
-                    display_cycle_count = cycle_count + WARMUP_RECON_CYCLES
+                    display_cycle_count = _display_cycle_number(cycle_count)
 
                     # FRESH CONTEXT PER CYCLE: Reset context windows for executer agents
                     # (only Planner keeps context across cycles)
                     recon_agent.reset_context_window_for_cycle()
                     recon_agent_worker_1.reset_context_window_for_cycle()
                     exploit_agent.reset_context_window_for_cycle()
-                    verify_agent.reset_context_window_for_cycle()
-                    retest_agent.reset_context_window_for_cycle()
-                    perceptor_agent.reset_context_window_for_cycle()
+                    analyzer_agent.reset_context_window_for_cycle()
                     executed_scenarios = _count_done_scenarios(plan_data)
 
                     self._emit_event(
@@ -7447,9 +8996,7 @@ class ScanOrchestratorService:
                             recon_agent=recon_agent,
                             recon_agent_worker_1=recon_agent_worker_1,
                             exploit_agent=exploit_agent,
-                            verify_agent=verify_agent,
-                            retest_agent=retest_agent,
-                            perceptor_agent=perceptor_agent,
+                            analyzer_agent=analyzer_agent,
                             loop_planner=loop_planner,
                             target=target,
                             target_type=target_type,
@@ -7457,6 +9004,7 @@ class ScanOrchestratorService:
                             info=info,
                             intel_checklist=intel_checklist,
                             project_cache_dir=project_cache_dir,
+                            target_memory=target_memory,
                         )
                     except Exception as cycle_exc:
                         # Safety: If execution cycle fails, emit warning and continue loop
@@ -7477,24 +9025,6 @@ class ScanOrchestratorService:
                         updated_plan = plan_data
 
                     plan_data = updated_plan
-
-                    # OPTIMIZATION: Compress Planner context window between cycles (after cycle 1)
-                    # to prevent token bloat while keeping critical plan history
-                    if cycle_count > 1 and loop_planner._context_window is not None:
-                        from server.agents.planner.context_compression import (
-                            compress_planner_context_window,
-                        )
-
-                        try:
-                            await compress_planner_context_window(
-                                loop_planner._context_window, cycle_count
-                            )
-                        except Exception as compression_exc:
-                            logger.warning(
-                                "planner_context_compression_skipped",
-                                cycle=cycle_count,
-                                error=str(compression_exc),
-                            )
 
                     self._emit_event(
                         project_id,
@@ -7556,9 +9086,7 @@ class ScanOrchestratorService:
                 await recon_agent.close()
                 await recon_agent_worker_1.close()
                 await exploit_agent.close()
-                await verify_agent.close()
-                await retest_agent.close()
-                await perceptor_agent.close()
+                await analyzer_agent.close()
                 await loop_planner.close()
         except Exception as exc:
             executer_error = str(exc)
@@ -7720,18 +9248,14 @@ class ScanOrchestratorService:
         project["scanProgress"] = scan_progress
         project["updatedAt"] = _utc_now_iso()
         existing_last_scan = project.get("lastScan", {})
-        merged_scan_meta = (
-            _merge_nested_records(existing_last_scan, scan_meta)
-            if isinstance(scan_meta, dict)
-            else dict(existing_last_scan) if isinstance(existing_last_scan, dict) else {}
+        merged_scan_meta = _merge_scan_metadata(
+            existing_last_scan if isinstance(existing_last_scan, dict) else {},
+            scan_meta if isinstance(scan_meta, dict) else {},
         )
-        result = merged_scan_meta.get("result", {})
-        if not isinstance(result, dict):
-            result = {}
-        context_windows = project.get("contextWindows", {})
-        if isinstance(context_windows, dict) and context_windows:
-            result["contextWindows"] = dict(context_windows)
-        merged_scan_meta["result"] = result
+        elapsed_seconds = _compute_scan_elapsed_seconds(merged_scan_meta)
+        merged_scan_meta["elapsedSeconds"] = elapsed_seconds
+        if status in {"completed", "paused", "error"}:
+            merged_scan_meta["durationSeconds"] = elapsed_seconds
         project["lastScan"] = merged_scan_meta
         self._projects_store.upsert_project(project)
         self._emit_event(
@@ -7743,5 +9267,8 @@ class ScanOrchestratorService:
             data={
                 "status": status,
                 "scan_progress": scan_progress,
+                "elapsed_seconds": elapsed_seconds,
+                "started_at": merged_scan_meta.get("startedAt"),
+                "finished_at": merged_scan_meta.get("finishedAt"),
             },
         )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-RAG_REFRESH_DAYS: int = 3
+RAG_REFRESH_DAYS: int = 5
 UPDATE_DAYS_BACK: int = 14
 UPDATE_MAX_RESULTS: int = 25
 

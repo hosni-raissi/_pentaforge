@@ -16,6 +16,7 @@ import {
   Square,
   Trash2,
   X,
+  Sparkles,
 } from "lucide-react";
 
 import { AIPromptPanel } from "@/components/dashboard/AIPromptPanel";
@@ -41,7 +42,15 @@ import {
   type ScanEventPayload,
 } from "@/lib/projectBridge";
 import { useProjects } from "@/stores/projects";
-import type { Finding, ProjectStatus } from "@/types";
+import { useConfig } from "@/stores/config";
+import type {
+  AgentInfo,
+  Finding,
+  FindingEvidence,
+  FindingEvidenceStatus,
+  FindingProofQuality,
+  ProjectStatus,
+} from "@/types";
 
 type InsightTab = "plan" | "checklist" | "information";
 type LogLevel = "info" | "success" | "warn" | "error";
@@ -192,6 +201,10 @@ interface RealtimeVulnFinding {
   cvss?: number | string;
   category?: string;
   description?: string;
+  evidence?: FindingEvidence;
+  evidenceStatus?: FindingEvidenceStatus;
+  proofQuality?: FindingProofQuality;
+  deterministicValidation?: boolean;
   remediation?: string;
 }
 
@@ -228,14 +241,9 @@ const PROJECT_STATUSES: ProjectStatus[] = [
   "error",
 ];
 const AGENT_ROLES: AgentGraphRole[] = [
-  "intel",
   "planner",
-  "recon",
-  "exploit",
-  "verify",
-  "report",
-  "retest",
-  "perceptor",
+  "executer",
+  "analyzer",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -253,27 +261,52 @@ function detectEventAgentRole(event: ScanEventPayload): AgentGraphRole | null {
   if (isAgentRole(dataAgent)) {
     return dataAgent;
   }
+  if (dataAgent === "recon" || dataAgent === "exploit") {
+    return "executer";
+  }
+  if (
+    dataAgent === "verify"
+    || dataAgent === "report"
+    || dataAgent === "retest"
+    || dataAgent === "perceptor"
+  ) {
+    return "analyzer";
+  }
 
   const stage = isRecord(event.data) ? event.data.stage : undefined;
   if (typeof stage === "string") {
     const normalized = stage.trim().toLowerCase();
-    if (normalized === "intel") {
-      return "intel";
-    }
     if (isAgentRole(normalized)) {
       return normalized;
+    }
+    if (normalized === "recon" || normalized === "exploit" || normalized === "executer") {
+      return "executer";
+    }
+    if (
+      normalized === "verify"
+      || normalized === "report"
+      || normalized === "retest"
+      || normalized === "perceptor"
+      || normalized === "analyzer"
+    ) {
+      return "analyzer";
     }
   }
 
   const text = `${event.event} ${event.message}`.toLowerCase();
-  if (text.includes("intel")) return "intel";
   if (text.includes("planner")) return "planner";
-  if (text.includes("recon")) return "recon";
-  if (text.includes("exploit")) return "exploit";
-  if (text.includes("verify")) return "verify";
-  if (text.includes("retest")) return "retest";
-  if (text.includes("report")) return "report";
-  if (text.includes("perceptor")) return "perceptor";
+  if (text.includes("recon") || text.includes("exploit") || text.includes("executer")) {
+    return "executer";
+  }
+  if (
+    text.includes("verify")
+    || text.includes("retest")
+    || text.includes("report")
+    || text.includes("perceptor")
+    || text.includes("analyzer")
+  ) {
+    return "analyzer";
+  }
   return null;
 }
 
@@ -402,6 +435,77 @@ function severityBadgeClass(value: DashboardSeverity): string {
   return "border-slate-500/40 bg-slate-500/15 text-slate-200";
 }
 
+function normalizeEvidenceStatus(value: unknown): FindingEvidenceStatus | undefined {
+  const raw = normalizeText(value).toLowerCase();
+  if (raw === "suspicion" || raw === "evidence_backed" || raw === "confirmed") {
+    return raw;
+  }
+  return undefined;
+}
+
+function normalizeProofQuality(value: unknown): FindingProofQuality | undefined {
+  const raw = normalizeText(value).toLowerCase();
+  if (raw === "weak" || raw === "moderate" || raw === "strong") {
+    return raw;
+  }
+  return undefined;
+}
+
+function evidenceBadgeClass(value?: FindingEvidenceStatus): string {
+  if (value === "confirmed") {
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+  }
+  if (value === "evidence_backed") {
+    return "border-amber-500/40 bg-amber-500/15 text-amber-200";
+  }
+  if (value === "suspicion") {
+    return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+  }
+  return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+}
+
+function proofQualityBadgeClass(value?: FindingProofQuality): string {
+  if (value === "strong") {
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+  }
+  if (value === "moderate") {
+    return "border-amber-500/40 bg-amber-500/15 text-amber-200";
+  }
+  if (value === "weak") {
+    return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+  }
+  return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+}
+
+function findingUsesOobProof(finding: Pick<Finding, "evidence" | "verificationMethods">): boolean {
+  const methods = Array.isArray(finding.verificationMethods)
+    ? finding.verificationMethods
+    : (Array.isArray(finding.evidence?.verification_methods) ? finding.evidence.verification_methods : []);
+  const normalizedMethods = methods
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim().toLowerCase());
+  return (
+    normalizedMethods.includes("oob_callback")
+    || finding.evidence?.oob_confirmed === true
+  );
+}
+
+function findingOobProtocol(finding: Pick<Finding, "evidence">): string | undefined {
+  const protocol = normalizeText(finding.evidence?.protocol).toLowerCase();
+  return protocol || undefined;
+}
+
+function formatVerificationMethod(value: string): string {
+  const raw = normalizeText(value).toLowerCase();
+  if (!raw) {
+    return "";
+  }
+  if (raw === "oob_callback") {
+    return "OOB callback";
+  }
+  return raw.replace(/_/g, " ");
+}
+
 function formatRealtimeFindingStatus(value: string): string {
   const normalized = normalizeText(value).toLowerCase();
   if (!normalized) {
@@ -463,6 +567,20 @@ function formatTime(value: string): string {
   return parsed.toLocaleTimeString();
 }
 
+function formatPentestElapsed(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(safe / 86400);
+  const hours = Math.floor((safe % 86400) / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const secs = safe % 60;
+
+  if (days > 0) {
+    return `${days}d ${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m`;
+  }
+
+  return `${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m ${String(secs).padStart(2, "0")}s`;
+}
+
 function detectLogSource(event: ScanEventPayload): string {
   const role = detectEventAgentRole(event);
   if (role) {
@@ -485,12 +603,16 @@ function formatSourceLabel(source: string): string {
   if (source === "system") return "System";
   if (source === "intel") return "Intel";
   if (source === "planner") return "Planner";
-  if (source === "recon") return "Recon";
-  if (source === "exploit") return "Exploit";
-  if (source === "verify") return "Verify";
-  if (source === "report") return "Report";
-  if (source === "retest") return "Retest";
-  if (source === "perceptor") return "Perceptor";
+  if (source === "executer" || source === "recon" || source === "exploit") return "Executer";
+  if (
+    source === "analyzer"
+    || source === "verify"
+    || source === "report"
+    || source === "retest"
+    || source === "perceptor"
+  ) {
+    return "Analyzer";
+  }
   return source.charAt(0).toUpperCase() + source.slice(1);
 }
 
@@ -1379,8 +1501,18 @@ export default function Dashboard() {
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [locallyAckedApprovalId, setLocallyAckedApprovalId] = useState<string | null>(null);
   const [locallyAckedPasswordId, setLocallyAckedPasswordId] = useState<string | null>(null);
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("custom");
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => {
+    const saved = typeof window !== "undefined" ? localStorage.getItem("pentaforge_approval_mode") : null;
+    return (saved as ApprovalMode) || "custom";
+  });
   const [showApprovalModeMenu, setShowApprovalModeMenu] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("pentaforge_approval_mode", approvalMode);
+    }
+  }, [approvalMode]);
+  const approvalModeMenuRef = useRef<HTMLDivElement | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<
     NotificationPermission | "unsupported"
   >(
@@ -1392,6 +1524,7 @@ export default function Dashboard() {
   const [logLevelFilter, setLogLevelFilter] = useState<"all" | LogLevel>("all");
   const [logSourceFilter, setLogSourceFilter] = useState<string>("all");
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
+  const [elapsedClockMs, setElapsedClockMs] = useState(() => Date.now());
   const logsContainerRef = useRef<HTMLDivElement | null>(null);
   const [streamRetry, setStreamRetry] = useState(0);
   const streamRetryRef = useRef(0);
@@ -1401,6 +1534,7 @@ export default function Dashboard() {
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
   const [informationGatheringApprovalLoading, setInformationGatheringApprovalLoading] = useState(false);
+  const [editableInformationGatheringProgram, setEditableInformationGatheringProgram] = useState<any[] | null>(null);
   const [plannerApprovalLoading, setPlannerApprovalLoading] = useState(false);
   const [toolApprovalLoading, setToolApprovalLoading] = useState<"approve" | "skip" | null>(null);
   const [passwordResponseLoading, setPasswordResponseLoading] = useState<"approve" | "deny" | null>(null);
@@ -1420,7 +1554,9 @@ export default function Dashboard() {
   const [projectEditName, setProjectEditName] = useState("");
   const [projectEditTarget, setProjectEditTarget] = useState("");
   const [projectEditDescription, setProjectEditDescription] = useState("");
-  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
+  const config = useConfig();
+  const isCopilotOpen = config.isAssistantOpen;
+  const setIsCopilotOpen = (open: boolean) => config.updateConfig({ isAssistantOpen: open });
   const lastApprovalNotifiedRef = useRef<string>("");
   const lastPlannerApprovalNotifiedRef = useRef<string>("");
   const autoApprovalFailedIdsRef = useRef<Set<string>>(new Set());
@@ -1434,6 +1570,24 @@ export default function Dashboard() {
     auto_verify: "Auto Verify",
   };
   const notificationsUnavailable = notificationPermission === "unsupported";
+
+  const shouldAutoApproveForRole = useCallback(
+    (role: string) => {
+      // Worker callbacks prefix the role with "[worker N] " (e.g. "[worker 0] exploit").
+      // Strip any bracket-prefixed segments to extract the base role.
+      const pendingRole = role
+        .replace(/\[worker\s*\d+\]\s*/gi, "")
+        .trim()
+        .toLowerCase();
+      return (
+        approvalMode === "auto_all"
+        || (approvalMode === "auto_exploit" && pendingRole === "exploit")
+        || (approvalMode === "auto_recon" && pendingRole === "recon")
+        || (approvalMode === "auto_verify" && pendingRole === "verify")
+      );
+    },
+    [approvalMode],
+  );
 
   const handleCloseProject = () => {
     setActive(null);
@@ -1505,8 +1659,29 @@ export default function Dashboard() {
         typeof rawProgress === "number" && Number.isFinite(rawProgress)
           ? rawProgress
           : undefined;
+      const rawElapsedSeconds = event.data.elapsed_seconds;
+      const nextElapsedSeconds =
+        typeof rawElapsedSeconds === "number" && Number.isFinite(rawElapsedSeconds)
+          ? Math.max(0, Math.floor(rawElapsedSeconds))
+          : undefined;
+      const nextStartedAt =
+        typeof event.data.started_at === "string" ? event.data.started_at : undefined;
+      const nextFinishedAt =
+        typeof event.data.finished_at === "string" ? event.data.finished_at : undefined;
 
-      if (nextStatus || typeof nextProgress === "number") {
+      if (
+        nextStatus ||
+        typeof nextProgress === "number" ||
+        typeof nextElapsedSeconds === "number" ||
+        nextStartedAt ||
+        nextFinishedAt
+      ) {
+        const activeProject = useProjects
+          .getState()
+          .projects.find((project) => project.id === activeProjectId);
+        const currentLastScan = isRecord(activeProject?.lastScan)
+          ? activeProject.lastScan
+          : {};
         updateProject(
           activeProjectId,
           {
@@ -1514,6 +1689,20 @@ export default function Dashboard() {
             ...(typeof nextProgress === "number"
               ? { scanProgress: nextProgress }
               : {}),
+            lastScan: {
+              ...currentLastScan,
+              ...(nextStatus ? { status: nextStatus } : {}),
+              ...(nextStartedAt ? { startedAt: nextStartedAt } : {}),
+              ...(nextFinishedAt ? { finishedAt: nextFinishedAt } : {}),
+              ...(typeof nextElapsedSeconds === "number"
+                ? {
+                  elapsedSeconds: nextElapsedSeconds,
+                  ...(nextStatus && nextStatus !== "running"
+                    ? { durationSeconds: nextElapsedSeconds }
+                    : {}),
+                }
+                : {}),
+            },
           },
           { persist: false },
         );
@@ -1565,7 +1754,33 @@ export default function Dashboard() {
                 : undefined,
             cve: typeof finding.cve === "string" ? finding.cve : undefined,
             description: typeof finding.description === "string" ? finding.description : "",
-            evidence: finding.evidence as Finding["evidence"],
+            evidence: (isRecord(finding.evidence) ? finding.evidence : undefined) as Finding["evidence"],
+            evidenceStatus: normalizeEvidenceStatus(
+              isRecord(finding.evidence)
+                ? finding.evidence.evidence_status
+                : finding.evidence_status,
+            ),
+            proofQuality: normalizeProofQuality(
+              isRecord(finding.evidence)
+                ? finding.evidence.proof_quality
+                : finding.proof_quality,
+            ),
+            deterministicValidation:
+              typeof finding.deterministic_validation === "boolean"
+                ? finding.deterministic_validation
+                : (
+                  isRecord(finding.evidence) && typeof finding.evidence.deterministic_validation === "boolean"
+                    ? finding.evidence.deterministic_validation
+                    : undefined
+                ),
+            verificationMethods:
+              Array.isArray(finding.verification_methods)
+                ? finding.verification_methods.filter((item): item is string => typeof item === "string")
+                : (
+                  isRecord(finding.evidence) && Array.isArray(finding.evidence.verification_methods)
+                    ? finding.evidence.verification_methods.filter((item): item is string => typeof item === "string")
+                    : undefined
+                ),
             remediation: typeof finding.remediation === "string" ? finding.remediation : undefined,
             timestamp: typeof finding.timestamp === "string" ? finding.timestamp : event.timestamp,
           };
@@ -1959,6 +2174,26 @@ export default function Dashboard() {
     return () => window.removeEventListener("keydown", handleEscape);
   }, [isInsightFullscreen, isCopilotOpen]);
 
+  useEffect(() => {
+    setElapsedClockMs(Date.now());
+
+    const lastScan = isRecord(activeProject?.lastScan) ? activeProject.lastScan : null;
+    const startedAt =
+      typeof lastScan?.startedAt === "string" ? lastScan.startedAt.trim() : "";
+    const status =
+      typeof lastScan?.status === "string" ? lastScan.status.trim().toLowerCase() : "";
+
+    if (!startedAt || status !== "running") {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setElapsedClockMs(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [activeProject?.lastScan]);
+
   if (!activeProject) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
@@ -1972,6 +2207,32 @@ export default function Dashboard() {
   const effectiveStatus = normalizeRunningStatus(activeProject);
   const isRunning = effectiveStatus === "running";
   const isStarting = startingProjectId === activeProject.id;
+  const activeLastScan = isRecord(activeProject.lastScan)
+    ? activeProject.lastScan
+    : null;
+  const persistedElapsedSeconds =
+    typeof activeLastScan?.elapsedSeconds === "number" &&
+    Number.isFinite(activeLastScan.elapsedSeconds)
+      ? Math.max(0, Math.floor(activeLastScan.elapsedSeconds))
+      : 0;
+  const timerStartedAt =
+    typeof activeLastScan?.startedAt === "string"
+      ? activeLastScan.startedAt.trim()
+      : "";
+  const liveElapsedSeconds = (() => {
+    if (!isRunning || !timerStartedAt) {
+      return persistedElapsedSeconds;
+    }
+    const parsed = new Date(timerStartedAt);
+    if (Number.isNaN(parsed.getTime())) {
+      return persistedElapsedSeconds;
+    }
+    return Math.max(
+      persistedElapsedSeconds,
+      Math.floor((elapsedClockMs - parsed.getTime()) / 1000),
+    );
+  })();
+  const displayedPentestElapsed = formatPentestElapsed(liveElapsedSeconds);
   const hasAnotherRunningProject = projects.some(
     (project) =>
       project.id !== activeProject.id &&
@@ -2094,6 +2355,13 @@ export default function Dashboard() {
     return null;
   })();
   const pendingToolCommandPreview = buildPendingApprovalCommand(pendingToolApproval);
+  const autoApprovingPendingTool = Boolean(
+    isRunning
+    && pendingToolApproval
+    && shouldAutoApproveForRole(String(pendingToolApproval.role || ""))
+    && !autoApprovalFailedIdsRef.current.has(pendingToolApproval.approvalId)
+    && !toolApprovalLoading,
+  );
   const pendingPasswordRequest: PendingPasswordRequestView | null = (() => {
     for (const event of scanEvents) {
       if (event.event === "executer_password_request") {
@@ -2127,33 +2395,6 @@ export default function Dashboard() {
     }
     return null;
   })();
-
-  const handleApproveInformationGathering = async () => {
-    if (!activeProjectId || informationGatheringApprovalLoading || !isRunning) {
-      return;
-    }
-    setInformationGatheringApprovalLoading(true);
-    try {
-      await approveInformationGatheringForProjectScanFromDesktop(activeProjectId);
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Failed to approve information gathering.";
-      setStreamLogs((previous) => {
-        const nextEntry: DashboardLogEntry = {
-          id: `info-gathering-approve-error-${Math.random().toString(36).slice(2, 10)}`,
-          level: "warn",
-          message: `Information Gathering approval failed: ${message}`,
-          at: new Date().toISOString(),
-          source: "information_gathering",
-        };
-        return [...previous, nextEntry];
-      });
-    } finally {
-      setInformationGatheringApprovalLoading(false);
-    }
-  };
 
   const handleApprovePlanner = async () => {
     if (!activeProjectId || plannerApprovalLoading || !isRunning) {
@@ -2384,6 +2625,35 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    if (!showApprovalModeMenu) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (approvalModeMenuRef.current?.contains(target)) {
+        return;
+      }
+      setShowApprovalModeMenu(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [showApprovalModeMenu]);
+
+  useEffect(() => {
+    if (approvalMode !== "auto_all" || !isRunning) {
+      return;
+    }
+    if (awaitingInformationGatheringApproval && !informationGatheringApprovalLoading) {
+      void handleApproveInformationGathering();
+    }
+  }, [approvalMode, isRunning, awaitingInformationGatheringApproval, informationGatheringApprovalLoading]);
+
+  useEffect(() => {
     if (approvalMode !== "auto_all" || !isRunning) {
       return;
     }
@@ -2399,16 +2669,11 @@ export default function Dashboard() {
     if (autoApprovalFailedIdsRef.current.has(pendingToolApproval.approvalId)) {
       return;
     }
-    const pendingRole = String(pendingToolApproval.role || "").trim().toLowerCase();
-    const shouldAutoApprove =
-      approvalMode === "auto_all"
-      || (approvalMode === "auto_exploit" && pendingRole === "exploit")
-      || (approvalMode === "auto_recon" && pendingRole === "recon")
-      || (approvalMode === "auto_verify" && pendingRole === "verify");
+    const shouldAutoApprove = shouldAutoApproveForRole(String(pendingToolApproval.role || ""));
     if (shouldAutoApprove) {
       void handleToolApproval("approve");
     }
-  }, [approvalMode, isRunning, pendingToolApproval, toolApprovalLoading]);
+  }, [isRunning, pendingToolApproval, shouldAutoApproveForRole, toolApprovalLoading]);
 
   useEffect(() => {
     const activeApprovalId = pendingToolApproval?.approvalId ?? "";
@@ -2544,6 +2809,7 @@ export default function Dashboard() {
     // This is the source of truth for real vulnerabilities
     for (const finding of activeProject.findings) {
       const findingKey = `persisted-${finding.title.toLowerCase()}|${finding.target.toLowerCase()}`;
+      const rawFinding = finding as Finding & Record<string, unknown>;
       feed.push({
         id: `finding-${finding.id}`,
         title: finding.title,
@@ -2557,6 +2823,25 @@ export default function Dashboard() {
         cvss: finding.cvss,
         category: finding.category,
         description: finding.description,
+        evidence: finding.evidence,
+        evidenceStatus: normalizeEvidenceStatus(
+          rawFinding.evidence_status ?? finding.evidenceStatus ?? finding.evidence?.evidence_status,
+        ),
+        proofQuality: normalizeProofQuality(
+          rawFinding.proof_quality ?? finding.proofQuality ?? finding.evidence?.proof_quality,
+        ),
+        deterministicValidation:
+          typeof rawFinding.deterministic_validation === "boolean"
+            ? rawFinding.deterministic_validation
+            : (
+              typeof finding.deterministicValidation === "boolean"
+                ? finding.deterministicValidation
+                : (
+                  typeof finding.evidence?.deterministic_validation === "boolean"
+                    ? finding.evidence.deterministic_validation
+                    : undefined
+                )
+            ),
         remediation: finding.remediation,
       });
     }
@@ -2664,6 +2949,81 @@ export default function Dashboard() {
     }
     return persisted ?? fromEvents;
   })();
+
+  useEffect(() => {
+    if (awaitingInformationGatheringApproval && !editableInformationGatheringProgram && informationGatheringView?.program?.length) {
+      setEditableInformationGatheringProgram(JSON.parse(JSON.stringify(informationGatheringView.program)));
+    } else if (!awaitingInformationGatheringApproval && editableInformationGatheringProgram) {
+      setEditableInformationGatheringProgram(null);
+    }
+  }, [awaitingInformationGatheringApproval, informationGatheringView?.program, editableInformationGatheringProgram]);
+
+  const handleApproveInformationGathering = async () => {
+    if (!activeProjectId || informationGatheringApprovalLoading || !isRunning) {
+      return;
+    }
+    setInformationGatheringApprovalLoading(true);
+    try {
+      await approveInformationGatheringForProjectScanFromDesktop(
+        activeProjectId,
+        editableInformationGatheringProgram || undefined
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to approve information gathering.";
+      setStreamLogs((previous) => {
+        const nextEntry: DashboardLogEntry = {
+          id: `info-gathering-approve-error-${Math.random().toString(36).slice(2, 10)}`,
+          level: "warn",
+          message: `Information Gathering approval failed: ${message}`,
+          at: new Date().toISOString(),
+          source: "information_gathering",
+        };
+        return [...previous, nextEntry];
+      });
+    } finally {
+      setInformationGatheringApprovalLoading(false);
+    }
+  };
+
+  const removeInformationGatheringBlock = (blockId: string) => {
+    if (!editableInformationGatheringProgram) return;
+    setEditableInformationGatheringProgram(prev => 
+      prev ? prev.filter(b => b.id !== blockId) : null
+    );
+  };
+
+  const addInformationGatheringTool = (blockId: string, toolLabel: string) => {
+    if (!editableInformationGatheringProgram || !toolLabel.trim()) return;
+    setEditableInformationGatheringProgram(prev => {
+      if (!prev) return null;
+      return prev.map(b => {
+        if (b.id !== blockId) return b;
+        const exists = b.plannedTools.some((t: { label: string }) => t.label === toolLabel.trim());
+        if (exists) return b;
+        return {
+          ...b,
+          plannedTools: [...b.plannedTools, { label: toolLabel.trim(), kind: "custom" }]
+        };
+      });
+    });
+  };
+
+  const removeInformationGatheringTool = (blockId: string, toolLabel: string) => {
+    if (!editableInformationGatheringProgram) return;
+    setEditableInformationGatheringProgram(prev => {
+      if (!prev) return null;
+      return prev.map(b => {
+        if (b.id !== blockId) return b;
+        return {
+          ...b,
+          plannedTools: b.plannedTools.filter((t: { label: string }) => t.label !== toolLabel)
+        };
+      });
+    });
+  };
   const informationGatheringCompletedIds = new Set(
     (informationGatheringView?.blocks ?? []).map((block) => block.id),
   );
@@ -3020,97 +3380,6 @@ export default function Dashboard() {
       });
     }
 
-    let intelSummary = "";
-    let intelStatus = "";
-    let intelError = "";
-
-    for (let index = filteredEvents.length - 1; index >= 0; index -= 1) {
-      const event = filteredEvents[index];
-      if (!isRecord(event.data)) {
-        continue;
-      }
-
-      if (event.event === "intel_complete") {
-        const summaryCandidate =
-          typeof event.data.summary === "string"
-            ? event.data.summary.trim()
-            : "";
-        const checklistInsight = buildChecklistInsightText(
-          event.data.checklist,
-        );
-        if (summaryCandidate.length > 0) {
-          intelSummary = checklistInsight
-            ? `${summaryCandidate}\n\n${checklistInsight}`
-            : summaryCandidate;
-          intelStatus =
-            typeof event.data.intel_status === "string"
-              ? event.data.intel_status.trim()
-              : "complete";
-          break;
-        }
-        if (checklistInsight.length > 0) {
-          intelSummary = checklistInsight;
-          intelStatus =
-            typeof event.data.intel_status === "string"
-              ? event.data.intel_status.trim()
-              : "complete";
-          break;
-        }
-      }
-
-      if (
-        !intelError &&
-        (event.event === "intel_crashed" || event.event === "scan_failed")
-      ) {
-        const errorCandidate =
-          typeof event.data.error === "string" ? event.data.error.trim() : "";
-        if (errorCandidate.length > 0) {
-          intelError = errorCandidate;
-        }
-      }
-    }
-
-    if (intelSummary.length === 0) {
-      const persistedLastScan = isRecord(activeProject.lastScan)
-        ? activeProject.lastScan
-        : null;
-      const persistedResult = isRecord(persistedLastScan?.result)
-        ? persistedLastScan.result
-        : null;
-      const persistedIntel = isRecord(persistedResult?.intel)
-        ? persistedResult.intel
-        : null;
-      const persistedSummary =
-        typeof persistedIntel?.summary === "string"
-          ? persistedIntel.summary.trim()
-          : "";
-      const persistedChecklistInsight = buildChecklistInsightText(
-        persistedIntel?.checklist,
-      );
-      if (persistedSummary || persistedChecklistInsight) {
-        intelSummary =
-          persistedSummary && persistedChecklistInsight
-            ? `${persistedSummary}\n\n${persistedChecklistInsight}`
-            : persistedSummary || persistedChecklistInsight;
-        intelStatus =
-          typeof persistedIntel?.status === "string"
-            ? persistedIntel.status.trim()
-            : typeof persistedLastScan?.status === "string"
-              ? persistedLastScan.status.trim()
-              : "";
-      }
-    }
-
-    if (intelSummary.length > 0) {
-      byRole.intel.resultLabel = intelStatus
-        ? `Intel Final Result (${intelStatus})`
-        : "Intel Final Result";
-      byRole.intel.result = intelSummary;
-    } else if (intelError.length > 0) {
-      byRole.intel.resultLabel = "Intel Error";
-      byRole.intel.result = intelError;
-    }
-
     if (plannerResultText.length > 0) {
       const plannerStatus = resolvedPlannerResult.status || "completed";
       byRole.planner.resultLabel = `Planner Final Result (${plannerStatus})`;
@@ -3120,14 +3389,83 @@ export default function Dashboard() {
       byRole.planner.result = resolvedPlannerResult.error;
     }
 
-    byRole.perceptor.resultLabel = "Perceptor Summary";
-    byRole.perceptor.result = `Scan status: ${effectiveStatus}. Progress: ${activeProject.scanProgress}%.`;
+    const latestExecuter = [...byRole.executer.history].reverse().find((entry) => entry.message.trim().length > 0);
+    byRole.executer.resultLabel = "Executer Summary";
+    byRole.executer.result = latestExecuter
+      ? latestExecuter.message
+      : "Recon and exploit work will appear here as the two active slots run.";
+
+    const latestAnalyzer = [...byRole.analyzer.history].reverse().find((entry) => entry.message.trim().length > 0);
+    byRole.analyzer.resultLabel = "Analyzer Summary";
+    byRole.analyzer.result = latestAnalyzer
+      ? latestAnalyzer.message
+      : `Scan status: ${effectiveStatus}. Progress: ${activeProject.scanProgress}%.`;
 
     return byRole;
   })();
 
+  const visibleAgents = (() => {
+    const roleOrder: AgentGraphRole[] = ["planner", "executer", "analyzer"];
+    const baseAgents = Array.isArray(activeProject.agents) ? activeProject.agents : [];
+    const baseAgentByRole = new Map(
+      baseAgents.map((agent) => [agent.name, agent] as const),
+    );
+    const roleProgress: Partial<Record<AgentGraphRole, number>> = {
+      planner: resolvedPlannerResult.status === "completed" ? 100 : undefined,
+      executer: effectiveStatus === "running" || activeProject.scanProgress > 0
+        ? activeProject.scanProgress
+        : undefined,
+      analyzer: agentInsights.analyzer?.history.length
+        ? activeProject.scanProgress
+        : undefined,
+    };
+    const latestRole = roleOrder.reduce<AgentGraphRole | null>((current, role) => {
+      const lastEntry = agentInsights[role]?.history.at(-1);
+      if (!lastEntry) {
+        return current;
+      }
+      if (!current) {
+        return role;
+      }
+      const currentEntry = agentInsights[current]?.history.at(-1);
+      if (!currentEntry) {
+        return role;
+      }
+      return new Date(lastEntry.at).getTime() >= new Date(currentEntry.at).getTime()
+        ? role
+        : current;
+    }, null);
+
+    return roleOrder.map((role): AgentInfo => {
+      const baseAgent = baseAgentByRole.get(role);
+      const history = agentInsights[role]?.history ?? [];
+      const latestEntry = history.at(-1);
+      let state: AgentInfo["state"] = baseAgent?.state ?? "idle";
+      if (effectiveStatus === "error" && role === latestRole) {
+        state = "error";
+      } else if (effectiveStatus === "running" && role === latestRole) {
+        state = "running";
+      } else if (history.some((entry) => entry.level === "error")) {
+        state = "error";
+      } else if (history.length > 0) {
+        state = effectiveStatus === "paused" ? "waiting" : "success";
+      } else if (effectiveStatus === "running") {
+        state = "waiting";
+      }
+
+      return {
+        name: role,
+        state,
+        currentTask: latestEntry?.message || agentInsights[role]?.result || baseAgent?.currentTask,
+        progress: roleProgress[role] ?? baseAgent?.progress,
+        lastUpdate: latestEntry?.at || baseAgent?.lastUpdate,
+      };
+    });
+  })();
+
   return (
-    <div className="space-y-4">
+    <div className="flex h-full w-full overflow-hidden bg-background">
+      <div className="flex-1 min-w-0 overflow-y-auto p-4 space-y-4 transition-all duration-300 ease-in-out scrollbar-pf">
       <div>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
@@ -3190,7 +3528,7 @@ export default function Dashboard() {
               </Button>
             ) : (
               <div className="flex items-center gap-2">
-                {awaitingPlannerApproval ? (
+                {awaitingPlannerApproval && approvalMode !== "auto_all" ? (
                   <Button
                     size="xs"
                     variant="secondary"
@@ -3204,7 +3542,12 @@ export default function Dashboard() {
                     Continue to Planner
                   </Button>
                 ) : null}
-                {pendingToolApproval ? (
+                {awaitingPlannerApproval && approvalMode === "auto_all" ? (
+                  <Badge variant="running" dot>
+                    Auto-approving planner
+                  </Badge>
+                ) : null}
+                {pendingToolApproval && !autoApprovingPendingTool ? (
                   <>
                     <Button
                       size="xs"
@@ -3231,6 +3574,11 @@ export default function Dashboard() {
                       Skip Tool
                     </Button>
                   </>
+                ) : null}
+                {pendingToolApproval && autoApprovingPendingTool ? (
+                  <Badge variant="running" dot>
+                    Auto-approving {pendingToolApproval.role}
+                  </Badge>
                 ) : null}
                 <Button
                   size="xs"
@@ -3315,21 +3663,37 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="rounded-md border border-border bg-surface-0/35 p-2">
-          <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
-              Scan Progress
-            </h3>
-            <span className="text-xs font-mono text-pf-400">
-              {activeProject.scanProgress}%
-            </span>
-          </div>
+        <div className="rounded-lg border border-border bg-surface-0/35 px-3 py-2.5">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="rounded-md border border-pf-500/20 bg-pf-500/10 px-2.5 py-1.5">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+                  Pentest Timer
+                </p>
+                <p className="mt-1 font-mono text-lg font-semibold leading-none text-text-primary sm:text-xl">
+                  {displayedPentestElapsed}
+                </p>
+              </div>
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+                  State
+                </p>
+                <p className="mt-1 text-sm font-medium capitalize text-text-primary">
+                  {effectiveStatus}
+                </p>
+              </div>
+            </div>
 
-          <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-surface-2">
-            <div
-              className="h-full rounded-full bg-pf-600 transition-all duration-500"
-              style={{ width: `${activeProject.scanProgress}%` }}
-            />
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-text-muted md:justify-end">
+              {timerStartedAt ? (
+                <span>Started {formatDateTime(timerStartedAt)}</span>
+              ) : (
+                <span>Waiting for first scan start</span>
+              )}
+              {typeof activeLastScan?.finishedAt === "string" && activeLastScan.finishedAt.trim() ? (
+                <span>Finished {formatDateTime(activeLastScan.finishedAt)}</span>
+              ) : null}
+            </div>
           </div>
         </div>
       </Card>
@@ -3426,7 +3790,7 @@ export default function Dashboard() {
                 ))}
               </select>
 
-              <div className="relative">
+              <div className="relative" ref={approvalModeMenuRef}>
                 <Button
                   size="icon"
                   variant="secondary"
@@ -3558,7 +3922,7 @@ export default function Dashboard() {
               ))
             )}
           </div>
-          {awaitingPlannerApproval ? (
+          {awaitingPlannerApproval && approvalMode !== "auto_all" ? (
             <div className="flex justify-center pt-2">
               <Button
                 size="sm"
@@ -3575,7 +3939,14 @@ export default function Dashboard() {
               </Button>
             </div>
           ) : null}
-          {awaitingInformationGatheringApproval ? (
+          {awaitingPlannerApproval && approvalMode === "auto_all" ? (
+            <div className="flex justify-center pt-2">
+              <Badge variant="running" dot>
+                Auto-approving planner
+              </Badge>
+            </div>
+          ) : null}
+          {awaitingInformationGatheringApproval && approvalMode !== "auto_all" ? (
             <div className="flex justify-center pt-2">
               <Button
                 size="sm"
@@ -3592,7 +3963,14 @@ export default function Dashboard() {
               </Button>
             </div>
           ) : null}
-          {pendingToolApproval ? (
+          {awaitingInformationGatheringApproval && approvalMode === "auto_all" ? (
+            <div className="flex justify-center pt-2">
+              <Badge variant="running" dot>
+                Auto-approving information gathering
+              </Badge>
+            </div>
+          ) : null}
+          {pendingToolApproval && !autoApprovingPendingTool ? (
             <div className="mt-2 flex flex-col items-center gap-2 pt-2">
               <p className="text-xs text-text-muted text-center">
                 Executer requests approval: <span className="font-semibold">{pendingToolApproval.role}</span> →{" "}
@@ -3622,6 +4000,14 @@ export default function Dashboard() {
                   Skip Tool
                 </Button>
               </div>
+            </div>
+          ) : null}
+          {pendingToolApproval && autoApprovingPendingTool ? (
+            <div className="mt-2 flex flex-col items-center gap-2 pt-2">
+              <p className="text-xs text-text-muted text-center">
+                Auto-approving <span className="font-semibold">{pendingToolApproval.role}</span> →{" "}
+                <span className="font-semibold break-all">{pendingToolCommandPreview}</span>
+              </p>
             </div>
           ) : null}
           {pendingPasswordRequest ? (
@@ -3714,6 +4100,25 @@ export default function Dashboard() {
                     >
                       {item.severity}
                     </Badge>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {item.evidenceStatus ? (
+                      <Badge
+                        variant="default"
+                        className={`border text-[11px] uppercase tracking-wide ${evidenceBadgeClass(item.evidenceStatus)}`}
+                      >
+                        {item.evidenceStatus.replace(/_/g, " ")}
+                      </Badge>
+                    ) : null}
+                    {item.proofQuality ? (
+                      <Badge
+                        variant="default"
+                        className={`border text-[11px] uppercase tracking-wide ${proofQualityBadgeClass(item.proofQuality)}`}
+                      >
+                        {item.proofQuality} proof
+                      </Badge>
+                    ) : null}
                   </div>
 
                   {/* CVE + CVSS */}
@@ -3953,7 +4358,7 @@ export default function Dashboard() {
                         {topStatus}
                       </span>
                     </div>
-                    {awaitingInformationGatheringApproval ? (
+                    {awaitingInformationGatheringApproval && approvalMode !== "auto_all" ? (
                       <div className="mt-3 flex items-center justify-end">
                         <Button
                           size="sm"
@@ -3970,6 +4375,13 @@ export default function Dashboard() {
                         </Button>
                       </div>
                     ) : null}
+                    {awaitingInformationGatheringApproval && approvalMode === "auto_all" ? (
+                      <div className="mt-3 flex items-center justify-end">
+                        <Badge variant="running" dot>
+                          Auto-approving information gathering
+                        </Badge>
+                      </div>
+                    ) : null}
                   </div>
                     );
                   })()}
@@ -3980,8 +4392,12 @@ export default function Dashboard() {
                     </div>
                     <div className={`${isInsightFullscreen ? "p-3 space-y-3" : "p-2 space-y-2"}`}>
                       {(() => {
-                        const renderedBlocks = informationGatheringView.program.length > 0
-                          ? informationGatheringView.program.map((programBlock) => {
+                        const currentProgram = (awaitingInformationGatheringApproval && editableInformationGatheringProgram) 
+                          ? editableInformationGatheringProgram 
+                          : informationGatheringView.program;
+
+                        const renderedBlocks = currentProgram.length > 0
+                          ? currentProgram.map((programBlock) => {
                               const executedBlock = informationGatheringView.blocks.find(
                                 (block) => block.id === programBlock.id,
                               );
@@ -4028,15 +4444,26 @@ export default function Dashboard() {
                         return renderedBlocks.map((block, blockIndex) => (
                           <div
                             key={`${block.id}-${blockIndex}`}
-                            className="rounded-md border border-border bg-surface-0/35 p-3"
+                            className="group relative rounded-md border border-border bg-surface-0/35 p-3"
                           >
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-sm font-semibold text-text-primary">
                                 {blockIndex + 1}. {block.name}
                               </p>
-                              <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-xs capitalize text-text-muted">
-                                {block.executionStatus}
-                              </span>
+                              <div className="flex items-center gap-2">
+                                {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
+                                  <button
+                                    onClick={() => removeInformationGatheringBlock(block.id)}
+                                    className="rounded-md p-1 text-text-muted hover:bg-red-500/10 hover:text-red-400"
+                                    title="Delete this gathering block"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                )}
+                                <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-xs capitalize text-text-muted">
+                                  {block.executionStatus}
+                                </span>
+                              </div>
                             </div>
                             {block.goal ? (
                               <div className="mt-2">
@@ -4050,14 +4477,41 @@ export default function Dashboard() {
                                 {block.plannedTools.length === 0 ? (
                                   <span className="text-xs text-text-muted">No tools selected.</span>
                                 ) : (
-                                  block.plannedTools.map((tool, toolIndex) => (
-                                    <span
+                                  block.plannedTools.map((tool: { label: string; kind: string }, toolIndex: number) => (
+                                    <div
                                       key={`${block.id}-tool-${toolIndex}`}
-                                      className={`rounded border px-2 py-1 text-xs ${tool.kind === "custom" ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-border bg-surface-1/55 text-text-secondary"}`}
+                                      className={`group/tool relative flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${tool.kind === "custom" ? "border-amber-500/50 bg-amber-500/10 text-amber-400 font-medium" : "border-border bg-surface-1/55 text-text-secondary"}`}
                                     >
-                                      {tool.label}
-                                    </span>
+                                      <span>{tool.label}</span>
+                                      {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
+                                        <button
+                                          onClick={() => removeInformationGatheringTool(block.id, tool.label)}
+                                          className="text-text-muted hover:text-red-400"
+                                          title="Remove tool"
+                                        >
+                                          <X size={10} />
+                                        </button>
+                                      )}
+                                    </div>
                                   ))
+                                )}
+                                {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
+                                  <div className="flex items-center gap-1">
+                                    <input
+                                      type="text"
+                                      placeholder="Add tool/command..."
+                                      className="h-6 w-32 rounded border border-border bg-surface-1/55 px-2 text-[10px] text-text-primary outline-none focus:border-pf-500/50"
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          addInformationGatheringTool(block.id, e.currentTarget.value);
+                                          e.currentTarget.value = "";
+                                        }
+                                      }}
+                                    />
+                                    <div className="rounded border border-border bg-surface-1/55 p-1 text-text-muted">
+                                      <Plus size={10} />
+                                    </div>
+                                  </div>
                                 )}
                               </div>
                             </div>
@@ -4358,10 +4812,10 @@ export default function Dashboard() {
         </Card>
 
         <AgentStatePath
-          agents={activeProject.agents}
+          agents={visibleAgents}
           agentInsights={agentInsights}
           showHeader
-          subtitle="Intel ↓ Planner ↓ Executor Layer (parallel) ↓ Perceptor ↺ Planner"
+          subtitle="Planner -> Executer -> Analyzer -> Planner"
           className="flex h-[560px] flex-col"
           graphHeightClassName="min-h-0 flex-1"
         />
@@ -4507,36 +4961,37 @@ export default function Dashboard() {
 
       <FindingsTable findings={activeProject.findings} />
 
-      {isCopilotOpen ? (
-        <div
-          className="fixed inset-0 z-40 bg-surface-0/45 backdrop-blur-[1px]"
-          onClick={() => setIsCopilotOpen(false)}
-        />
-      ) : null}
+      </div>
+
       <div
-        className={`fixed bottom-24 right-4 z-50 w-[min(460px,calc(100vw-1.5rem))] transition-all duration-300 sm:right-6 ${isCopilotOpen
-          ? "pointer-events-auto translate-y-0 opacity-100"
-          : "pointer-events-none translate-y-4 opacity-0"
+        className={`border-l border-border bg-surface-1/95 backdrop-blur-md transition-all duration-300 ease-in-out overflow-hidden flex flex-col relative z-30 ${
+          isCopilotOpen ? "w-[460px] opacity-100" : "w-0 opacity-0 border-l-0"
           }`}
       >
-        <AIPromptPanel
-          projectId={activeProject.id}
-          projectName={activeProject.name}
-          target={activeProject.target}
-          targetType={activeProject.targetType}
-          agents={activeProject.agents}
-          history={activeProject.copilotHistory}
-        />
+        <div className="flex-1 overflow-hidden min-w-[460px] flex flex-col h-full">
+          <AIPromptPanel
+            projectId={activeProject.id}
+            projectName={activeProject.name}
+            target={activeProject.target}
+            targetType={activeProject.targetType}
+            agents={visibleAgents}
+            history={activeProject.copilotHistory}
+            onClose={() => setIsCopilotOpen(false)}
+          />
+        </div>
       </div>
-      <Button
-        size="sm"
-        variant="primary"
-        onClick={() => setIsCopilotOpen((open) => !open)}
-        className="fixed bottom-4 right-4 z-50 h-12 w-12 rounded-full shadow-lg sm:bottom-6 sm:right-6"
-        title={isCopilotOpen ? "Hide AI chat" : "Open AI chat"}
-      >
-        <Bot size={18} />
-      </Button>
+
+      {!isCopilotOpen && (
+        <Button
+          size="sm"
+          variant="primary"
+          onClick={() => setIsCopilotOpen(true)}
+          className="fixed bottom-4 right-4 z-50 h-12 w-12 rounded-full shadow-lg transition-all duration-300 sm:bottom-6 sm:right-6"
+          title="Open AI chat"
+        >
+          <Bot size={18} />
+        </Button>
+      )}
 
       <Dialog
         open={projectEditOpen}
@@ -4651,8 +5106,90 @@ export default function Dashboard() {
                     {selectedFinding.category}
                   </span>
                 )}
+                {normalizeEvidenceStatus(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status) ? (
+                  <Badge
+                    variant="default"
+                    className={`border text-xs uppercase tracking-wide ${evidenceBadgeClass(
+                      normalizeEvidenceStatus(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status)
+                    )}`}
+                  >
+                    {String(
+                      normalizeEvidenceStatus(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status)
+                    ).replace(/_/g, " ")}
+                  </Badge>
+                ) : null}
+                {normalizeProofQuality(selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality) ? (
+                  <Badge
+                    variant="default"
+                    className={`border text-xs uppercase tracking-wide ${proofQualityBadgeClass(
+                      normalizeProofQuality(selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality)
+                    )}`}
+                  >
+                    {normalizeProofQuality(selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality)} proof
+                  </Badge>
+                ) : null}
+                {findingUsesOobProof(selectedFinding) ? (
+                  <Badge
+                    variant="default"
+                    className="border border-sky-500/40 bg-sky-500/15 text-sky-200 text-xs uppercase tracking-wide"
+                  >
+                    {findingOobProtocol(selectedFinding)
+                      ? `OOB ${findingOobProtocol(selectedFinding)?.toUpperCase()}`
+                      : "OOB"}
+                  </Badge>
+                ) : null}
               </div>
             </div>
+
+            {(selectedFinding.evidenceStatus || selectedFinding.proofQuality || selectedFinding.deterministicValidation !== undefined || selectedFinding.verificationMethods?.length) && (
+              <div className="space-y-1 bg-surface-0/40 p-3 rounded border border-border">
+                <p className="text-xs font-semibold text-text-muted uppercase">Proof Summary</p>
+                <div className="space-y-1 text-sm text-text-secondary">
+                  {(selectedFinding.evidenceStatus || selectedFinding.evidence?.evidence_status) && (
+                    <div>
+                      Evidence Tier: {String(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status).replace(/_/g, " ")}
+                    </div>
+                  )}
+                  {(selectedFinding.proofQuality || selectedFinding.evidence?.proof_quality) && (
+                    <div>
+                      Proof Quality: {selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality}
+                    </div>
+                  )}
+                  {(selectedFinding.deterministicValidation !== undefined
+                    || selectedFinding.evidence?.deterministic_validation !== undefined) && (
+                    <div>
+                      Deterministic Validation: {(selectedFinding.deterministicValidation ?? selectedFinding.evidence?.deterministic_validation) ? "yes" : "no"}
+                    </div>
+                  )}
+                  {findingUsesOobProof(selectedFinding) && (
+                    <div>
+                      OOB Confirmation: {findingOobProtocol(selectedFinding)
+                        ? `yes (${findingOobProtocol(selectedFinding)?.toUpperCase()} callback)`
+                        : "yes"}
+                    </div>
+                  )}
+                  {Array.isArray(selectedFinding.evidence?.callbacks) && selectedFinding.evidence.callbacks.length > 0 && (
+                    <div>
+                      OOB Callback Count: {selectedFinding.evidence.callbacks.length}
+                    </div>
+                  )}
+                  {typeof selectedFinding.evidence?.remote_address === "string" && selectedFinding.evidence.remote_address.trim() && (
+                    <div>
+                      OOB Remote Address: {selectedFinding.evidence.remote_address}
+                    </div>
+                  )}
+                  {((Array.isArray(selectedFinding.verificationMethods) && selectedFinding.verificationMethods.length > 0)
+                    || (Array.isArray(selectedFinding.evidence?.verification_methods) && selectedFinding.evidence.verification_methods.length > 0)) && (
+                    <div>
+                      Verification Methods: {((selectedFinding.verificationMethods ?? selectedFinding.evidence?.verification_methods) as string[])
+                        .map((item) => formatVerificationMethod(item))
+                        .filter(Boolean)
+                        .join(", ")}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* CVE + CVSS */}
             {(selectedFinding.cve || selectedFinding.cvss) && (

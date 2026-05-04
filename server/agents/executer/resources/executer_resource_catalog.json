@@ -1,0 +1,200 @@
+{
+  "sandbox": [
+    {
+      "name": "sandbox_root",
+      "path": "server/sandbox",
+      "role": "Forced working-directory root for all executer subprocess commands."
+    }
+  ],
+  "checklists": [
+    {
+      "name": "planner_get_checklists",
+      "path": "server/agents/planner/tools/get_checklists.py",
+      "role": "Generates target-specific checklist candidates for planner and executer workflow alignment."
+    },
+    {
+      "name": "planner_set_checklist",
+      "path": "server/agents/planner/tools/set_checklist.py",
+      "role": "Normalizes and finalizes checklist output after planning."
+    },
+    {
+      "name": "checklist_sources",
+      "path": "server/db/knowledge/config/checklist_sources.py",
+      "role": "Authoritative checklist-source registry by target type."
+    }
+  ],
+  "wordlists": [
+    {
+      "name": "dns_subdomains_short",
+      "path": "server/share/wordlists/dns/subdomains_short.txt",
+      "role": "Fast DNS subdomain brute-force for warmup and low-noise recon."
+    },
+    {
+      "name": "dns_subdomains_common",
+      "path": "server/share/wordlists/dns/subdomains_common.txt",
+      "role": "Common DNS subdomain enumeration for standard recon."
+    },
+    {
+      "name": "dns_subdomains_medium",
+      "path": "server/share/wordlists/dns/subdomains_medium.txt",
+      "role": "Broader DNS subdomain enumeration when common lists are exhausted."
+    },
+    {
+      "name": "dns_subdomains_large",
+      "path": "server/share/wordlists/dns/subdomains_large.txt",
+      "role": "Large DNS brute-force list for deeper recon passes."
+    },
+    {
+      "name": "dns_subdomains_full",
+      "path": "server/share/wordlists/dns/subdomains_full.txt",
+      "role": "Max-coverage DNS brute-force list for exhaustive subdomain enumeration."
+    },
+    {
+      "name": "dns_resolvers",
+      "path": "server/share/wordlists/dns/resolvers.txt",
+      "role": "General DNS resolver list for enumeration tooling."
+    },
+    {
+      "name": "dns_resolvers_trusted",
+      "path": "server/share/wordlists/dns/resolvers_trusted.txt",
+      "role": "Trusted DNS resolvers for cleaner, lower-noise validation."
+    },
+    {
+      "name": "dns_names",
+      "path": "server/share/wordlists/dns/dns_names.txt",
+      "role": "Supplemental DNS name candidates."
+    },
+    {
+      "name": "dns_bitquark",
+      "path": "server/share/wordlists/dns/bitquark.txt",
+      "role": "Bitquark-style DNS candidate list for broader discovery."
+    },
+    {
+      "name": "dns_deepmagic",
+      "path": "server/share/wordlists/dns/deepmagic.txt",
+      "role": "Large DNS candidate set for deep subdomain coverage."
+    },
+    {
+      "name": "dns_fierce",
+      "path": "server/share/wordlists/dns/fierce.txt",
+      "role": "Fierce-compatible DNS wordlist."
+    },
+    {
+      "name": "dns_fuzz_common",
+      "path": "server/share/wordlists/dns-fuzz-common.txt",
+      "role": "Common DNS record/path fuzzing candidates."
+    },
+    {
+      "name": "dns_fuzz_small",
+      "path": "server/share/wordlists/dns-fuzz-small.txt",
+      "role": "Small DNS fuzzing list for fast validation."
+    },
+    {
+      "name": "web_files",
+      "path": "server/share/wordlists/web/files.txt",
+      "role": "Common web file names for content discovery and ffuf/gobuster passes."
+    },
+    {
+      "name": "web_folders",
+      "path": "server/share/wordlists/web/folders.txt",
+      "role": "Common web directory names for content discovery."
+    },
+    {
+      "name": "short_generic",
+      "path": "server/share/wordlists/short.txt",
+      "role": "Short generic wordlist for lightweight fuzzing."
+    },
+    {
+      "name": "medium_generic",
+      "path": "server/share/wordlists/medium.txt",
+      "role": "Medium generic wordlist for broader fuzzing."
+    },
+    {
+      "name": "large_generic",
+      "path": "server/share/wordlists/large.txt",
+      "role": "Large generic wordlist for deeper brute-force and fuzzing."
+    },
+    {
+      "name": "rockyou",
+      "path": "server/share/wordlists/rockyou.txt",
+      "role": "Password cracking and auth spraying where a larger credential list is justified."
+    }
+  ],
+  "seclists": [
+    {
+      "name": "usernames_top_shortlist",
+      "path": "server/share/seclists/Usernames/top-usernames-shortlist.txt",
+      "role": "Short username shortlist for focused auth checks."
+    },
+    {
+      "name": "usernames_default",
+      "path": "server/share/seclists/Usernames/default-usernames.txt",
+      "role": "Default username list for appliance and admin login testing."
+    },
+    {
+      "name": "usernames_cirt_default",
+      "path": "server/share/seclists/Usernames/cirt-default-usernames.txt",
+      "role": "CIRT-curated default usernames for service login checks."
+    },
+    {
+      "name": "usernames_names",
+      "path": "server/share/seclists/Usernames/Names/names.txt",
+      "role": "Name-based username candidates for larger auth assessments."
+    },
+    {
+      "name": "passwords_top_100_common",
+      "path": "server/share/seclists/Passwords/Common-Credentials/top-100-common.txt",
+      "role": "Short common-password list for cautious credential testing."
+    },
+    {
+      "name": "passwords_best1050",
+      "path": "server/share/seclists/Passwords/Common-Credentials/best1050.txt",
+      "role": "Broader common-password list for credential brute-force when justified."
+    },
+    {
+      "name": "passwords_10k_common",
+      "path": "server/share/seclists/Passwords/Common-Credentials/10k-most-common.txt",
+      "role": "Large common-password list for deeper auth testing."
+    },
+    {
+      "name": "passwords_top_20_ssh",
+      "path": "server/share/seclists/Passwords/Common-Credentials/top-20-common-SSH-passwords.txt",
+      "role": "SSH-focused password shortlist."
+    },
+    {
+      "name": "default_passwords",
+      "path": "server/share/seclists/Passwords/Default-Credentials/default-passwords.txt",
+      "role": "General default-password list for default credential assessment."
+    },
+    {
+      "name": "default_ftp_passwords",
+      "path": "server/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt",
+      "role": "FTP-specific default passwords."
+    },
+    {
+      "name": "default_mysql_passwords",
+      "path": "server/share/seclists/Passwords/Default-Credentials/mysql-betterdefaultpasslist.txt",
+      "role": "MySQL-specific default passwords."
+    },
+    {
+      "name": "default_postgres_passwords",
+      "path": "server/share/seclists/Passwords/Default-Credentials/postgres-betterdefaultpasslist.txt",
+      "role": "PostgreSQL-specific default passwords."
+    },
+    {
+      "name": "default_mssql_passwords",
+      "path": "server/share/seclists/Passwords/Default-Credentials/mssql-betterdefaultpasslist.txt",
+      "role": "MSSQL-specific default passwords."
+    },
+    {
+      "name": "default_ssh_passwords",
+      "path": "server/share/seclists/Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt",
+      "role": "SSH-specific default passwords."
+    },
+    {
+      "name": "default_tomcat_passwords",
+      "path": "server/share/seclists/Passwords/Default-Credentials/tomcat-betterdefaultpasslist.txt",
+      "role": "Tomcat-specific default passwords."
+    }
+  ]
+}

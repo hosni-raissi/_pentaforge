@@ -16,16 +16,23 @@ export interface ProjectTargetField {
 
 export interface ProjectShareLinkRequest {
   expires_hours: number;
-  password?: string;
+  password?: string | null;
   one_time: boolean;
 }
 
 export interface ProjectShareLinkResponse {
-  token: string;
+  ok: boolean;
   access_url: string;
+  tunnel_url?: string | null;
+  token: string;
+  project_id: string;
+  payload: string;
   expires_at: string;
   one_time: boolean;
   password_protected: boolean;
+  view_count: number;
+  revoked: boolean;
+  created_at: string;
 }
 
 export interface StartScanResponse {
@@ -198,6 +205,85 @@ export interface AIAssistResponse {
   };
 }
 
+export interface AIClearConversationRequest {
+  projectId: string;
+  target?: string;
+  targetType?: string;
+}
+
+const VISIBLE_AGENT_ORDER: Project["agents"][number]["name"][] = [
+  "planner",
+  "executer",
+  "analyzer",
+];
+
+const LEGACY_AGENT_TO_VISIBLE: Record<string, Project["agents"][number]["name"]> = {
+  analyzer: "analyzer",
+  executer: "executer",
+  exploit: "executer",
+  perceptor: "analyzer",
+  planner: "planner",
+  recon: "executer",
+  report: "analyzer",
+  retest: "analyzer",
+  verify: "analyzer",
+};
+
+const AGENT_STATE_RANK: Record<Project["agents"][number]["state"], number> = {
+  error: 5,
+  running: 4,
+  waiting: 3,
+  success: 2,
+  idle: 1,
+};
+
+function normalizeVisibleAgents(value: unknown): Project["agents"] {
+  const buckets = new Map<Project["agents"][number]["name"], Project["agents"][number]>();
+  for (const name of VISIBLE_AGENT_ORDER) {
+    buckets.set(name, { name, state: "idle" });
+  }
+
+  if (!Array.isArray(value)) {
+    return VISIBLE_AGENT_ORDER.map((name) => ({ ...buckets.get(name)! }));
+  }
+
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const rawName = typeof row.name === "string" ? row.name.trim().toLowerCase() : "";
+    const visibleName = LEGACY_AGENT_TO_VISIBLE[rawName];
+    if (!visibleName) {
+      continue;
+    }
+    const current = buckets.get(visibleName) ?? { name: visibleName, state: "idle" as const };
+    const rawState = row.state;
+    const normalizedState =
+      rawState === "idle"
+      || rawState === "running"
+      || rawState === "success"
+      || rawState === "error"
+      || rawState === "waiting"
+        ? rawState
+        : "idle";
+    if (AGENT_STATE_RANK[normalizedState] < AGENT_STATE_RANK[current.state]) {
+      continue;
+    }
+    buckets.set(visibleName, {
+      name: visibleName,
+      state: normalizedState,
+      currentTask: typeof row.currentTask === "string" ? row.currentTask : current.currentTask,
+      progress: typeof row.progress === "number" && Number.isFinite(row.progress)
+        ? row.progress
+        : current.progress,
+      lastUpdate: typeof row.lastUpdate === "string" ? row.lastUpdate : current.lastUpdate,
+    });
+  }
+
+  return VISIBLE_AGENT_ORDER.map((name) => ({ ...buckets.get(name)! }));
+}
+
 export function supportsDesktopProjectBridge(): boolean {
   const { serverUrl } = useConfig.getState();
   return serverUrl.trim().length > 0;
@@ -295,7 +381,7 @@ function normalizeProjectRow(value: unknown): Project | null {
       ? row.copilotContext
       : undefined,
     findings: Array.isArray(row.findings) ? (row.findings as Project["findings"]) : [],
-    agents: Array.isArray(row.agents) ? (row.agents as Project["agents"]) : [],
+    agents: normalizeVisibleAgents(row.agents),
     phases: Array.isArray(row.phases) ? (row.phases as Project["phases"]) : [],
     scanProgress: (
       typeof row.scanProgress === "number" && Number.isFinite(row.scanProgress)
@@ -323,7 +409,7 @@ function apiBaseUrl(): string {
 async function requestJson<T>(
   path: string,
   init?: RequestInit,
-  timeoutMs = 8000,
+  timeoutMs = 15000,
 ): Promise<T> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -334,12 +420,20 @@ async function requestJson<T>(
       headers.set("Content-Type", "application/json");
     }
 
-    const response = await fetch(`${apiBaseUrl()}${path}`, {
-      ...init,
-      credentials: "include",
-      headers,
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${apiBaseUrl()}${path}`, {
+        ...init,
+        credentials: "include",
+        headers,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+      }
+      throw error;
+    }
 
     if (!response.ok) {
       const body = await response.text();
@@ -349,6 +443,29 @@ async function requestJson<T>(
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+export interface SystemSettings {
+  privacy_gate: boolean;
+}
+
+export async function fetchSystemSettingsFromDesktop(): Promise<SystemSettings> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<SystemSettings>("/api/settings");
+}
+
+export async function updateSystemSettingsFromDesktop(
+  settings: SystemSettings,
+): Promise<{ ok: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson("/api/settings", {
+    method: "POST",
+    body: JSON.stringify(settings),
+  });
 }
 
 export async function listProjectsFromDesktop(): Promise<Project[]> {
@@ -445,6 +562,7 @@ export async function approvePlannerForProjectScanFromDesktop(
 
 export async function approveInformationGatheringForProjectScanFromDesktop(
   projectId: string,
+  modifiedProgram?: any[],
 ): Promise<{
   ok: boolean;
   project_id?: string;
@@ -460,6 +578,7 @@ export async function approveInformationGatheringForProjectScanFromDesktop(
     `/api/scans/${encodeURIComponent(projectId)}/approve-information-gathering`,
     {
       method: "POST",
+      body: modifiedProgram ? JSON.stringify({ modified_program: modifiedProgram }) : undefined,
     },
     120000,
   );
@@ -756,6 +875,7 @@ export async function createProjectShareLinkFromDesktop(
       method: "POST",
       body: JSON.stringify(payload),
     },
+    60000,
   );
 }
 
@@ -1029,7 +1149,24 @@ export async function askAIAssistFromDesktop(
       target_type: request.targetType ?? "",
       context: request.context ?? "",
     }),
-  }, 120000);
+  }, 180000);
+}
+
+export async function clearAIAssistConversationFromDesktop(
+  request: AIClearConversationRequest,
+): Promise<{ ok: boolean; project_id: string; scope_key: string; cleared: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+
+  return await requestJson("/api/ai/clear-conversation", {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: request.projectId,
+      target: request.target ?? "",
+      target_type: request.targetType ?? "",
+    }),
+  }, 30000);
 }
 
 export async function setIntelUpdateScheduleFromDesktop(
@@ -1095,4 +1232,186 @@ export async function getForceIntelUpdateStatusFromDesktop(
     updated_at: typeof payload.updated_at === "string" ? payload.updated_at : null,
     error: typeof payload.error === "string" ? payload.error : "",
   };
+}
+
+/* ── Report API ──────────────────────────────────────────── */
+
+export interface ReportStatus {
+  markdown: boolean;
+  html: boolean;
+  pdf: boolean;
+  generated_at: string | null;
+}
+
+export interface GenerateReportResponse {
+  ok: boolean;
+  report_id: string;
+  format: string;
+  created_at: string;
+}
+
+export interface ReportContentResponse {
+  ok: boolean;
+  format: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export async function generateReportFromDesktop(
+  projectId: string,
+): Promise<GenerateReportResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<GenerateReportResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/reports/generate`,
+    { method: "POST" },
+    180000,
+  );
+}
+
+export async function getReportStatusFromDesktop(
+  projectId: string,
+): Promise<ReportStatus> {
+  if (!supportsDesktopProjectBridge()) {
+    return { markdown: false, html: false, pdf: false, generated_at: null };
+  }
+  const payload = await requestJson<Partial<ReportStatus>>(
+    `/api/projects/${encodeURIComponent(projectId)}/reports/status`,
+  );
+  return {
+    markdown: typeof payload.markdown === "boolean" ? payload.markdown : false,
+    html: typeof payload.html === "boolean" ? payload.html : false,
+    pdf: typeof payload.pdf === "boolean" ? payload.pdf : false,
+    generated_at: typeof payload.generated_at === "string" ? payload.generated_at : null,
+  };
+}
+
+export async function getReportContentFromDesktop(
+  projectId: string,
+  format: "markdown" | "html",
+): Promise<ReportContentResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<ReportContentResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/reports/${encodeURIComponent(format)}`,
+  );
+}
+
+export async function downloadReportBlobFromDesktop(
+  projectId: string,
+  format: "markdown" | "html",
+): Promise<{ content: string; filename: string; mimeType: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  const report = await getReportContentFromDesktop(projectId, format);
+  const ext = format === "html" ? "html" : "md";
+  const mime = format === "html" ? "text/html" : "text/markdown";
+  return {
+    content: report.content,
+    filename: `pentaforge-report-${projectId.slice(0, 8)}.${ext}`,
+    mimeType: mime,
+  };
+}
+
+export async function createShareLinkFromDesktop(
+  projectId: string,
+  payload: { expires_hours: number; password?: string; one_time: boolean },
+): Promise<{ ok: boolean; access_url: string; token: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/share-links`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export interface ClientMessage {
+  id: string;
+  project_id: string;
+  sender: "client" | "pentester";
+  content: string;
+  created_at: string;
+}
+
+export interface PentesterMessagesResponse {
+  messages: ClientMessage[];
+  client_typing: boolean;
+}
+
+export async function getPentesterMessagesFromDesktop(
+  projectId: string,
+): Promise<PentesterMessagesResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<PentesterMessagesResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/messages`,
+  );
+}
+
+export async function setPentesterTypingFromDesktop(
+  projectId: string,
+): Promise<{ ok: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/typing`,
+    { method: "POST" },
+  );
+}
+
+export async function getActiveShareLinkFromDesktop(
+  projectId: string,
+): Promise<ProjectShareLinkResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<ProjectShareLinkResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/share-link`,
+  );
+}
+
+export async function stopTunnelFromDesktop(): Promise<{ ok: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson("/api/tunnel/stop", { method: "POST" });
+}
+
+export async function revokeShareLinksFromDesktop(
+  projectId: string,
+): Promise<{ ok: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/share-links/revoke`,
+    { method: "POST" },
+  );
+}
+
+export async function sendPentesterMessageFromDesktop(
+  projectId: string,
+  content: string,
+  sender: "client" | "pentester" = "pentester",
+): Promise<{ ok: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify({ content, sender }),
+    },
+  );
 }

@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
+from server.agents.executer.sandbox import get_sandbox_root
+
 
 # ══════════════════════════════════════════════════════════════
 # 1. POLICY — Block only destructive/system-modifying commands
@@ -149,6 +151,7 @@ class RunCustomResult(BaseModel):
     return_code: Optional[int] = None
     execution_time: float = 0.0
     logged: bool = True
+    execution_cwd: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -487,6 +490,10 @@ def safe_execute(
         return "", str(exc), -1
 
 
+def _effective_command_cwd() -> str:
+    return str(get_sandbox_root())
+
+
 # ══════════════════════════════════════════════════════════════
 # 5. MAIN TOOL FUNCTION
 # ══════════════════════════════════════════════════════════════
@@ -518,7 +525,7 @@ def run_custom(
         args:     Argument list — no shell metacharacters.
         timeout:  Execution timeout in seconds (5–300).
         env:      Extra environment variables.
-        cwd:      Working directory for the subprocess.
+        cwd:      Ignored for safety. Commands always run from server/sandbox.
 
     Returns:
         Structured dict with stdout, stderr, return_code, execution_time.
@@ -610,11 +617,12 @@ def run_custom(
             ).model_dump()
 
     # ── Execute ───────────────────────────────────────────────
+    execution_cwd = _effective_command_cwd()
     stdout, stderr, rc = safe_execute(
         cmd,
         timeout=req.timeout,
         extra_env=req.env or None,
-        cwd=req.cwd,
+        cwd=execution_cwd,
         password=password,
     )
 
@@ -629,6 +637,7 @@ def run_custom(
         return_code=rc,
         execution_time=round(time.time() - start, 2),
         logged=True,
+        execution_cwd=execution_cwd,
         error=None if rc == 0 else f"Exited with code {rc}",
     ).model_dump()
 
@@ -656,7 +665,8 @@ RUN_CUSTOM_TOOL_DEFINITION = {
         "No command whitelist — nmap, sqlmap, ffuf, nikto, gobuster, hydra, metasploit, "
         "nuclei, trivy, semgrep, wfuzz, and others are all permitted. "
         "Destructive system commands (rm, chmod, shutdown…) and shell injection are blocked. "
-        "Every call requires a reason and is audit-logged."
+        "Every call requires a reason and is audit-logged. "
+        "Commands always execute from server/sandbox and should prefer prompt-supplied local resource paths."
     ),
     "parameters": {
         "type": "object",
@@ -680,7 +690,7 @@ RUN_CUSTOM_TOOL_DEFINITION = {
                     "Argument list — no shell metacharacters (; | & > < ` $()). Examples:\n"
                     "nmap:     ['-sV', '-p', '1-65535', '10.0.0.1']\n"
                     "sqlmap:   ['-u', 'http://target/page?id=1', '--dbs']\n"
-                    "ffuf:     ['-u', 'http://target/FUZZ', '-w', '/wordlists/common.txt']\n"
+                    "ffuf:     ['-u', 'http://target/FUZZ', '-w', '<local-catalog-wordlist-path>']\n"
                     "nuclei:   ['-u', 'http://target', '-t', 'cves/']\n"
                     "openssl:  ['s_client', '-connect', 'target:443']\n"
                     "curl:     ['-I', '-s', 'https://target.com']"
@@ -697,7 +707,7 @@ RUN_CUSTOM_TOOL_DEFINITION = {
             },
             "cwd": {
                 "type": "string",
-                "description": "Optional working directory for the subprocess.",
+                "description": "Ignored for safety. Commands always execute from server/sandbox root.",
             },
         },
         "required": ["command", "reason"],

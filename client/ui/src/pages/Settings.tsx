@@ -18,6 +18,8 @@ import {
   listIntelUpdateStatusFromDesktop,
   setIntelUpdateScheduleFromDesktop,
   updateIntelResourceFromDesktop,
+  fetchSystemSettingsFromDesktop,
+  updateSystemSettingsFromDesktop,
   type IntelForceUpdateStatus,
   type IntelResource,
   type IntelTargetTypeOption,
@@ -267,6 +269,30 @@ export default function Settings() {
     }, 1500);
     return () => window.clearInterval(timer);
   }, [showForceUpdatePanel, forceUpdateStatus, loadForceUpdateStatus]);
+
+  // Synchronize PrivacyGate settings with backend
+  useEffect(() => {
+    async function sync() {
+      try {
+        const remote = await fetchSystemSettingsFromDesktop();
+        if (remote.privacy_gate !== config.privacyGate) {
+          config.updateConfig({ privacy_gate: remote.privacy_gate } as any);
+        }
+      } catch (err) {
+        console.error("Failed to sync system settings:", err);
+      }
+    }
+    void sync();
+  }, []);
+
+  const handleTogglePrivacyGate = useCallback(async (next: boolean) => {
+    config.updateConfig({ privacyGate: next });
+    try {
+      await updateSystemSettingsFromDesktop({ privacy_gate: next });
+    } catch (err) {
+      console.error("Failed to update backend privacy gate setting:", err);
+    }
+  }, [config]);
 
   const typeFilterOptions = useMemo(() => {
     const values = new Set<string>();
@@ -588,7 +614,7 @@ export default function Settings() {
   }
 
   return (
-    <div className="mx-auto flex h-full min-h-0 max-w-5xl flex-col gap-4">
+    <div className="mx-auto flex h-full min-h-0 max-w-5xl flex-col gap-4 p-4">
       <h1 className="text-lg font-bold text-text-primary">Settings</h1>
       <Tabs
         className="min-h-0 flex-1"
@@ -674,14 +700,9 @@ export default function Settings() {
             content: (
               <Card className="space-y-3">
                 <Toggle
-                  checked={config.autoApprove}
-                  onChange={(next) => config.updateConfig({ autoApprove: next })}
-                  label="Auto-approve low-risk actions"
-                />
-                <Toggle
-                  checked={config.stealthMode}
-                  onChange={(next) => config.updateConfig({ stealthMode: next })}
-                  label="Stealth mode"
+                  checked={config.privacyGate}
+                  onChange={handleTogglePrivacyGate}
+                  label="PrivacyGate (LLM Anonymization)"
                 />
               </Card>
             )

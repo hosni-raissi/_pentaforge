@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from server.agents.assistant import AssistantAgent
 from server.api.dependencies import projects_store
 from server.layers.safety.prompt_guard import PromptInjectionGuard
+from server.utils.target_scope import normalize_target_scope
 
 router = APIRouter(tags=["ai"])
 
@@ -25,20 +26,31 @@ class AIAssistPayload(BaseModel):
     target_type: str = Field(default="", max_length=120)
     context: str = Field(default="", max_length=12000)
 
+
+class AIClearConversationPayload(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    target: str = Field(default="", max_length=2048)
+    target_type: str = Field(default="", max_length=120)
+
 @router.post("/api/ai/assist")
 async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
     prompt = payload.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    scope_key = normalize_target_scope(payload.target, payload.target_type)
     saved_context = ""
     saved_history: list[dict[str, object]] = []
     if payload.project_id:
         project = projects_store.get_project(payload.project_id)
         if isinstance(project, dict):
-            saved_context = str(project.get("copilotContext", "") or "").strip()
+            if str(project.get("copilotContextScope", "")).strip() == scope_key:
+                saved_context = str(project.get("copilotContext", "") or "").strip()
             raw_history = project.get("copilotHistory", [])
-            if isinstance(raw_history, list):
+            if (
+                str(project.get("copilotHistoryScope", "")).strip() == scope_key
+                and isinstance(raw_history, list)
+            ):
                 saved_history = [
                     item for item in raw_history
                     if isinstance(item, dict)
@@ -79,6 +91,7 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
                         "blocked": True,
                     },
                 ],
+                scope_key=scope_key,
             )
         return {
             "ok": True,
@@ -129,10 +142,12 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
                         "blocked": False,
                     },
                 ],
+                scope_key=scope_key,
             )
             projects_store.update_project_copilot_context(
                 payload.project_id,
                 saved_context,
+                scope_key=scope_key,
             )
         return {
             "ok": True,
@@ -162,10 +177,12 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
                     "blocked": False,
                 },
             ],
+            scope_key=scope_key,
         )
         projects_store.update_project_copilot_context(
             payload.project_id,
             result.next_context,
+            scope_key=scope_key,
         )
 
     return {
@@ -180,4 +197,23 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
             "classifier": decision.classifier,
             "detections": decision.detections,
         },
+    }
+
+
+@router.post("/api/ai/clear-conversation")
+async def clear_ai_conversation(payload: AIClearConversationPayload) -> dict[str, object]:
+    scope_key = normalize_target_scope(payload.target, payload.target_type)
+    project = projects_store.get_project(payload.project_id)
+    if not isinstance(project, dict):
+        raise HTTPException(status_code=404, detail="project not found")
+
+    projects_store.clear_project_copilot_state(
+        payload.project_id,
+        scope_key=scope_key,
+    )
+    return {
+        "ok": True,
+        "project_id": payload.project_id,
+        "scope_key": scope_key,
+        "cleared": True,
     }

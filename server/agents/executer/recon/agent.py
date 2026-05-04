@@ -2,25 +2,117 @@
 
 from __future__ import annotations
 
+import json
+
 from server.agents.executer.base import BaseExecuterAgent, ExecuterCallback, ExecuterResult
+from server.agents.executer.resource_catalog import (
+    format_executer_resource_catalog_for_prompt,
+)
 from server.agents.executer.target_tool_routing import (
     filter_tools_for_target_types,
     normalize_target_types,
 )
+from server.agents.executer.recon.tools.api.security_tools import API_RECON_TOOLS
+from server.agents.executer.recon.tools.cloud.security_tools import CLOUD_RECON_TOOLS
+from server.agents.executer.recon.tools.container.security_tools import CONTAINER_RECON_TOOLS
+from server.agents.executer.recon.tools.infra.security_tools import INFRA_RECON_TOOLS
+from server.agents.executer.recon.tools.iot.security_tools import IOT_RECON_TOOLS
+from server.agents.executer.recon.tools.mobile.security_tools import MOBILE_APP_RECON_TOOLS
+from server.agents.executer.recon.tools.network.security_tools import NETWORK_RECON_TOOLS
+from server.agents.executer.recon.tools.repository.security_tools import REPOSITORY_RECON_TOOLS
+from server.agents.executer.recon.tools.server.security_tools import SERVER_RECON_TOOLS
+from server.agents.executer.recon.tools.web.security_tools import WEB_RECON_TOOLS
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
 from .config import (
     LLM_CALL_TIMEOUT_SECONDS,
     MAX_TOOL_ROUNDS,
-    RECON_CONTEXT_WINDOW_MAX_TOKENS,
-    RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS,
     RECON_MAX_TOOL_CALLS_PER_ROUND,
     RECON_TOOL_EXECUTION_TIMEOUT_SECONDS,
     WARMUP_RECON_MAX_TOOL_CALLS_PER_ROUND,
 )
-from .context_window import RECON_CONTEXT_WINDOW_KEY
 from .prompts import SYSTEM_PROMPT
 from .tools import ALL_RECON_TOOLS
+
+_RECON_RUN_CUSTOM_CATALOG_BY_SCOPE: dict[str, dict[str, dict[str, object]]] = {
+    "web": WEB_RECON_TOOLS,
+    "api": API_RECON_TOOLS,
+    "network": NETWORK_RECON_TOOLS,
+    "infra": INFRA_RECON_TOOLS,
+    "server": SERVER_RECON_TOOLS,
+    "mobile": MOBILE_APP_RECON_TOOLS,
+    "cloud": CLOUD_RECON_TOOLS,
+    "container": CONTAINER_RECON_TOOLS,
+    "repository": REPOSITORY_RECON_TOOLS,
+    "iot": IOT_RECON_TOOLS,
+}
+
+_RECON_TARGET_TYPE_SCOPE_MATRIX: dict[str, tuple[str, ...]] = {
+    "web_app": ("web",),
+    "api": ("api",),
+    "network": ("network",),
+    "infra": ("infra",),
+    "linux_server": ("server",),
+    "mobile": ("mobile",),
+    "desktop": (),
+    "cloud": ("cloud",),
+    "container": ("container",),
+    "repository": ("repository",),
+    "iot": ("iot",),
+}
+
+
+def build_recon_run_custom_catalog_for_target_types(
+    target_types: list[str] | None,
+) -> dict[str, dict[str, object]]:
+    normalized = normalize_target_types(target_types)
+    if not normalized:
+        return {}
+
+    scopes: list[str] = []
+    for target_type in normalized:
+        for scope in _RECON_TARGET_TYPE_SCOPE_MATRIX.get(target_type, ()):
+            if scope not in scopes:
+                scopes.append(scope)
+
+    merged: dict[str, dict[str, object]] = {}
+    for scope in scopes:
+        source = _RECON_RUN_CUSTOM_CATALOG_BY_SCOPE.get(scope)
+        if not source:
+            continue
+        for tool_name, meta in source.items():
+            merged[tool_name] = dict(meta)
+    return merged
+
+
+def build_recon_scoped_prompt(target_types: list[str] | None) -> str:
+    run_custom_catalog = build_recon_run_custom_catalog_for_target_types(target_types)
+    local_resource_catalog = format_executer_resource_catalog_for_prompt()
+    scope_text = ", ".join(str(x).strip() for x in (target_types or []) if str(x).strip())
+    scoped_prompt = SYSTEM_PROMPT
+    if scope_text:
+        scoped_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"Target surface scope for this run: {scope_text}. "
+            "Only work on active surfaces unless tool evidence discovers a new surface."
+        )
+    if run_custom_catalog:
+        scoped_prompt = (
+            f"{scoped_prompt}\n\n"
+            "run_custom command catalog for this target scope:\n"
+            f"{json.dumps(run_custom_catalog, ensure_ascii=True, sort_keys=True, indent=2)}\n"
+            "For external security CLIs from this catalog, use "
+            "run_custom(command=..., args=[...], reason=...). "
+            "Treat the catalog as guidance for what tools are appropriate in this scope."
+        )
+    scoped_prompt = (
+        f"{scoped_prompt}\n\n"
+        "Preferred local executer resource catalog for this repository:\n"
+        f"{local_resource_catalog}\n"
+        "Prefer these project-local checklist, wordlist, and seclist paths over generic "
+        "OS defaults such as /usr/share/... or /opt/wordlists."
+    )
+    return scoped_prompt
 
 
 class ReconExecuterAgent(BaseExecuterAgent):
@@ -58,14 +150,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
             tools=ALL_RECON_TOOLS,
             target_types=target_types,
         )
-        scope_text = ", ".join(str(x).strip() for x in (target_types or []) if str(x).strip())
-        scoped_prompt = SYSTEM_PROMPT
-        if scope_text:
-            scoped_prompt = (
-                f"{SYSTEM_PROMPT}\n\n"
-                f"Target surface scope for this run: {scope_text}. "
-                "Only work on active surfaces unless tool evidence discovers a new surface."
-            )
+        scoped_prompt = build_recon_scoped_prompt(target_types)
         super().__init__(
             role="recon",
             system_prompt=scoped_prompt,
@@ -79,8 +164,6 @@ class ReconExecuterAgent(BaseExecuterAgent):
             local_config=local_config,
             project_id=project_id,
             project_cache_dir=project_cache_dir,
-            context_window_key=RECON_CONTEXT_WINDOW_KEY,
-            context_window_max_tokens=RECON_CONTEXT_WINDOW_MAX_TOKENS,
         )
 
     async def run(
@@ -89,16 +172,14 @@ class ReconExecuterAgent(BaseExecuterAgent):
         *,
         max_tool_rounds_override: int | None = None,
     ) -> ExecuterResult:
-        context_block = "Context window disabled (missing project_id)."
-        if self._context_window is not None:
-            await self._context_window.ensure_token_budget(
-                threshold_tokens=RECON_CONTEXT_WINDOW_SEND_THRESHOLD_TOKENS
-            )
-            snapshot = self._context_window.snapshot()
-            context_block = format_recon_context_for_packet(snapshot)
+        context_block = "Project memory system is authoritative for prior findings; no legacy context window is used."
 
         available_tools = sorted(self._tools.keys())
         normalized_targets = normalize_target_types(self._target_types)
+        run_custom_catalog = sorted(
+            build_recon_run_custom_catalog_for_target_types(self._target_types).keys()
+        )
+        local_resource_catalog = format_executer_resource_catalog_for_prompt()
         max_tool_calls_for_run = _max_tool_calls_per_round_for_message(user_message)
         max_rounds_for_run = (
             min(3, max(1, int(max_tool_rounds_override)))
@@ -110,6 +191,8 @@ class ReconExecuterAgent(BaseExecuterAgent):
             context_block=context_block,
             available_tools=available_tools,
             target_types=normalized_targets,
+            run_custom_catalog=run_custom_catalog,
+            local_resource_catalog=local_resource_catalog,
             max_tool_calls_per_round=max_tool_calls_for_run,
             max_rounds_per_scenario=max_rounds_for_run,
         )
@@ -137,39 +220,23 @@ def _max_tool_calls_per_round_for_message(user_message: str) -> int:
         return WARMUP_RECON_MAX_TOOL_CALLS_PER_ROUND
     return RECON_MAX_TOOL_CALLS_PER_ROUND
 
-
-def format_recon_context_for_packet(snapshot: dict[str, object], max_entries: int = 8) -> str:
-    estimated = int(snapshot.get("estimated_tokens", 0) or 0)
-    max_t = int(snapshot.get("max_tokens", RECON_CONTEXT_WINDOW_MAX_TOKENS) or RECON_CONTEXT_WINDOW_MAX_TOKENS)
-    entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
-    if not isinstance(entries, list) or not entries:
-        return f"Context window tokens: {estimated}/{max_t}\nNo stored context window entries."
-
-    lines: list[str] = [f"Context window tokens: {estimated}/{max_t}"]
-    for item in entries[-max_entries:]:
-        if not isinstance(item, dict):
-            continue
-        kind = str(item.get("kind", "note"))
-        role = str(item.get("role", "assistant"))
-        content = str(item.get("content", "")).strip()
-        if len(content) > 260:
-            content = content[:260] + "..."
-        if content:
-            lines.append(f"- [{kind}/{role}] {content}")
-    if len(lines) == 1:
-        lines.append("No stored context window entries.")
-    return "\n".join(lines)
-
-
 def build_recon_scenario_packet(
     *,
     scenario_and_target: str,
     context_block: str,
     available_tools: list[str],
     target_types: list[str],
+    run_custom_catalog: list[str],
+    local_resource_catalog: str = "",
     max_tool_calls_per_round: int,
     max_rounds_per_scenario: int,
 ) -> str:
+    local_catalog_block = (
+        "Preferred local executer resource catalog:\n"
+        f"{local_resource_catalog}\n\n"
+        if local_resource_catalog
+        else ""
+    )
     return (
         "Recon scenario packet:\n"
         "1) Scenario + target info from operator follows below.\n"
@@ -180,11 +247,15 @@ def build_recon_scenario_packet(
         "5) If another round remains after this one, carry forward a concise summary of what ran and what was found before choosing the next tools.\n"
         "6) After the last allowed tool round, the system will forward collected evidence and round summaries to the perceptor.\n"
         "7) Always update context window with new findings each round.\n\n"
+        "8) If scenario info includes recommended product tooling or nuclei hints, prefer that selective path over broad generic scanning.\n\n"
         "Current context window:\n"
         f"{context_block}\n\n"
         f"Target surface scope for this run: {', '.join(target_types) if target_types else 'unspecified'}\n\n"
         "Available callable tools in this run:\n"
         f"{', '.join(available_tools)}\n\n"
+        "run_custom catalog security tools for this scope:\n"
+        f"{', '.join(run_custom_catalog) if run_custom_catalog else 'none'}\n\n"
+        f"{local_catalog_block}"
         "Scenario + target info:\n"
         f"{scenario_and_target}"
     )

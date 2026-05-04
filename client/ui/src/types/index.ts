@@ -2,9 +2,12 @@
 
 export type ProjectStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error';
 export type SeverityLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
-export type AgentName = 'planner' | 'recon' | 'exploit' | 'verify' | 'report' | 'retest';
+export type AgentName = 'planner' | 'executer' | 'analyzer';
 export type AgentState = 'idle' | 'running' | 'success' | 'error' | 'waiting';
 export type PhaseName = 'Reconnaissance' | 'Enumeration' | 'Exploitation' | 'Post-Exploitation' | 'Reporting';
+export type FindingStatus = 'open' | 'verified' | 'fixed' | 'false_positive';
+export type FindingEvidenceStatus = 'suspicion' | 'evidence_backed' | 'confirmed';
+export type FindingProofQuality = 'weak' | 'moderate' | 'strong';
 
 export interface CopilotMessage {
   id: string;
@@ -38,6 +41,8 @@ export interface Project {
     status?: string;
     startedAt?: string;
     finishedAt?: string;
+    elapsedSeconds?: number;
+    durationSeconds?: number;
     error?: string;
     result?: {
       target?: string;
@@ -73,13 +78,34 @@ export interface Finding {
   severity: SeverityLevel;
   category: string;
   target: string;
-  status: 'open' | 'verified' | 'fixed' | 'false_positive';
+  status: FindingStatus;
   cvss?: number;
   cve?: string;
   description: string;
-  evidence?: string;
+  evidence?: FindingEvidence;
+  evidenceStatus?: FindingEvidenceStatus;
+  proofQuality?: FindingProofQuality;
+  deterministicValidation?: boolean;
+  verificationMethods?: string[];
   remediation?: string;
   timestamp: string;
+}
+
+export interface FindingEvidence {
+  verification_summary?: string;
+  verification_confidence?: number;
+  evidence_status?: FindingEvidenceStatus;
+  proof_quality?: FindingProofQuality;
+  deterministic_validation?: boolean;
+  verification_methods?: string[];
+  oob_confirmed?: boolean;
+  protocol?: string;
+  remote_address?: string;
+  callbacks?: Array<Record<string, unknown>>;
+  commands?: string[];
+  tools_used?: string[];
+  artifact_quality?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 export interface AgentInfo {
@@ -116,6 +142,6 @@ export interface AppConfig {
   activeLLM: string;
   serverUrl: string;
   serverPort: number;
-  autoApprove: boolean;
-  stealthMode: boolean;
+  privacyGate: boolean;
+  isAssistantOpen: boolean;
 }

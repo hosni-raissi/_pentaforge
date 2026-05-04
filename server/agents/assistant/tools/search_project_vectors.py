@@ -13,12 +13,16 @@ async def search_project_vectors(
     query: str,
     limit: int = 5,
     kinds: list[str] | None = None,
+    target: str = "",
+    target_type: str = "",
 ) -> dict[str, Any]:
     return await search_project_rag(
         project_id=project_id,
         query=query,
         limit=limit,
         kinds=kinds,
+        target=target,
+        target_type=target_type,
     )
 
 
@@ -31,13 +35,9 @@ ASSISTANT_SEARCH_PROJECT_VECTORS_TOOL_DEFINITION = {
     "parameters": {
         "type": "object",
         "properties": {
-            "project_id": {
-                "type": "string",
-                "description": "Current project id. Use the active project id from context.",
-            },
             "query": {
                 "type": "string",
-                "description": "The specific question or search phrase about saved project vulnerabilities or memory.",
+                "description": "The specific question or search phrase about saved project vulnerabilities or memory for the active target only.",
             },
             "limit": {
                 "type": "integer",

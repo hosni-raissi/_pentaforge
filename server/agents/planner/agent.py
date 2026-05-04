@@ -41,6 +41,7 @@ from server.core.llm import ChatMessage, LLMClient
 from server.core.tool import Tool, coerce_args_from_schema
 from server.agents.rate_limiter import get_global_llm_queue, get_backup_llm_fallback
 from .config import (
+    CHECKLIST_MAX_TOOL_ROUNDS,
     PLANNER_CHECKLIST_WINDOW_MAX_ITEMS,
     PLANNER_CHECKLIST_WINDOW_MAX_ITEMS_PER_PHASE,
     PLANNER_CHECKLIST_SUMMARY_MAX_CHANGED_ITEMS,
@@ -57,11 +58,11 @@ from .config import (
     _RETRY_JITTER_MAX,
     _TRANSIENT_EXCEPTIONS,
 )
-from .context_window import build_planner_context_window
 from .context_builder import PlannerContextBuilder
 from .prompts import (
     CHECKLIST_GENERATOR_SYSTEM_PROMPT,
     PLAN_CREATE_UPDATE_SYSTEM_PROMPT,
+    render_planner_prompt,
 )
 from .tools import ALL_PLANNER_TOOLS
 from .tools.pentest_plan import _current_plan, update_pentest_plan
@@ -157,6 +158,15 @@ def _dict_to_msg(d: dict[str, Any]) -> ChatMessage:
 def _needs_nothink(model_name: str) -> bool:
     lowered = model_name.lower()
     return "qwen3" in lowered or "qwen-3" in lowered
+
+
+def _planner_kb_domain_for_target_type(target_type: str) -> str:
+    normalized = normalize_target_type(target_type) or "shared"
+    if normalized == "infra":
+        return "linux_server"
+    if normalized == "container":
+        return "cloud"
+    return normalized if normalized != "desktop" else "shared"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -588,10 +598,8 @@ def _normalize_scenario_agent(scenario: dict[str, Any]) -> dict[str, Any]:
     if agent in {"verify", "retest"}:
         normalized["agent"] = "exploit"
         return normalized
-    if agent == "reporting":
-        normalized["agent"] = "report"
-        return normalized
-    if agent == "report":
+    if agent in {"reporting", "report"}:
+        normalized["agent"] = "exploit"
         return normalized
 
     task = str(normalized.get("task", "")).lower()
@@ -644,13 +652,11 @@ def _normalize_scenario_agent(scenario: dict[str, Any]) -> dict[str, Any]:
 
     if has_recon and not has_exploit:
         normalized["agent"] = "recon"
-    elif has_exploit and agent not in {"report"}:
+    elif has_exploit:
         normalized["agent"] = "exploit"
-    elif agent == "report":
-        normalized["agent"] = "report"
     elif not agent:
         normalized["agent"] = "recon"
-    elif agent not in {"recon", "exploit", "report"}:
+    elif agent not in {"recon", "exploit"}:
         normalized["agent"] = "exploit" if has_exploit else "recon"
 
     return normalized
@@ -918,8 +924,8 @@ def _normalize_dispatch_items(dispatch_items: list[dict[str, Any]]) -> list[dict
         entry = dict(item)
         agent = str(entry.get("agent") or entry.get("role") or "").strip().lower()
         if agent == "reporting":
-            agent = "report"
-        if agent not in {"recon", "exploit", "report"}:
+            agent = "exploit"
+        if agent not in {"recon", "exploit"}:
             continue
         entry["agent"] = agent
         target_type = normalize_target_type(
@@ -1112,6 +1118,25 @@ def _is_plan_payload(data: Any) -> bool:
     return isinstance(phases, list)
 
 
+def _extract_plan_candidate_from_parsed(data: Any) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    if _is_plan_payload(data):
+        return data
+
+    plan_obj = data.get("plan")
+    if _is_plan_payload(plan_obj):
+        return plan_obj
+
+    action_plan = data.get("action_plan")
+    if isinstance(action_plan, dict):
+        nested_plan = action_plan.get("plan")
+        if _is_plan_payload(nested_plan):
+            return nested_plan
+
+    return None
+
+
 def _extract_json_object_at(text: str, start_idx: int) -> str | None:
     if start_idx < 0 or start_idx >= len(text) or text[start_idx] != "{":
         return None
@@ -1149,17 +1174,9 @@ def _extract_plan_from_text(raw: str) -> dict[str, Any] | None:
     # 1) Full text is JSON
     try:
         parsed = json.loads(text)
-        if _is_plan_payload(parsed):
-            return parsed
-        if isinstance(parsed, dict):
-            plan_obj = parsed.get("plan")
-            if _is_plan_payload(plan_obj):
-                return plan_obj
-            action_plan = parsed.get("action_plan")
-            if isinstance(action_plan, dict):
-                nested_plan = action_plan.get("plan")
-                if _is_plan_payload(nested_plan):
-                    return nested_plan
+        extracted = _extract_plan_candidate_from_parsed(parsed)
+        if extracted is not None:
+            return extracted
     except (json.JSONDecodeError, TypeError):
         pass
 
@@ -1170,17 +1187,9 @@ def _extract_plan_from_text(raw: str) -> dict[str, Any] | None:
             continue
         try:
             parsed = json.loads(candidate)
-            if _is_plan_payload(parsed):
-                return parsed
-            if isinstance(parsed, dict):
-                plan_obj = parsed.get("plan")
-                if _is_plan_payload(plan_obj):
-                    return plan_obj
-                action_plan = parsed.get("action_plan")
-                if isinstance(action_plan, dict):
-                    nested_plan = action_plan.get("plan")
-                    if _is_plan_payload(nested_plan):
-                        return nested_plan
+            extracted = _extract_plan_candidate_from_parsed(parsed)
+            if extracted is not None:
+                return extracted
         except (json.JSONDecodeError, TypeError):
             continue
 
@@ -1196,8 +1205,9 @@ def _extract_plan_from_text(raw: str) -> dict[str, Any] | None:
                 break
             try:
                 parsed = json.loads(obj_text)
-                if _is_plan_payload(parsed):
-                    return parsed
+                extracted = _extract_plan_candidate_from_parsed(parsed)
+                if extracted is not None:
+                    return extracted
             except (json.JSONDecodeError, TypeError):
                 pass
             start = text.rfind("{", 0, start)
@@ -1773,10 +1783,7 @@ class PlannerAgent:
             self._llm = LLMClient(self._config, mode="public", client_name="planner")
             self._model_name = self._config.model
 
-        self._context_window = build_planner_context_window(
-            project_id=project_id,
-            llm=self._llm,
-        )
+        self._context_window = None
 
         # Initialize context builder if stores are available
         if self._projects_store and self._vector_store:
@@ -1806,21 +1813,113 @@ class PlannerAgent:
         target_type: str = "",
     ) -> PlannerChecklistResult:
         self._cb.on_step("Planner checklist generator starting")
-        system_content = CHECKLIST_GENERATOR_SYSTEM_PROMPT
+
+        project = self._projects_store.get_project(self._project_id) if self._projects_store else {}
+        if not isinstance(project, dict): project = {}
+        engagement_type = project.get("engagement_type", "pentest")
+        target = project.get("target", "")
+        scope = project.get("scope", "")
+        last_scan = project.get("lastScan", {}) if isinstance(project.get("lastScan"), dict) else {}
+        scan_result = last_scan.get("result", {}) if isinstance(last_scan.get("result"), dict) else {}
+        brain = scan_result.get("system_memory", {}) if isinstance(scan_result.get("system_memory"), dict) else {}
+        plan_state = last_scan.get("plan", {}) if isinstance(last_scan.get("plan"), dict) else {}
+        fallback_checklist = current_checklist if isinstance(current_checklist, dict) else {}
+        
+        system_content = render_planner_prompt(
+            CHECKLIST_GENERATOR_SYSTEM_PROMPT,
+            engagement_type=engagement_type,
+            target=target,
+            scope=scope,
+            brain=brain,
+            checklist_state=fallback_checklist,
+            plan_state=plan_state,
+        )
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content
-        fallback_checklist = current_checklist if isinstance(current_checklist, dict) else {}
+
+        checklist_tool_schemas = self._checklist_tool_schemas()
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_message},
+        ]
+        round_cap = max(1, int(CHECKLIST_MAX_TOOL_ROUNDS))
+        last_content = ""
+
         try:
-            response = await self._llm.chat(
-                [
-                    ChatMessage(role="system", content=system_content),
-                    ChatMessage(role="user", content=user_message),
-                ],
-                temperature=0,
-                max_tokens=min(PLANNER_MAX_TOKENS_PER_REQUEST, 5000),
-            )
+            for round_count in range(1, round_cap + 1):
+                self._cb.on_step(
+                    f"Checklist LLM Round {round_count}/{round_cap}"
+                )
+
+                round_messages = list(messages)
+                tools_for_call = checklist_tool_schemas
+                if round_count >= round_cap:
+                    round_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Final round: return strict JSON now with keys "
+                                "`status` and `checklist`. Do not call any tools."
+                            ),
+                        }
+                    )
+                    tools_for_call = None
+
+                response = await self._llm.chat(
+                    [_dict_to_msg(m) for m in round_messages],
+                    tools=tools_for_call,
+                    temperature=0,
+                    max_tokens=min(PLANNER_MAX_TOKENS_PER_REQUEST, 5000),
+                )
+
+                raw_content = response.content or ""
+                tool_calls = response.tool_calls or []
+                if not tool_calls and raw_content:
+                    cleaned_content, inline_calls = _extract_inline_tool_calls(raw_content)
+                    if inline_calls:
+                        tool_calls = inline_calls
+                        raw_content = cleaned_content
+                        self._cb.on_warn("Recovered inline checklist tool-call from text.")
+
+                last_content = raw_content
+                if tool_calls and tools_for_call:
+                    tool_names = [tc["function"]["name"] for tc in tool_calls]
+                    self._cb.on_step(
+                        f"Checklist round {round_count}: Calling tools → {tool_names}"
+                    )
+                    batch_results = await self._execute_checklist_tool_calls(
+                        tool_calls,
+                        target_type=target_type,
+                        info=user_message,
+                    )
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": raw_content,
+                            "tool_calls": tool_calls,
+                        }
+                    )
+                    for item in batch_results:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": str(item.get("result", "")),
+                                "tool_call_id": str(item.get("tool_call_id", "")),
+                                "name": str(item.get("name", "")),
+                            }
+                        )
+                    continue
+
+                result = _extract_checklist_result_from_text(
+                    raw_content,
+                    fallback_target_type=target_type,
+                    fallback_checklist=fallback_checklist,
+                )
+                self._cb.on_done(result.summary)
+                return result
+
             result = _extract_checklist_result_from_text(
-                response.content or "",
+                last_content,
                 fallback_target_type=target_type,
                 fallback_checklist=fallback_checklist,
             )
@@ -1846,8 +1945,86 @@ class PlannerAgent:
             schema
             for schema in self._tool_schemas
             if schema.get("function", {}).get("name")
-            not in {"remove_target_type", "get_pentest_plan"}
+            not in {"remove_target_type", "get_pentest_plan", "get_checklists"}
         ]
+
+    def _checklist_tool_schemas(self) -> list[dict[str, Any]]:
+        allowed = {"get_checklists", "get_page", "search_kb", "search_web"}
+        return [
+            schema
+            for schema in self._tool_schemas
+            if schema.get("function", {}).get("name") in allowed
+        ]
+
+    async def _execute_checklist_tool_calls(
+        self,
+        tool_calls: list[dict[str, Any]],
+        *,
+        target_type: str,
+        info: str,
+    ) -> list[dict[str, Any]]:
+        batch_results: list[dict[str, Any]] = []
+        default_domain = _planner_kb_domain_for_target_type(target_type)
+
+        for tc in tool_calls:
+            raw_tool_name = tc["function"]["name"]
+            raw_args = tc["function"].get("arguments", "{}")
+            call_id = tc["id"]
+
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+
+            tool_name, corrected = self._resolve_compatible_tool_name(raw_tool_name)
+            if corrected:
+                self._cb.on_warn(
+                    f"Auto-corrected checklist tool '{raw_tool_name}' → '{tool_name}'."
+                )
+
+            args = self._repair_tool_args(tool_name, args)
+            if tool_name == "get_checklists":
+                if target_type and not str(args.get("target_type", "")).strip():
+                    args["target_type"] = target_type
+                if info and not str(args.get("info", "")).strip():
+                    args["info"] = info
+            elif tool_name == "search_kb":
+                if not str(args.get("domain", "")).strip():
+                    args["domain"] = default_domain
+
+            args = self._filter_tool_args(tool_name, args)
+            tool = self._tools.get(tool_name)
+
+            if tool is None:
+                result_str = f"Error: unknown tool '{raw_tool_name}'"
+                self._cb.on_warn(f"Unknown checklist tool: {raw_tool_name}")
+            else:
+                self._report_tool_start(tool_name, args)
+                try:
+                    result_str = _truncate_result(await tool.execute(**args))
+                    self._report_tool_result(tool_name, result_str)
+                except Exception as exc:
+                    result_str = f"Error executing {tool_name}: {exc}"
+                    self._cb.on_warn(f"Checklist tool error: {exc}")
+                    logger.error(
+                        "planner_checklist_tool_error",
+                        tool=tool_name,
+                        error=str(exc),
+                    )
+
+            batch_results.append(
+                {
+                    "tool_call_id": call_id,
+                    "name": tool_name,
+                    "requested_name": raw_tool_name,
+                    "args": args,
+                    "result": result_str,
+                }
+            )
+
+        return batch_results
 
     # ── Graph ──────────────────────────────────────────────────────
 
@@ -2031,19 +2208,6 @@ class PlannerAgent:
 
         raw_content = response.content or ""
         tool_calls = response.tool_calls or []
-        if self._context_window is not None:
-            await self._context_window.record_llm_turn(
-                prompt_excerpt=messages[-1].content if messages else f"planner round {round_count}",
-                response_excerpt=raw_content or f"tool_calls={len(tool_calls)}",
-                usage=response.usage if isinstance(response.usage, dict) else {},
-                metadata={
-                    "agent": "planner",
-                    "round": round_count,
-                    "is_loop": bool(state.get("is_loop")),
-                    "tool_calls": len(tool_calls),
-                },
-            )
-
         # Recover inline function calls from content text.
         if not tool_calls and raw_content:
             cleaned_content, inline_calls = _extract_inline_tool_calls(raw_content)
@@ -2731,17 +2895,6 @@ class PlannerAgent:
             "loop": "loop re-entry",
         }.get(normalized_plan_mode, "full plan")
         self._cb.on_step(f"Planner Agent starting ({mode_label})")
-        if self._context_window is not None:
-            await self._context_window.record(
-                kind="run_input",
-                role="user",
-                content=user_message,
-                metadata={
-                    "agent": "planner",
-                    "mode": mode_label,
-                },
-            )
-
         if normalized_plan_mode == "loop":
             system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
         else:
@@ -2760,6 +2913,27 @@ class PlannerAgent:
                 logger.warning("context_builder_failed", error=str(exc))
                 # Fall back to static prompt if context builder fails
                 system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
+
+        project = self._projects_store.get_project(self._project_id) if self._projects_store else {}
+        if not isinstance(project, dict): project = {}
+        engagement_type = project.get("engagement_type", "pentest")
+        target = project.get("target", "")
+        scope = project.get("scope", "")
+        last_scan = project.get("lastScan", {}) if isinstance(project.get("lastScan"), dict) else {}
+        scan_result = last_scan.get("result", {}) if isinstance(last_scan.get("result"), dict) else {}
+        brain = scan_result.get("system_memory", {}) if isinstance(scan_result.get("system_memory"), dict) else {}
+        plan_state = last_scan.get("plan", {}) if isinstance(last_scan.get("plan"), dict) else {}
+        checklist_state = project.get("checklist", {}) if isinstance(project.get("checklist"), dict) else {}
+
+        system_content = render_planner_prompt(
+            system_content,
+            engagement_type=engagement_type,
+            target=target,
+            scope=scope,
+            brain=brain,
+            checklist_state=checklist_state,
+            plan_state=plan_state,
+        )
 
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content
@@ -2836,18 +3010,6 @@ class PlannerAgent:
             tool_results=plan_data.get("tool_results", []),
             action_plan=plan_data.get("action_plan", {}),
         )
-        if self._context_window is not None:
-            await self._context_window.record(
-                kind="run_result",
-                role="assistant",
-                content=result.summary or json.dumps(result.action_plan, ensure_ascii=True),
-                metadata={
-                    "agent": "planner",
-                    "mode": mode_label,
-                    "scenario_count": len(result.scenarios),
-                    "needs_count": len(result.needs),
-                },
-            )
         self._last_state_hash = world_state_hash
         self._last_plan_result = result
         return result

@@ -13,10 +13,12 @@ from server.api.routes import (
     health_router,
     intel_router,
     projects_router,
+    reports_router,
     scans_router,
     share_router,
     target_types_router,
     web_auth_router,
+    settings_router,
 )
 
 app = FastAPI(
@@ -59,8 +61,10 @@ app.include_router(health_router)
 app.include_router(ai_router)
 app.include_router(debug_router)
 app.include_router(projects_router)
+app.include_router(reports_router)
 app.include_router(scans_router)
 app.include_router(target_types_router)
 app.include_router(intel_router)
 app.include_router(share_router)
 app.include_router(web_auth_router)
+app.include_router(settings_router)

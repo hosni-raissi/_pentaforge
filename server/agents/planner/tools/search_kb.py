@@ -9,6 +9,7 @@ import structlog
 from server.core.tool import tool
 from server.db.knowledge.storage.embedding import EmbeddingGenerator
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
+from server.utils.known_vuln_intelligence import build_known_vuln_query
 
 logger = structlog.get_logger(__name__)
 
@@ -47,9 +48,17 @@ def _merge_results(primary: list[dict[str, Any]], secondary: list[dict[str, Any]
 
 @tool(
     name="search_kb",
-    description="Search knowledge base for techniques, methods, and vulnerabilities. Domains: web, api, cloud, network, shared, etc.",
+    description="Search knowledge base for techniques, methods, and vulnerabilities. Supports direct queries or structured product/version lookups. Domains: web, api, cloud, network, shared, etc.",
 )
-async def search_kb(query: str, domain: str = "shared", n_results: int = 5) -> str:
+async def search_kb(
+    query: str = "",
+    domain: str = "shared",
+    n_results: int = 5,
+    product: str = "",
+    version: str = "",
+    attack_type: str = "",
+    severity: str = "",
+) -> str:
     """Search the knowledge base.
 
     Args:
@@ -58,12 +67,20 @@ async def search_kb(query: str, domain: str = "shared", n_results: int = 5) -> s
         n_results: Results count (1-20).
     """
     n_results = max(1, min(8, n_results))
+    effective_query = build_known_vuln_query(
+        query=query,
+        product=product,
+        version=version,
+        attack_type=attack_type,
+        severity=severity,
+        target_type=domain,
+    )
 
     try:
         embedder = _get_embedder()
         vector_store = _get_vector_store()
         vector_store.ensure_all_collections()
-        embedding = await embedder.embed_single(query, is_query=True)
+        embedding = await embedder.embed_single(effective_query, is_query=True)
 
         if domain == "shared":
             all_hits = vector_store.search_multi(query_embedding=embedding, domain="shared", n_results=n_results)
@@ -73,13 +90,13 @@ async def search_kb(query: str, domain: str = "shared", n_results: int = 5) -> s
             all_hits = _merge_results(domain_hits, shared_hits, n_results)
 
     except Exception as exc:
-        logger.error("search_kb_error", error=str(exc))
+        logger.error("search_kb_error", error=str(exc), query=effective_query)
         return f"Search failed: {exc}"
 
     if not all_hits:
-        return f"No results for '{query}' in '{domain}'."
+        return f"No results for '{effective_query}' in '{domain}'."
 
-    parts: list[str] = [f"{len(all_hits)} results for '{query}' (domain: {domain}):\n"]
+    parts: list[str] = [f"{len(all_hits)} results for '{effective_query}' (domain: {domain}):\n"]
     for i, hit in enumerate(all_hits, 1):
         meta = hit.get("metadata", {})
         source = meta.get("source_name", "?")

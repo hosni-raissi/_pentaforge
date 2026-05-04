@@ -106,8 +106,12 @@ DANGEROUS_CHARS = [";", "&&", "||", "|", "`", "$(", ">", "\n", "\r", "'", '"']
 
 from server.agents.executer.recon.config import is_blocked_host
 
+_SERVER_SHARE_DIR = Path(__file__).resolve().parents[5] / "share"
+
 # Allowed wordlist directories
 ALLOWED_WORDLIST_DIRS = [
+    _SERVER_SHARE_DIR / "seclists",
+    _SERVER_SHARE_DIR / "wordlists",
     Path("/usr/share/seclists"),
     Path("/usr/share/wordlists"),
     Path("/opt/wordlists"),

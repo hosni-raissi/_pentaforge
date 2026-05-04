@@ -515,7 +515,7 @@ class LLMClient:
     ) -> LLMResponse:
         """Send a chat completion request and return the parsed response."""
 
-        # Determine max_tokens
+        # ── 1. Determine parameters ───────────────────────────────────────────
         payload_max_tokens: int | None
         if max_tokens is not None:
             payload_max_tokens = max_tokens
@@ -526,21 +526,70 @@ class LLMClient:
 
         effective_temp = temperature if temperature is not None else self._config.temperature
 
+        # ── 2. PrivacyGate Anonymization ──────────────────────────────────────
+        # Check global database settings first, then fallback to ENV
+        use_privacy_gate = True
+        try:
+            from server.api.dependencies import projects_store
+            from server.api.routes.settings import SETTINGS_ID
+            settings_data = projects_store.get_project(SETTINGS_ID)
+            if settings_data and "privacy_gate" in settings_data:
+                use_privacy_gate = bool(settings_data["privacy_gate"])
+            else:
+                use_privacy_gate = os.getenv("PRIVACYGATE_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+        except Exception:
+            # Fallback to ENV if DB is not available or during early startup
+            use_privacy_gate = os.getenv("PRIVACYGATE_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+        
+        session_id = None
+
+        if use_privacy_gate:
+            from server.layers.PrivacyGate.node import anonymize, deanonymize
+            
+            _sep = "\n\n---PRIVACYGATE_MSG_SEP---\n\n"
+            raw_contents = [m.content or "" for m in messages]
+            combined_prompt = _sep.join(raw_contents)
+            
+            # Use a generic engagement_id for chat, the UUID inside anonymize prevents collisions
+            anon_combined, session_id, _mapping = anonymize(
+                combined_prompt,
+                engagement_id="llm_chat",
+                verbose=True
+            )
+            
+            anon_contents = anon_combined.split(_sep)
+            
+            anon_messages = []
+            for orig_m, anon_content in zip(messages, anon_contents):
+                anon_messages.append(ChatMessage(
+                    role=orig_m.role,
+                    content=anon_content if orig_m.content else None,
+                    tool_calls=orig_m.tool_calls,
+                    tool_call_id=orig_m.tool_call_id,
+                    name=orig_m.name,
+                ))
+        else:
+            anon_messages = messages
+
+        # ── 3. Dispatch to Provider ───────────────────────────────────────────
+        result_content = ""
+        result_tool_calls: list[dict[str, Any]] = []
+        result_finish_reason = "stop"
+        result_usage: dict[str, int] = {}
+
         # Use Mistral SDK if configured
         if self._use_mistral_sdk and self._mistral is not None:
             try:
                 result = await self._mistral.chat(
-                    messages=[m.to_api() for m in messages],
+                    messages=[m.to_api() for m in anon_messages],
                     tools=tools,
                     temperature=effective_temp,
                     max_tokens=payload_max_tokens,
                 )
-                return LLMResponse(
-                    content=str(result.get("content", "") or ""),
-                    tool_calls=list(result.get("tool_calls", []) or []),
-                    finish_reason=str(result.get("finish_reason", "stop") or "stop"),
-                    usage=result.get("usage", {}) if isinstance(result.get("usage"), dict) else {},
-                )
+                result_content = str(result.get("content", "") or "")
+                result_tool_calls = list(result.get("tool_calls", []) or [])
+                result_finish_reason = str(result.get("finish_reason", "stop") or "stop")
+                result_usage = result.get("usage", {}) if isinstance(result.get("usage"), dict) else {}
             except Exception as exc:
                 logger.warning(
                     "mistral_sdk_fallback_http",
@@ -553,67 +602,84 @@ class LLMClient:
                     self._http = self._build_http_client()
 
         # Use OpenAI-compatible HTTP client
-        payload: dict[str, Any] = {
-            "model": self._config.model,
-            "messages": [m.to_api() for m in messages],
-            "temperature": effective_temp,
-        }
-        if payload_max_tokens is not None:
-            payload["max_tokens"] = payload_max_tokens
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        if not self._use_mistral_sdk and self._http is not None:
+            payload: dict[str, Any] = {
+                "model": self._config.model,
+                "messages": [m.to_api() for m in anon_messages],
+                "temperature": effective_temp,
+            }
+            if payload_max_tokens is not None:
+                payload["max_tokens"] = payload_max_tokens
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
 
-        if _LLM_DEBUG_LOGS:
-            logger.debug(
-                "llm_request",
-                provider=self._provider,
-                model=self._config.model,
-                messages=len(messages),
-                tools=len(tools) if tools else 0,
-            )
+            if _LLM_DEBUG_LOGS:
+                logger.debug(
+                    "llm_request",
+                    provider=self._provider,
+                    model=self._config.model,
+                    messages=len(anon_messages),
+                    tools=len(tools) if tools else 0,
+                )
 
-        if self._http is None:
-            raise RuntimeError("HTTP LLM client is not initialized")
-
-        resp = await self._http.post("/chat/completions", json=payload)
-
-        # Log error body for non-2xx responses (except 429 which is retried)
-        if resp.status_code >= 400 and resp.status_code != 429:
-            logger.error(
-                "llm_api_error",
-                provider=self._provider,
-                status=resp.status_code,
-                body=resp.text[:500],
-            )
-
-        # Retry on rate-limit (429) with exponential backoff
-        retries = 0
-        max_retries = 3
-        while resp.status_code == 429 and retries < max_retries:
-            retries += 1
-            wait = float(resp.headers.get("retry-after", 2 ** retries))
-            logger.warning("llm_rate_limited", retry=retries, wait=wait)
-            await asyncio.sleep(wait)
             resp = await self._http.post("/chat/completions", json=payload)
 
-        resp.raise_for_status()
-        data = resp.json()
+            # Log error body for non-2xx responses (except 429 which is retried)
+            if resp.status_code >= 400 and resp.status_code != 429:
+                logger.error(
+                    "llm_api_error",
+                    provider=self._provider,
+                    status=resp.status_code,
+                    body=resp.text[:500],
+                )
 
-        choice = data["choices"][0]
-        msg = choice["message"]
-        content = msg.get("content") or ""
+            # Retry on rate-limit (429) with exponential backoff
+            retries = 0
+            max_retries = 3
+            while resp.status_code == 429 and retries < max_retries:
+                retries += 1
+                wait = float(resp.headers.get("retry-after", 2 ** retries))
+                logger.warning("llm_rate_limited", retry=retries, wait=wait)
+                await asyncio.sleep(wait)
+                resp = await self._http.post("/chat/completions", json=payload)
 
-        # Handle local LLM quirks
-        if self._is_local and not content.strip() and msg.get("reasoning"):
-            logger.warning("local_llm_content_empty_reasoning_dropped")
-            content = ""
+            resp.raise_for_status()
+            data = resp.json()
+
+            choice = data["choices"][0]
+            msg = choice["message"]
+            result_content = msg.get("content") or ""
+            
+            # Handle local LLM quirks
+            if self._is_local and not result_content.strip() and msg.get("reasoning"):
+                logger.warning("local_llm_content_empty_reasoning_dropped")
+                result_content = ""
+
+            result_tool_calls = msg.get("tool_calls", [])
+            result_finish_reason = choice.get("finish_reason", "stop")
+            result_usage = data.get("usage", {})
+
+        # ── 4. PrivacyGate Deanonymization ────────────────────────────────────
+        
+        # Restore actual values in LLM text output if PrivacyGate was used
+        if session_id:
+            from server.layers.PrivacyGate.node import deanonymize
+            if result_content:
+                result_content = deanonymize(result_content, session_id)
+                
+            # Restore actual values inside JSON tool arguments
+            for tc in result_tool_calls:
+                if isinstance(tc, dict) and "function" in tc:
+                    func = tc["function"]
+                    if "arguments" in func and isinstance(func["arguments"], str):
+                        func["arguments"] = deanonymize(func["arguments"], session_id)
 
         return LLMResponse(
-            content=content,
-            tool_calls=msg.get("tool_calls", []),
-            finish_reason=choice.get("finish_reason", "stop"),
-            usage=data.get("usage", {}),
+            content=result_content,
+            tool_calls=result_tool_calls,
+            finish_reason=result_finish_reason,
+            usage=result_usage,
         )
 
     async def close(self) -> None:

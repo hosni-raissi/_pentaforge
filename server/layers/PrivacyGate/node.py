@@ -1,66 +1,249 @@
+import os
 import re
+import uuid
+import logging
 import spacy
 import redis
 import json
-import hashlib
 from datetime import datetime
 
-nlp = spacy.load("en_core_web_sm")
+# ── Logger ────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("PrivacyGate")
+
+# ── Strict mode ───────────────────────────────────────────────────
+# Set PRIVACYGATE_STRICT=1 in production to raise on degraded NER
+# instead of silently falling back to the smaller model.
+_STRICT = os.getenv("PRIVACYGATE_STRICT", "0") == "1"
+
+# ── NER model ─────────────────────────────────────────────────────
+try:
+    nlp = spacy.load("en_core_web_lg")
+    logger.info("PrivacyGate: using en_core_web_lg (high-accuracy NER)")
+except OSError:
+    if _STRICT:
+        raise RuntimeError(
+            "PrivacyGate: en_core_web_lg is required in strict mode. "
+            "Run: python -m spacy download en_core_web_lg"
+        )
+    nlp = spacy.load("en_core_web_sm")
+    logger.warning(
+        "PrivacyGate: en_core_web_lg not found — falling back to en_core_web_sm. "
+        "NER coverage is reduced. Set PRIVACYGATE_STRICT=1 to block this."
+    )
+
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-# ── Pattern registry (order matters — most specific first) ────────
+# ─────────────────────────────────────────────────────────────────
+#  Pre-compiled patterns
+# ─────────────────────────────────────────────────────────────────
+
+# PEM blocks — compiled separately because they require re.DOTALL.
+# Applying DOTALL globally would cause IP/HASH/PORT to match across
+# line boundaries, producing false positives.
+_PEM_RE = re.compile(
+    r"-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----",
+    re.DOTALL,
+)
+
+# Partial URL anonymization — scheme and path are preserved intact;
+# only the domain is replaced with an alias.
+#
+#   Input:  http://ijbirb.com/sign
+#   Output: http://__HOST_001__/sign
+#
+# This ensures the LLM retains:
+#   - scheme (http vs https) — security signal (no TLS = worth flagging)
+#   - path (/sign, /api/v2/users?id=1) — identifies the attack surface
+#   - query parameters — needed for injection and IDOR testing
+#
+# Group 1: scheme   ("http://" | "https://")  — keep as-is
+# Group 2: domain   ("ijbirb.com")             — anonymize → alias
+# Group 3: path     ("/sign?foo=bar")           — keep as-is
+_URL_PARTS_RE = re.compile(
+    r"(https?://)"
+    r"([a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})"
+    r"(/[^\s\"'<>]*)?",
+    re.IGNORECASE,
+)
+
+# Pattern registry — processed in Pass 1c after PEM and URL passes.
+# Rules:
+#   - Most specific pattern before broader ones (CIDR before IP, etc.)
+#   - re.IGNORECASE only — no DOTALL (PEM is handled separately)
+#   - No cross-line matching
 PATTERNS = [
-    ("CIDR",  r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b"),          # before IP
-    ("IP",    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
-    ("EMAIL", r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),# before HOST
-    ("URL",   r"https?://[^\s\"'<>]+"),                            # before HOST
-    ("HOST",  r"\b(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|io|tn|local|corp|int|lan|gov|edu)\b"),
-    ("CRED",  r"(?:password|passwd|secret|token|api_?key|auth)\s*[:=]\s*\S+"),
-    ("HASH",  r"\b[a-fA-F0-9]{32}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{64}\b"),  # MD5/SHA1/SHA256
-    ("PORT",  r"\b(?:port|PORT)\s+(\d{1,5})\b"),                  # labeled ports only
+    # Bearer tokens (Authorization / X-Auth-Token headers)
+    ("CRED", re.compile(
+        r"Bearer\s+[A-Za-z0-9+/=_\-\.]{20,}",
+        re.IGNORECASE,
+    )),
+
+    # AWS ARNs — before HOST to prevent domain part being caught first
+    ("CRED", re.compile(
+        r"arn:aws:[a-z0-9\-]+:[a-z0-9\-]*:\d*:[a-zA-Z0-9\-_/:.]+",
+        re.IGNORECASE,
+    )),
+
+    # AWS access key IDs
+    ("CRED", re.compile(
+        r"\bAKIA[0-9A-Z]{16}\b",
+    )),
+
+    # High-entropy secrets: key=<≥32 chars> — before short key=value
+    ("CRED", re.compile(
+        r"(?:secret|token|key|password|passwd|pwd|auth)\s*[:=]\s*[A-Za-z0-9+/=_\-]{32,}",
+        re.IGNORECASE,
+    )),
+
+    # Generic key=value credentials (shorter values)
+    ("CRED", re.compile(
+        r"(?:password|passwd|secret|token|api_?key|auth)\s*[:=]\s*\S+",
+        re.IGNORECASE,
+    )),
+
+    # CIDR before bare IP — prevents /24 suffix being left behind
+    ("CIDR", re.compile(
+        r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b",
+    )),
+
+    # Bare IPv4
+    ("IP", re.compile(
+        r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    )),
+
+    # Email before HOST — domain part of email would match HOST pattern
+    ("EMAIL", re.compile(
+        r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+    )),
+
+    # Bare hostnames / FQDNs (URLs already handled in Pass 1b)
+    ("HOST", re.compile(
+        r"\b(?:[a-zA-Z0-9\-]+\.)+(?:com|org|net|io|tn|local|corp|int|lan|gov|edu)\b",
+        re.IGNORECASE,
+    )),
+
+    # Cryptographic hashes: SHA-256 (64) > SHA-1 (40) > MD5 (32)
+    # Longest first to prevent partial matches
+    ("HASH", re.compile(
+        r"\b[a-fA-F0-9]{64}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{32}\b",
+    )),
+
+    # Labeled port references only — avoids replacing bare port numbers
+    ("PORT", re.compile(
+        r"\b(?:port|PORT)\s+(\d{1,5})\b",
+    )),
 ]
 
-# ── Tokens that must NEVER be replaced ───────────────────────────
+# ── Safe passthrough — never replace these ────────────────────────
+# Security framework identifiers, scoring systems, and tool names
+# must reach the LLM intact for correct reasoning.
 SAFE_PASSTHROUGH = re.compile(
-    r"CVE-\d{4}-\d+"           # CVE IDs
-    r"|CWE-\d+"                # CWE IDs
-    r"|\bCVSS\b|\bEPSS\b"     # scoring systems
-    r"|\bSSVC\b|\bMITRE\b"    # frameworks
-    r"|\bnmap\b|\bsqlmap\b|\bmetasploit\b|\bnuclei\b"   # tools
+    r"CVE-\d{4}-\d+"
+    r"|CWE-\d+"
+    r"|\bCVSS\b|\bEPSS\b"
+    r"|\bSSVC\b|\bMITRE\b"
+    r"|\bnmap\b|\bsqlmap\b|\bmetasploit\b|\bnuclei\b"
     r"|\bburp\b|\bdalfox\b|\bhydra\b|\bamass\b"
-    r"|\bACT\b|\bATTEND\b|\bTRACK\b",                  # SSVC decisions
-    re.IGNORECASE
+    r"|\bACT\b|\bATTEND\b|\bTRACK\b",
+    re.IGNORECASE,
 )
 
 # ── NER labels to anonymize ───────────────────────────────────────
 NER_LABELS = {"ORG", "PERSON", "GPE", "LOC", "FAC"}
 
-# ── Prefix map for readable aliases ──────────────────────────────
+# ── Alias prefix map ──────────────────────────────────────────────
 PREFIX = {
     "IP":     "IP",
     "CIDR":   "NET",
-    "URL":    "URL",
     "HOST":   "HOST",
     "EMAIL":  "EMAIL",
     "CRED":   "CRED",
     "HASH":   "HASH",
     "PORT":   "PORT",
     "ORG":    "ORG",
-    "PER":    "PERSON",
+    "PERSON": "PERSON",
     "GPE":    "PLACE",
     "LOC":    "PLACE",
     "FAC":    "PLACE",
 }
 
+# ── Alias integrity scanner ───────────────────────────────────────
+_ALIAS_PATTERN = re.compile(r"__[A-Z]+_\d{3}__")
 
-def anonymize(prompt: str, session_id: str) -> tuple[str, dict]:
+
+# ─────────────────────────────────────────────────────────────────
+#  Session key
+# ─────────────────────────────────────────────────────────────────
+
+def make_session_key(engagement_id: str) -> tuple[str, str]:
     """
-    Anonymize sensitive data in prompt before sending to public LLM API.
-    Returns (clean_prompt, mapping) and saves mapping to Redis.
+    Build a collision-safe Redis key for one anonymization session.
+
+    Key format: anon:{engagement_id}:{uuid4()}
+
+    Two concurrent calls with the same engagement_id never collide,
+    and the key cannot be predicted or pre-poisoned.
+
+    Returns:
+        (redis_key, session_id)
     """
-    mapping = {}   # alias  → real value
-    reverse = {}   # real   → alias      (dedup)
-    counters = {}  # type   → int counter
+    session_id = f"{engagement_id}:{uuid.uuid4()}"
+    return f"anon:{session_id}", session_id
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Anonymize
+# ─────────────────────────────────────────────────────────────────
+
+def anonymize(
+    prompt: str,
+    engagement_id: str,
+    verbose: bool = False,
+) -> tuple[str, str, dict]:
+    """
+    Anonymize sensitive data in a prompt before sending to a public LLM API.
+
+    Four-pass pipeline
+    ------------------
+    Pass 1a — PEM blocks
+        Compiled with re.DOTALL (multiline key blocks). Fires first so the
+        full key material is captured before any inner tokens are matched.
+
+    Pass 1b — Partial URL anonymization
+        Scheme and path are preserved; only the domain is aliased.
+        http://ijbirb.com/sign  →  http://__HOST_001__/sign
+        Preserves TLS signal (http vs https) and attack surface info (/sign).
+
+    Pass 1c — Regex patterns
+        IGNORECASE only (no DOTALL). Handles credentials, IPs, emails,
+        bare hostnames, hashes, and labeled ports.
+
+    Pass 2 — spaCy NER
+        Catches org names, personal names, and locations not captured by
+        the regex patterns. Processed in reverse order to keep char offsets
+        valid after each substitution.
+
+    Pass 3 — Redis persistence
+        Alias mapping stored with 24 h TTL. Key is engagement-scoped and
+        UUID-suffixed — no cross-session collision possible.
+
+    Args:
+        prompt:        Raw prompt that may contain IPs, credentials, URLs,
+                       PEM keys, AWS ARNs, bearer tokens, and personal names.
+        engagement_id: Logical engagement identifier (e.g. "eng_2026_001").
+        verbose:       Print anonymized prompt and mapping table (debug only).
+
+    Returns:
+        (clean_prompt, session_id, mapping)
+        Store session_id and pass it to deanonymize() for every LLM
+        response generated from this prompt.
+    """
+    redis_key, session_id = make_session_key(engagement_id)
+
+    mapping  = {}   # alias  → real value
+    reverse  = {}   # real   → alias  (same value always gets same alias)
+    counters = {}   # prefix → int
 
     def get_alias(token_type: str, value: str) -> str:
         if value in reverse:
@@ -74,54 +257,192 @@ def anonymize(prompt: str, session_id: str) -> tuple[str, dict]:
 
     result = prompt
 
-    # ── Pass 1: Regex — structured sensitive data ─────────────────
-    for token_type, pattern in PATTERNS:
-        def replacer(m, t=token_type):
+    # ── Pass 1a: PEM blocks ───────────────────────────────────────
+    def _pem_replacer(m: re.Match) -> str:
+        return get_alias("CRED", m.group(0))
+
+    result = _PEM_RE.sub(_pem_replacer, result)
+
+    # ── Pass 1b: Partial URL anonymization ───────────────────────
+    # Scheme and path flow through to the LLM unchanged.
+    # Only the domain is replaced with a HOST alias.
+    def _url_replacer(m: re.Match) -> str:
+        scheme = m.group(1)        # "http://" or "https://"
+        domain = m.group(2)        # "ijbirb.com"
+        path   = m.group(3) or ""  # "/sign" or "/api/v2/users?id=1" or ""
+        if SAFE_PASSTHROUGH.search(domain):
+            return m.group(0)
+        return f"{scheme}{get_alias('HOST', domain)}{path}"
+
+    result = _URL_PARTS_RE.sub(_url_replacer, result)
+
+    # ── Pass 1c: Regex pattern registry ──────────────────────────
+    for token_type, compiled_pattern in PATTERNS:
+        def replacer(m: re.Match, t: str = token_type) -> str:
             original = m.group(0)
             if SAFE_PASSTHROUGH.search(original):
                 return original
             return get_alias(t, original)
-        result = re.sub(pattern, replacer, result, flags=re.IGNORECASE)
+        result = compiled_pattern.sub(replacer, result)
 
-    # ── Pass 2: spaCy NER — names, orgs, locations ────────────────
+    # ── Pass 2: spaCy NER — text-based substitution ──────────────
     doc = nlp(result)
-    for ent in reversed(doc.ents):   # reversed keeps char offsets valid
-        if ent.label_ in NER_LABELS:
-            if SAFE_PASSTHROUGH.search(ent.text):
-                continue
-            alias = get_alias(ent.label_, ent.text)
-            result = result[:ent.start_char] + alias + result[ent.end_char:]
+    for ent in reversed(doc.ents):
+        if ent.label_ not in NER_LABELS:
+            continue
+        if SAFE_PASSTHROUGH.search(ent.text):
+            continue
+        alias = get_alias(ent.label_, ent.text)
+        # Replace by the actual entity text string, not by char offset.
+        # count=1 + reversed iteration = correct left-to-right replacement
+        # without double-substituting the same value.
+        result = re.sub(re.escape(ent.text), alias, result, count=1)
 
-    # ── Pass 3: Persist to Redis (TTL = 24h) ─────────────────────
-    redis_key = f"anon:{session_id}"
-    r.setex(redis_key, 86400, json.dumps({
-        "mapping":    mapping,
-        "created_at": datetime.utcnow().isoformat(),
-        "session_id": session_id,
-    }))
+    # ── Pass 3: Persist mapping to Redis (TTL = 24 h) ────────────
+    r.setex(
+        redis_key,
+        86_400,
+        json.dumps({
+            "mapping":    mapping,
+            "created_at": datetime.utcnow().isoformat(),
+            "session_id": session_id,
+        }),
+    )
 
-    return result, mapping
+    if verbose:
+        _print_verbose(result, mapping)
 
+    return result, session_id, mapping
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Deanonymize
+# ─────────────────────────────────────────────────────────────────
 
 def deanonymize(response: str, session_id: str) -> str:
     """
-    Restore real values in LLM response using the Redis mapping.
+    Restore real values in an LLM response using the stored alias mapping.
+
+    Alias integrity check
+    ---------------------
+    After replacement, scans for any surviving __ALIAS__ tokens.
+    These indicate the LLM mutated the token format (e.g. __IP_001__
+    became __IP_1__). Each survivor is:
+        - logged as WARNING with session_id and the full survivor list
+        - tagged inline as [PRIVACYGATE_LEAK:__TOKEN__]
+    so downstream consumers (report builder, DB writer) can detect and
+    handle leakage explicitly rather than silently storing a raw alias.
+
+    Args:
+        response:   Raw LLM output containing alias tokens.
+        session_id: Value returned by anonymize() for this prompt.
+
+    Returns:
+        De-anonymized string. May contain [PRIVACYGATE_LEAK:...] markers
+        if alias mutation was detected.
     """
-    raw = r.get(f"anon:{session_id}")
+    redis_key = f"anon:{session_id}"
+    raw = r.get(redis_key)
+
     if not raw:
+        logger.error(
+            "PrivacyGate.deanonymize: no mapping found for session '%s'. "
+            "Response returned as-is — inspect before use.",
+            session_id,
+        )
         return response
 
-    data = json.loads(raw)
-    mapping: dict = data["mapping"]
+    mapping: dict = json.loads(raw)["mapping"]
 
-    # Longest alias first — prevents partial replacements
+    # Longest alias first — prevents __CRED_010__ being partially replaced
+    # if __CRED_01__ also exists.
     for alias, real in sorted(mapping.items(), key=lambda x: -len(x[0])):
         response = response.replace(alias, real)
+
+    # ── Integrity check ───────────────────────────────────────────
+    survivors = _ALIAS_PATTERN.findall(response)
+    if survivors:
+        logger.warning(
+            "PrivacyGate.deanonymize: %d alias(es) survived in session '%s'. "
+            "LLM likely mutated the token format. Survivors: %s",
+            len(survivors),
+            session_id,
+            survivors,
+        )
+        for token in set(survivors):
+            response = response.replace(token, f"[PRIVACYGATE_LEAK:{token}]")
 
     return response
 
 
+# ─────────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────────
+
 def get_session_mapping(session_id: str) -> dict:
-    """Debug helper — inspect what was anonymized in a session."""
+    """
+    Debug helper — retrieve the alias mapping for a session.
+    Returns an empty dict if the session has expired or never existed.
+    """
     raw = r.get(f"anon:{session_id}")
     return json.loads(raw) if raw else {}
+
+
+def _print_verbose(clean_prompt: str, mapping: dict) -> None:
+    sep = "=" * 64
+    print(f"\n{sep}")
+    print("  PrivacyGate — Anonymized Prompt")
+    print(sep)
+    print(clean_prompt)
+    print(f"\n{'-' * 64}")
+    print("  Mapping  (alias → real value)")
+    print(f"{'-' * 64}")
+    for alias, real in mapping.items():
+        display = real if len(real) <= 60 else real[:57] + "..."
+        print(f"  {alias:28s} → {display}")
+    print(f"{sep}\n")
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Self-test
+# ─────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    SAMPLE = """
+    Target: http://ijbirb.com/sign
+    Admin panel: https://ijbirb.com/admin/dashboard?debug=true
+    API endpoint: http://ijbirb.com/api/v2/users?id=1
+    Internal host: 10.0.0.5/24
+
+    Credentials found:
+        api_key=sk-prod-A3f9Kz112mNqP0Xw91234567890ABCDEF
+        Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig
+        AWS resource: arn:aws:s3:::acme-prod-backups/db-dump-2024.sql
+
+    CVE-2021-41773 confirmed on Apache 2.4.49 — CVSS 9.8, EPSS 0.97.
+    Contact: devops@acme-corp.com — reported by John Smith (CISO at Acme Corp).
+
+    -----BEGIN RSA PRIVATE KEY-----
+    MIIEowIBAAKCAQEA2a2rwplBQLzHPZe5RJr9bnDpdFBqKHFKMVFv6XESBcP+oAGW
+    -----END RSA PRIVATE KEY-----
+    """
+
+    print("── Anonymize ───────────────────────────────────────────────")
+    clean, session_id, mapping = anonymize(
+        SAMPLE, engagement_id="eng_2026_001", verbose=True
+    )
+
+    print(f"Session ID: {session_id}\n")
+
+    # Verify URL partial anonymization
+    print("── URL anonymization check ─────────────────────────────────")
+    for line in clean.splitlines():
+        line = line.strip()
+        if "http" in line or "HOST" in line:
+            print(f"  {line}")
+
+    # Simulate LLM mutating one alias
+    print("\n── Deanonymize (with deliberate alias mutation) ────────────")
+    mutated = clean.replace("__IP_001__", "__IP_1__")
+    restored = deanonymize(mutated, session_id)
+    print(restored[:600])

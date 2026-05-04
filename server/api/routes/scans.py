@@ -42,6 +42,10 @@ class PasswordResponsePayload(BaseModel):
     approved: bool = Field(default=True)
 
 
+class ApproveInformationGatheringPayload(BaseModel):
+    modified_program: list[dict[str, Any]] | None = None
+
+
 def _sse_message(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
@@ -102,9 +106,10 @@ async def approve_planner(project_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/scans/{project_id}/approve-information-gathering")
-async def approve_information_gathering(project_id: str) -> dict[str, Any]:
+async def approve_information_gathering(project_id: str, payload: ApproveInformationGatheringPayload | None = None) -> dict[str, Any]:
     try:
-        result = await scan_orchestrator.approve_information_gathering(project_id)
+        modified_program = payload.modified_program if payload else None
+        result = await scan_orchestrator.approve_information_gathering(project_id, modified_program=modified_program)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

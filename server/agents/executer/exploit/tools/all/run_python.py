@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
+from server.agents.executer.sandbox import get_sandbox_root, get_sandbox_tmp_dir
 
 # ══════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -533,18 +534,13 @@ def _install_package(package: str) -> tuple[bool, str]:
 # ══════════════════════════════════════════════════════════════════════
 
 def _get_temp_dir() -> Path:
-    env_dir = os.environ.get("AGENT_PROJECT_DIR")
-    if env_dir and Path(env_dir).is_dir():
-        base = Path(env_dir) / "tmp" / "python_scripts"
-    else:
-        base = Path(tempfile.gettempdir()) / "pentaforge_python"
+    base = get_sandbox_tmp_dir() / "python_scripts"
     base.mkdir(parents=True, exist_ok=True)
     return base
 
 
 def _get_server_tmp_dir() -> Path:
-    server_root = Path(__file__).resolve().parents[5]
-    tmp_dir = server_root / "tmp"
+    tmp_dir = get_sandbox_tmp_dir() / "named_python"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     return tmp_dir
 
@@ -762,7 +758,7 @@ def run_python(
                 text=True,
                 timeout=req.timeout,
                 shell=False,                        # CRITICAL: never shell=True
-                cwd=str(script_path.parent),
+                cwd=str(get_sandbox_root()),
                 preexec_fn=_make_preexec(req.memory_limit_mb),
                 env={
                     **os.environ,

@@ -11,12 +11,20 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 import structlog
-
-from server.agents.context_window_manager import estimate_tokens
 from server.config.agent import get_public_agent_config
 from server.core.llm import ChatMessage, get_llm
 from server.db.projects.project_rag import index_system_memory_markdown
 from server.db.projects.store import ProjectsStore
+from server.utils.known_vuln_intelligence import (
+    build_known_vuln_query,
+    canonicalize_product_name,
+    confidence_label,
+    get_product_profile,
+    normalize_version_text,
+    project_legacy_tech_stack,
+    recommend_nuclei_hints,
+    recommend_run_custom_tools,
+)
 
 from .config import SystemMemoryConfig, get_system_memory_config
 from .prompts import (
@@ -29,6 +37,13 @@ from .prompts import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def estimate_tokens(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
 
 
 def _loads_json_loose(raw: str) -> dict[str, Any] | None:
@@ -286,6 +301,37 @@ def _sanitize_artifact_values(values: list[Any], *, limit: int = 12) -> list[str
     return cleaned
 
 
+def _sanitize_structured_snapshot(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    def _clean(item: Any, *, depth: int = 0) -> Any:
+        if depth >= 3:
+            return None
+        if isinstance(item, dict):
+            cleaned_dict: dict[str, Any] = {}
+            for key, sub_value in list(item.items())[:20]:
+                cleaned_value = _clean(sub_value, depth=depth + 1)
+                if cleaned_value in (None, "", [], {}):
+                    continue
+                cleaned_dict[str(key)] = cleaned_value
+            return cleaned_dict
+        if isinstance(item, list):
+            cleaned_list = []
+            for sub_value in item[:20]:
+                cleaned_value = _clean(sub_value, depth=depth + 1)
+                if cleaned_value in (None, "", [], {}):
+                    continue
+                cleaned_list.append(cleaned_value)
+            return cleaned_list
+        if isinstance(item, str):
+            return _sanitize_memory_text(item, limit=180)
+        return item
+
+    cleaned = _clean(value, depth=0)
+    return cleaned if isinstance(cleaned, dict) else {}
+
+
 def system_memory_dir(project_cache_dir: str) -> str:
     return os.path.join(project_cache_dir, "system_memory")
 
@@ -325,6 +371,19 @@ def initialize_system_memory(
         "updates": [],
         "checklist": {},
         "artifacts": [],
+        "tech_stack": {},
+        "tech_inventory": [],
+        "known_vulnerability_signals": [],
+        "recommended_run_custom_tools": [],
+        "nuclei_scan_hints": {},
+        "anonymous_routes": [],
+        "authenticated_routes": [],
+        "auth_surface_delta": [],
+        "blocked_routes": [],
+        "blocked_route_prefixes": [],
+        "session_contexts": [],
+        "parameter_hints": [],
+        "tool_observations": [],
         "compression": {},
         "paths": {},
     }
@@ -378,6 +437,24 @@ def merge_system_memory_artifacts(memory: dict[str, Any], *values: Any) -> None:
         seen.add(lowered)
         artifacts.append(text)
     memory["artifacts"] = artifacts[:200]
+
+
+def _merge_memory_string_list(memory: dict[str, Any], key: str, values: Any, *, limit: int = 200) -> None:
+    existing = memory.get(key, [])
+    if not isinstance(existing, list):
+        existing = []
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in list(existing) + (values if isinstance(values, list) else [values]):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        merged.append(text)
+    memory[key] = merged[:limit]
 
 
 def _render_checklist_lines(checklist: dict[str, Any]) -> list[str]:
@@ -469,12 +546,284 @@ def _memory_is_effectively_empty(memory: dict[str, Any]) -> bool:
     )
 
 
+def _iter_structured_gathering_results(memory: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+    blocks = gathering.get("blocks", []) if isinstance(gathering.get("blocks"), list) else []
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        for result in block.get("results", []) if isinstance(block.get("results"), list) else []:
+            if not isinstance(result, dict):
+                continue
+            tool_name = str(result.get("tool", "")).strip().lower()
+            structured = result.get("structured", {})
+            if tool_name and isinstance(structured, dict):
+                rows.append((tool_name, structured))
+    return rows
+
+
+def _parse_banner_claim(value: Any, source: str, *, category: str) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    product_part = text
+    version_part = ""
+    if "/" in text:
+        product_part, version_part = text.split("/", 1)
+    elif " " in text:
+        product_part, version_part = text.split(" ", 1)
+    product = canonicalize_product_name(product_part)
+    normalized_version = normalize_version_text(version_part)
+    return {
+        "product": product or product_part.strip(),
+        "display_name": product_part.strip() or product,
+        "category": category,
+        "version": version_part.strip(),
+        "version_normalized": normalized_version,
+        "source": source,
+        "source_detail": source,
+        "confidence_score": 0.68 if normalized_version else 0.55,
+        "confidence_label": confidence_label(0.68 if normalized_version else 0.55),
+    }
+
+
+def _append_claim(claims: dict[tuple[str, str], list[dict[str, Any]]], claim: dict[str, Any] | None) -> None:
+    if not isinstance(claim, dict):
+        return
+    product = canonicalize_product_name(claim.get("product", claim.get("display_name", "")))
+    if not product:
+        return
+    version = normalize_version_text(claim.get("version_normalized") or claim.get("version"))
+    key = (product, version)
+    claim["product"] = product
+    claim["version_normalized"] = version
+    claims.setdefault(key, []).append(claim)
+
+
+def _build_tech_inventory(memory: dict[str, Any]) -> list[dict[str, Any]]:
+    claims: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    for tool_name, structured in _iter_structured_gathering_results(memory):
+        if tool_name == "detect_tech":
+            for item in structured.get("technologies", []) if isinstance(structured.get("technologies"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                score = float(item.get("confidence", 0) or 0) / 100.0
+                claim = {
+                    "product": item.get("name", ""),
+                    "display_name": str(item.get("name", "")).strip(),
+                    "category": str(item.get("category", "")).strip().lower(),
+                    "version": str(item.get("version", "")).strip(),
+                    "version_normalized": str(item.get("version_normalized", "")).strip(),
+                    "source": "detect_tech",
+                    "source_detail": "detect_tech",
+                    "confidence_score": max(0.35, min(score or 0.0, 1.0)),
+                    "confidence_label": confidence_label(score),
+                }
+                _append_claim(claims, claim)
+        elif tool_name == "http_probe":
+            for host in structured.get("hosts", []) if isinstance(structured.get("hosts"), list) else []:
+                if not isinstance(host, dict):
+                    continue
+                _append_claim(claims, _parse_banner_claim(host.get("webserver"), "http_probe:webserver", category="web server"))
+                for tech_name in host.get("tech", []) if isinstance(host.get("tech"), list) else []:
+                    _append_claim(
+                        claims,
+                        {
+                            "product": tech_name,
+                            "display_name": str(tech_name).strip(),
+                            "category": "technology",
+                            "version": "",
+                            "version_normalized": "",
+                            "source": "http_probe",
+                            "source_detail": "http_probe:tech",
+                            "confidence_score": 0.58,
+                            "confidence_label": "medium",
+                        },
+                    )
+        elif tool_name == "http_header_analysis":
+            for endpoint in structured.get("endpoints", []) if isinstance(structured.get("endpoints"), list) else []:
+                if not isinstance(endpoint, dict):
+                    continue
+                _append_claim(claims, _parse_banner_claim(endpoint.get("server"), "http_header_analysis:server", category="web server"))
+                _append_claim(claims, _parse_banner_claim(endpoint.get("x_powered_by"), "http_header_analysis:x_powered_by", category="backend"))
+
+    inventory: list[dict[str, Any]] = []
+    for (product, version), grouped_claims in claims.items():
+        if not grouped_claims:
+            continue
+        sources = sorted(
+            {
+                str(item.get("source_detail", item.get("source", ""))).strip()
+                for item in grouped_claims
+                if str(item.get("source_detail", item.get("source", ""))).strip()
+            }
+        )
+        best = max(grouped_claims, key=lambda item: float(item.get("confidence_score", 0.0) or 0.0))
+        version_sources = {
+            str(item.get("source", "")).strip()
+            for item in grouped_claims
+            if normalize_version_text(item.get("version_normalized") or item.get("version")) == version
+            and version
+        }
+        corroborated = bool(version and len(version_sources) >= 2)
+        confidence_score = max(float(best.get("confidence_score", 0.0) or 0.0), 0.55 if corroborated else 0.0)
+        if corroborated:
+            confidence_score = max(confidence_score, 0.9)
+        profile = get_product_profile(product)
+        kb_query = build_known_vuln_query(
+            product=product,
+            version=version,
+            target_type=memory.get("overview", {}).get("target_type", "") if isinstance(memory.get("overview"), dict) else "",
+        )
+        inventory.append(
+            {
+                "product": product,
+                "display_name": str(best.get("display_name", product)).strip() or product,
+                "category": str(best.get("category", "")).strip() or "technology",
+                "version": str(best.get("version", "")).strip(),
+                "version_normalized": version,
+                "confidence_score": round(confidence_score, 2),
+                "confidence_label": "high" if corroborated else confidence_label(confidence_score),
+                "corroborated": corroborated,
+                "source_count": len(sources),
+                "sources": sources,
+                "legacy_field": str(profile.get("legacy_field", "")).strip(),
+                "recommended_run_custom_tools": profile.get("run_custom_tools", [])[:5],
+                "nuclei_tags": profile.get("nuclei_tags", [])[:6],
+                "nuclei_templates": profile.get("nuclei_templates", [])[:4],
+                "kb_query": kb_query,
+            }
+        )
+
+    inventory.sort(
+        key=lambda item: (
+            float(item.get("confidence_score", 0.0) or 0.0),
+            int(item.get("source_count", 0) or 0),
+            len(str(item.get("version_normalized", "")).strip()),
+        ),
+        reverse=True,
+    )
+    return inventory[:20]
+
+
+def _build_known_vulnerability_signals(memory: dict[str, Any]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool_name, structured in _iter_structured_gathering_results(memory):
+        if tool_name != "known_vuln_lookup":
+            continue
+        for item in structured.get("signals", []) if isinstance(structured.get("signals"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            product = canonicalize_product_name(item.get("product", ""))
+            version = normalize_version_text(item.get("version"))
+            key = "|".join(
+                [
+                    product,
+                    version,
+                    str(item.get("cve", "")).strip().upper(),
+                    str(item.get("title", "")).strip().lower(),
+                ]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            signals.append(
+                {
+                    "product": product,
+                    "version": version,
+                    "cve": str(item.get("cve", "")).strip().upper(),
+                    "title": str(item.get("title", "")).strip(),
+                    "severity": str(item.get("severity", "")).strip().upper(),
+                    "cisa_kev": bool(item.get("cisa_kev")),
+                    "exploit_source": str(item.get("source", "")).strip(),
+                    "summary": str(item.get("summary", "")).strip(),
+                    "confidence_label": str(item.get("confidence_label", "")).strip() or "medium",
+                }
+            )
+    return signals[:30]
+
+
+def _apply_memory_enrichment(memory: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(memory, dict):
+        return {}
+    enriched = dict(memory)
+    inventory = _build_tech_inventory(enriched)
+    if inventory:
+        enriched["tech_inventory"] = inventory
+        current_stack = enriched.get("tech_stack", {})
+        stack = dict(current_stack) if isinstance(current_stack, dict) else {}
+        stack.update(project_legacy_tech_stack(inventory))
+        enriched["tech_stack"] = stack
+        enriched["recommended_run_custom_tools"] = recommend_run_custom_tools(inventory)
+        enriched["nuclei_scan_hints"] = recommend_nuclei_hints(inventory)
+    else:
+        enriched.setdefault("tech_inventory", [])
+        enriched.setdefault("recommended_run_custom_tools", [])
+        enriched.setdefault("nuclei_scan_hints", {})
+
+    known_signals = _build_known_vulnerability_signals(enriched)
+    if known_signals:
+        enriched["known_vulnerability_signals"] = known_signals
+    else:
+        enriched.setdefault("known_vulnerability_signals", [])
+    return enriched
+
+
+def compute_tool_efficiency_snapshot(memory: dict[str, Any]) -> dict[str, dict[str, float | int]]:
+    observations = memory.get("tool_observations", []) if isinstance(memory.get("tool_observations"), list) else []
+    stats: dict[str, dict[str, float | int]] = {}
+    for row in observations:
+        if not isinstance(row, dict):
+            continue
+        tool_name = str(row.get("tool", "")).strip()
+        if not tool_name:
+            continue
+        bucket = stats.setdefault(
+            tool_name,
+            {
+                "total": 0,
+                "successes": 0,
+                "false_positives": 0,
+                "avg_confidence": 0.0,
+            },
+        )
+        bucket["total"] = int(bucket["total"]) + 1
+        if str(row.get("status", "")).strip().lower() == "success":
+            bucket["successes"] = int(bucket["successes"]) + 1
+        bucket["false_positives"] = int(bucket["false_positives"]) + int(row.get("false_positive_count", 0) or 0)
+        confidence = float(row.get("confidence", 0.0) or 0.0)
+        bucket["avg_confidence"] = float(bucket["avg_confidence"]) + confidence
+
+    for bucket in stats.values():
+        total = max(int(bucket["total"]), 1)
+        bucket["efficiency"] = round(int(bucket["successes"]) / total, 2)
+        bucket["false_positive_rate"] = round(int(bucket["false_positives"]) / total, 2)
+        bucket["avg_confidence"] = round(float(bucket["avg_confidence"]) / total, 2)
+    return stats
+
+
 def build_system_memory_prompt_block(memory: dict[str, Any]) -> str:
     overview = memory.get("overview", {}) if isinstance(memory.get("overview"), dict) else {}
     gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
     compression = memory.get("compression", {}) if isinstance(memory.get("compression"), dict) else {}
     updates = memory.get("updates", []) if isinstance(memory.get("updates"), list) else []
     checklist = memory.get("checklist", {}) if isinstance(memory.get("checklist"), dict) else {}
+    tech_stack = memory.get("tech_stack", {}) if isinstance(memory.get("tech_stack"), dict) else {}
+    tech_inventory = memory.get("tech_inventory", []) if isinstance(memory.get("tech_inventory"), list) else []
+    known_vuln_signals = memory.get("known_vulnerability_signals", []) if isinstance(memory.get("known_vulnerability_signals"), list) else []
+    nuclei_scan_hints = memory.get("nuclei_scan_hints", {}) if isinstance(memory.get("nuclei_scan_hints"), dict) else {}
+    recommended_run_custom_tools = memory.get("recommended_run_custom_tools", []) if isinstance(memory.get("recommended_run_custom_tools"), list) else []
+    anonymous_routes = memory.get("anonymous_routes", []) if isinstance(memory.get("anonymous_routes"), list) else []
+    authenticated_routes = memory.get("authenticated_routes", []) if isinstance(memory.get("authenticated_routes"), list) else []
+    auth_surface_delta = memory.get("auth_surface_delta", []) if isinstance(memory.get("auth_surface_delta"), list) else []
+    blocked_routes = memory.get("blocked_routes", []) if isinstance(memory.get("blocked_routes"), list) else []
+    blocked_route_prefixes = memory.get("blocked_route_prefixes", []) if isinstance(memory.get("blocked_route_prefixes"), list) else []
+    session_contexts = memory.get("session_contexts", []) if isinstance(memory.get("session_contexts"), list) else []
+    parameter_hints = memory.get("parameter_hints", []) if isinstance(memory.get("parameter_hints"), list) else []
+    tool_efficiency = compute_tool_efficiency_snapshot(memory)
 
     lines = [
         "# System Memory",
@@ -535,6 +884,100 @@ def build_system_memory_prompt_block(memory: dict[str, Any]) -> str:
             lines.append("")
     else:
         lines.append("- (no grouped gathering blocks stored)")
+
+    tech_lines = [
+        f"{key.replace('_', ' ').title()}: {value}"
+        for key, value in tech_stack.items()
+        if str(value or "").strip()
+    ]
+    if tech_lines:
+        lines.extend(["", "## Tech Stack"])
+        lines.extend(f"- {item}" for item in tech_lines[:8])
+    if tech_inventory:
+        lines.extend(["", "## Tech Inventory"])
+        for row in tech_inventory[:10]:
+            if not isinstance(row, dict):
+                continue
+            product = str(row.get("product", "")).strip()
+            version = str(row.get("version_normalized", row.get("version", ""))).strip()
+            confidence = str(row.get("confidence_label", "")).strip()
+            sources = ", ".join(str(item).strip() for item in row.get("sources", [])[:3]) if isinstance(row.get("sources"), list) else ""
+            line = product
+            if version:
+                line = f"{line} {version}"
+            if confidence:
+                line = f"{line} [{confidence}]"
+            if sources:
+                line = f"{line} via {sources}"
+            if line.strip():
+                lines.append(f"- {line.strip()}")
+    if recommended_run_custom_tools or nuclei_scan_hints:
+        lines.extend(["", "## Known-Vuln Fast Lane Hints"])
+        if recommended_run_custom_tools:
+            lines.append(
+                f"- Preferred scoped tools: {', '.join(str(item) for item in recommended_run_custom_tools[:8])}"
+            )
+        tags = nuclei_scan_hints.get("tags", []) if isinstance(nuclei_scan_hints.get("tags"), list) else []
+        templates = nuclei_scan_hints.get("templates", []) if isinstance(nuclei_scan_hints.get("templates"), list) else []
+        if tags:
+            lines.append(f"- Nuclei tags: {', '.join(str(item) for item in tags[:8])}")
+        if templates:
+            lines.append(f"- Nuclei templates: {', '.join(str(item) for item in templates[:6])}")
+    if known_vuln_signals:
+        lines.extend(["", "## Known Vulnerability Signals"])
+        for row in known_vuln_signals[:10]:
+            if not isinstance(row, dict):
+                continue
+            cve = str(row.get("cve", "")).strip()
+            title = str(row.get("title", "")).strip()
+            product = str(row.get("product", "")).strip()
+            version = str(row.get("version", "")).strip()
+            severity = str(row.get("severity", "")).strip()
+            kev = " KEV" if bool(row.get("cisa_kev")) else ""
+            summary_text = str(row.get("summary", "")).strip()
+            label = " ".join(part for part in [product, version, cve, severity] if part).strip()
+            if not label:
+                label = title or "known vulnerability signal"
+            lines.append(f"- {label}{kev}: {summary_text or title}")
+
+    if anonymous_routes or authenticated_routes or auth_surface_delta or blocked_routes or blocked_route_prefixes or session_contexts:
+        lines.extend(["", "## Session And Surface Context"])
+        if session_contexts:
+            lines.append(f"- Session contexts: {', '.join(str(item) for item in session_contexts[:8])}")
+        if anonymous_routes:
+            lines.append(f"- Anonymous routes discovered: {len(anonymous_routes)}")
+        if authenticated_routes:
+            lines.append(f"- Authenticated routes discovered: {len(authenticated_routes)}")
+        if auth_surface_delta:
+            lines.append("- Auth-only surface delta:")
+            for route in auth_surface_delta[:8]:
+                lines.append(f"  - {route}")
+        if blocked_routes:
+            lines.append("- Blocked or disproven routes:")
+            for route in blocked_routes[:10]:
+                lines.append(f"  - {route}")
+        if blocked_route_prefixes:
+            lines.append("- Blocked route families:")
+            for route in blocked_route_prefixes[:8]:
+                lines.append(f"  - {route}")
+
+    if parameter_hints:
+        lines.extend(["", "## Parameter Hints"])
+        for hint in parameter_hints[:12]:
+            text = str(hint or "").strip()
+            if text:
+                lines.append(f"- {text}")
+
+    if tool_efficiency:
+        lines.extend(["", "## Tool Efficiency"])
+        for tool_name, stats in list(tool_efficiency.items())[:10]:
+            lines.append(
+                "- "
+                + f"{tool_name}: efficiency={stats.get('efficiency', 0.0)} "
+                + f"avg_confidence={stats.get('avg_confidence', 0.0)} "
+                + f"false_positive_rate={stats.get('false_positive_rate', 0.0)} "
+                + f"total={stats.get('total', 0)}"
+            )
 
     summary = str(compression.get("summary", "")).strip()
     if summary:
@@ -646,6 +1089,7 @@ def _fallback_compress_markdown(
 
 def _normalize_saved_memory(memory: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(memory) if isinstance(memory, dict) else {}
+    normalized = _apply_memory_enrichment(normalized)
 
     gathering = normalized.get("gathering", {}) if isinstance(normalized.get("gathering"), dict) else {}
     raw_blocks = gathering.get("blocks", [])
@@ -691,6 +1135,21 @@ def _normalize_saved_memory(memory: dict[str, Any]) -> dict[str, Any]:
     normalized["artifacts"] = _sanitize_artifact_values(
         normalized.get("artifacts", []) if isinstance(normalized.get("artifacts"), list) else [],
         limit=200,
+    )
+    normalized["tech_inventory"] = [
+        row for row in normalized.get("tech_inventory", [])
+        if isinstance(row, dict)
+    ][:20] if isinstance(normalized.get("tech_inventory"), list) else []
+    normalized["known_vulnerability_signals"] = [
+        row for row in normalized.get("known_vulnerability_signals", [])
+        if isinstance(row, dict)
+    ][:30] if isinstance(normalized.get("known_vulnerability_signals"), list) else []
+    normalized["recommended_run_custom_tools"] = _normalize_string_list(
+        normalized.get("recommended_run_custom_tools", []),
+        limit=12,
+    )
+    normalized["nuclei_scan_hints"] = _sanitize_structured_snapshot(
+        normalized.get("nuclei_scan_hints", {})
     )
     return normalized
 
@@ -790,24 +1249,36 @@ async def append_system_memory_updates(
     stage: str,
     updates: list[dict[str, Any]],
     verified_findings: list[dict[str, Any]] | None = None,
+    tool_observations: list[dict[str, Any]] | None = None,
     memory_llm: Any | None = None,
     config: SystemMemoryConfig | None = None,
 ) -> dict[str, Any]:
     del memory_llm
     memory = load_system_memory(project_cache_dir)
-    rows = memory.get("updates", [])
-    if not isinstance(rows, list):
-        rows = []
+    update_rows = memory.get("updates", [])
+    if not isinstance(update_rows, list):
+        update_rows = []
     for update in updates:
         if not isinstance(update, dict):
             continue
         row = dict(update)
         row.setdefault("stage", stage)
-        rows.append(row)
+        update_rows.append(row)
         merge_system_memory_artifacts(memory, row.get("title"), row.get("summary"))
+        if row.get("kind") == "blocked_route":
+            _merge_memory_string_list(memory, "blocked_routes", row.get("routes", []), limit=200)
+            _merge_memory_string_list(memory, "blocked_route_prefixes", row.get("route_prefixes", []), limit=80)
     if verified_findings:
         memory["verified_findings"] = verified_findings
-    memory["updates"] = rows[-100:]
+    if tool_observations:
+        observation_rows = memory.get("tool_observations", [])
+        if not isinstance(observation_rows, list):
+            observation_rows = []
+        for item in tool_observations:
+            if isinstance(item, dict):
+                observation_rows.append(dict(item))
+        memory["tool_observations"] = observation_rows[-200:]
+    memory["updates"] = update_rows[-100:]
     return await save_system_memory(project_cache_dir, memory, config=config)
 
 
@@ -896,6 +1367,7 @@ class SystemMemoryLLM:
                     "summary": _sanitize_memory_text(row.get("summary", ""), limit=220),
                     "command": _sanitize_memory_text(row.get("command", ""), limit=420),
                     "artifacts": [],
+                    "structured": _sanitize_structured_snapshot(row.get("structured")),
                 }
             )
 
@@ -1019,6 +1491,9 @@ class SystemMemoryLLM:
                             limit=420,
                         ),
                         "artifacts": _sanitize_artifact_values(row.get("artifacts", []), limit=8),
+                        "structured": _sanitize_structured_snapshot(
+                            row.get("structured", fallback_row.get("structured", {}))
+                        ),
                     }
                 )
         if results:
