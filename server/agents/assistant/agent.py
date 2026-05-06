@@ -8,7 +8,7 @@ import re
 import shlex
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import httpx
 import structlog
@@ -22,10 +22,12 @@ from server.layers.safety.prompt_guard import PromptInjectionGuard
 from server.utils.target_scope import describe_url_scope_issue, extract_target_host_port
 
 from .tools import (
+    ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION,
     ASSISTANT_GET_PAGE_TOOL_DEFINITION,
     ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION,
     ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION,
     ASSISTANT_SEARCH_PROJECT_VECTORS_TOOL_DEFINITION,
+    add_finding_to_brain as assistant_add_finding_to_brain,
     get_page as assistant_get_page,
     mark_false_positive as assistant_mark_false_positive,
     run_custom as assistant_run_custom,
@@ -42,8 +44,9 @@ _MAX_REPLY_TOKENS = 2200
 _MAX_CONTEXT_CHARS = 1400
 _DIRECT_COMMAND_BINARIES = {
     "curl", "nmap", "ffuf", "sqlmap", "nikto", "wget", "git",
-    "openssl", "whois", "dig", "nslookup", "httpx",
-    "whatweb", "arjun", "dalfox", "katana", "feroxbuster",
+    "openssl", "whois", "dig", "nslookup", "httpx", "ftp", "hydra",
+    "whatweb", "arjun", "dalfox", "katana", "feroxbuster", "gobuster",
+    "nuclei",
 }
 _VAGUE_COMMAND_TOKENS = {
     "it", "that", "this", "them", "result", "results", "output", "command",
@@ -57,9 +60,11 @@ _ASSISTANT_NETWORK_COMMANDS = {
     "feroxbuster",
     "ffuf",
     "find",
+    "ftp",
     "grep",
     "head",
     "httpx",
+    "hydra",
     "katana",
     "ls",
     "netstat",
@@ -75,6 +80,8 @@ _ASSISTANT_NETWORK_COMMANDS = {
     "whatweb",
     "wget",
     "whois",
+    "gobuster",
+    "nuclei",
 }
 _ASSISTANT_CAPABILITY_QUESTION_PATTERNS = (
     "what tools do you have",
@@ -145,6 +152,15 @@ _GET_PAGE_SCHEMA = {
     },
 }
 
+_ADD_FINDING_TO_BRAIN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION["name"],
+        "description": ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION["description"],
+        "parameters": ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION["parameters"],
+    },
+}
+
 _MARK_FALSE_POSITIVE_SCHEMA = {
     "type": "function",
     "function": {
@@ -187,6 +203,45 @@ class AssistantAgent:
         saved_context: str = "",
         history: list[dict[str, Any]] | None = None,
     ) -> AssistantResult:
+        """Standard non-streaming answer (backward compatibility)."""
+        reply = ""
+        tool_results = []
+        next_context = ""
+        
+        async for event in self.stream_answer(
+            prompt=prompt,
+            project_id=project_id,
+            target=target,
+            target_type=target_type,
+            context=context,
+            saved_context=saved_context,
+            history=history,
+        ):
+            if event["type"] == "reply":
+                reply = event["data"]["text"]
+            elif event["type"] == "tool_output":
+                tool_results.append(event["data"]["output"])
+            elif event["type"] == "context":
+                next_context = event["data"]["next_context"]
+        
+        return AssistantResult(
+            reply=reply,
+            tool_results=tool_results,
+            next_context=next_context,
+        )
+
+    async def stream_answer(
+        self,
+        *,
+        prompt: str,
+        project_id: str | None = None,
+        target: str = "",
+        target_type: str = "",
+        context: str = "",
+        saved_context: str = "",
+        history: list[dict[str, Any]] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Async generator yielding real-time tool progress and the final answer."""
         scope_reply = self._answer_scope_question(prompt, target=target, target_type=target_type)
         if scope_reply is not None:
             next_context = await self._build_next_context(
@@ -198,7 +253,9 @@ class AssistantAgent:
                 target=target,
                 target_type=target_type,
             )
-            return AssistantResult(reply=scope_reply, next_context=next_context)
+            yield {"type": "reply", "data": {"text": scope_reply}}
+            yield {"type": "context", "data": {"next_context": next_context}}
+            return
 
         capability_reply = self._answer_capability_question(prompt, target=target, target_type=target_type)
         if capability_reply is not None:
@@ -211,7 +268,9 @@ class AssistantAgent:
                 target=target,
                 target_type=target_type,
             )
-            return AssistantResult(reply=capability_reply, next_context=next_context)
+            yield {"type": "reply", "data": {"text": capability_reply}}
+            yield {"type": "context", "data": {"next_context": next_context}}
+            return
 
         report_reply = await self._handle_report_intent(
             prompt,
@@ -229,14 +288,26 @@ class AssistantAgent:
                 target=target,
                 target_type=target_type,
             )
-            return AssistantResult(reply=report_reply, next_context=next_context)
+            yield {"type": "reply", "data": {"text": report_reply}}
+            yield {"type": "context", "data": {"next_context": next_context}}
+            return
 
         follow_up_direct = self._resolve_follow_up_command_from_history(
             prompt,
             history=history,
         )
         if follow_up_direct is not None:
+            yield {
+                "type": "tool_start", 
+                "data": {
+                    "tool": "run_custom", 
+                    "input": f"{follow_up_direct.get('command')} {' '.join(follow_up_direct.get('args', []))}",
+                    "reason": follow_up_direct.get("reason")
+                }
+            }
             tool_result = await self._execute_run_custom(follow_up_direct, target=target)
+            yield {"type": "tool_output", "data": {"tool": "run_custom", "output": tool_result}}
+            
             reply = self._format_direct_command_reply(tool_result)
             next_context = await self._build_next_context(
                 saved_context=saved_context,
@@ -247,22 +318,28 @@ class AssistantAgent:
                 target=target,
                 target_type=target_type,
             )
-            return AssistantResult(
-                reply=reply,
-                tool_results=[tool_result],
-                next_context=next_context,
-            )
+            yield {"type": "reply", "data": {"text": reply}}
+            yield {"type": "context", "data": {"next_context": next_context}}
+            return
 
         direct = self._parse_direct_command_prompt(prompt, target=target)
         if direct is not None:
-            tool_result = await self._execute_run_custom(
-                {
-                    "command": direct["command"],
-                    "args": direct["args"],
-                    "reason": direct["reason"],
-                },
-                target=target,
-            )
+            cmd_payload = {
+                "command": direct["command"],
+                "args": direct["args"],
+                "reason": direct["reason"],
+            }
+            yield {
+                "type": "tool_start", 
+                "data": {
+                    "tool": "run_custom", 
+                    "input": f"{direct['command']} {' '.join(direct['args'])}",
+                    "reason": direct["reason"]
+                }
+            }
+            tool_result = await self._execute_run_custom(cmd_payload, target=target)
+            yield {"type": "tool_output", "data": {"tool": "run_custom", "output": tool_result}}
+            
             reply = self._format_direct_command_reply(tool_result)
             next_context = await self._build_next_context(
                 saved_context=saved_context,
@@ -273,11 +350,9 @@ class AssistantAgent:
                 target=target,
                 target_type=target_type,
             )
-            return AssistantResult(
-                reply=reply,
-                tool_results=[tool_result],
-                next_context=next_context,
-            )
+            yield {"type": "reply", "data": {"text": reply}}
+            yield {"type": "context", "data": {"next_context": next_context}}
+            return
 
         context_block = self._build_context_block(
             project_id=project_id,
@@ -293,6 +368,7 @@ class AssistantAgent:
 
         tool_results: list[dict[str, Any]] = []
         for round_index in range(1, _MAX_TOOL_ROUNDS + 1):
+            yield {"type": "ping", "data": {"step": f"round_{round_index}_thinking"}}
             response = await self._chat_with_fallback(messages)
             tool_calls = list(response.tool_calls or [])[:_MAX_TOOL_CALLS_PER_ROUND]
             if not tool_calls:
@@ -313,26 +389,103 @@ class AssistantAgent:
                     target=target,
                     target_type=target_type,
                 )
-                return AssistantResult(reply=reply, tool_results=tool_results, next_context=next_context)
+                yield {"type": "reply", "data": {"text": reply}}
+                yield {"type": "context", "data": {"next_context": next_context}}
+                return
+
+            # Ensure tool calls have 'type': 'function' as required by some providers
+            normalized_tool_calls = []
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    ntc = tc.copy()
+                    if "type" not in ntc:
+                        ntc["type"] = "function"
+                    normalized_tool_calls.append(ntc)
+                else:
+                    normalized_tool_calls.append(tc)
 
             messages.append(
                 ChatMessage(
                     role="assistant",
                     content=response.content or "",
-                    tool_calls=tool_calls,
+                    tool_calls=normalized_tool_calls,
                 )
             )
 
-            for tool_call in tool_calls:
+            for idx, tool_call in enumerate(tool_calls):
+                tool_call_id = tool_call.get("id") or f"call_{idx}_{int(time.time())}"
                 tool_name = (
                     tool_call.get("function", {}).get("name", "")
                     if isinstance(tool_call, dict)
                     else ""
                 )
+                
+                # Emit tool start event
+                tool_input = ""
+                tool_reason = ""
+                if tool_name == "run_custom":
+                    raw_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION["parameters"],
+                    )
+                    cmd = raw_args.get("command", "")
+                    args = raw_args.get("args", [])
+                    tool_input = f"{cmd} {' '.join(args)}".strip()
+                    tool_reason = raw_args.get("reason", "")
+                elif tool_name == "search_project_vectors":
+                    raw_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_SEARCH_PROJECT_VECTORS_TOOL_DEFINITION["parameters"],
+                    )
+                    tool_input = raw_args.get("query", "")
+                    tool_reason = f"Searching project vectors for: {tool_input}"
+                elif tool_name == "get_page":
+                    raw_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_GET_PAGE_TOOL_DEFINITION["parameters"],
+                    )
+                    tool_input = raw_args.get("url", "")
+                    tool_reason = f"Inspecting page: {tool_input}"
+                elif tool_name == "add_finding_to_brain":
+                    raw_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION["parameters"],
+                    )
+                    tool_input = raw_args.get("finding", "")
+                    tool_reason = "Updating project brain"
+                elif tool_name == "mark_false_positive":
+                    raw_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION["parameters"],
+                    )
+                    tool_input = raw_args.get("finding_id", "")
+                    tool_reason = raw_args.get("reason", "")
+                else:
+                    try:
+                        func = tool_call.get("function", {})
+                        args_str = func.get("arguments", "{}")
+                        args_obj = args_str if isinstance(args_str, dict) else json.loads(args_str)
+                        tool_input = str(args_obj.get("query") or args_obj.get("url") or args_obj.get("command") or "")
+                        tool_reason = str(args_obj.get("reason") or "")
+                    except:
+                        tool_input = ""
+                        tool_reason = ""
+
+                yield {
+                    "type": "tool_start",
+                    "data": {
+                        "call_id": tool_call_id,
+                        "tool": tool_name,
+                        "input": tool_input,
+                        "reason": tool_reason,
+                    }
+                }
+
                 if tool_name not in {
                     "run_custom",
                     "search_project_vectors",
                     "get_page",
+                    "add_finding_to_brain",
                     "mark_false_positive",
                 }:
                     tool_payload = {
@@ -356,6 +509,15 @@ class AssistantAgent:
                         ASSISTANT_GET_PAGE_TOOL_DEFINITION["parameters"],
                     )
                     tool_payload = await self._execute_get_page(raw_args, target=target)
+                elif tool_name == "add_finding_to_brain":
+                    raw_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION["parameters"],
+                    )
+                    tool_payload = await self._execute_add_finding_to_brain(
+                        raw_args,
+                        project_id=project_id,
+                    )
                 elif tool_name == "mark_false_positive":
                     raw_args = self._parse_tool_call_args(
                         tool_call,
@@ -366,13 +528,23 @@ class AssistantAgent:
                         project_id=project_id,
                     )
                 else:
-                    # Fallback to run_custom for everything else (legacy behavior)
+                    # Fallback to run_custom
                     raw_args = self._parse_tool_call_args(
                         tool_call,
                         ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION["parameters"],
                     )
                     tool_payload = await self._execute_run_custom(raw_args, target=target)
+                
                 tool_results.append(tool_payload)
+                yield {
+                    "type": "tool_output",
+                    "data": {
+                        "call_id": tool_call_id,
+                        "tool": tool_name,
+                        "output": tool_payload
+                    }
+                }
+
                 messages.append(
                     ChatMessage(
                         role="tool",
@@ -385,8 +557,11 @@ class AssistantAgent:
                     )
                 )
 
+        yield {"type": "ping", "data": {"step": "generating_final_reply"}}
         final_response = await self._chat_with_fallback(messages, allow_tools=False)
         reply = self._sanitize_reply_text(final_response.content or "") or self._format_tool_only_reply(tool_results)
+        yield {"type": "reply", "data": {"text": reply}}
+
         next_context = await self._build_next_context(
             saved_context=saved_context,
             history=history,
@@ -396,7 +571,7 @@ class AssistantAgent:
             target=target,
             target_type=target_type,
         )
-        return AssistantResult(reply=reply, tool_results=tool_results, next_context=next_context)
+        yield {"type": "context", "data": {"next_context": next_context}}
 
     def _build_context_block(
         self,
@@ -431,6 +606,7 @@ class AssistantAgent:
                 _RUN_CUSTOM_SCHEMA,
                 _SEARCH_PROJECT_VECTORS_SCHEMA,
                 _GET_PAGE_SCHEMA,
+                _ADD_FINDING_TO_BRAIN_SCHEMA,
                 _MARK_FALSE_POSITIVE_SCHEMA,
             ]
             if allow_tools
@@ -443,28 +619,29 @@ class AssistantAgent:
                 tools=tool_payload,
                 temperature=0.2,
                 max_tokens=_MAX_REPLY_TOKENS,
+                max_retries=0,
             )
 
         try:
             return await self._queue.call_with_queue("assistant", _call_primary())
-        except httpx.HTTPStatusError as exc:
-            recovered = self._recover_from_failed_generation(exc)
-            if recovered is not None:
-                logger.warning("assistant_recovered_failed_generation_tool_call")
-                return recovered
-            error_text = str(exc)
-            if "429" not in error_text and "rate limit" not in error_text.lower():
-                raise
         except Exception as exc:
-            error_text = str(exc)
-            if "429" not in error_text and "rate limit" not in error_text.lower():
+            error_text = str(exc).lower()
+            is_rate_limit = "429" in error_text or "rate limit" in error_text
+            
+            if isinstance(exc, httpx.HTTPStatusError):
+                recovered = self._recover_from_failed_generation(exc)
+                if recovered is not None:
+                    logger.warning("assistant_recovered_failed_generation_tool_call")
+                    return recovered
+
+            if not is_rate_limit:
                 raise
 
             backup_llm = await self._backup.get_backup_llm()
             if backup_llm is None:
                 raise
 
-            logger.info("assistant_backup_llm_fallback")
+            logger.info("assistant_backup_llm_fallback", error=error_text)
             return await backup_llm.chat(
                 messages,
                 tools=tool_payload,
@@ -494,7 +671,7 @@ class AssistantAgent:
         raw_args = args.get("args", [])
         if not isinstance(raw_args, list):
             raw_args = []
-        timeout = args.get("timeout", 120)
+        timeout = args.get("timeout", 300)
         env = args.get("env", {})
         cwd = args.get("cwd")
         normalized_args = [str(item) for item in raw_args]
@@ -521,7 +698,7 @@ class AssistantAgent:
             command=command,
             args=normalized_args,
             reason=reason,
-            timeout=int(timeout) if str(timeout).strip() else 120,
+            timeout=int(timeout) if str(timeout).strip() else 300,
             env=env if isinstance(env, dict) else {},
             cwd=str(cwd) if cwd else None,
         )
@@ -566,6 +743,27 @@ class AssistantAgent:
             css_selector=str(args.get("css_selector", "")).strip(),
         )
 
+    async def _execute_add_finding_to_brain(
+        self,
+        args: dict[str, Any],
+        *,
+        project_id: str | None,
+    ) -> dict[str, Any]:
+        from server.api.dependencies import projects_store
+        title = str(args.get("title", "")).strip()
+        description = str(args.get("description", "")).strip()
+        severity = str(args.get("severity", "info")).strip()
+        status = str(args.get("status", "not_done")).strip()
+        
+        return assistant_add_finding_to_brain(
+            project_id=str(project_id or "").strip(),
+            title=title,
+            description=description,
+            severity=severity,
+            status=status,
+            project_store=projects_store,
+        )
+
     async def _execute_mark_false_positive(
         self,
         args: dict[str, Any],
@@ -573,10 +771,9 @@ class AssistantAgent:
         project_id: str | None,
     ) -> dict[str, Any]:
         from server.api.dependencies import projects_store
-
         finding_id = str(args.get("finding_id", "")).strip()
         reason = str(args.get("reason", "")).strip()
-        return mark_false_positive(
+        return await assistant_mark_false_positive(
             project_id=str(project_id or "").strip(),
             finding_id=finding_id,
             reason=reason,
@@ -598,9 +795,54 @@ class AssistantAgent:
             )
         target_host, target_port = extract_target_host_port(target)
         matched_target = False
-        for token in args:
+        skip_next = False
+        for i, token in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
+
             clean = str(token or "").strip().strip("'\"")
-            if not clean or clean.startswith("-"):
+            if not clean:
+                continue
+
+            # Handle flags that take non-target arguments (like credentials)
+            if clean.startswith("-"):
+                # curl -u, wget --user, etc.
+                if normalized_command == "curl" and clean in {"-u", "--user", "-E", "--cert", "-x", "--proxy", "-U", "--proxy-user"}:
+                    skip_next = True
+                elif normalized_command == "wget" and clean in {"--user", "--password", "--proxy-user", "--proxy-password"}:
+                    skip_next = True
+                elif normalized_command == "ffuf" and clean in {"-w", "-H", "-X", "-p", "-d", "-r", "-ac", "-acc", "-ach", "-ack", "-acs", "-act", "-af", "-ao", "-as", "-cc", "-ck", "-cs", "-ct", "-d", "-h", "-header", "-p", "-proxy", "-r", "-v", "-w", "-X"}:
+                    # ffuf has many flags, some take values we should skip.
+                    # Especially -w (wordlist), -H (header), -X (method), -p (pause/proxy), -d (data).
+                    if clean in {"-w", "-H", "-X", "-p", "-d", "-proxy", "-header"}:
+                        skip_next = True
+                elif normalized_command == "sqlmap" and clean in {"--data", "--header", "--cookie", "--user-agent", "--referer", "--proxy", "--proxy-cred", "--auth-type", "--auth-cred"}:
+                    skip_next = True
+                elif normalized_command == "gobuster" and clean in {"-w", "-H", "-P", "-U", "-a", "-c", "-p", "-s", "-t"}:
+                    if clean in {"-w", "-H", "-P", "-U", "-p"}:
+                        skip_next = True
+                elif normalized_command == "nuclei" and clean in {"-t", "-tags", "-et", "-it", "-author", "-severity"}:
+                    if clean in {"-t", "-tags", "-et", "-it"}:
+                        skip_next = True
+                continue
+
+            if " " in clean:
+                continue
+            if clean.lower() in {
+                "port",
+                "host",
+                "target",
+                "url",
+                "ip",
+                "user",
+                "pass",
+                "password",
+                "username",
+                "service",
+                "version",
+                "path",
+            }:
                 continue
             issue = describe_url_scope_issue(clean, target)
             if issue:
@@ -617,6 +859,9 @@ class AssistantAgent:
                 matched_target = True
                 continue
             if target_host in clean and ("://" in clean or clean.startswith(f"{target_host}/")):
+                matched_target = True
+                continue
+            if "__IP_" in clean or "__HOST_" in clean:
                 matched_target = True
                 continue
             if normalized_command in {"dig", "nslookup", "nmap"} and ("." in clean or ":" in clean):
@@ -1098,7 +1343,14 @@ class AssistantAgent:
             if not isinstance(row, dict):
                 continue
             if "matches" in row:
-                tool_summaries.append(f"project_vector_hits={len(row.get('matches', []))}")
+                matches = row.get('matches', [])
+                summary_parts = [f"project_vector_hits={len(matches)}"]
+                for m in matches[:3]:
+                    m_id = str(m.get('metadata', {}).get('record_id') or m.get('id', '')).strip()
+                    m_title = str(m.get('title', '')).strip()[:60]
+                    if m_id:
+                        summary_parts.append(f"hit_id={m_id} title=\"{m_title}\"")
+                tool_summaries.append(" ".join(summary_parts))
                 continue
             if "results" in row:
                 tool_summaries.append(f"web_results={len(row.get('results', []))}")

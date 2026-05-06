@@ -1,5 +1,9 @@
 """Assistant tool exports."""
 
+from .add_finding_to_brain import (
+    ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION,
+    add_finding_to_brain,
+)
 from .get_page import ASSISTANT_GET_PAGE_TOOL_DEFINITION, get_page
 from .mark_false_positive import (
     ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION,
@@ -13,11 +17,13 @@ from .search_project_vectors import (
 from .search_web import ASSISTANT_SEARCH_WEB_TOOL_DEFINITION, search_web
 
 __all__ = [
+    "ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION",
     "ASSISTANT_GET_PAGE_TOOL_DEFINITION",
     "ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION",
     "ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION",
     "ASSISTANT_SEARCH_PROJECT_VECTORS_TOOL_DEFINITION",
     "ASSISTANT_SEARCH_WEB_TOOL_DEFINITION",
+    "add_finding_to_brain",
     "get_page",
     "mark_false_positive",
     "run_custom",

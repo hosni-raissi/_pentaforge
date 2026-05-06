@@ -189,6 +189,7 @@ export interface AIAssistRequest {
   target?: string;
   targetType?: string;
   context?: string;
+  requestId?: string;
 }
 
 export interface AIAssistResponse {
@@ -373,6 +374,12 @@ function normalizeProjectRow(value: unknown): Project | null {
             if (typeof message.blocked === "boolean") {
               normalized.blocked = message.blocked;
             }
+            if (Array.isArray(message.toolLogs)) {
+              normalized.toolLogs = message.toolLogs as any;
+            }
+            if (Array.isArray(message.passwordRequests)) {
+              normalized.passwordRequests = message.passwordRequests as any;
+            }
             return normalized;
           })
           .filter((item): item is CopilotMessage => item !== null)
@@ -386,6 +393,7 @@ function normalizeProjectRow(value: unknown): Project | null {
     scanProgress: (
       typeof row.scanProgress === "number" && Number.isFinite(row.scanProgress)
     ) ? row.scanProgress : 0,
+    approval_mode: row.approval_mode === "auto" ? "auto" : "custom",
     lastScan: (
       typeof row.lastScan === "object" && row.lastScan !== null
     ) ? (row.lastScan as Project["lastScan"]) : undefined,
@@ -491,6 +499,16 @@ export async function saveProjectToDesktop(project: Project): Promise<void> {
   await requestJson("/api/projects", {
     method: "POST",
     body: JSON.stringify(project),
+  });
+}
+
+export async function updateProjectSavedContextFromDesktop(projectId: string, context: string): Promise<void> {
+  if (!supportsDesktopProjectBridge()) {
+    return;
+  }
+  await requestJson("/api/projects", {
+    method: "POST",
+    body: JSON.stringify({ id: projectId, context }),
   });
 }
 
@@ -1133,6 +1151,116 @@ export async function listIntelUpdateStatusFromDesktop(
   };
 }
 
+export interface AIAssistStreamEvent {
+  type: "run" | "tool_start" | "tool_output" | "reply" | "context" | "error" | "ping" | "keepalive";
+  data: any;
+}
+
+export async function askAIAssistStreamFromDesktop(
+  request: AIAssistRequest,
+  onEvent: (event: AIAssistStreamEvent) => void,
+  options?: { signal?: AbortSignal },
+): Promise<void> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+
+  const url = `${apiBaseUrl()}/api/ai/assist/stream`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      prompt: request.prompt,
+      project_id: request.projectId ?? "",
+      target: request.target ?? "",
+      target_type: request.targetType ?? "",
+      context: request.context ?? "",
+      request_id: request.requestId ?? "",
+    }),
+    credentials: "include",
+    signal: options?.signal,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`${response.status} ${response.statusText}: ${text}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Failed to get reader from response body");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent: string | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (trimmed.startsWith("event:")) {
+        currentEvent = trimmed.substring(trimmed.indexOf(":") + 1).trim();
+      } else if (trimmed.startsWith("data:")) {
+        if (currentEvent) {
+          try {
+            const jsonStr = trimmed.substring(trimmed.indexOf(":") + 1).trim();
+            const data = JSON.parse(jsonStr);
+            onEvent({ type: currentEvent as any, data });
+          } catch (e) {
+            console.error("Failed to parse SSE data", e, trimmed);
+          }
+          currentEvent = null;
+        }
+      }
+    }
+  }
+}
+
+export async function cancelAIAssistRunFromDesktop(requestId: string): Promise<{ ok: boolean; request_id: string; status: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/ai/assist/${encodeURIComponent(requestId)}/cancel`,
+    {
+      method: "POST",
+    },
+    30000,
+  );
+}
+
+export async function sendAIAssistInputFromDesktop(
+  requestId: string,
+  payload: {
+    callId: string;
+    value: string;
+    denied: boolean;
+  },
+): Promise<{ ok: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(`/api/ai/assist/${encodeURIComponent(requestId)}/input`, {
+    method: "POST",
+    body: JSON.stringify({
+      call_id: payload.callId,
+      value: payload.value,
+      denied: payload.denied,
+    }),
+  });
+}
+
 export async function askAIAssistFromDesktop(
   request: AIAssistRequest,
 ): Promise<AIAssistResponse> {
@@ -1149,7 +1277,7 @@ export async function askAIAssistFromDesktop(
       target_type: request.targetType ?? "",
       context: request.context ?? "",
     }),
-  }, 180000);
+  }, 600000);
 }
 
 export async function clearAIAssistConversationFromDesktop(
@@ -1265,8 +1393,8 @@ export async function generateReportFromDesktop(
     throw new Error("desktop project bridge is disabled");
   }
   return await requestJson<GenerateReportResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/reports/generate`,
-    { method: "POST" },
+    `/api/projects/${encodeURIComponent(projectId)}/reports/generate?ts=${Date.now()}`,
+    { method: "POST", cache: "no-store" },
     180000,
   );
 }
@@ -1278,7 +1406,8 @@ export async function getReportStatusFromDesktop(
     return { markdown: false, html: false, pdf: false, generated_at: null };
   }
   const payload = await requestJson<Partial<ReportStatus>>(
-    `/api/projects/${encodeURIComponent(projectId)}/reports/status`,
+    `/api/projects/${encodeURIComponent(projectId)}/reports/status?ts=${Date.now()}`,
+    { cache: "no-store" },
   );
   return {
     markdown: typeof payload.markdown === "boolean" ? payload.markdown : false,
@@ -1296,7 +1425,8 @@ export async function getReportContentFromDesktop(
     throw new Error("desktop project bridge is disabled");
   }
   return await requestJson<ReportContentResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/reports/${encodeURIComponent(format)}`,
+    `/api/projects/${encodeURIComponent(projectId)}/reports/${encodeURIComponent(format)}?ts=${Date.now()}`,
+    { cache: "no-store" },
   );
 }
 

@@ -189,16 +189,27 @@ def shared_report_viewer(token: str) -> HTMLResponse:
       --primary-hover: #4338ca;
     }}
 
-    body {{ font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; overflow: hidden; transition: background 0.2s, color 0.2s; }}
-    .auth-overlay {{ position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 1000; }}
+    * {{ box-sizing: border-box; }}
+    html,
+    body {{ height: 100%; }}
+    body {{ font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; min-height: 100vh; height: 100vh; overflow: hidden; transition: background 0.2s, color 0.2s; }}
+    .auth-overlay {{ position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; }}
     .auth-card {{ background: var(--surface); padding: 2rem; border-radius: 12px; border: 1px solid var(--border); width: 100%; max-width: 400px; text-align: center; }}
     .auth-card input {{ width: 100%; box-sizing: border-box; padding: 0.75rem; margin: 1rem 0; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; }}
     .auth-card button {{ width: 100%; padding: 0.75rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; }}
     
-    .layout {{ display: flex; width: 100%; height: 100%; }}
-    .report-pane {{ flex: 1; padding: 2rem; overflow-y: auto; background: var(--bg); }}
+    .layout {{ display: flex; width: 100%; min-height: 100vh; height: 100vh; align-items: stretch; flex: 1 1 auto; }}
+    .report-pane {{ flex: 1 1 auto; min-width: 0; min-height: 0; padding: 2rem; overflow: hidden; background: var(--bg); display: flex; flex-direction: column; }}
+    .report-toolbar {{ display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-shrink: 0; align-items: center; }}
+    .report-toolbar button,
+    .report-toolbar select {{
+      min-height: 40px;
+    }}
+    .report-toolbar-actions {{ margin-left: auto; display: flex; gap: 0.5rem; align-items: center; }}
+    .report-frame {{ flex: 1 1 auto; min-height: 0; width: 100%; height: 100%; border-radius: 12px; border: 1px solid var(--border); }}
+    .report-markdown {{ display: none; flex: 1 1 auto; min-height: 0; width: 100%; height: 100%; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem; background: var(--surface); padding: 1.5rem; border-radius: 12px; margin: 0; border: 1px solid var(--border); overflow-y: auto; color: var(--text); }}
     
-    .chat-pane {{ width: 450px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; }}
+    .chat-pane {{ width: 450px; max-width: 42vw; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }}
     .chat-header {{ padding: 1rem; border-bottom: 1px solid var(--border); font-weight: 600; background: var(--surface); display: flex; align-items: center; justify-content: space-between; }}
     .chat-messages {{ flex: 1; padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; }}
     .msg {{ padding: 0.75rem; border-radius: 8px; max-width: 85%; line-height: 1.4; font-size: 0.9rem; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }}
@@ -209,9 +220,68 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     .chat-input button {{ padding: 0.5rem 1rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; }}
     
     #error {{ color: #ef4444; margin-top: 1rem; font-size: 0.9rem; }}
-    iframe {{ width: 100%; height: 100%; border: none; background: white; border-radius: 12px; }}
+    iframe {{ width: 100%; height: 100%; border: none; background: white; border-radius: 12px; display: block; }}
     .theme-toggle {{ background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; }}
     .theme-toggle:hover {{ color: var(--text); background: var(--surface-light); }}
+
+    @media (max-width: 960px) {{
+      body {{ display: block; overflow: auto; }}
+      .layout {{ flex-direction: column; min-height: 100vh; height: auto; }}
+      .report-pane {{ padding: 1rem; overflow: visible; }}
+      .report-toolbar {{
+        flex-wrap: wrap;
+        align-items: stretch;
+      }}
+      .report-toolbar button,
+      .report-toolbar select {{
+        flex: 1 1 140px;
+      }}
+      .report-toolbar-actions {{
+        margin-left: 0;
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }}
+      .report-frame,
+      .report-markdown {{
+        min-height: 58vh;
+      }}
+      .chat-pane {{
+        width: 100%;
+        max-width: none;
+        border-left: none;
+        border-top: 1px solid var(--border);
+        min-height: 45vh;
+      }}
+    }}
+
+    @media (max-width: 640px) {{
+      .auth-card {{ padding: 1.25rem; border-radius: 10px; }}
+      .report-pane {{ padding: 0.75rem; }}
+      .report-toolbar-actions {{
+        grid-template-columns: 1fr;
+      }}
+      .report-frame,
+      .report-markdown {{
+        min-height: 52vh;
+      }}
+      .chat-header,
+      .chat-messages,
+      .chat-input {{
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+      }}
+      .chat-input {{
+        flex-wrap: wrap;
+      }}
+      .chat-input input,
+      .chat-input button {{
+        width: 100%;
+      }}
+      .msg {{
+        max-width: 92%;
+      }}
+    }}
   </style>
 </head>
 <body>
@@ -226,12 +296,12 @@ def shared_report_viewer(token: str) -> HTMLResponse:
   </div>
 
   <div class="layout" id="portal-layout" style="display: none;">
-    <div class="report-pane" style="display: flex; flex-direction: column;">
-      <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-shrink: 0;">
+    <div class="report-pane">
+      <div class="report-toolbar">
         <button id="btn-view-html" onclick="setView('html')" style="padding: 0.5rem 1rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 500;">HTML View</button>
         <button id="btn-view-md" onclick="setView('markdown')" style="padding: 0.5rem 1rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; font-weight: 500;">Markdown View</button>
         
-        <div style="margin-left: auto; display: flex; gap: 0.5rem;">
+        <div class="report-toolbar-actions">
           <select id="download-format" style="padding: 0.5rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; font-size: 0.85rem; cursor: pointer;">
             <option value="html">HTML</option>
             <option value="markdown">Markdown</option>
@@ -239,8 +309,8 @@ def shared_report_viewer(token: str) -> HTMLResponse:
           <button onclick="downloadActive()" style="padding: 0.5rem 1rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; font-weight: 500;">Download</button>
         </div>
       </div>
-      <iframe id="report-frame" style="flex: 1; border-radius: 12px; border: 1px solid var(--border);"></iframe>
-      <pre id="report-markdown" style="display: none; flex: 1; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem; background: var(--surface); padding: 1.5rem; border-radius: 12px; margin: 0; border: 1px solid var(--border); overflow-y: auto; color: var(--text);"></pre>
+      <iframe id="report-frame" class="report-frame"></iframe>
+      <pre id="report-markdown" class="report-markdown"></pre>
     </div>
     <div class="chat-pane">
       <div class="chat-header">

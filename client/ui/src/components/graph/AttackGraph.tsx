@@ -73,6 +73,7 @@ export function AttackGraph({ target, findings, className }: AttackGraphProps) {
   const { nodes, edges } = useMemo(() => {
     const n: Node<AttackNodeData>[] = [];
     const e: Edge[] = [];
+    const activeFindings = findings.filter((finding) => finding.status !== 'false_positive');
 
     // Root target node
     n.push({
@@ -84,7 +85,7 @@ export function AttackGraph({ target, findings, className }: AttackGraphProps) {
 
     // Group findings by category to create service nodes
     const categories = new Map<string, Finding[]>();
-    findings.forEach((f) => {
+    activeFindings.forEach((f) => {
       const existing = categories.get(f.category) ?? [];
       existing.push(f);
       categories.set(f.category, existing);

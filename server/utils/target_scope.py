@@ -10,28 +10,44 @@ def _split_target(value: str) -> tuple[str, str, int | None, str]:
     if not raw:
         return "", "", None, ""
 
-    parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
-    scheme = (parsed.scheme or "").strip().lower()
-    host = (parsed.hostname or "").strip().lower()
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
+    has_scheme = "://" in raw
+    if has_scheme:
+        parsed = urlsplit(raw)
+        scheme = (parsed.scheme or "").strip().lower()
+        host = (parsed.hostname or "").strip().lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        path = (parsed.path or "").strip()
+    else:
+        # No scheme, handle host[:port][/path]
+        scheme = ""
+        host_part = raw.split("/", 1)[0]
+        path = "/" + raw.split("/", 1)[1] if "/" in raw else ""
+        
+        if ":" in host_part:
+            host_str, port_str = host_part.rsplit(":", 1)
+            host = host_str.lower()
+            try:
+                port = int(port_str)
+            except ValueError:
+                port = None
+                host = host_part.lower()
+        else:
+            host = host_part.lower()
+            port = None
 
-    if port is None and scheme == "http":
-        port = 80
-    elif port is None and scheme == "https":
-        port = 443
+    if port is None:
+        if scheme == "http":
+            port = 80
+        elif scheme == "https":
+            port = 443
 
-    path = (parsed.path or "").strip()
     if path == "/":
         path = ""
     elif path.endswith("/"):
         path = path.rstrip("/")
-
-    if not host:
-        fallback = raw.split("?", 1)[0].split("#", 1)[0].strip()
-        host = fallback.split("/", 1)[0].split(":", 1)[0].strip().lower()
 
     return scheme, host, port, path
 
@@ -64,7 +80,17 @@ def describe_url_scope_issue(url: str, active_target: str) -> str | None:
         return None
 
     _, url_host, url_port, _ = _split_target(url)
-    if not url_host:
+    if not url_host or url.isdigit() or ("__IP_" in url) or ("__HOST_" in url) or " " in url:
+        return None
+
+    # Ignore tokens that don't look like hostnames or IPs.
+    # Must have a dot (domain/IP), a scheme, be 'localhost', or be a valid IPv6 (has multiple colons).
+    is_localhost = url_host == "localhost"
+    has_dot = "." in url_host
+    has_scheme = "://" in url
+    is_ipv6 = url_host.count(":") >= 2
+    
+    if not (has_dot or has_scheme or is_localhost or is_ipv6):
         return None
 
     same_host = url_host == target_host

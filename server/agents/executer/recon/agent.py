@@ -143,6 +143,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
         target_types: list[str] | None = None,
         project_id: str | None = None,
         project_cache_dir: str | None = None,
+        approval_mode: str = "custom",
     ) -> None:
         self._target_types = list(target_types or [])
         scoped_tools = filter_tools_for_target_types(
@@ -164,6 +165,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
             local_config=local_config,
             project_id=project_id,
             project_cache_dir=project_cache_dir,
+            approval_mode=approval_mode,
         )
 
     async def run(

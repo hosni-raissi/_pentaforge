@@ -201,17 +201,6 @@ function AgentNode({ data }: { data: AgentNodeData }) {
       <p className="max-w-[180px] truncate text-[10px] text-text-muted">
         {data.currentTask?.trim() || "No active task"}
       </p>
-      {typeof data.progress === "number" ? (
-        <div className="w-[132px]">
-          <div className="h-1 overflow-hidden rounded-full bg-surface-3">
-            <div
-              className="h-full rounded-full bg-pf-500 transition-all duration-300"
-              style={{ width: `${Math.min(Math.max(data.progress, 0), 100)}%` }}
-            />
-          </div>
-          <p className="mt-0.5 text-center text-[9px] text-text-muted">{data.progress}%</p>
-        </div>
-      ) : null}
       <Handle type="source" position={Position.Bottom} id="bottom" className="!h-2 !w-2 !border-0 !bg-pf-500" />
       <Handle
         type="source"
@@ -497,9 +486,9 @@ export function AgentStatePath({
             maxZoom={1.6}
             nodesDraggable={!locked}
             panOnDrag={!locked}
-            zoomOnScroll={!locked}
-            zoomOnPinch={!locked}
-            zoomOnDoubleClick={!locked}
+            zoomOnScroll={false}
+            zoomOnPinch={false}
+            zoomOnDoubleClick={false}
             preventScrolling={!locked}
             proOptions={{ hideAttribution: true }}
           >
@@ -507,9 +496,6 @@ export function AgentStatePath({
             <CustomControls locked={locked} onToggleLock={() => setLocked((value) => !value)} />
           </ReactFlow>
 
-          <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-md border border-border bg-surface-1/90 px-2.5 py-1.5 text-xs text-text-secondary shadow">
-            Click a role to inspect logs, results, and history
-          </div>
         </div>
       )}
     </Card>
@@ -527,12 +513,6 @@ function CustomControls({
 
   return (
     <div className="pf-controls absolute bottom-3 left-3 z-10 flex flex-col gap-1">
-      <button onClick={() => zoomIn({ duration: 200 })} title="Zoom in">
-        <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-      </button>
-      <button onClick={() => zoomOut({ duration: 200 })} title="Zoom out">
-        <svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12" /></svg>
-      </button>
       <button onClick={() => fitView({ padding: 0.2, duration: 300 })} title="Fit view">
         <svg viewBox="0 0 24 24">
           <polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" />

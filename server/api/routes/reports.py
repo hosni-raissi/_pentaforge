@@ -6,7 +6,7 @@ import uuid
 
 import markdown as md
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from server.agents.report.report_generator import generate_report
@@ -220,12 +220,14 @@ async def generate_project_report(project_id: str) -> GenerateReportResponse:
 
 
 @router.get("/api/projects/{project_id}/reports/status")
-async def get_report_status(project_id: str) -> ReportStatusResponse:
+async def get_report_status(project_id: str, response: Response) -> ReportStatusResponse:
     """Check which report formats exist for a project."""
     project = projects_store.get_project(project_id)
     if not isinstance(project, dict):
         raise HTTPException(status_code=404, detail="Project not found")
 
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     status = projects_store.list_report_status(project_id)
     return ReportStatusResponse(
         markdown=bool(status.get("markdown")),
@@ -236,7 +238,7 @@ async def get_report_status(project_id: str) -> ReportStatusResponse:
 
 
 @router.get("/api/projects/{project_id}/reports/{report_format}")
-async def get_report_content(project_id: str, report_format: str) -> ReportContentResponse:
+async def get_report_content(project_id: str, report_format: str, response: Response) -> ReportContentResponse:
     """Get a report's content by format."""
     if report_format not in {"markdown", "html", "pdf"}:
         raise HTTPException(status_code=400, detail=f"Unsupported format: {report_format}")
@@ -249,6 +251,8 @@ async def get_report_content(project_id: str, report_format: str) -> ReportConte
     if report is None:
         raise HTTPException(status_code=404, detail=f"No {report_format} report found for this project")
 
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     return ReportContentResponse(
         ok=True,
         format=str(report["format"]),

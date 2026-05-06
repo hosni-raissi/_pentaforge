@@ -34,6 +34,8 @@ interface FormatCardConfig {
   gradient: string;
 }
 
+const REPORT_GENERATING_STORAGE_PREFIX = "pf-report-generating";
+
 const FORMAT_CARDS: FormatCardConfig[] = [
   {
     format: "html",
@@ -65,12 +67,45 @@ function triggerFileDownload(content: string, filename: string, mimeType: string
   URL.revokeObjectURL(url);
 }
 
+function reportGeneratingStorageKey(projectId: string): string {
+  return `${REPORT_GENERATING_STORAGE_PREFIX}:${projectId}`;
+}
+
+function readPersistedGenerating(projectId: string): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.sessionStorage.getItem(reportGeneratingStorageKey(projectId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writePersistedGenerating(projectId: string, generating: boolean): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const key = reportGeneratingStorageKey(projectId);
+    if (generating) {
+      window.sessionStorage.setItem(key, "1");
+    } else {
+      window.sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 export default function Reports() {
   const project = useProjects((s) => s.getActive());
   const navigate = useNavigate();
 
   const [status, setStatus] = useState<ReportStatus | null>(null);
-  const [generating, setGenerating] = useState(false);
+  const [generating, setGenerating] = useState(() => (
+    project ? readPersistedGenerating(project.id) : false
+  ));
   const [error, setError] = useState("");
   const [viewFormat, setViewFormat] = useState<ReportFormat | null>(null);
   const [viewContent, setViewContent] = useState("");
@@ -78,26 +113,76 @@ export default function Reports() {
   const [downloadingFormat, setDownloadingFormat] = useState<ReportFormat | null>(null);
   const statusPolling = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const stopStatusPolling = useCallback(() => {
+    if (statusPolling.current) {
+      clearInterval(statusPolling.current);
+      statusPolling.current = null;
+    }
+  }, []);
+
+  const beginStatusPolling = useCallback(() => {
+    if (!project) {
+      return;
+    }
+    stopStatusPolling();
+    statusPolling.current = setInterval(() => {
+      void fetchStatus();
+    }, 3000);
+  }, [project, stopStatusPolling]);
+
   const fetchStatus = useCallback(async () => {
     if (!project) return;
     try {
       const s = await getReportStatusFromDesktop(project.id);
       setStatus(s);
+      const reportExists = Boolean(s.markdown || s.html || s.pdf);
+      if (reportExists) {
+        setGenerating(false);
+        writePersistedGenerating(project.id, false);
+        stopStatusPolling();
+      }
     } catch {
       // Silently ignore status fetch failures.
     }
-  }, [project?.id]);
+  }, [project?.id, stopStatusPolling]);
+
+  useEffect(() => {
+    if (!project) {
+      setGenerating(false);
+      stopStatusPolling();
+      return;
+    }
+    const persisted = readPersistedGenerating(project.id);
+    setGenerating(persisted);
+    if (persisted) {
+      beginStatusPolling();
+    } else {
+      stopStatusPolling();
+    }
+  }, [project?.id, beginStatusPolling, stopStatusPolling]);
 
   useEffect(() => {
     void fetchStatus();
   }, [fetchStatus]);
 
+  useEffect(() => {
+    if (!project) {
+      return;
+    }
+    writePersistedGenerating(project.id, generating);
+    if (generating) {
+      beginStatusPolling();
+    } else {
+      stopStatusPolling();
+    }
+  }, [project?.id, generating, beginStatusPolling, stopStatusPolling]);
+
   // Clean up polling on unmount.
   useEffect(() => {
     return () => {
-      if (statusPolling.current) clearInterval(statusPolling.current);
+      stopStatusPolling();
     };
-  }, []);
+  }, [stopStatusPolling]);
 
   if (!project) {
     return (
@@ -118,14 +203,22 @@ export default function Reports() {
   const handleGenerate = async () => {
     setGenerating(true);
     setError("");
+    setStatus((prev) => (
+      prev
+        ? { ...prev, markdown: false, html: false, pdf: false, generated_at: null }
+        : null
+    ));
+    setViewFormat(null);
+    setViewContent("");
+    setViewLoading(false);
     try {
       await generateReportFromDesktop(project.id);
       await fetchStatus();
+      setGenerating(false);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Report generation failed",
       );
-    } finally {
       setGenerating(false);
     }
   };

@@ -48,6 +48,7 @@ from server.nodes.system_memory import (
     system_memory_dir as _system_memory_dir_external,
     system_memory_paths as _system_memory_paths_external,
 )
+from server.agents.architect.agent import ArchitectAgent
 from server.tools.session.session_manager import SessionContext, SessionManager
 
 logger = structlog.get_logger(__name__)
@@ -4914,6 +4915,10 @@ class ExecuterScanCallback:
             data={"stage": "executer", "kind": "warn", "raw_message": message},
         )
 
+    def get_approval_mode(self) -> str:
+        project = self._service._projects_store.get_project(self._project_id)  # noqa: SLF001
+        return str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
+
     async def request_tool_approval(
         self,
         *,
@@ -5021,6 +5026,9 @@ class WorkerExecuterCallback:
 
     def on_warn(self, message: str) -> None:
         self._parent.on_warn(self._prefix_message(message))
+
+    def get_approval_mode(self) -> str:
+        return self._parent.get_approval_mode()
 
     async def request_tool_approval(
         self,
@@ -5191,6 +5199,7 @@ class ScanOrchestratorService:
                     )
             scan_id = str(uuid.uuid4())
             started_at = _utc_now_iso()
+            approval_mode = str(project.get("approval_mode") or "custom").lower().strip()
             run_state = {
                 "scan_id": scan_id,
                 "project_id": project_key,
@@ -5199,6 +5208,7 @@ class ScanOrchestratorService:
                 "updated_at": started_at,
                 "finished_at": None,
                 "error": "",
+                "approval_mode": approval_mode,
                 "awaiting_information_gathering_approval": False,
                 "awaiting_planner_approval": False,
                 "awaiting_tool_approval": False,
@@ -5438,15 +5448,20 @@ class ScanOrchestratorService:
                 "already_running": False,
             }
             last_scan = project.get("lastScan")
-            if isinstance(last_scan, dict):
-                last_scan["status"] = "paused"
-                last_scan["finishedAt"] = last_scan.get("finishedAt") or now_iso
-                last_scan["awaitingToolApproval"] = False
-                last_scan["pendingToolApproval"] = None
-                project["lastScan"] = last_scan
-            project["status"] = "paused"
-            project["updatedAt"] = now_iso
-            self._projects_store.upsert_project(project)
+            last_scan_meta = dict(last_scan) if isinstance(last_scan, dict) else {}
+            last_scan_meta["awaitingToolApproval"] = False
+            last_scan_meta["pendingToolApproval"] = None
+            self._persist_project_status(
+                project_key,
+                status="paused",
+                scan_progress=int(project.get("scanProgress", 0) or 0),
+                scan_meta={
+                    **last_scan_meta,
+                    "scanId": scan_id,
+                    "status": "paused",
+                    "finishedAt": last_scan_meta.get("finishedAt") or now_iso,
+                },
+            )
             self._emit_event(
                 project_key,
                 event="scan_paused",
@@ -5473,6 +5488,7 @@ class ScanOrchestratorService:
                 "project_id": project_key,
                 "scan_id": scan_id,
                 "status": "paused",
+                "finished_at": now_iso,
             }
 
         # cancel
@@ -5671,6 +5687,24 @@ class ScanOrchestratorService:
         project_key = str(project_id or "").strip()
         if not project_key:
             return False
+
+        project = self._projects_store.get_project(project_key)
+        approval_mode = str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
+        
+        run_state = self._runs.get(project_key)
+        if isinstance(run_state, dict):
+            # Sync run_state for consistency
+            run_state["approval_mode"] = approval_mode
+            self._runs[project_key] = run_state
+
+        if approval_mode == "auto":
+            logger.info(
+                "executer_tool_auto_approved",
+                project_id=project_key,
+                role=role,
+                tool_name=tool_name,
+            )
+            return True
 
         approval_id = str(uuid.uuid4())
         pending = _PendingToolApproval(
@@ -6642,6 +6676,10 @@ class ScanOrchestratorService:
                     data={"stage": "recon", "kind": "warn", "raw_message": message},
                 )
 
+            def get_approval_mode(self) -> str:
+                project = self._svc._projects_store.get_project(self._pid)  # noqa: SLF001
+                return str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
+
             def request_tool_approval(self, *, role: str, tool_name: str, args: dict[str, Any], call_id: str) -> Any:
                 if hasattr(self._parent, "request_tool_approval"):
                     return self._parent.request_tool_approval(role=role, tool_name=tool_name, args=args, call_id=call_id)
@@ -6665,13 +6703,14 @@ class ScanOrchestratorService:
                     project_id=None,
                     project_cache_dir=project_cache_dir,
                     config=override_config,
+                    approval_mode=run_state.get("approval_mode", "custom"),
                 )
             )
-        analyzer_agent = AnalyzerAgent()
+        analyzer_agent = None
         analyzer_lock = asyncio.Lock()
         cached_summaries: list[dict[str, Any]] = []
-
         try:
+            analyzer_agent = AnalyzerAgent()
             for cycle_number in range(1, WARMUP_RECON_CYCLES + 1):
                 display_cycle_number = _display_cycle_number(
                     cycle_number,
@@ -6798,10 +6837,12 @@ class ScanOrchestratorService:
         finally:
             for agent in warmup_recon_agents:
                 await agent.clear_context_window()
-            await analyzer_agent.clear_context_window()
+            if analyzer_agent:
+                await analyzer_agent.clear_context_window()
             for agent in warmup_recon_agents:
                 await agent.close()
-            await analyzer_agent.close()
+            if analyzer_agent:
+                await analyzer_agent.close()
 
         return plan_data, cached_summaries
 
@@ -7738,6 +7779,53 @@ class ScanOrchestratorService:
                 blocked_route_prefixes=blocked_route_prefixes[:8],
             )
 
+        # ============================================================================
+        # PHASE 2.5: Architect Agent (background synthesis of target map)
+        # ============================================================================
+        try:
+            architect = ArchitectAgent(project_id=project_id, project_cache_dir=project_cache_dir)
+            current_project = self._projects_store.get_project(project_id)
+            previous_architecture = current_project.get("payload", {}).get("architecture_draft")
+            
+            # Build memory and vulnerability context for synthesis
+            arch_memory_block = _build_target_memory_prompt_block(target_memory)
+            arch_vulnerabilities_block = ""
+            for item in verify_results_organized["real_vulnerabilities"]:
+                arch_vulnerabilities_block += f"- {item['verify_summary']}\n"
+
+            # Run architect synthesis
+            architecture_draft = await architect.synthesize(
+                target=target,
+                target_type=target_type,
+                scope=scope,
+                memory_block=arch_memory_block,
+                vulnerabilities_block=arch_vulnerabilities_block,
+                previous_draft=previous_architecture
+            )
+            
+            if architecture_draft and isinstance(architecture_draft, dict) and architecture_draft.get("hosts"):
+                if "payload" not in current_project:
+                    current_project["payload"] = {}
+                current_project["payload"]["architecture_draft"] = architecture_draft
+                self._projects_store.upsert_project(current_project)
+                
+                self._emit_event(
+                    project_id,
+                    event="architect_updated",
+                    scan_id=scan_id,
+                    level="info",
+                    message="Architect [updated] Refined target architecture draft based on latest findings.",
+                    data={
+                        "stage": "architect",
+                        "kind": "updated",
+                        "architecture_draft": architecture_draft,
+                        "cycle": cycle_number
+                    },
+                )
+        except Exception as arch_exc:
+            logger.warning("architect_synthesis_failed", error=str(arch_exc))
+            # Non-critical failure, continue to planner
+
         # Build single aggregated message
         aggregated_planner_message = (
             f"Target: {target}\n"
@@ -8250,40 +8338,49 @@ class ScanOrchestratorService:
                     },
                 )
 
+                project = self._projects_store.get_project(project_id)
+                approval_mode = str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
+                
                 run_state = self._runs.get(project_id)
                 if isinstance(run_state, dict):
-                    run_state["awaiting_information_gathering_approval"] = True
-                    run_state["updated_at"] = _utc_now_iso()
-                    run_state["active_memory"] = memory  # Store for updates during approval
-                    self._runs[project_id] = run_state
+                    # Sync run_state
+                    run_state["approval_mode"] = approval_mode
+                    
+                    if approval_mode == "auto":
+                        logger.info("target_info_gathering_auto_approved", project_id=project_id)
+                    else:
+                        run_state["awaiting_information_gathering_approval"] = True
+                        run_state["updated_at"] = _utc_now_iso()
+                        run_state["active_memory"] = memory  # Store for updates during approval
+                        self._runs[project_id] = run_state
 
-                gate = asyncio.Event()
-                self._info_gathering_approval_events[project_id] = gate
+                        gate = asyncio.Event()
+                        self._info_gathering_approval_events[project_id] = gate
 
-                self._emit_event(
-                    project_id,
-                    event="target_info_gathering_waiting_approval",
-                    scan_id=scan_id,
-                    level="warn",
-                    message=(
-                        "Information Gathering [waiting approval] Static information gathering plan is ready. "
-                        "Review the organized blocks, then click Continue Information Gathering."
-                    ),
-                    data={
-                        "stage": "information_gathering",
-                        "kind": "waiting_approval",
-                        "status": "running",
-                        "awaiting_user_approval": True,
-                        "program": target_info_gathering_result,
-                    },
-                )
+                        self._emit_event(
+                            project_id,
+                            event="target_info_gathering_waiting_approval",
+                            scan_id=scan_id,
+                            level="warn",
+                            message=(
+                                "Information Gathering [waiting approval] Static information gathering plan is ready. "
+                                "Review the organized blocks, then click Continue Information Gathering."
+                            ),
+                            data={
+                                "stage": "information_gathering",
+                                "kind": "waiting_approval",
+                                "status": "running",
+                                "awaiting_user_approval": True,
+                                "program": target_info_gathering_result,
+                            },
+                        )
 
-                try:
-                    await gate.wait()
-                except asyncio.CancelledError:
-                    raise
-                finally:
-                    self._info_gathering_approval_events.pop(project_id, None)
+                        try:
+                            await gate.wait()
+                        except asyncio.CancelledError:
+                            raise
+                        finally:
+                            self._info_gathering_approval_events.pop(project_id, None)
 
             target_memory = await brain_builder.run(
                 project_id=project_id,
@@ -8507,53 +8604,64 @@ class ScanOrchestratorService:
             scan_meta=partial_intel_scan_meta,
         )
 
+        project = self._projects_store.get_project(project_id)
+        approval_mode = str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
+        
         run_state = self._runs.get(project_id)
         if isinstance(run_state, dict):
-            run_state["awaiting_planner_approval"] = True
-            run_state["updated_at"] = _utc_now_iso()
-            self._runs[project_id] = run_state
+            # Sync run_state
+            run_state["approval_mode"] = approval_mode
+            
+            if approval_mode == "auto":
+                logger.info("planner_auto_approved", project_id=project_id)
+                gate = None
+            else:
+                run_state["awaiting_planner_approval"] = True
+                run_state["updated_at"] = _utc_now_iso()
+                self._runs[project_id] = run_state
 
-        gate = asyncio.Event()
-        self._planner_approval_events[project_id] = gate
-        self._emit_event(
-            project_id,
-            event="planner_waiting_approval",
-            scan_id=scan_id,
-            level="warn",
-            message=(
-                "Planner [waiting approval] Planner-generated checklist is ready. "
-                "Review/edit checklist, then click Continue to Planner."
-            ),
-            data={
-                "stage": "planner",
-                "kind": "waiting_approval",
-                "status": "running",
-                "awaiting_user_approval": True,
-                "checklist_items_count": checklist_items_count,
-                "warmup_summary_count": len(warmup_summaries),
-                "checklist": intel_checklist,
-                "summary": intel_summary,
-                "intel_status": intel_status,
-            },
-        )
-        logger.info(
-            "scan_orchestrator_waiting_planner_approval",
-            project_id=project_id,
-            scan_id=scan_id,
-            checklist_items_count=checklist_items_count,
-        )
+                gate = asyncio.Event()
+                self._planner_approval_events[project_id] = gate
+                self._emit_event(
+                    project_id,
+                    event="planner_waiting_approval",
+                    scan_id=scan_id,
+                    level="warn",
+                    message=(
+                        "Planner [waiting approval] Planner-generated checklist is ready. "
+                        "Review/edit checklist, then click Continue to Planner."
+                    ),
+                    data={
+                        "stage": "planner",
+                        "kind": "waiting_approval",
+                        "status": "running",
+                        "awaiting_user_approval": True,
+                        "checklist_items_count": checklist_items_count,
+                        "warmup_summary_count": len(warmup_summaries),
+                        "checklist": intel_checklist,
+                        "summary": intel_summary,
+                        "intel_status": intel_status,
+                    },
+                )
+                logger.info(
+                    "scan_orchestrator_waiting_planner_approval",
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    checklist_items_count=checklist_items_count,
+                )
 
-        try:
-            await gate.wait()
-        except asyncio.CancelledError:
-            current = self._runs.get(project_id, {})
-            if str(current.get("status")) in {"paused", "idle"}:
-                logger.info("scan_orchestrator_cancelled", project_id=project_id, scan_id=scan_id)
+        if gate:
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                current = self._runs.get(project_id, {})
+                if str(current.get("status")) in {"paused", "idle"}:
+                    logger.info("scan_orchestrator_cancelled", project_id=project_id, scan_id=scan_id)
+                    return
+                self._mark_failed(project_id, scan_id, "scan cancelled")
                 return
-            self._mark_failed(project_id, scan_id, "scan cancelled")
-            return
-        finally:
-            self._planner_approval_events.pop(project_id, None)
+            finally:
+                self._planner_approval_events.pop(project_id, None)
 
         run_state = self._runs.get(project_id)
         if isinstance(run_state, dict):
@@ -8876,6 +8984,12 @@ class ScanOrchestratorService:
             data={"stage": "executer", "kind": "start"},
         )
 
+        recon_agent = None
+        recon_agent_worker_1 = None
+        exploit_agent = None
+        analyzer_agent = None
+        loop_planner = None
+
         try:
             from server.agents.analyzer import AnalyzerAgent
             from server.agents.executer.recon.agent import ReconExecuterAgent
@@ -8903,6 +9017,7 @@ class ScanOrchestratorService:
                 target_types=[target_type],
                 project_id=project_id,
                 project_cache_dir=project_cache_dir,
+                approval_mode=run_state.get("approval_mode", "custom"),
             )
             recon_agent_worker_1 = ReconExecuterAgent(
                 callback=recon_worker_1_callback,
@@ -8910,12 +9025,14 @@ class ScanOrchestratorService:
                 project_id=project_id,
                 project_cache_dir=project_cache_dir,
                 config=get_public_agent_config("exploit"),
+                approval_mode=run_state.get("approval_mode", "custom"),
             )
             exploit_agent = ExploitExecuterAgent(
                 callback=executer_callback,
                 target_types=[target_type],
                 project_id=project_id,
                 project_cache_dir=project_cache_dir,
+                approval_mode=run_state.get("approval_mode", "custom"),
             )
             analyzer_agent = AnalyzerAgent(
                 callback=analyzer_callback,
@@ -9082,106 +9199,125 @@ class ScanOrchestratorService:
                         "planner_loop_count": len(planner_loop_rows),
                     },
                 )
+            except Exception as exc:
+                executer_error = str(exc)
+                self._emit_event(
+                    project_id,
+                    event="executer_crashed",
+                    scan_id=scan_id,
+                    level="warn",
+                    message=f"Executer [crashed] {exc}",
+                    data={
+                        "stage": "executer",
+                        "kind": "crashed",
+                        "error": str(exc),
+                    },
+                )
             finally:
-                await recon_agent.close()
-                await recon_agent_worker_1.close()
-                await exploit_agent.close()
-                await analyzer_agent.close()
-                await loop_planner.close()
-        except Exception as exc:
-            executer_error = str(exc)
+                if recon_agent:
+                    await recon_agent.close()
+                if recon_agent_worker_1:
+                    await recon_agent_worker_1.close()
+                if exploit_agent:
+                    await exploit_agent.close()
+                if analyzer_agent:
+                    await analyzer_agent.close()
+                if loop_planner:
+                    await loop_planner.close()
+
+            if executer_error:
+                self._mark_failed(
+                    project_id,
+                    scan_id,
+                    f"executer runtime error: {executer_error}",
+                )
+                return
+
+            finished_at = _utc_now_iso()
+
+            scan_meta = {
+                "scanId": scan_id,
+                "status": "completed",
+                "startedAt": started_at,
+                "finishedAt": finished_at,
+                "error": "",
+                "result": {
+                    "target": target,
+                    "targetType": target_type,
+                    "intel": {
+                        "status": intel_status,
+                        "summary": intel_summary,
+                        "stats": intel_stats,
+                        "checklist": intel_checklist,
+                    },
+                    "plannerStaticPlan": static_recon_plan,
+                    "targetInfoProfile": target_info_profile,
+                    "targetMemory": target_memory.get("paths", {}),
+                    "targetInfoGathering": target_info_gathering_result,
+                    "warmup": {
+                        "status": "completed",
+                        "plan": warmup_plan_data,
+                        "summaries": warmup_summaries,
+                    },
+                    "planner": {
+                        "summary": str(planner_result.summary),
+                        "scenarios": list(planner_result.scenarios),
+                        "needs": list(planner_result.needs),
+                        "action_plan": (
+                            dict(planner_result.action_plan)
+                            if isinstance(planner_result.action_plan, dict)
+                            else {}
+                        ),
+                        "plan_data": plan_data,
+                    },
+                    "execution": execution_rows,
+                    "perceptor": perceptor_rows,
+                    "plannerLoops": planner_loop_rows,
+                },
+            }
+
+            self._runs[project_id] = {
+                "scan_id": scan_id,
+                "project_id": project_id,
+                "status": "completed",
+                "started_at": started_at,
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "error": "",
+                "awaiting_information_gathering_approval": False,
+                "awaiting_planner_approval": False,
+                "awaiting_tool_approval": False,
+                "pending_tool_approval": None,
+                "already_running": False,
+            }
+            self._persist_project_status(
+                project_id,
+                status="completed",
+                scan_progress=100,
+                scan_meta=scan_meta,
+            )
             self._emit_event(
                 project_id,
-                event="executer_crashed",
+                event="scan_completed",
                 scan_id=scan_id,
-                level="warn",
-                message=f"Executer [crashed] {exc}",
-                data={
-                    "stage": "executer",
-                    "kind": "crashed",
-                    "error": str(exc),
-                },
+                level="success",
+                message="Scan completed successfully.",
+                data={"status": "completed", "scan_progress": 100},
             )
-        if executer_error:
-            self._mark_failed(
-                project_id,
-                scan_id,
-                f"executer runtime error: {executer_error}",
+            logger.info("scan_orchestrator_complete", project_id=project_id, scan_id=scan_id)
+
+        except Exception as exc:
+            logger.exception(
+                "scan_orchestrator_fatal_error",
+                project_id=project_id,
+                scan_id=scan_id,
+                error=str(exc),
             )
-            return
-
-        finished_at = _utc_now_iso()
-
-        scan_meta = {
-            "scanId": scan_id,
-            "status": "completed",
-            "startedAt": started_at,
-            "finishedAt": finished_at,
-            "error": "",
-            "result": {
-                "target": target,
-                "targetType": target_type,
-                "intel": {
-                    "status": intel_status,
-                    "summary": intel_summary,
-                    "stats": intel_stats,
-                    "checklist": intel_checklist,
-                },
-                "plannerStaticPlan": static_recon_plan,
-                "targetInfoProfile": target_info_profile,
-                "targetMemory": target_memory.get("paths", {}),
-                "targetInfoGathering": target_info_gathering_result,
-                "warmup": {
-                    "status": "completed",
-                    "plan": warmup_plan_data,
-                    "summaries": warmup_summaries,
-                },
-                "planner": {
-                    "summary": str(planner_result.summary),
-                    "scenarios": list(planner_result.scenarios),
-                    "needs": list(planner_result.needs),
-                    "action_plan": (
-                        dict(planner_result.action_plan)
-                        if isinstance(planner_result.action_plan, dict)
-                        else {}
-                    ),
-                    "plan_data": plan_data,
-                },
-                "execution": execution_rows,
-                "perceptor": perceptor_rows,
-                "plannerLoops": planner_loop_rows,
-            },
-        }
-
-        self._runs[project_id] = {
-            "scan_id": scan_id,
-            "project_id": project_id,
-            "status": "completed",
-            "started_at": started_at,
-            "updated_at": finished_at,
-            "finished_at": finished_at,
-            "error": "",
-            "awaiting_information_gathering_approval": False,
-            "awaiting_planner_approval": False,
-            "awaiting_tool_approval": False,
-            "pending_tool_approval": None,
-            "already_running": False,
-        }
-        self._persist_project_status(
-            project_id,
-            status="completed",
-            scan_progress=100,
-            scan_meta=scan_meta,
-        )
-        self._emit_event(
-            project_id,
-            event="scan_completed",
-            scan_id=scan_id,
-            level="success",
-            message="Scan completed successfully.",
-            data={"status": "completed", "scan_progress": 100},
-        )
-        logger.info("scan_orchestrator_complete", project_id=project_id, scan_id=scan_id)
+            self._mark_failed(project_id, scan_id, f"fatal orchestrator error: {exc}")
+        finally:
+            self._runs.pop(project_id, None)
+            self._planner_approval_events.pop(project_id, None)
+            self._info_gathering_approval_events.pop(project_id, None)
 
     def _mark_failed(
         self,

@@ -18,14 +18,6 @@ export function StatusBar() {
           <Wifi size={10} />
           {safeServerUrl}:{safeServerPort}
         </span>
-        <span className="flex items-center gap-1">
-          <Cpu size={10} />
-          {llm?.name ?? 'No LLM'}
-        </span>
-        <span className="flex items-center gap-1">
-          <Database size={10} />
-          {llm?.mode === 'local' ? 'Local' : 'Cloud'}
-        </span>
       </div>
       <div className="flex items-center gap-2">
         {running ? (

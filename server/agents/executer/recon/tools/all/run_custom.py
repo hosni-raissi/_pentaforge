@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from server.agents.executer.sandbox import get_sandbox_root
 
@@ -55,7 +55,6 @@ BLOCKED_TOKENS = {
 BLOCKED_ARG_PATTERNS = [
     r"^/dev/sd",          # raw block device writes
     r"^/dev/nvme",
-    r"^/dev/null$",       # output redirection via flag value
     r"^-rf$", r"^-fr$",   # recursive force flags
     r"^--delete$",
     r"^--remove$",
@@ -63,12 +62,11 @@ BLOCKED_ARG_PATTERNS = [
 ]
 
 # curl / wget write flags — blocked even though the binary itself is allowed
-_CURL_BLOCKED_FLAGS  = {"-d", "--data", "--data-binary", "--data-raw",
-                        "-T", "--upload-file", "-F", "--form",
+_CURL_BLOCKED_FLAGS  = {"-T", "--upload-file", "-F", "--form",
                         "--config",                          # could load arbitrary config
                         "-o", "--output"}                   # file write
-_WGET_BLOCKED_FLAGS  = {"--post-data", "--post-file",
-                        "--method", "--body-data", "--body-file",
+_WGET_BLOCKED_FLAGS  = {"--post-file",
+                        "--method", "--body-file",
                         "-O",                               # file write (use -O - to stdout)
                         "-P", "--directory-prefix",          # writes into chosen directory
                         "-r", "--recursive", "-m", "--mirror",
@@ -91,24 +89,6 @@ class RunCustomRequest(BaseModel):
     env: dict[str, str] = {}          # optional extra env vars (e.g. GOPATH, PYTHONPATH)
     cwd: Optional[str] = None         # working directory override
 
-    @field_validator("command")
-    @classmethod
-    def validate_command(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("Command cannot be empty")
-        # No path traversal in the binary name itself
-        if "/" in v or "\\" in v:
-            raise ValueError(
-                "Specify the binary name only (e.g. 'nmap'), not a full path. "
-                "Use cwd to set the working directory."
-            )
-        if v in BLOCKED_COMMANDS:
-            raise ValueError(
-                f"Command '{v}' is blocked — it performs destructive system modifications."
-            )
-        return v
-
     @field_validator("reason")
     @classmethod
     def validate_reason(cls, v: str) -> str:
@@ -117,19 +97,43 @@ class RunCustomRequest(BaseModel):
             raise ValueError("Reason must be at least 8 characters")
         return v
 
-    @field_validator("args")
-    @classmethod
-    def validate_args(cls, args: list[str]) -> list[str]:
-        for arg in args:
+    @model_validator(mode="after")
+    def validate_request(self) -> "RunCustomRequest":
+        cmd = self.command.strip()
+        if not cmd:
+            raise ValueError("Command cannot be empty")
+        
+        # No path traversal in the binary name itself
+        if "/" in cmd or "\\" in cmd:
+            raise ValueError(
+                "Specify the binary name only (e.g. 'nmap'), not a full path. "
+                "Use cwd to set the working directory."
+            )
+            
+        lowered_cmd = cmd.lower()
+        if lowered_cmd in BLOCKED_COMMANDS:
+            raise ValueError(
+                f"Command '{cmd}' is blocked — it performs destructive system modifications."
+            )
+            
+        # Special handling for curl/wget: they are allowed to send payloads containing shell tokens
+        # to remote targets. Since we use shell=False, these tokens are safe on the local machine.
+        allow_shell_tokens = lowered_cmd in {"curl", "wget"}
+
+        for arg in self.args:
             if not isinstance(arg, str):
                 raise ValueError("All args must be strings")
-            for tok in BLOCKED_TOKENS:
-                if tok in arg:
-                    raise ValueError(f"Dangerous shell token '{tok}' detected in arg: {repr(arg)}")
+            
+            if not allow_shell_tokens:
+                for tok in BLOCKED_TOKENS:
+                    if tok in arg:
+                        raise ValueError(f"Dangerous shell token '{tok}' detected in arg: {repr(arg)}")
+            
             for pat in BLOCKED_ARG_PATTERNS:
                 if re.search(pat, arg):
                     raise ValueError(f"Blocked argument pattern matched in: {repr(arg)}")
-        return args
+        
+        return self
 
 
 class CustomCommandLog(BaseModel):
@@ -171,9 +175,14 @@ def validate_command_policy(command: str, args: list[str]) -> Optional[str]:
     arg_set = set(args)
 
     if command == "curl":
-        bad = arg_set & _CURL_BLOCKED_FLAGS
-        if bad:
-            return f"curl flags {bad} are blocked (write/upload/output-to-file operations)"
+        # Block write flags except when pointing to a safe sink (stdout / dev/null)
+        for i, arg in enumerate(args):
+            if arg in {"-o", "--output"}:
+                val = str(args[i+1]).strip() if i+1 < len(args) else ""
+                if not val or _looks_like_file_sink(val):
+                    return f"curl flag '{arg}' is blocked unless outputting to stdout or /dev/null"
+            elif arg in (_CURL_BLOCKED_FLAGS - {"-o", "--output"}):
+                 return f"curl flag '{arg}' is blocked (write/upload operations)"
 
     if command == "wget":
         bad = arg_set & _WGET_BLOCKED_FLAGS
@@ -275,7 +284,7 @@ def _looks_like_file_sink(value: str) -> bool:
     if not text:
         return True
     lowered = text.lower()
-    if lowered in {"-", "stdout", "/dev/stdout", "/dev/fd/1"}:
+    if lowered in {"-", "stdout", "/dev/stdout", "/dev/fd/1", "/dev/null"}:
         return False
     if "=" in text and "/" not in text and "\\" not in text:
         left, _, right = text.partition("=")
@@ -308,12 +317,19 @@ def strip_output_file_flags(command: str, args: list[str]) -> tuple[list[str], l
         arg = str(args[i] or "").strip()
 
         if arg in short_flags or arg in _LONG_OUTPUT_FLAGS:
-            stripped.append(arg)
             next_value = str(args[i + 1]).strip() if i + 1 < len(args) else ""
             if next_value and _looks_like_file_sink(next_value):
+                stripped.append(arg)
                 stripped.append(next_value)
                 i += 2
+            elif next_value and not _looks_like_file_sink(next_value) and not next_value.startswith("-"):
+                # Safe sink (stdout, /dev/null) - KEEP IT
+                cleaned.append(arg)
+                cleaned.append(next_value)
+                i += 2
             else:
+                # Ambiguous or no value - strip the flag to be safe
+                stripped.append(arg)
                 i += 1
         elif any(arg.startswith(prefix) for prefix in _LONG_OUTPUT_FLAG_PREFIXES):
             i += 1

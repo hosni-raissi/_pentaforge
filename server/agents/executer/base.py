@@ -609,7 +609,7 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
         summary = raw.strip() or "No response generated."
         return ExecuterResult(status="incomplete", summary=summary)
 
-    scenario_summaries = parsed.get("scenario_summaries", [])
+    scenario_summaries = parsed.get("scenario_summaries") or []
     if not isinstance(scenario_summaries, list):
         scenario_summaries = []
 
@@ -792,11 +792,11 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
             )
             status = "inconclusive"
 
-    findings = parsed.get("findings", [])
-    evidence = parsed.get("evidence", [])
-    needs = parsed.get("needs", [])
+    findings = parsed.get("findings") or []
+    evidence = parsed.get("evidence") or []
+    needs = parsed.get("needs") or []
     summary = parsed.get("summary", "")
-    next_hypotheses = parsed.get("next_hypotheses", [])
+    next_hypotheses = parsed.get("next_hypotheses") or []
     raw_confidence = parsed.get("confidence")
     confidence = _coerce_optional_confidence(raw_confidence)
 
@@ -891,6 +891,7 @@ class BaseExecuterAgent:
         local_config: LocalLLMConfig | None = None,
         project_id: str | None = None,
         project_cache_dir: str | None = None,
+        approval_mode: str = "custom",
     ) -> None:
         self._sandbox_root = ensure_sandbox_environment()
         self._role = role
@@ -902,6 +903,7 @@ class BaseExecuterAgent:
         self._cb = callback or _NoOpCallback()
         self._project_id = str(project_id or "").strip()
         self._project_cache_dir = str(project_cache_dir or "").strip()
+        self._approval_mode = str(approval_mode or "custom").lower().strip()
 
         self._tools = {t.name: t for t in tools}
         self._tool_schemas = [t.schema() for t in tools]
@@ -1326,7 +1328,7 @@ class BaseExecuterAgent:
             return []
         command = str(args.get("command", "") or "").strip().lower()
         _ = command  # command-specific handling may be expanded without changing callers.
-        tokens = [str(value or "").strip() for value in args.get("args", [])]
+        tokens = [str(value or "").strip() for value in (args.get("args") or [])]
         urls: list[str] = []
         idx = 0
         while idx < len(tokens):
@@ -1716,7 +1718,7 @@ class BaseExecuterAgent:
                     cmd_preview = ""
                     if tool_name == "run_custom":
                         base_cmd = str(args.get("command", "")).strip()
-                        arg_list = args.get("args", [])
+                        arg_list = args.get("args") or []
                         if base_cmd:
                             if isinstance(arg_list, list):
                                 joined_args = " ".join(str(x) for x in arg_list)
@@ -1821,6 +1823,21 @@ class BaseExecuterAgent:
         )
 
     def _tool_requires_user_approval(self, tool_name: str) -> bool:
+        # If approval mode is set to auto, bypass all manual checks.
+        # Fetch latest mode from callback if possible to respect mid-scan changes.
+        approval_mode = self._approval_mode
+        get_mode_fn = getattr(self._cb, "get_approval_mode", None)
+        if callable(get_mode_fn):
+            try:
+                latest_mode = get_mode_fn()
+                if latest_mode:
+                    approval_mode = latest_mode
+            except Exception:
+                pass
+
+        if approval_mode == "auto":
+            return False
+
         # Any Exploit execution requires explicit approval.
         if self._role == "exploit":
             return True

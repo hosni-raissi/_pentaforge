@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Bell,
@@ -17,6 +17,9 @@ import {
   Trash2,
   X,
   Sparkles,
+  Lock,
+  ShieldAlert,
+  Key,
 } from "lucide-react";
 
 import { AIPromptPanel } from "@/components/dashboard/AIPromptPanel";
@@ -25,12 +28,13 @@ import {
   type AgentGraphRole,
   type AgentInsightPanelData,
 } from "@/components/dashboard/AgentStatePath";
-import { FindingsTable } from "@/components/dashboard/FindingsTable";
+
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
+import { Textarea } from "@/components/ui/Textarea";
 import {
   approveInformationGatheringForProjectScanFromDesktop,
   approvePasswordForProjectScanFromDesktop,
@@ -224,12 +228,7 @@ interface PendingPasswordRequestView {
   callId: string;
 }
 
-type ApprovalMode =
-  | "custom"
-  | "auto_all"
-  | "auto_exploit"
-  | "auto_recon"
-  | "auto_verify";
+type ApprovalMode = "custom" | "auto";
 
 const NOTIFICATION_PREF_KEY = "pentaforge_notifications_enabled";
 
@@ -421,18 +420,18 @@ function normalizeDashboardSeverity(value: unknown): DashboardSeverity {
 
 function severityBadgeClass(value: DashboardSeverity): string {
   if (value === "critical") {
-    return "border-red-500/40 bg-red-500/15 text-red-200";
+    return "border-red-500/40 bg-red-500/15 text-red-900 dark:text-red-200";
   }
   if (value === "high") {
-    return "border-orange-500/40 bg-orange-500/15 text-orange-200";
+    return "border-orange-600/40 bg-orange-600/15 text-orange-950 dark:text-orange-200";
   }
   if (value === "medium") {
-    return "border-amber-500/40 bg-amber-500/15 text-amber-200";
+    return "border-orange-500/40 bg-orange-500/15 text-orange-900 dark:text-orange-200";
   }
   if (value === "low") {
-    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-900 dark:text-emerald-200";
   }
-  return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+  return "border-slate-500/40 bg-slate-500/15 text-slate-900 dark:text-slate-200";
 }
 
 function normalizeEvidenceStatus(value: unknown): FindingEvidenceStatus | undefined {
@@ -453,28 +452,28 @@ function normalizeProofQuality(value: unknown): FindingProofQuality | undefined 
 
 function evidenceBadgeClass(value?: FindingEvidenceStatus): string {
   if (value === "confirmed") {
-    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-900 dark:text-emerald-200";
   }
   if (value === "evidence_backed") {
-    return "border-amber-500/40 bg-amber-500/15 text-amber-200";
+    return "border-orange-500/40 bg-orange-500/15 text-orange-900 dark:text-orange-200";
   }
   if (value === "suspicion") {
-    return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+    return "border-slate-500/40 bg-slate-500/15 text-slate-900 dark:text-slate-200";
   }
-  return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+  return "border-slate-500/40 bg-slate-500/15 text-slate-900 dark:text-slate-200";
 }
 
 function proofQualityBadgeClass(value?: FindingProofQuality): string {
   if (value === "strong") {
-    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-900 dark:text-emerald-200";
   }
   if (value === "moderate") {
-    return "border-amber-500/40 bg-amber-500/15 text-amber-200";
+    return "border-orange-500/40 bg-orange-500/15 text-orange-900 dark:text-orange-200";
   }
   if (value === "weak") {
-    return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+    return "border-slate-500/40 bg-slate-500/15 text-slate-900 dark:text-slate-200";
   }
-  return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+  return "border-slate-500/40 bg-slate-500/15 text-slate-900 dark:text-slate-200";
 }
 
 function findingUsesOobProof(finding: Pick<Finding, "evidence" | "verificationMethods">): boolean {
@@ -1375,103 +1374,22 @@ function buildTargetArchitectureDraft(
   targetType: string,
   target: string,
 ): TargetArchitectureDraft {
-  const normalized = targetType.trim().toLowerCase();
   const targetLabel = target.trim() || "target";
 
-  if (normalized === "network") {
-    return {
-      title: `Network architecture draft for ${targetLabel}`,
-      hosts: [
-        {
-          id: "gw",
-          name: "Gateway / Firewall",
-          role: "Edge",
-          ports: ["443/tcp", "80/tcp"],
-          note: "Initial ingress and egress filtering point.",
-          x: 12,
-          y: 54,
-        },
-        {
-          id: "web-01",
-          name: "Web Host",
-          role: "Service",
-          ports: ["80/tcp", "443/tcp"],
-          note: "Public-facing application host.",
-          x: 36,
-          y: 34,
-        },
-        {
-          id: "app-01",
-          name: "Application Host",
-          role: "Internal",
-          ports: ["8080/tcp", "8443/tcp"],
-          note: "Business logic / API processing tier.",
-          x: 60,
-          y: 50,
-        },
-        {
-          id: "db-01",
-          name: "Database Host",
-          role: "Data",
-          ports: ["5432/tcp", "3306/tcp", "27017/tcp"],
-          note: "Validate segmentation and direct-access exposure.",
-          x: 84,
-          y: 64,
-        },
-      ],
-      flows: [
-        { fromId: "gw", toId: "web-01", label: "Ingress web traffic" },
-        { fromId: "web-01", toId: "app-01", label: "App routing" },
-        { fromId: "app-01", toId: "db-01", label: "DB queries" },
-      ],
-    };
-  }
-
   return {
-    title: `Web architecture draft for ${targetLabel}`,
+    title: `Initial architecture for ${targetLabel}`,
     hosts: [
       {
-        id: "edge",
+        id: "target-node",
         name: targetLabel,
-        role: "Public Web Edge",
-        ports: ["443/tcp", "80/tcp"],
-        note: "Entry point for public traffic and recon.",
-        x: 12,
-        y: 54,
-      },
-      {
-        id: "app",
-        name: "Application Service",
-        role: "Business Logic",
-        ports: ["8080/tcp", "8443/tcp"],
-        note: "Focus for auth/session/input validation tests.",
-        x: 44,
-        y: 36,
-      },
-      {
-        id: "nosql",
-        name: "NoSQL Database",
-        role: "Data Store",
-        ports: ["27017/tcp"],
-        note: "Focus for injection, auth, and access-control paths.",
-        x: 76,
-        y: 68,
-      },
-      {
-        id: "auth",
-        name: "Session / Auth Layer",
-        role: "Identity",
-        ports: ["443/tcp"],
-        note: "Token, cookie, and privilege boundary checks.",
-        x: 72,
-        y: 24,
+        role: "Target",
+        ports: [],
+        note: "Initial target identified. Architecture synthesis will begin once findings are verified.",
+        x: 50,
+        y: 50,
       },
     ],
-    flows: [
-      { fromId: "edge", toId: "app", label: "HTTP requests" },
-      { fromId: "app", toId: "nosql", label: "Query path" },
-      { fromId: "app", toId: "auth", label: "Auth/session checks" },
-    ],
+    flows: [],
   };
 }
 
@@ -1501,17 +1419,24 @@ export default function Dashboard() {
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [locallyAckedApprovalId, setLocallyAckedApprovalId] = useState<string | null>(null);
   const [locallyAckedPasswordId, setLocallyAckedPasswordId] = useState<string | null>(null);
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => {
+  const [fallbackApprovalMode, setFallbackApprovalMode] = useState<ApprovalMode>(() => {
     const saved = typeof window !== "undefined" ? localStorage.getItem("pentaforge_approval_mode") : null;
-    return (saved as ApprovalMode) || "custom";
+    if (saved === "auto") return "auto";
+    if (saved === "custom") return "custom";
+    return "custom";
   });
+  const approvalMode: ApprovalMode = activeProject?.approval_mode === "auto"
+    ? "auto"
+    : activeProject?.approval_mode === "custom"
+      ? "custom"
+      : fallbackApprovalMode;
   const [showApprovalModeMenu, setShowApprovalModeMenu] = useState(false);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      localStorage.setItem("pentaforge_approval_mode", approvalMode);
+      localStorage.setItem("pentaforge_approval_mode", fallbackApprovalMode);
     }
-  }, [approvalMode]);
+  }, [fallbackApprovalMode]);
   const approvalModeMenuRef = useRef<HTMLDivElement | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<
     NotificationPermission | "unsupported"
@@ -1521,7 +1446,6 @@ export default function Dashboard() {
       : "unsupported",
   );
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
-  const [logLevelFilter, setLogLevelFilter] = useState<"all" | LogLevel>("all");
   const [logSourceFilter, setLogSourceFilter] = useState<string>("all");
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   const [elapsedClockMs, setElapsedClockMs] = useState(() => Date.now());
@@ -1554,6 +1478,16 @@ export default function Dashboard() {
   const [projectEditName, setProjectEditName] = useState("");
   const [projectEditTarget, setProjectEditTarget] = useState("");
   const [projectEditDescription, setProjectEditDescription] = useState("");
+  const handleApprovalModeChange = useCallback(
+    (mode: ApprovalMode) => {
+      setFallbackApprovalMode(mode);
+      if (activeProject && activeProject.approval_mode !== mode) {
+        updateProject(activeProject.id, { approval_mode: mode });
+      }
+    },
+    [activeProject, updateProject],
+  );
+
   const config = useConfig();
   const isCopilotOpen = config.isAssistantOpen;
   const setIsCopilotOpen = (open: boolean) => config.updateConfig({ isAssistantOpen: open });
@@ -1564,10 +1498,7 @@ export default function Dashboard() {
     "h-7 rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]";
   const approvalModeLabel: Record<ApprovalMode, string> = {
     custom: "Custom Approve",
-    auto_all: "Auto All",
-    auto_exploit: "Auto Exploit",
-    auto_recon: "Auto Recon",
-    auto_verify: "Auto Verify",
+    auto: "Auto",
   };
   const notificationsUnavailable = notificationPermission === "unsupported";
 
@@ -1579,12 +1510,7 @@ export default function Dashboard() {
         .replace(/\[worker\s*\d+\]\s*/gi, "")
         .trim()
         .toLowerCase();
-      return (
-        approvalMode === "auto_all"
-        || (approvalMode === "auto_exploit" && pendingRole === "exploit")
-        || (approvalMode === "auto_recon" && pendingRole === "recon")
-        || (approvalMode === "auto_verify" && pendingRole === "verify")
-      );
+      return approvalMode === "auto";
     },
     [approvalMode],
   );
@@ -2046,7 +1972,6 @@ export default function Dashboard() {
       return;
     }
 
-    setLogLevelFilter("all");
     setLogSourceFilter("all");
     setAutoScrollLogs(true);
     setStreamLogs([]);
@@ -2115,7 +2040,7 @@ export default function Dashboard() {
       return;
     }
     container.scrollTop = container.scrollHeight;
-  }, [streamLogs.length, autoScrollLogs, logLevelFilter, logSourceFilter]);
+  }, [streamLogs.length, autoScrollLogs, logSourceFilter]);
 
   useEffect(() => {
     if (!activeProjectId || !shouldStreamScanEvents) {
@@ -2645,7 +2570,7 @@ export default function Dashboard() {
   }, [showApprovalModeMenu]);
 
   useEffect(() => {
-    if (approvalMode !== "auto_all" || !isRunning) {
+    if (approvalMode !== "auto" || !isRunning) {
       return;
     }
     if (awaitingInformationGatheringApproval && !informationGatheringApprovalLoading) {
@@ -2654,7 +2579,7 @@ export default function Dashboard() {
   }, [approvalMode, isRunning, awaitingInformationGatheringApproval, informationGatheringApprovalLoading]);
 
   useEffect(() => {
-    if (approvalMode !== "auto_all" || !isRunning) {
+    if (approvalMode !== "auto" || !isRunning) {
       return;
     }
     if (awaitingPlannerApproval && !plannerApprovalLoading) {
@@ -2783,9 +2708,6 @@ export default function Dashboard() {
     new Set(baseLogs.map((entry) => entry.source)),
   );
   const displayedLogs = baseLogs.filter((entry) => {
-    if (logLevelFilter !== "all" && entry.level !== logLevelFilter) {
-      return false;
-    }
     if (logSourceFilter !== "all" && entry.source !== logSourceFilter) {
       return false;
     }
@@ -2808,15 +2730,20 @@ export default function Dashboard() {
     // ONLY show confirmed/persisted findings from the project store
     // This is the source of truth for real vulnerabilities
     for (const finding of activeProject.findings) {
-      const findingKey = `persisted-${finding.title.toLowerCase()}|${finding.target.toLowerCase()}`;
+      if (finding.status === "false_positive") {
+        continue;
+      }
+      const findingTitle = String(finding.title || "").toLowerCase();
+      const findingTarget = String(finding.target || "").toLowerCase();
+      const findingKey = `persisted-${findingTitle}|${findingTarget}`;
       const rawFinding = finding as Finding & Record<string, unknown>;
       feed.push({
         id: `finding-${finding.id}`,
-        title: finding.title,
+        title: finding.title || "Untitled Finding",
         severity: normalizeDashboardSeverity(finding.severity),
         source: "finding",
-        at: finding.timestamp,
-        endpoint: finding.target,
+        at: finding.timestamp || new Date().toISOString(),
+        endpoint: finding.target || "",
         status: "verified_saved",
         findingKey,
         cve: finding.cve,
@@ -3027,10 +2954,23 @@ export default function Dashboard() {
   const informationGatheringCompletedIds = new Set(
     (informationGatheringView?.blocks ?? []).map((block) => block.id),
   );
-  const architectureDraft = buildTargetArchitectureDraft(
-    activeProject.targetType,
-    activeProject.target,
-  );
+  const architectureDraft = useMemo(() => {
+    // 1. Check scan events for real-time updates
+    for (const event of [...scanEvents].reverse()) {
+      if (event.event === "architect_updated" && isRecord(event.data?.architecture_draft)) {
+        return (event.data.architecture_draft as unknown) as TargetArchitectureDraft;
+      }
+    }
+    // 2. Check project payload for persisted state
+    if (activeProject.payload && isRecord(activeProject.payload.architecture_draft)) {
+      return (activeProject.payload.architecture_draft as unknown) as TargetArchitectureDraft;
+    }
+    // 3. Fallback to static initial draft
+    return buildTargetArchitectureDraft(
+      activeProject.targetType,
+      activeProject.target,
+    );
+  }, [scanEvents, activeProject]);
   const architectureHostMap = new Map(
     architectureDraft.hosts.map((host) => [host.id, host]),
   );
@@ -3528,7 +3468,7 @@ export default function Dashboard() {
               </Button>
             ) : (
               <div className="flex items-center gap-2">
-                {awaitingPlannerApproval && approvalMode !== "auto_all" ? (
+                {awaitingPlannerApproval && approvalMode !== "auto" ? (
                   <Button
                     size="xs"
                     variant="secondary"
@@ -3542,7 +3482,7 @@ export default function Dashboard() {
                     Continue to Planner
                   </Button>
                 ) : null}
-                {awaitingPlannerApproval && approvalMode === "auto_all" ? (
+                {awaitingPlannerApproval && approvalMode === "auto" ? (
                   <Badge variant="running" dot>
                     Auto-approving planner
                   </Badge>
@@ -3636,28 +3576,36 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-xs text-text-muted">Target</p>
-            <p className="mt-0.5 break-all font-mono text-xs text-text-primary">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Target</p>
+            <p className="mt-1.5 break-all font-mono text-sm font-semibold text-pf-500 dark:text-pf-400">
               {activeProject.target}
             </p>
           </div>
-          <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-xs text-text-muted">Target Type</p>
-            <p className="mt-0.5 text-xs text-text-primary">
+          <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Target Type</p>
+            <p className="mt-1.5 text-sm font-semibold text-text-primary capitalize">
               {activeProject.targetType.replaceAll("_", " ")}
             </p>
           </div>
-          <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-xs text-text-muted">Created</p>
-            <p className="mt-0.5 text-xs text-text-primary">
+          <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Created</p>
+            <p className="mt-1.5 text-sm font-semibold text-text-primary">
               {formatDateTime(activeProject.createdAt)}
             </p>
           </div>
-          <div className="rounded-md bg-surface-0/40 p-1.5">
-            <p className="text-xs text-text-muted">Status</p>
-            <p className="mt-0.5 text-xs text-text-primary">
+          <div className={`rounded-xl p-3 border shadow-sm transition-all duration-300 ${
+            effectiveStatus === "running" 
+              ? "bg-pf-500/15 border-pf-500/30 ring-1 ring-pf-500/20" 
+              : "bg-surface-0/40 border-border/40"
+          }`}>
+            <p className={`text-[11px] font-bold uppercase tracking-wider ${
+              effectiveStatus === "running" ? "text-pf-600 dark:text-pf-400" : "text-text-muted"
+            }`}>Status</p>
+            <p className={`mt-1.5 text-lg font-bold capitalize ${
+              effectiveStatus === "running" ? "text-pf-700 dark:text-pf-300 animate-pulse" : "text-text-primary"
+            }`}>
               {effectiveStatus}
             </p>
           </div>
@@ -3672,14 +3620,6 @@ export default function Dashboard() {
                 </p>
                 <p className="mt-1 font-mono text-lg font-semibold leading-none text-text-primary sm:text-xl">
                   {displayedPentestElapsed}
-                </p>
-              </div>
-              <div className="min-w-0">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-                  State
-                </p>
-                <p className="mt-1 text-sm font-medium capitalize text-text-primary">
-                  {effectiveStatus}
                 </p>
               </div>
             </div>
@@ -3705,61 +3645,6 @@ export default function Dashboard() {
               <h2 className="text-base font-semibold text-text-primary">
                 Real-Time Logs
               </h2>
-
-              <select
-                value={logLevelFilter}
-                onChange={(event) =>
-                  setLogLevelFilter(event.target.value as "all" | LogLevel)
-                }
-                className="rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]"
-                title="Filter by level"
-              >
-                <option
-                  value="all"
-                  style={{
-                    backgroundColor: "var(--surface-1)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  All Levels
-                </option>
-                <option
-                  value="info"
-                  style={{
-                    backgroundColor: "var(--surface-1)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  Info
-                </option>
-                <option
-                  value="success"
-                  style={{
-                    backgroundColor: "var(--surface-1)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  Success
-                </option>
-                <option
-                  value="warn"
-                  style={{
-                    backgroundColor: "var(--surface-1)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  Warn
-                </option>
-                <option
-                  value="error"
-                  style={{
-                    backgroundColor: "var(--surface-1)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  Error
-                </option>
-              </select>
 
               <select
                 value={logSourceFilter}
@@ -3805,12 +3690,12 @@ export default function Dashboard() {
                     <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-secondary">
                       Approval Mode
                     </p>
-                    <div className="grid grid-cols-2 gap-1">
+                    <div className="flex flex-col gap-1">
                       <Button
                         size="xs"
                         variant={approvalMode === "custom" ? "primary" : "secondary"}
                         onClick={() => {
-                          setApprovalMode("custom");
+                          handleApprovalModeChange("custom");
                           setShowApprovalModeMenu(false);
                         }}
                       >
@@ -3818,43 +3703,13 @@ export default function Dashboard() {
                       </Button>
                       <Button
                         size="xs"
-                        variant={approvalMode === "auto_all" ? "primary" : "secondary"}
+                        variant={approvalMode === "auto" ? "primary" : "secondary"}
                         onClick={() => {
-                          setApprovalMode("auto_all");
+                          handleApprovalModeChange("auto");
                           setShowApprovalModeMenu(false);
                         }}
                       >
-                        Auto All
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant={approvalMode === "auto_exploit" ? "primary" : "secondary"}
-                        onClick={() => {
-                          setApprovalMode("auto_exploit");
-                          setShowApprovalModeMenu(false);
-                        }}
-                      >
-                        Auto Exploit
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant={approvalMode === "auto_recon" ? "primary" : "secondary"}
-                        onClick={() => {
-                          setApprovalMode("auto_recon");
-                          setShowApprovalModeMenu(false);
-                        }}
-                      >
-                        Auto Recon
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant={approvalMode === "auto_verify" ? "primary" : "secondary"}
-                        onClick={() => {
-                          setApprovalMode("auto_verify");
-                          setShowApprovalModeMenu(false);
-                        }}
-                      >
-                        Auto Verify
+                        Auto
                       </Button>
                     </div>
                   </div>
@@ -3922,7 +3777,7 @@ export default function Dashboard() {
               ))
             )}
           </div>
-          {awaitingPlannerApproval && approvalMode !== "auto_all" ? (
+          {awaitingPlannerApproval && approvalMode !== "auto" ? (
             <div className="flex justify-center pt-2">
               <Button
                 size="sm"
@@ -3939,14 +3794,14 @@ export default function Dashboard() {
               </Button>
             </div>
           ) : null}
-          {awaitingPlannerApproval && approvalMode === "auto_all" ? (
+          {awaitingPlannerApproval && approvalMode === "auto" ? (
             <div className="flex justify-center pt-2">
               <Badge variant="running" dot>
                 Auto-approving planner
               </Badge>
             </div>
           ) : null}
-          {awaitingInformationGatheringApproval && approvalMode !== "auto_all" ? (
+          {awaitingInformationGatheringApproval && approvalMode !== "auto" ? (
             <div className="flex justify-center pt-2">
               <Button
                 size="sm"
@@ -3963,7 +3818,7 @@ export default function Dashboard() {
               </Button>
             </div>
           ) : null}
-          {awaitingInformationGatheringApproval && approvalMode === "auto_all" ? (
+          {awaitingInformationGatheringApproval && approvalMode === "auto" ? (
             <div className="flex justify-center pt-2">
               <Badge variant="running" dot>
                 Auto-approving information gathering
@@ -4011,52 +3866,86 @@ export default function Dashboard() {
             </div>
           ) : null}
           {pendingPasswordRequest ? (
-            <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
-              <p className="text-sm font-semibold text-text-primary">
-                Authentication required for {pendingPasswordRequest.toolName || "tool"}
-              </p>
-              {pendingPasswordRequest.reason ? (
-                <p className="mt-1 text-xs text-text-muted">
-                  {pendingPasswordRequest.reason}
-                </p>
-              ) : null}
-              {pendingPasswordRequest.prompt ? (
-                <p className="mt-1 text-xs text-text-muted">
-                  Prompt: <span className="font-mono">{pendingPasswordRequest.prompt}</span>
-                </p>
-              ) : null}
-              <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Input
-                  type="password"
-                  value={pendingPasswordValue}
-                  onChange={(event) => setPendingPasswordValue(event.target.value)}
-                  placeholder="Enter password"
-                  className="sm:max-w-sm"
-                />
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    onClick={() => {
-                      void handlePasswordResponse(true);
-                    }}
-                    loading={passwordResponseLoading === "approve"}
-                    disabled={pendingPasswordValue.length === 0}
-                  >
-                    <Check size={14} />
-                    Send Password
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => {
-                      void handlePasswordResponse(false);
-                    }}
-                    loading={passwordResponseLoading === "deny"}
-                  >
-                    <X size={14} />
-                    Deny
-                  </Button>
+            <div className="mt-2 overflow-hidden rounded-xl border border-amber-500/40 bg-surface-1 shadow-lg animate-in fade-in zoom-in duration-300">
+              <div className="flex items-center gap-3 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/20 text-amber-500">
+                  <ShieldAlert size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold tracking-tight text-text-primary">
+                    Security Challenge
+                  </h3>
+                  <p className="text-[10px] uppercase tracking-widest text-amber-500/80 font-bold">
+                    Authentication Required
+                  </p>
+                </div>
+              </div>
+              <div className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 rounded-full bg-surface-2 p-1.5 text-text-muted">
+                    <Lock size={14} />
+                  </div>
+                  <div className="flex-1 space-y-1">
+                    <p className="text-sm font-medium text-text-secondary">
+                      {pendingPasswordRequest.toolName || "External Tool"} requires your credentials
+                    </p>
+                    {pendingPasswordRequest.reason && (
+                      <p className="text-xs text-text-muted leading-relaxed">
+                        {pendingPasswordRequest.reason}
+                      </p>
+                    )}
+                    {pendingPasswordRequest.prompt && (
+                      <div className="mt-2 rounded bg-surface-0 px-2 py-1.5 border border-border/50">
+                        <p className="font-mono text-[11px] text-text-muted">
+                          Prompt: <span className="text-pf-400">{pendingPasswordRequest.prompt}</span>
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <div className="relative flex-1">
+                    <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-text-muted">
+                      <Key size={14} />
+                    </div>
+                    <Input
+                      type="password"
+                      autoFocus
+                      value={pendingPasswordValue}
+                      onChange={(event) => setPendingPasswordValue(event.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && pendingPasswordValue.length > 0) {
+                          void handlePasswordResponse(true);
+                        }
+                      }}
+                      placeholder="Verification password..."
+                      className="pl-9 bg-surface-0 border-border/60 focus:border-amber-500/50 focus:ring-amber-500/20"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="primary"
+                      className="bg-amber-600 hover:bg-amber-500 text-white shadow-md shadow-amber-900/20 px-6"
+                      onClick={() => {
+                        void handlePasswordResponse(true);
+                      }}
+                      loading={passwordResponseLoading === "approve"}
+                      disabled={pendingPasswordValue.length === 0}
+                    >
+                      Verify
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      className="border-border/60 hover:bg-surface-2"
+                      onClick={() => {
+                        void handlePasswordResponse(false);
+                      }}
+                      loading={passwordResponseLoading === "deny"}
+                    >
+                      Deny
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -4148,7 +4037,7 @@ export default function Dashboard() {
 
                   {/* Quick Remediation Hint */}
                   {item.remediation && (
-                    <div className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded italic">
+                    <div className="text-xs text-indigo-900 dark:text-indigo-100 bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/30 px-2 py-1 rounded shadow-sm font-medium">
                       💡 {item.remediation.split('\n')[0].slice(0, 120)}
                       {item.remediation.length > 120 ? "..." : ""}
                     </div>
@@ -4358,7 +4247,7 @@ export default function Dashboard() {
                         {topStatus}
                       </span>
                     </div>
-                    {awaitingInformationGatheringApproval && approvalMode !== "auto_all" ? (
+                    {awaitingInformationGatheringApproval && approvalMode !== "auto" ? (
                       <div className="mt-3 flex items-center justify-end">
                         <Button
                           size="sm"
@@ -4375,7 +4264,7 @@ export default function Dashboard() {
                         </Button>
                       </div>
                     ) : null}
-                    {awaitingInformationGatheringApproval && approvalMode === "auto_all" ? (
+                    {awaitingInformationGatheringApproval && approvalMode === "auto" ? (
                       <div className="mt-3 flex items-center justify-end">
                         <Badge variant="running" dot>
                           Auto-approving information gathering
@@ -4959,8 +4848,6 @@ export default function Dashboard() {
         </div>
       </Card>
 
-      <FindingsTable findings={activeProject.findings} />
-
       </div>
 
       <div
@@ -5011,11 +4898,12 @@ export default function Dashboard() {
             onChange={(event) => setProjectEditTarget(event.target.value)}
             placeholder="Target URL / IP"
           />
-          <Input
+          <Textarea
             label="Description"
             value={projectEditDescription}
             onChange={(event) => setProjectEditDescription(event.target.value)}
             placeholder="Optional scope/notes"
+            rows={4}
           />
           <div className="flex justify-end gap-2">
             <Button
@@ -5241,7 +5129,7 @@ export default function Dashboard() {
             {selectedFinding.remediation && (
               <div className="space-y-1">
                 <p className="text-xs font-semibold text-text-muted uppercase">Remediation</p>
-                <div className="text-sm text-amber-100 bg-amber-500/20 border border-amber-500/40 p-3 rounded whitespace-pre-wrap break-words">
+                <div className="text-sm text-indigo-900 dark:text-indigo-100 bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/30 p-3 rounded whitespace-pre-wrap break-words shadow-inner font-medium">
                   {selectedFinding.remediation}
                 </div>
               </div>

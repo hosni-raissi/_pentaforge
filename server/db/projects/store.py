@@ -502,6 +502,14 @@ class ProjectsStore:
         project_id = str(project.get("id", "")).strip()
         if not project_id:
             raise ValueError("project.id is required")
+
+        # Load existing project if it exists to perform a merge
+        existing = self.get_project(project_id)
+        if existing:
+            merged = dict(existing)
+            merged.update(project)
+            project = merged
+
         payload = json.dumps(project, ensure_ascii=True)
 
         with self._connect() as conn:
@@ -563,6 +571,10 @@ class ProjectsStore:
                     entry["route"] = route
                 if "blocked" in item:
                     entry["blocked"] = bool(item.get("blocked"))
+                if "toolLogs" in item:
+                    entry["toolLogs"] = item.get("toolLogs")
+                if "passwordRequests" in item:
+                    entry["passwordRequests"] = item.get("passwordRequests")
             normalized_new.append(entry)
 
         if not normalized_new:
@@ -1625,7 +1637,7 @@ class ProjectsStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT format, created_at
+                SELECT format, created_at, updated_at
                 FROM project_reports
                 WHERE project_id = ?;
                 """,
@@ -1636,7 +1648,7 @@ class ProjectsStore:
         formats_present = {str(row["format"]).strip().lower() for row in rows}
         latest_date: str | None = None
         for row in rows:
-            ts = str(row["created_at"])
+            ts = str(row["updated_at"] or row["created_at"])
             if latest_date is None or ts > latest_date:
                 latest_date = ts
 

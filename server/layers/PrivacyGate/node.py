@@ -2,7 +2,7 @@ import os
 import re
 import uuid
 import logging
-import spacy
+# import spacy
 import redis
 import json
 from datetime import datetime
@@ -16,21 +16,22 @@ logger = logging.getLogger("PrivacyGate")
 # instead of silently falling back to the smaller model.
 _STRICT = os.getenv("PRIVACYGATE_STRICT", "0") == "1"
 
-# ── NER model ─────────────────────────────────────────────────────
-try:
-    nlp = spacy.load("en_core_web_lg")
-    logger.info("PrivacyGate: using en_core_web_lg (high-accuracy NER)")
-except OSError:
-    if _STRICT:
-        raise RuntimeError(
-            "PrivacyGate: en_core_web_lg is required in strict mode. "
-            "Run: python -m spacy download en_core_web_lg"
-        )
-    nlp = spacy.load("en_core_web_sm")
-    logger.warning(
-        "PrivacyGate: en_core_web_lg not found — falling back to en_core_web_sm. "
-        "NER coverage is reduced. Set PRIVACYGATE_STRICT=1 to block this."
-    )
+# ── NER model (Disabled per user request) ─────────────────────────
+nlp = None
+# try:
+#     nlp = spacy.load("en_core_web_lg")
+#     logger.info("PrivacyGate: using en_core_web_lg (high-accuracy NER)")
+# except OSError:
+#     if _STRICT:
+#         raise RuntimeError(
+#             "PrivacyGate: en_core_web_lg is required in strict mode. "
+#             "Run: python -m spacy download en_core_web_lg"
+#         )
+#     nlp = spacy.load("en_core_web_sm")
+#     logger.warning(
+#         "PrivacyGate: en_core_web_lg not found — falling back to en_core_web_sm. "
+#         "NER coverage is reduced. Set PRIVACYGATE_STRICT=1 to block this."
+#     )
 
 r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
@@ -73,35 +74,6 @@ _URL_PARTS_RE = re.compile(
 #   - re.IGNORECASE only — no DOTALL (PEM is handled separately)
 #   - No cross-line matching
 PATTERNS = [
-    # Bearer tokens (Authorization / X-Auth-Token headers)
-    ("CRED", re.compile(
-        r"Bearer\s+[A-Za-z0-9+/=_\-\.]{20,}",
-        re.IGNORECASE,
-    )),
-
-    # AWS ARNs — before HOST to prevent domain part being caught first
-    ("CRED", re.compile(
-        r"arn:aws:[a-z0-9\-]+:[a-z0-9\-]*:\d*:[a-zA-Z0-9\-_/:.]+",
-        re.IGNORECASE,
-    )),
-
-    # AWS access key IDs
-    ("CRED", re.compile(
-        r"\bAKIA[0-9A-Z]{16}\b",
-    )),
-
-    # High-entropy secrets: key=<≥32 chars> — before short key=value
-    ("CRED", re.compile(
-        r"(?:secret|token|key|password|passwd|pwd|auth)\s*[:=]\s*[A-Za-z0-9+/=_\-]{32,}",
-        re.IGNORECASE,
-    )),
-
-    # Generic key=value credentials (shorter values)
-    ("CRED", re.compile(
-        r"(?:password|passwd|secret|token|api_?key|auth)\s*[:=]\s*\S+",
-        re.IGNORECASE,
-    )),
-
     # CIDR before bare IP — prevents /24 suffix being left behind
     ("CIDR", re.compile(
         r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b",
@@ -111,46 +83,33 @@ PATTERNS = [
     ("IP", re.compile(
         r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
     )),
-
-    # Email before HOST — domain part of email would match HOST pattern
-    ("EMAIL", re.compile(
-        r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-    )),
-
-    # Bare hostnames / FQDNs (URLs already handled in Pass 1b)
-    ("HOST", re.compile(
-        r"\b(?:[a-zA-Z0-9\-]+\.)+(?:com|org|net|io|tn|local|corp|int|lan|gov|edu)\b",
-        re.IGNORECASE,
-    )),
-
-    # Cryptographic hashes: SHA-256 (64) > SHA-1 (40) > MD5 (32)
-    # Longest first to prevent partial matches
-    ("HASH", re.compile(
-        r"\b[a-fA-F0-9]{64}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{32}\b",
-    )),
-
-    # Labeled port references only — avoids replacing bare port numbers
-    ("PORT", re.compile(
-        r"\b(?:port|PORT)\s+(\d{1,5})\b",
-    )),
 ]
 
 # ── Safe passthrough — never replace these ────────────────────────
-# Security framework identifiers, scoring systems, and tool names
-# must reach the LLM intact for correct reasoning.
+# Security framework identifiers, scoring systems, tool names,
+# protocols, and common report labels must reach the LLM intact.
 SAFE_PASSTHROUGH = re.compile(
-    r"CVE-\d{4}-\d+"
-    r"|CWE-\d+"
-    r"|\bCVSS\b|\bEPSS\b"
-    r"|\bSSVC\b|\bMITRE\b"
-    r"|\bnmap\b|\bsqlmap\b|\bmetasploit\b|\bnuclei\b"
-    r"|\bburp\b|\bdalfox\b|\bhydra\b|\bamass\b"
+    # CVEs/CWEs/Metrics
+    r"CVE-\d{4}-\d+|CWE-\d+|\bCVSS\b|\bEPSS\b|\bSSVC\b|\bMITRE\b"
+    # Tools
+    r"|\bnmap\b|\bsqlmap\b|\bmetasploit\b|\bnuclei\b|\bburp\b|\bdalfox\b"
+    r"|\bhydra\b|\bamass\b|\bgobuster\b|\bdirbuster\b|\bffuf\b|\bnikto\b"
+    r"|\bwireshark\b|\bnetcat\b|\bnc\b|\bhashcat\b|\bjohn\b|\benum4linux\b"
+    # Protocols/Tech
+    r"|\bhttp\b|\bhttps\b|\bftp\b|\bsftp\b|\bssh\b|\btelnet\b|\bsmtp\b|\bdns\b"
+    r"|\bsmb\b|\brdp\b|\bmysql\b|\bpostgres\b|\bmongo\b|\bredis\b|\bphp\b"
+    r"|\bpython\b|\bjava\b|\bnode\b|\bapache\b|\bnginx\b|\blinux\b|\bwindows\b"
+    # Report Labels / UI
+    r"|\bCritical\b|\bHigh\b|\bMedium\b|\bLow\b|\bInfo\b|\bverified\b|\bopen\b"
+    r"|\bTarget\b|\bScope\b|\bMethodology\b|\bFindings\b|\bRemediation\b"
+    r"|\bmax\b"
+    # Actions
     r"|\bACT\b|\bATTEND\b|\bTRACK\b",
     re.IGNORECASE,
 )
 
 # ── NER labels to anonymize ───────────────────────────────────────
-NER_LABELS = {"ORG", "PERSON", "GPE", "LOC", "FAC"}
+NER_LABELS = set() # Disabled per user request (only URL and IP)
 
 # ── Alias prefix map ──────────────────────────────────────────────
 PREFIX = {
@@ -160,7 +119,7 @@ PREFIX = {
     "EMAIL":  "EMAIL",
     "CRED":   "CRED",
     "HASH":   "HASH",
-    "PORT":   "PORT",
+    # "PORT":   "PORT",  # Disabled per user request
     "ORG":    "ORG",
     "PERSON": "PERSON",
     "GPE":    "PLACE",
@@ -258,10 +217,8 @@ def anonymize(
     result = prompt
 
     # ── Pass 1a: PEM blocks ───────────────────────────────────────
-    def _pem_replacer(m: re.Match) -> str:
-        return get_alias("CRED", m.group(0))
-
-    result = _PEM_RE.sub(_pem_replacer, result)
+    # Disabled per user request (only URL and IP)
+    # result = _PEM_RE.sub(_pem_replacer, result)
 
     # ── Pass 1b: Partial URL anonymization ───────────────────────
     # Scheme and path flow through to the LLM unchanged.
@@ -282,21 +239,20 @@ def anonymize(
             original = m.group(0)
             if SAFE_PASSTHROUGH.search(original):
                 return original
+            # Avoid re-anonymizing things that look like our own aliases
+            if _ALIAS_PATTERN.search(original):
+                return original
+            # Special check for PORT: don't anonymize if it's already a placeholder-like number
+            if t == "PORT":
+                port_num = m.group(1)
+                if port_num.startswith("00") and len(port_num) == 3:
+                    return original
             return get_alias(t, original)
         result = compiled_pattern.sub(replacer, result)
 
-    # ── Pass 2: spaCy NER — text-based substitution ──────────────
-    doc = nlp(result)
-    for ent in reversed(doc.ents):
-        if ent.label_ not in NER_LABELS:
-            continue
-        if SAFE_PASSTHROUGH.search(ent.text):
-            continue
-        alias = get_alias(ent.label_, ent.text)
-        # Replace by the actual entity text string, not by char offset.
-        # count=1 + reversed iteration = correct left-to-right replacement
-        # without double-substituting the same value.
-        result = re.sub(re.escape(ent.text), alias, result, count=1)
+    # ── Pass 2: spaCy NER (Disabled per user request) ────────────
+    # doc = nlp(result)
+    # ...
 
     # ── Pass 3: Persist mapping to Redis (TTL = 24 h) ────────────
     r.setex(

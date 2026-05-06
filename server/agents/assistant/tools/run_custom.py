@@ -48,7 +48,6 @@ _ASSISTANT_BLOCKED_COMMANDS = {
 }
 
 _ASSISTANT_BLOCKED_ARG_FLAGS = {
-    "-i",
     "--in-place",
     "--write-out",
     "--create-dirs",
@@ -70,9 +69,9 @@ def _assistant_policy_error(
 
     normalized_args = [str(arg or "").strip() for arg in args]
     for arg in normalized_args:
-        lowered = arg.lower()
-        if lowered in _ASSISTANT_BLOCKED_ARG_FLAGS:
+        if arg in _ASSISTANT_BLOCKED_ARG_FLAGS:
             return f"Assistant policy blocks argument '{arg}' because it can write locally."
+        lowered = arg.lower()
         if lowered.startswith("--output=") or lowered.startswith("--output-file="):
             return f"Assistant policy blocks argument '{arg}' because it can write locally."
         if lowered.startswith("--directory-prefix=") or lowered.startswith("--output-dir="):
@@ -117,7 +116,7 @@ def run_custom(
         command=command,
         reason=reason,
         args=normalized_args,
-        timeout=max(5, min(int(timeout or 120), 180)),
+        timeout=max(5, min(int(timeout or 120), 420)),
         env=env if isinstance(env, dict) else {},
         cwd=None,
     )

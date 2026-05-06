@@ -558,7 +558,7 @@ class AnalyzerAgent:
     def _derive_expected_indicator(self, candidate: AnalyzerCandidate) -> str:
         routes: list[str] = []
         markers: list[str] = []
-        for entry in candidate.normalized_outputs[:5]:
+        for entry in (candidate.normalized_outputs or [])[:5]:
             if not isinstance(entry, dict):
                 continue
             if isinstance(entry.get("routes"), list):
@@ -578,7 +578,7 @@ class AnalyzerAgent:
     ) -> dict[str, Any]:
         evidence = verify_data.get("evidence", {})
         evidence_map = evidence if isinstance(evidence, dict) else {}
-        tool_results = verify_data.get("tool_results", [])
+        tool_results = verify_data.get("tool_results") or []
         commands: list[str] = []
         tool_names: list[str] = []
         screenshots = 0

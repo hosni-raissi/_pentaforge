@@ -150,7 +150,11 @@ def _format_findings_section(findings: list[dict[str, Any]]) -> str:
     if stats_line:
         sections.insert(0, f"**Summary**: {stats_line}\n")
 
-    return "\n".join(sections)
+    # Final truncation to ensure prompt stability
+    full_text = "\n".join(sections)
+    if len(full_text) > 15000:
+        return full_text[:15000] + "\n... [Findings Truncated]"
+    return full_text
 
 
 def _format_checklist_section(project: dict[str, Any]) -> str:
@@ -168,7 +172,7 @@ def _format_checklist_section(project: dict[str, Any]) -> str:
     if not isinstance(checklist, dict):
         return "No checklist data available."
 
-    items = checklist.get("items", [])
+    items = checklist.get("items", checklist.get("checklist", []))
     if not isinstance(items, list) or not items:
         return "No checklist items available."
 
@@ -329,6 +333,8 @@ async def generate_report(
     target = str(project.get("target", "")).strip() or "Unknown"
     target_type = str(project.get("targetType", "")).strip() or "unknown"
     scope = str(project.get("description", "")).strip() or "Not specified"
+    if len(scope) > 2000:
+        scope = scope[:2000] + "... [Scope Truncated]"
     engagement_type = str(project.get("engagement_type", "pentest")).strip()
     status = str(project.get("status", "")).strip()
 
@@ -363,7 +369,7 @@ async def generate_report(
     )
 
     # Call LLM.
-    config = get_public_agent_config("assistant")
+    config = get_public_agent_config("report")
     llm = LLMClient(config, client_name="report_generator")
     queue = get_global_llm_queue()
 

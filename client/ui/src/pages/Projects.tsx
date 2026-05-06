@@ -7,6 +7,7 @@ import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Dialog } from '../components/ui/Dialog';
 import { Input } from '../components/ui/Input';
+import { Textarea } from '../components/ui/Textarea';
 import { Select } from '../components/ui/Select';
 import { useProjects } from '../stores/projects';
 import { format } from 'date-fns';
@@ -143,6 +144,8 @@ export default function Projects() {
   const [fieldsLoading, setFieldsLoading] = useState(false);
   const [typesError, setTypesError] = useState<string>('');
   const [fieldsError, setFieldsError] = useState<string>('');
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
   const [customChecklistText, setCustomChecklistText] = useState('');
   const [customChecklistName, setCustomChecklistName] = useState('');
   const [customChecklistError, setCustomChecklistError] = useState('');
@@ -153,6 +156,7 @@ export default function Projects() {
   const [pendingEditProject, setPendingEditProject] = useState<Project | null>(null);
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
   const [stopProjectId, setStopProjectId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
   function formatShortDate(value: string): string {
     const parsed = new Date(value);
@@ -473,6 +477,7 @@ export default function Projects() {
         { name: 'Reporting', status: 'pending', progress: 0 },
       ],
       scanProgress: 0,
+      approval_mode: 'custom',
     };
 
     if (editingProjectId) {
@@ -700,7 +705,17 @@ export default function Projects() {
                       >
                         <Share2 size={12} />
                       </Button>
-                      <Button variant="ghost" size="sm" onClick={() => removeProject(project.id)} title="Delete">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setProjectToDelete(project);
+                          setDeleteDialogOpen(true);
+                        }}
+                        title="Delete"
+                      >
                         <Trash2 size={12} />
                       </Button>
                     </div>
@@ -944,11 +959,12 @@ export default function Projects() {
             {fieldsError && <p className="mt-2 text-sm text-yellow-400">{fieldsError}</p>}
           </div>
 
-          <Input
+          <Textarea
             label="Description (optional)"
             placeholder="Black-box web application assessment"
             value={form.description}
             onChange={(e) => setForm({ ...form, description: e.target.value })}
+            rows={4}
           />
 
           <div className="rounded-lg border border-border bg-surface-0/35 p-3">
@@ -1084,6 +1100,41 @@ export default function Projects() {
               Cancel Scan
             </Button>
           </div>
+        </div>
+      </Dialog>
+      <Dialog
+        open={deleteDialogOpen}
+        onClose={() => setDeleteDialogOpen(false)}
+        title="Delete Project"
+        description={`Are you sure you want to delete project "${projectToDelete?.name}"? This will permanently remove all findings and scan history.`}
+      >
+        <div className="flex justify-end gap-2 pt-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setDeleteDialogOpen(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            loading={deletingProjectId === projectToDelete?.id}
+            onClick={async () => {
+              if (projectToDelete) {
+                setDeletingProjectId(projectToDelete.id);
+                try {
+                  await removeProject(projectToDelete.id);
+                  setDeleteDialogOpen(false);
+                  setProjectToDelete(null);
+                } finally {
+                  setDeletingProjectId(null);
+                }
+              }
+            }}
+          >
+            Delete
+          </Button>
         </div>
       </Dialog>
       </div>

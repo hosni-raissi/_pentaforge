@@ -17,7 +17,9 @@ export function FindingsTable({ findings, limit = 10 }: FindingsTableProps) {
     return format(parsed, 'HH:mm');
   }
 
-  const sorted = [...findings].sort((a, b) => {
+  const visibleFindings = findings.filter((finding) => finding.status !== 'false_positive');
+
+  const sorted = [...visibleFindings].sort((a, b) => {
     const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
     return (order[a.severity] ?? 5) - (order[b.severity] ?? 5);
   });
@@ -25,13 +27,13 @@ export function FindingsTable({ findings, limit = 10 }: FindingsTableProps) {
 
   function proofBadgeClass(value?: Finding["proofQuality"]): string {
     if (value === "strong") {
-      return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+      return "border-emerald-500/40 bg-emerald-500/15 text-emerald-900 dark:text-emerald-200";
     }
     if (value === "moderate") {
-      return "border-amber-500/40 bg-amber-500/15 text-amber-200";
+      return "border-orange-500/40 bg-orange-500/15 text-orange-900 dark:text-orange-200";
     }
     if (value === "weak") {
-      return "border-slate-500/40 bg-slate-500/15 text-slate-200";
+      return "border-slate-500/40 bg-slate-500/15 text-slate-900 dark:text-slate-200";
     }
     return "";
   }
@@ -50,7 +52,7 @@ export function FindingsTable({ findings, limit = 10 }: FindingsTableProps) {
     <Card className="p-0">
       <CardHeader className="px-4 pt-4">
         <CardTitle>Recent Findings</CardTitle>
-        <span className="text-xs text-text-muted">{findings.length} total</span>
+        <span className="text-xs text-text-muted">{visibleFindings.length} active</span>
       </CardHeader>
 
       <div className="overflow-x-auto">

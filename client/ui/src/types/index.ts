@@ -16,6 +16,19 @@ export interface CopilotMessage {
   timestamp?: string;
   route?: 'assistant' | 'planner' | 'reporting' | 'blocked';
   blocked?: boolean;
+  toolLogs?: Array<{
+    id: string;
+    tool: string;
+    input: string;
+    output?: any;
+    status: 'running' | 'done' | 'error';
+  }>;
+  passwordRequests?: Array<{
+    call_id: string;
+    prompt: string;
+    reason: string;
+    status: 'pending' | 'submitted' | 'denied';
+  }>;
 }
 
 export interface Project {
@@ -70,6 +83,8 @@ export interface Project {
     };
     [key: string]: unknown;
   };
+  payload?: Record<string, any>;
+  approval_mode?: 'custom' | 'auto';
 }
 
 export interface Finding {

@@ -30,6 +30,21 @@
 ## Session And Surface Context
 - Anonymous routes discovered: 1
 
+## Tool Efficiency
+- run_custom: efficiency=0.12 avg_confidence=0.03 false_positive_rate=0.75 total=8
+- smb_deep_enum: efficiency=0.0 avg_confidence=0.0 false_positive_rate=1.0 total=3
+- snmp_fast_enum: efficiency=0.0 avg_confidence=0.0 false_positive_rate=1.0 total=3
+- run_python: efficiency=0.5 avg_confidence=0.0 false_positive_rate=0.5 total=2
+- hydra_bruteforce: efficiency=0.0 avg_confidence=0.25 false_positive_rate=0.0 total=1
+
+## Recent Updates
+- Document assumptions about target reachability and proceed to non-web tasks.: This finding is a reconnaissance directive for CTF tasks, not a vulnerability. The target is confirmed unreachable via non-HTTP services, and tasks 6–8 were successfully answered using authoritative sources.
+- Enumerate non-HTTP services (SSH, SMB, FTP) if target is alive but HTTP is blocked.: The finding was classified as reconnaissance data after confirming open ports (21/FTP, 80/HTTP, 445/SMB) but no vulnerabilities, misconfigurations, or unauthorized access.
+- Inspect HTTP response headers and page source for clues about the scripting language used to generate webpages (Task 2).: The target was unreachable, and no HTTP response or scripting language indicators were obtained, failing the scenario's prerequisite.
+- Enumerate URL parameters to identify the parameter used for loading different language versions of the webpage (Task 3).: The 'page' parameter was confirmed as the URL parameter responsible for loading different language versions of the webpage via fuzzing with ffuf, which showed unique responses for language-specific values.
+- Brute-force FTP credentials using common wordlists. Target Tasks 9–11.: [INCONCLUSIVE] Brute-force FTP credentials using common wordlists. Target Tasks 9–11. - Collected exploit evidence ac...
+- Enumerate non-HTTP services (SSH, SMB, FTP) for service banners, version disclosure, or misconfigurations (Tasks 2, 9–11).: All targeted non-HTTP services (FTP, SMB, LDAP) are filtered or unreachable, with no evidence of banners, version disclosures, or misconfigurations.
+
 ## Stored Checklist
 - Phase 1 Reconnaissance
   - Validate whether the target server 10.129.167.141 is reachable and serving HTTP responses by re-attempting a curl request with verbose output and extended timeouts. (P1)

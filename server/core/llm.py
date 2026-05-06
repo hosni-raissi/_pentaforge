@@ -499,7 +499,7 @@ class LLMClient:
             base_url=self._config.api_url,
             headers=headers,
             timeout=httpx.Timeout(
-                180.0 if self._is_local else 120.0,
+                600.0,
                 connect=10.0,
             ),
         )
@@ -512,6 +512,7 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         use_config_max_tokens: bool = True,
+        max_retries: int = 3,
     ) -> LLMResponse:
         """Send a chat completion request and return the parsed response."""
 
@@ -636,13 +637,33 @@ class LLMClient:
 
             # Retry on rate-limit (429) with exponential backoff
             retries = 0
-            max_retries = 3
             while resp.status_code == 429 and retries < max_retries:
                 retries += 1
-                wait = float(resp.headers.get("retry-after", 2 ** retries))
-                logger.warning("llm_rate_limited", retry=retries, wait=wait)
+                wait_raw = float(resp.headers.get("retry-after", 2 ** retries))
+                wait = min(wait_raw, 30.0)
+                logger.warning("llm_rate_limited", retry=retries, wait=wait, original_wait=wait_raw)
                 await asyncio.sleep(wait)
                 resp = await self._http.post("/chat/completions", json=payload)
+
+            if resp.status_code == 429:
+                # Try backup provider if configured
+                backup_config = get_backup_llm_config()
+                if backup_config and backup_config.provider != self._provider:
+                    logger.warning(
+                        "llm_rate_limit_fallback",
+                        original_provider=self._provider,
+                        backup_provider=backup_config.provider,
+                    )
+                    # Use a fresh client for the backup request
+                    async with LLMClient(backup_config, client_name=f"{self._client_name}_fallback") as fallback_llm:
+                        return await fallback_llm.chat(
+                            messages=messages,
+                            tools=tools,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            use_config_max_tokens=use_config_max_tokens,
+                            max_retries=1,  # Avoid deep recursion
+                        )
 
             resp.raise_for_status()
             data = resp.json()
@@ -656,7 +677,7 @@ class LLMClient:
                 logger.warning("local_llm_content_empty_reasoning_dropped")
                 result_content = ""
 
-            result_tool_calls = msg.get("tool_calls", [])
+            result_tool_calls = msg.get("tool_calls") or []
             result_finish_reason = choice.get("finish_reason", "stop")
             result_usage = data.get("usage", {})
 
@@ -672,8 +693,28 @@ class LLMClient:
             for tc in result_tool_calls:
                 if isinstance(tc, dict) and "function" in tc:
                     func = tc["function"]
-                    if "arguments" in func and isinstance(func["arguments"], str):
-                        func["arguments"] = deanonymize(func["arguments"], session_id)
+                    if "arguments" in func:
+                        args = func["arguments"]
+                        if isinstance(args, str):
+                            func["arguments"] = deanonymize(args, session_id)
+                        elif isinstance(args, dict):
+                            # Recursively deanonymize dict values
+                            def _deanonymize_recursive(obj):
+                                if isinstance(obj, str):
+                                    return deanonymize(obj, session_id)
+                                elif isinstance(obj, dict):
+                                    return {k: _deanonymize_recursive(v) for k, v in obj.items()}
+                                elif isinstance(obj, list):
+                                    return [_deanonymize_recursive(x) for x in obj]
+                                return obj
+                            func["arguments"] = _deanonymize_recursive(args)
+
+        # ── 5. Clean up Thinking Blocks ───────────────────────────────────────
+        
+        # Strip <think>...</think> tags used by models like DeepSeek-R1
+        if result_content and "<think>" in result_content:
+            import re
+            result_content = re.sub(r"<think>.*?</think>", "", result_content, flags=re.DOTALL).strip()
 
         return LLMResponse(
             content=result_content,

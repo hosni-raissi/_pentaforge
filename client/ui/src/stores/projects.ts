@@ -18,7 +18,7 @@ interface ProjectStore {
 
   // Actions
   addProject: (project: Project, opts?: { persist?: boolean }) => void;
-  removeProject: (id: string) => void;
+  removeProject: (id: string) => Promise<void>;
   setActive: (id: string | null) => void;
   setRunning: (id: string | null, opts?: { triggerScan?: boolean; resume?: boolean; force?: boolean }) => void;
   stopScan: (id: string, mode: "pause" | "cancel") => Promise<void>;
@@ -51,19 +51,22 @@ export const useProjects = create<ProjectStore>()(
           };
         }),
 
-      removeProject: (id) =>
-        set((s) => {
-          void deleteProjectFromDesktop(id).catch((error) => {
-            console.error('Failed to delete project from desktop DB:', error);
-          });
+      removeProject: async (id) => {
+        try {
+          await deleteProjectFromDesktop(id);
+        } catch (error) {
+          console.error('Failed to delete project from desktop DB:', error);
+          // We still remove it from local state for responsiveness, 
+          // but we could also throw here if we wanted to block the UI.
+        }
 
-          return {
-            projects: s.projects.filter((p) => p.id !== id),
-            activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
-            runningProjectId: s.runningProjectId === id ? null : s.runningProjectId,
-            startingProjectId: s.startingProjectId === id ? null : s.startingProjectId,
-          };
-        }),
+        set((s) => ({
+          projects: s.projects.filter((p) => p.id !== id),
+          activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
+          runningProjectId: s.runningProjectId === id ? null : s.runningProjectId,
+          startingProjectId: s.startingProjectId === id ? null : s.startingProjectId,
+        }));
+      },
 
       setActive: (id) => set({ activeProjectId: id }),
 
@@ -328,10 +331,21 @@ export const useProjects = create<ProjectStore>()(
           return;
         }
 
+        const nowIso = new Date().toISOString();
         const pausedProject: Project = {
           ...target,
           status: 'paused',
-          updatedAt: new Date().toISOString(),
+          updatedAt: nowIso,
+          lastScan: {
+            ...(target.lastScan ?? {}),
+            status: 'paused',
+            finishedAt: nowIso,
+            durationSeconds:
+              typeof target.lastScan?.elapsedSeconds === 'number'
+              && Number.isFinite(target.lastScan.elapsedSeconds)
+                ? target.lastScan.elapsedSeconds
+                : target.lastScan?.durationSeconds,
+          },
         };
         set((inner) => ({
           projects: inner.projects.map((project) => (
@@ -340,9 +354,6 @@ export const useProjects = create<ProjectStore>()(
           runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
           startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
         }));
-        void saveProjectToDesktop(pausedProject).catch((error) => {
-          console.error('Failed to persist paused project:', error);
-        });
       },
 
       updateProject: (id, updates, opts) =>
@@ -425,7 +436,9 @@ export const useProjects = create<ProjectStore>()(
               }
               const updatedAt = new Date(project.updatedAt || project.createdAt || 0).getTime();
               const ageMs = Number.isNaN(updatedAt) ? Number.POSITIVE_INFINITY : now - updatedAt;
-              if (ageMs <= 60_000) {
+              // Relaxed: Keep local-only projects for 24 hours before assuming they were deleted elsewhere.
+              // This prevents accidental local deletion if the server list is temporarily incomplete.
+              if (ageMs <= 24 * 60 * 60_000) {
                 mergedProjects.unshift(project);
               }
             }

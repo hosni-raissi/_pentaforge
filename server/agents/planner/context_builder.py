@@ -61,6 +61,9 @@ class PlannerContextBuilder:
         # PART 6 — User Directive
         parts.append(self._build_user_directive(user_message))
 
+        # PART 7 — USER CONTRIBUTIONS (High priority intelligence)
+        parts.append(self._build_user_contributions(project))
+
         # Update timestamp for next round
         self.last_round_timestamp = datetime.now(tz=timezone.utc).isoformat()
 
@@ -191,6 +194,33 @@ Detected Technologies:
         # For now, return placeholder
         # In production: query Qdrant with signals from findings + detected tech
         return "RAG CONTEXT: (Qdrant retrieval not yet enabled)"
+
+    def _build_user_contributions(self, project: dict[str, Any]) -> str:
+        """PART 7 — USER CONTRIBUTIONS (intelligence from the assistant/user)."""
+        if not isinstance(project, dict):
+            return "USER CONTRIBUTIONS: (no project data)"
+
+        findings = project.get("findings", [])
+        if not isinstance(findings, list):
+            return "USER CONTRIBUTIONS: None."
+
+        user_contributions = []
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            if f.get("source") == "user_contribution" or "user_help" in f.get("tags", []):
+                title = f.get("title", "Untitled")
+                status = f.get("user_contribution_status", "not_done")
+                severity = f.get("severity", "info")
+                desc = f.get("description", "")[:100]
+                user_contributions.append(
+                    f"  - [{status.upper()}] {title} ({severity}): {desc}..."
+                )
+
+        if not user_contributions:
+            return "USER CONTRIBUTIONS: None."
+
+        return "USER CONTRIBUTIONS (Review these carefully):\n" + "\n".join(user_contributions)
 
     def _build_user_directive(self, user_message: str | None) -> str:
         """PART 6 — User Directive (per-round)."""
