@@ -20,9 +20,12 @@ client/src-tauri/target
 server/venv
 server/cache
 server/logs
+server/sandbox
+server/db/knowledge/data
 server/db/projects/postgres_data
 server/db/projects/projects.db
 server/db/projects/*.db-shm
 server/db/projects/*.db-wal
+client/ui/*.tsbuildinfo
 
 tmp

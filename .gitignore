@@ -29,6 +29,13 @@ Thumbs.db
 # Data & cache (large, regenerated)
 server/db/knowledge/data/
 server/db/projects/projects.db
+server/cache/
+server/logs/
+server/sandbox/.cache/
+server/sandbox/home/
+server/sandbox/tmp/
+server/sandbox/cookies.txt
+client/ui/*.tsbuildinfo
 
 # Type checking / linting
 .mypy_cache/
