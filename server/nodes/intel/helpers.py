@@ -12,8 +12,8 @@ import structlog
 
 from server.agents.planner.tools.get_checklists import (
     _default_priority_for_item,
+    _get_checklists_impl,
     build_deterministic_checklist_payload,
-    get_checklists,
 )
 from server.db.knowledge.config.sources import ContentType, SourceConfig, get_source_by_name
 from server.db.knowledge.models.document import SourceType
@@ -718,7 +718,7 @@ async def synthesize_checklist(
         "Intel checklist synthesis now runs in deterministic mode without LLM.",
     )
 
-    raw = await get_checklists(target_type=normalized_target, info=info)
+    raw = await _get_checklists_impl(target_type=normalized_target, info=info)
     try:
         checklist_data = json.loads(raw)
     except json.JSONDecodeError:

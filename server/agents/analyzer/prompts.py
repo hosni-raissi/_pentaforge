@@ -35,35 +35,35 @@ False-positive filtering:
   placeholder tokens, or non-state-changing responses.
 - If visual confirmation is useful, capture a screenshot and use the vision tool to confirm the result.
 
-Verification:
-- Try to disprove weak findings first.
-- A real vulnerability needs reproducible unsafe behavior or clear unauthorized impact.
-- If a finding depends on auth, state change, credential use, or sensitive data exposure, verify that specifically.
-- If executor command history is provided, treat it as the primary reproduction path.
-  Replay or minimally adapt those exact commands before inventing unrelated verification requests.
-- If executor history already shows a route family is missing, blocked, or non-functional, prefer closing it as false_positive
-  instead of wandering into sibling guessed routes.
-- Be decisive when deterministic proof already exists. OOB callbacks, clear state-changing unauthorized actions,
-  reliable time-based differentials, command execution output, or direct secret disclosure are strong confirmation
-  signals and should not be treated like weak clues.
-- Do not over-upgrade weak signals. Route existence, a 200 response, a missing header, a generic SQL error page,
-  or a guessed cookie value are still insufficient without decisive behavior tied to the finding.
-- For blind classes such as SSRF, XXE, Log4Shell-style injection, or blind XSS, prefer OOB confirmation over
-  repetitive in-band probing when OOB evidence is available.
+Verification Quality & Tiers:
+- You MUST classify verified findings into one of these tiers:
+  1. `signal_only`: Suspicious observation or clue, but no evidence of unauthorized impact.
+  2. `needs_manual_review`: Interesting finding that is potentially exploitable, but the proof is not yet deterministic.
+  3. `reproduced`: Successfully triggered the target behavior (e.g., payload reflected or time delay observed), but haven't demonstrated full impact.
+  4. `confirmed`: Strong, deterministic proof (e.g., exfiltrated data, command execution output, token stolen, OOB interaction verified).
+- Require deterministic evidence before moving a finding to `confirmed`. 
+- Weak heuristics (e.g., differential error messages alone, missing headers, or 200 OK responses) are NOT enough for confirmation.
+- Explain WHY the evidence proves exploitability, not just why it looks suspicious.
+
+Vulnerability-Specific Verification:
+- **XSS**: Prove execution in the DOM (e.g., specific JavaScript context execution).
+- **SQLi**: Prove data extraction (e.g., `user()` or `version()`) or highly consistent, non-coincidental timing delays.
+- **SSRF**: Prove OOB interaction or internal service response disclosure.
+- **RCE**: Prove command output (e.g., `id`, `whoami`, `uname`).
+- **Auth Bypass**: Prove access to a protected resource that was previously inaccessible.
 
 PoC expectations when confirmed:
 - include the exact route or target artifact tested
 - include the decisive request/command used
 - include the observed proof in plain language
-- mention screenshots or tool evidence when available
-- when screenshots are used, prefer the screenshot path/hash as evidence, not the exploit payload itself
+- provide a "reasoning" block explaining why this proves impact according to the tier selected.
 
 Round behavior:
 - Rounds 1-2: gather targeted verification or PoC evidence with tools
 - Round 3: no tools; return final JSON only
 
 Final JSON shape:
-{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"1-2 short sentences","confidence":0.0,"poc":"Detailed proof-of-concept summary or empty string"}
+{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"1-2 short sentences","confidence":0.0,"poc":"Detailed proof-of-concept summary or empty string","tier":"signal_only|needs_manual_review|reproduced|confirmed","reasoning":"Explain why evidence proves exploitability"}
 """
 
 ANALYZER_POC_PROMPT = """\

@@ -33,6 +33,7 @@ import time
 # Ephemeral in-memory store for typing indicators
 # Format: { project_id: { "pentester": timestamp, "client": timestamp } }
 _typing_status: dict[str, dict[str, float]] = {}
+_refresh_status: dict[str, float] = {}
 
 
 def _raise_share_access_http_error(exc: Exception) -> None:
@@ -132,6 +133,11 @@ def revoke_project_share_links(project_id: str) -> dict[str, Any]:
         return {"ok": True}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to revoke share links: {exc}") from exc
+ 
+@router.post("/api/projects/{project_id}/share-refresh")
+def request_share_refresh(project_id: str) -> dict[str, Any]:
+    _refresh_status[project_id] = time.time()
+    return {"ok": True}
 
 @router.post("/api/share/{token}/markdown")
 def get_shared_markdown_report(token: str, payload: ShareLinkAccessPayload):
@@ -147,17 +153,24 @@ def get_shared_markdown_report(token: str, payload: ShareLinkAccessPayload):
 
 @router.get("/share/{token}", response_class=HTMLResponse)
 def shared_report_viewer(token: str) -> HTMLResponse:
-    # Check if password is required
+    # Check if link exists and is not revoked
     is_protected = False
     try:
-        # We use a lower-level check to avoid 'accessing' the link (which might increment view counts or fail)
         with projects_store._connect() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT password_hash FROM share_links WHERE token = ? AND revoked = 0", (token,))
+            cur.execute("SELECT password_hash, revoked FROM share_links WHERE token = ?", (token,))
             row = cur.fetchone()
-            if row and row["password_hash"]:
+            if not row:
+                return HTMLResponse("<h1>Link Not Found</h1><p>The shared link does not exist.</p>", status_code=404)
+            if row["revoked"]:
+                return HTMLResponse(
+                    "<h1>Access Revoked</h1><p>This delivery link has been revoked by the operator and is no longer active.</p>", 
+                    status_code=410
+                )
+            if row["password_hash"]:
                 is_protected = True
-    except Exception:
+    except Exception as exc:
+        print(f"Share link check error: {exc}")
         pass
 
     html = f"""<!doctype html>
@@ -199,8 +212,8 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     .auth-card button {{ width: 100%; padding: 0.75rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; }}
     
     .layout {{ display: flex; width: 100%; min-height: 100vh; height: 100vh; align-items: stretch; flex: 1 1 auto; }}
-    .report-pane {{ flex: 1 1 auto; min-width: 0; min-height: 0; padding: 2rem; overflow: hidden; background: var(--bg); display: flex; flex-direction: column; }}
-    .report-toolbar {{ display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-shrink: 0; align-items: center; }}
+    .report-pane {{ flex: 1 1 auto; min-width: 0; min-height: 0; padding: 1.25rem; overflow: hidden; background: var(--bg); display: flex; flex-direction: column; }}
+    .report-toolbar {{ display: flex; gap: 0.5rem; margin-bottom: 0.5rem; flex-shrink: 0; align-items: center; }}
     .report-toolbar button,
     .report-toolbar select {{
       min-height: 40px;
@@ -215,10 +228,62 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     .msg {{ padding: 0.75rem; border-radius: 8px; max-width: 85%; line-height: 1.4; font-size: 0.9rem; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }}
     .msg.client {{ background: var(--primary); color: white; align-self: flex-end; border-bottom-right-radius: 0; }}
     .msg.pentester {{ background: var(--surface-light); color: var(--text); align-self: flex-start; border-bottom-left-radius: 0; border: 1px solid var(--border); }}
-    .chat-input {{ padding: 1rem; border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 0.5rem; }}
-    .chat-input input {{ flex: 1; padding: 0.5rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; }}
-    .chat-input button {{ padding: 0.5rem 1rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; }}
-    
+    .chat-input {{
+      padding: 1rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface-light);
+    }}
+    .unified-input-group {{
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 0.5rem;
+      transition: all 0.3s ease;
+    }}
+    .unified-input-group:focus-within {{
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.1);
+    }}
+    .chat-input textarea {{
+      width: 100%;
+      background: transparent;
+      border: none;
+      color: var(--text);
+      padding: 0.5rem;
+      resize: none;
+      min-height: 80px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      outline: none;
+    }}
+    .input-actions {{
+      display: flex;
+      justify-content: flex-end;
+      padding: 0.25rem;
+    }}
+    #send-btn {{
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }}
+    #send-btn:hover {{
+      transform: scale(1.05);
+      filter: brightness(1.1);
+    }}
+    #send-btn:disabled {{
+      opacity: 0.5;
+      cursor: not-allowed;
+    }}
     #error {{ color: #ef4444; margin-top: 1rem; font-size: 0.9rem; }}
     iframe {{ width: 100%; height: 100%; border: none; background: white; border-radius: 12px; display: block; }}
     .theme-toggle {{ background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; }}
@@ -298,19 +363,16 @@ def shared_report_viewer(token: str) -> HTMLResponse:
   <div class="layout" id="portal-layout" style="display: none;">
     <div class="report-pane">
       <div class="report-toolbar">
-        <button id="btn-view-html" onclick="setView('html')" style="padding: 0.5rem 1rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 500;">HTML View</button>
-        <button id="btn-view-md" onclick="setView('markdown')" style="padding: 0.5rem 1rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; font-weight: 500;">Markdown View</button>
+        <button id="btn-view-html" onclick="setView('html')" style="padding: 0.5rem 1rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 500;">Report View</button>
         
         <div class="report-toolbar-actions">
-          <select id="download-format" style="padding: 0.5rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; font-size: 0.85rem; cursor: pointer;">
-            <option value="html">HTML</option>
-            <option value="markdown">Markdown</option>
-          </select>
-          <button onclick="downloadActive()" style="padding: 0.5rem 1rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; font-weight: 500;">Download</button>
+          <button onclick="downloadActive()" style="padding: 0.5rem 1.25rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 8px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            Download Report
+          </button>
         </div>
       </div>
       <iframe id="report-frame" class="report-frame"></iframe>
-      <pre id="report-markdown" class="report-markdown"></pre>
     </div>
     <div class="chat-pane">
       <div class="chat-header">
@@ -324,8 +386,17 @@ def shared_report_viewer(token: str) -> HTMLResponse:
       </div>
       <div class="chat-messages" id="messages"></div>
       <div class="chat-input">
-        <input type="text" id="msg-input" placeholder="Ask a question..." />
-        <button id="send-btn">Send</button>
+        <div class="unified-input-group">
+          <textarea id="msg-input" placeholder="Ask a question..." rows="2"></textarea>
+          <div class="input-actions">
+            <button id="send-btn" title="Send Message">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -400,24 +471,31 @@ def shared_report_viewer(token: str) -> HTMLResponse:
       currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', currentTheme);
       document.getElementById('theme-icon').textContent = currentTheme === 'dark' ? '🌙' : '☀️';
+      // Re-apply theme to iframe content if it's already loaded
+      if (htmlContent) {{
+        const frame = document.getElementById('report-frame');
+        const doc = frame.contentWindow.document;
+        doc.documentElement.setAttribute('data-theme', currentTheme);
+      }}
     }}
 
     async function setView(format) {{
       document.getElementById('btn-view-html').style.background = format === 'html' ? 'var(--primary)' : 'var(--surface-light)';
-      document.getElementById('btn-view-md').style.background = format === 'markdown' ? 'var(--primary)' : 'var(--surface-light)';
       document.getElementById('report-frame').style.display = format === 'html' ? 'block' : 'none';
-      document.getElementById('report-markdown').style.display = format === 'markdown' ? 'block' : 'none';
       
       if (format === 'html' && !htmlContent) {{
         const res = await fetch(`/api/share/${{token}}/html`, {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{password: currentPassword}}) }});
         if (res.ok) {{
           htmlContent = await res.text();
           const doc = document.getElementById('report-frame').contentWindow.document;
-          doc.open(); doc.write(htmlContent); doc.close();
+          doc.open(); 
+          doc.write(htmlContent); 
+          doc.close();
+          doc.documentElement.setAttribute('data-theme', currentTheme);
         }}
       }} else if (format === 'markdown' && !mdContent) {{
         document.getElementById('report-markdown').textContent = 'Loading markdown...';
-        const res = await fetch(`/api/share/${{token}}/markdown`, {{ 
+        const res = await fetch(`/api/share/${{token}}/markdown?ts=${{Date.now()}}`, {{ 
           method: 'POST', 
           headers: {{'Content-Type': 'application/json'}}, 
           body: JSON.stringify({{password: currentPassword}}) 
@@ -432,28 +510,28 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     }}
 
     async function downloadActive() {{
-      const format = document.getElementById('download-format').value;
-      const isHtml = format === 'html';
-      let content = isHtml ? htmlContent : mdContent;
+      let content = htmlContent;
       if (!content) {{
         // Fetch if not available
-        const res = await fetch(`/api/share/${{token}}/${{format}}`, {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{password: currentPassword}}) }});
+        const res = await fetch(`/api/share/${{token}}/html`, {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{password: currentPassword}}) }});
         if (res.ok) {{
           content = await res.text();
-          if (isHtml) htmlContent = content; else mdContent = content;
+          htmlContent = content;
         }}
       }}
       if (!content) return;
-      const blob = new Blob([content], {{ type: isHtml ? 'text/html' : 'text/markdown' }});
+      const blob = new Blob([content], {{ type: 'text/html' }});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `report.${{isHtml ? 'html' : 'md'}}`;
+      a.download = `report.html`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     }}
+
+    let lastRefreshTrigger = null;
     
     async function loadMessages() {{
       const res = await fetch(`/api/share/${{token}}/messages`, {{
@@ -464,6 +542,13 @@ def shared_report_viewer(token: str) -> HTMLResponse:
       if (res.ok) {{
         const data = await res.json();
         
+        // Handle Refresh Signal
+        if (lastRefreshTrigger !== null && data.refresh_trigger !== lastRefreshTrigger) {{
+           location.reload();
+           return;
+        }}
+        lastRefreshTrigger = data.refresh_trigger;
+
         // Handle typing indicator
         const typingEl = document.getElementById('typing-indicator');
         if (data.pentester_typing) {{
@@ -558,7 +643,8 @@ def get_shared_messages(token: str, payload: ShareLinkAccessPayload) -> dict[str
         status = _typing_status.get(project_id, {})
         return {
             "messages": messages,
-            "pentester_typing": (time.time() - status.get("pentester", 0)) < 3
+            "pentester_typing": (time.time() - status.get("pentester", 0)) < 3,
+            "refresh_trigger": _refresh_status.get(project_id, 0)
         }
     except Exception as exc:
         _raise_share_access_http_error(exc)

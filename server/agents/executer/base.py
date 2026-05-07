@@ -17,6 +17,11 @@ import structlog
 
 from server.agents.rate_limiter import LLMRateLimiter, get_global_llm_queue, get_backup_llm_fallback
 from server.agents.executer.sandbox import ensure_sandbox_environment
+from server.agents.executer.tool_safety import (
+    get_run_custom_command_profile,
+    get_tool_safety_profile,
+    requires_approval_for_execution,
+)
 from server.agents.executer.target_tool_routing import extract_discovered_target_types
 from server.config.agent import (
     LocalLLMConfig,
@@ -1682,7 +1687,7 @@ class BaseExecuterAgent:
                 self._cb.on_warn(f"[{self._role}] unknown tool: {tool_name}")
             else:
                 result = ""
-                if self._tool_requires_user_approval(tool_name):
+                if self._tool_requires_user_approval_with_args(tool_name, args):
                     approved = await self._request_tool_approval(
                         tool_name=tool_name,
                         args=args,
@@ -1744,6 +1749,16 @@ class BaseExecuterAgent:
                                 "project_cache_dir": self._project_cache_dir,
                                 "role": self._role,
                                 "tool": tool_name,
+                                "target_url": self._declared_target_url(),
+                                "approval_mode": self._approval_mode,
+                                "safety_profile": (
+                                    get_run_custom_command_profile(
+                                        str(args.get("command", "")).strip().lower(),
+                                        role=self._role,
+                                    ).to_dict()
+                                    if tool_name == "run_custom"
+                                    else get_tool_safety_profile(tool_name, role=self._role).to_dict()
+                                ),
                             }
                         )
                         try:
@@ -1803,6 +1818,14 @@ class BaseExecuterAgent:
                     "args": args,
                     "scenario_id": scenario_id,
                     "result": result,
+                    "safety_profile": (
+                        get_run_custom_command_profile(
+                            str(args.get("command", "")).strip().lower(),
+                            role=self._role,
+                        ).to_dict()
+                        if tool_name == "run_custom"
+                        else get_tool_safety_profile(tool_name, role=self._role).to_dict()
+                    ),
                     "discovered_target_types": extract_discovered_target_types(result),
                     "approval_required": bool(
                         isinstance(result, str)
@@ -1823,8 +1846,9 @@ class BaseExecuterAgent:
         )
 
     def _tool_requires_user_approval(self, tool_name: str) -> bool:
-        # If approval mode is set to auto, bypass all manual checks.
-        # Fetch latest mode from callback if possible to respect mid-scan changes.
+        return self._tool_requires_user_approval_with_args(tool_name, {})
+
+    def _tool_requires_user_approval_with_args(self, tool_name: str, args: dict[str, Any]) -> bool:
         approval_mode = self._approval_mode
         get_mode_fn = getattr(self._cb, "get_approval_mode", None)
         if callable(get_mode_fn):
@@ -1835,14 +1859,23 @@ class BaseExecuterAgent:
             except Exception:
                 pass
 
-        if approval_mode == "auto":
-            return False
+        if str(tool_name or "").strip().lower() == "run_custom":
+            command_name = str(args.get("command", "")).strip().lower() if isinstance(args, dict) else ""
+            profile = get_run_custom_command_profile(command_name, role=self._role)
+            return requires_approval_for_execution(
+                profile=profile,
+                approval_mode=approval_mode,
+                role=self._role,
+                tool_name="run_custom",
+            )
 
-        # Any Exploit execution requires explicit approval.
-        if self._role == "exploit":
-            return True
-        # run_custom is powerful even in recon and must be explicitly approved.
-        return tool_name == "run_custom"
+        profile = get_tool_safety_profile(tool_name, role=self._role)
+        return requires_approval_for_execution(
+            profile=profile,
+            approval_mode=approval_mode,
+            role=self._role,
+            tool_name=tool_name,
+        )
 
     async def _request_tool_approval(
         self,

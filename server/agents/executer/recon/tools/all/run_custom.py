@@ -17,7 +17,25 @@ from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from server.agents.executer.sandbox import get_sandbox_root
+from server.agents.executer.run_custom_guard import (
+    append_audit_record,
+    collect_artifact_paths,
+    current_execution_context,
+    detect_recon_role_violation,
+    detect_scope_violation,
+)
+from server.agents.executer.sandbox import (
+    SandboxExecutionPolicy,
+    build_sandbox_env,
+    build_sandbox_preexec,
+    get_sandbox_root,
+    resolve_sandbox_cwd,
+)
+from server.agents.executer.sandbox_client import (
+    execute_run_custom_remotely,
+    sandbox_remote_enabled,
+)
+from server.agents.executer.tool_safety import get_run_custom_command_profile
 
 
 # ══════════════════════════════════════════════════════════════
@@ -479,10 +497,13 @@ def safe_execute(
         cwd: Working directory
         password: Password to send via stdin (for ssh, sudo, etc.)
     """
-    import os
-    env = os.environ.copy()
-    if extra_env:
-        env.update(extra_env)
+    env = build_sandbox_env(extra_env)
+    execution_cwd = resolve_sandbox_cwd(cwd)
+    preexec_fn = build_sandbox_preexec(
+        SandboxExecutionPolicy(
+            cpu_seconds=max(10, min(int(timeout), 120)),
+        )
+    )
 
     try:
         proc = subprocess.run(
@@ -493,7 +514,9 @@ def safe_execute(
             timeout=timeout,
             shell=False,       # CRITICAL: never use shell=True
             env=env,
-            cwd=cwd,
+            cwd=execution_cwd,
+            preexec_fn=preexec_fn,
+            start_new_session=True,
         )
         return proc.stdout, proc.stderr, proc.returncode
     except subprocess.TimeoutExpired:
@@ -582,10 +605,86 @@ def run_custom(
     # ── Redirect default tool output folders ──────────────────
     redirected_args, _redirected_flags = redirect_default_tool_outputs(req.command, req.args)
     req.args = redirected_args
+    command_profile = get_run_custom_command_profile(req.command, role=str(current_execution_context().get("role", "")))
+
+    role_violation = detect_recon_role_violation(
+        req.command,
+        role=str(current_execution_context().get("role", "")),
+    )
+    if role_violation:
+        append_audit_record(
+            command=req.command,
+            args=req.args,
+            full_command=" ".join(shlex.quote(x) for x in [req.command, *req.args]),
+            reason=req.reason,
+            status="blocked",
+            execution_cwd=_effective_command_cwd(),
+            return_code=-1,
+            execution_time=round(time.time() - start, 2),
+            error=role_violation,
+            stripped_args=stripped_flags,
+            scope_target=str(current_execution_context().get("target_url", "")).strip(),
+            profile=command_profile,
+        )
+        return RunCustomResult(
+            success=False,
+            command=req.command,
+            args=req.args,
+            reason=req.reason,
+            full_command="",
+            error=role_violation,
+            return_code=-1,
+            execution_time=round(time.time() - start, 2),
+        ).model_dump()
+
+    scope_violation = detect_scope_violation(
+        req.command,
+        req.args,
+        active_target=str(current_execution_context().get("target_url", "")).strip(),
+    )
+    if scope_violation:
+        append_audit_record(
+            command=req.command,
+            args=req.args,
+            full_command=" ".join(shlex.quote(x) for x in [req.command, *req.args]),
+            reason=req.reason,
+            status="blocked",
+            execution_cwd=_effective_command_cwd(),
+            return_code=-1,
+            execution_time=round(time.time() - start, 2),
+            error=scope_violation,
+            stripped_args=stripped_flags,
+            scope_target=str(current_execution_context().get("target_url", "")).strip(),
+            profile=command_profile,
+        )
+        return RunCustomResult(
+            success=False,
+            command=req.command,
+            args=req.args,
+            reason=req.reason,
+            full_command="",
+            error=f"Target scope violation: {scope_violation}",
+            return_code=-1,
+            execution_time=round(time.time() - start, 2),
+        ).model_dump()
 
     # ── Policy check ──────────────────────────────────────────
     policy_error = validate_command_policy(req.command, req.args)
     if policy_error:
+        append_audit_record(
+            command=req.command,
+            args=req.args,
+            full_command=" ".join(shlex.quote(x) for x in [req.command, *req.args]),
+            reason=req.reason,
+            status="blocked",
+            execution_cwd=_effective_command_cwd(),
+            return_code=-1,
+            execution_time=round(time.time() - start, 2),
+            error=policy_error,
+            stripped_args=stripped_flags,
+            scope_target=str(current_execution_context().get("target_url", "")).strip(),
+            profile=command_profile,
+        )
         return RunCustomResult(
             success=False,
             command=req.command,
@@ -599,14 +698,6 @@ def run_custom(
     # ── Build & audit-log command ─────────────────────────────
     cmd = [req.command] + req.args
     full_command = " ".join(shlex.quote(x) for x in cmd)
-
-    _audit(CustomCommandLog(
-        command=req.command,
-        args=req.args,
-        reason=req.reason,
-        timestamp=time.time(),
-        full_command=full_command,
-    ))
 
     # ── Password handling ──────────────────────────────────────
     password: Optional[str] = None
@@ -634,12 +725,47 @@ def run_custom(
 
     # ── Execute ───────────────────────────────────────────────
     execution_cwd = _effective_command_cwd()
-    stdout, stderr, rc = safe_execute(
-        cmd,
-        timeout=req.timeout,
-        extra_env=req.env or None,
-        cwd=execution_cwd,
-        password=password,
+    if sandbox_remote_enabled():
+        remote_result = execute_run_custom_remotely(
+            command=req.command,
+            args=req.args,
+            timeout=req.timeout,
+            env=req.env or {},
+            cwd=execution_cwd,
+            password=password,
+        )
+        stdout = str(remote_result.get("stdout") or "")
+        stderr = str(remote_result.get("stderr") or "")
+        rc = int(remote_result.get("return_code", -1))
+        execution_cwd = str(remote_result.get("execution_cwd") or execution_cwd)
+        artifact_paths = (
+            list(remote_result.get("artifact_paths", []))
+            if isinstance(remote_result.get("artifact_paths"), list)
+            else collect_artifact_paths(req.args, execution_cwd=execution_cwd)
+        )
+    else:
+        stdout, stderr, rc = safe_execute(
+            cmd,
+            timeout=req.timeout,
+            extra_env=req.env or None,
+            cwd=execution_cwd,
+            password=password,
+        )
+        artifact_paths = collect_artifact_paths(req.args, execution_cwd=execution_cwd)
+    append_audit_record(
+        command=req.command,
+        args=req.args,
+        full_command=full_command,
+        reason=req.reason,
+        status="completed" if rc == 0 else "failed",
+        execution_cwd=execution_cwd,
+        return_code=rc,
+        execution_time=round(time.time() - start, 2),
+        error=None if rc == 0 else stderr[:5000] if stderr else f"Exited with code {rc}",
+        artifact_paths=artifact_paths,
+        stripped_args=stripped_flags,
+        scope_target=str(current_execution_context().get("target_url", "")).strip(),
+        profile=command_profile,
     )
 
     return RunCustomResult(
@@ -657,17 +783,6 @@ def run_custom(
         error=None if rc == 0 else f"Exited with code {rc}",
     ).model_dump()
 
-
-def _audit(log: CustomCommandLog) -> None:
-    """Write audit record to stderr (replace with your logging backend)."""
-    import sys
-    record = {
-        "audit": True,
-        "ts": log.timestamp,
-        "cmd": log.full_command,
-        "reason": log.reason,
-    }
-    print(json.dumps(record), file=sys.stderr)
 
 
 # ══════════════════════════════════════════════════════════════

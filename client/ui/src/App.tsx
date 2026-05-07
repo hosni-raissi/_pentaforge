@@ -3,7 +3,6 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
-import ClientShare from "@/pages/ClientShare";
 import Dashboard from "@/pages/Dashboard";
 import Projects from "@/pages/Projects";
 import Reports from "@/pages/Reports";
@@ -167,7 +166,7 @@ export default function App() {
           <Route index element={<Navigate to="/projects" replace />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/client-share" element={<ClientShare />} />
+          <Route path="/client-share" element={<Navigate to="/reports" replace />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/settings" element={<Settings />} />
         </Route>

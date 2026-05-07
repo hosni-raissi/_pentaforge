@@ -3,26 +3,76 @@ import { clsx } from "clsx";
 import {
   LayoutDashboard,
   FolderOpen,
-  Share2,
   FileText,
   Settings,
-  Shield
+  Shield,
+  Search,
+  type LucideIcon,
 } from "lucide-react";
 
 import { useProjects } from "../../stores/projects";
+import {
+  PRODUCT_LOOPS,
+} from "../../lib/productWorkflows";
 import { Badge } from "../ui/Badge";
 
-const navItems = [
+const loopNavItems = [
+  { to: "/dashboard", icon: LayoutDashboard, label: "Run Scan" },
+  { to: "/reports", icon: FileText, label: "Reports & Share" },
+];
+
+const supportNavItems = [
   { to: "/projects", icon: FolderOpen, label: "Projects" },
-  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/client-share", icon: Share2, label: "Client Share" },
-  { to: "/reports", icon: FileText, label: "Reports" },
-  { to: "/settings", icon: Settings, label: "Settings" }
+  { to: "/settings", icon: Settings, label: "Settings" },
 ];
 
 export function Sidebar() {
   const location = useLocation();
   const running = useProjects((state) => state.getRunning());
+  const activeProject = useProjects((state) => state.getActive());
+  const displayProject = activeProject || running;
+
+  const activeLoop = PRODUCT_LOOPS.find((loop) => {
+    if (loop.route === "/dashboard?focus=findings") {
+      return (
+        location.pathname === "/dashboard"
+        && new URLSearchParams(location.search).get("focus") === "findings"
+      );
+    }
+    return location.pathname === loop.route;
+  });
+
+  const renderNavLink = ({
+    to,
+    icon: Icon,
+    label,
+  }: {
+    to: string;
+    icon: LucideIcon;
+    label: string;
+  }) => {
+    const [pathname, search = ""] = to.split("?");
+    const active =
+      location.pathname === pathname
+      && ((search.length === 0 && location.search.length === 0)
+        || location.search === `?${search}`);
+
+    return (
+      <NavLink
+        key={to}
+        to={to}
+        className={clsx(
+          "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors duration-100",
+          active
+            ? "bg-pf-600/15 text-pf-400"
+            : "text-text-secondary hover:bg-surface-2 hover:text-text-primary",
+        )}
+      >
+        <Icon size={15} className={active ? "text-pf-400" : ""} />
+        {label}
+      </NavLink>
+    );
+  };
 
   return (
     <aside className="flex h-full w-48 flex-col border-r border-border bg-surface-1">
@@ -30,7 +80,7 @@ export function Sidebar() {
         <div className="flex items-center gap-2">
           <Shield size={14} className="text-pf-500" />
           <span className="truncate text-sm font-medium text-text-secondary">
-            {running?.name ?? "No active scan"}
+            {displayProject?.name ?? "No Active Project"}
           </span>
         </div>
         {running ? (
@@ -40,30 +90,18 @@ export function Sidebar() {
         ) : null}
       </div>
 
-      <nav className="flex-1 space-y-0.5 px-2 py-2">
-        {navItems.map(({ to, icon: Icon, label }) => {
-          const active = location.pathname === to;
-
-          return (
-            <NavLink
-              key={to}
-              to={to}
-              className={clsx(
-                "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors duration-100",
-                active
-                  ? "bg-pf-600/15 text-pf-400"
-                  : "text-text-secondary hover:bg-surface-2 hover:text-text-primary"
-              )}
-            >
-              <Icon size={15} className={active ? "text-pf-400" : ""} />
-              {label}
-            </NavLink>
-          );
-        })}
-      </nav>
+      <div className="flex-1 overflow-y-auto px-2 py-4">
+        <nav className="space-y-1">
+          {loopNavItems.map(renderNavLink)}
+        </nav>
+        <div className="my-3 border-t border-border/50 px-3" />
+        <nav className="space-y-1">
+          {supportNavItems.map(renderNavLink)}
+        </nav>
+      </div>
 
       <div className="border-t border-border px-3 py-2">
-        <span className="text-xs text-text-muted">v1.0.0</span>
+        <span className="mt-1 block text-xs text-text-muted">v1.0.0</span>
       </div>
     </aside>
   );

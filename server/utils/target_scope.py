@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from urllib.parse import urlsplit
 
 
@@ -99,4 +100,37 @@ def describe_url_scope_issue(url: str, active_target: str) -> str | None:
         return f"{url} is outside target host {target_host}"
     if target_port is not None and url_port is not None and url_port != target_port:
         return f"{url} uses port {url_port}, expected {target_port}"
+    return None
+
+
+def describe_network_target_scope_issue(value: str, active_target: str) -> str | None:
+    """Validate a URL or host[:port] token against the active target."""
+    text = str(value or "").strip().strip("'\"")
+    if not text:
+        return None
+    if "://" in text:
+        return describe_url_scope_issue(text, active_target)
+
+    _, target_host, target_port, _ = _split_target(active_target)
+    if not target_host:
+        return None
+
+    _, value_host, value_port, _ = _split_target(text)
+    if not value_host:
+        return None
+
+    try:
+        ipaddress.ip_address(value_host)
+        host_like = True
+    except ValueError:
+        host_like = value_host == "localhost" or "." in value_host or value_host.count(":") >= 2
+    if not host_like:
+        return None
+
+    same_host = value_host == target_host
+    same_loopback_family = is_loopback_host(value_host) and is_loopback_host(target_host)
+    if not (same_host or same_loopback_family):
+        return f"{text} is outside target host {target_host}"
+    if target_port is not None and value_port is not None and value_port != target_port:
+        return f"{text} uses port {value_port}, expected {target_port}"
     return None

@@ -22,7 +22,7 @@ export function ClientChat({ projectId }: ClientChatProps) {
   const fetchMessages = async () => {
     try {
       const msgs = await getPentesterMessagesFromDesktop(projectId);
-      setMessages(msgs);
+      setMessages(Array.isArray(msgs.messages) ? msgs.messages : []);
     } catch (err) {
       console.error("Failed to fetch client messages", err);
     } finally {

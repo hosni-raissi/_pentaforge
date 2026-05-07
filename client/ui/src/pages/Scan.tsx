@@ -60,7 +60,7 @@ export default function Scan() {
                     setRunning(project.id, { triggerScan: true, force: true });
                     return;
                   }
-                  if (project.status === 'paused') {
+                  if (project.status === 'stopped') {
                     const confirmed = window.confirm('Resume will start a new scan and keep previous history visible. Continue?');
                     if (!confirmed) {
                       return;

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from server.api.dependencies import projects_store
-from server.app.orchestrator import _build_default_target_info_profile, _resolve_target_info_profile
+from server.app.scan.utils import _build_default_target_info_profile, _resolve_target_info_profile
 from server.constants.target_types import (
     TARGET_TYPES,
     get_target_schema_fields,

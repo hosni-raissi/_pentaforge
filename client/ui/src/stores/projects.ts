@@ -21,12 +21,14 @@ interface ProjectStore {
   removeProject: (id: string) => Promise<void>;
   setActive: (id: string | null) => void;
   setRunning: (id: string | null, opts?: { triggerScan?: boolean; resume?: boolean; force?: boolean }) => void;
-  stopScan: (id: string, mode: "pause" | "cancel") => Promise<void>;
+  stopScan: (id: string, mode: "stop" | "pause" | "cancel") => Promise<void>;
   updateProject: (id: string, updates: Partial<Project>, opts?: { persist?: boolean }) => void;
   getActive: () => Project | null;
   getRunning: () => Project | null;
   hydrateFromDatabase: () => Promise<void>;
 }
+
+type PersistedProjectStore = Pick<ProjectStore, 'activeProjectId'>;
 
 export const useProjects = create<ProjectStore>()(
   persist(
@@ -107,7 +109,7 @@ export const useProjects = create<ProjectStore>()(
             }
             if (p.status === 'running') {
               changedProjectIds.add(p.id);
-              return { ...p, status: 'paused' as ProjectStatus };
+              return { ...p, status: 'stopped' as ProjectStatus };
             }
             return p;
           });
@@ -211,7 +213,7 @@ export const useProjects = create<ProjectStore>()(
               const responseStatus = String(response.status || '').toLowerCase();
               const nextStatus: ProjectStatus = (
                 responseStatus === 'completed'
-                || responseStatus === 'paused'
+                || responseStatus === 'stopped'
                 || responseStatus === 'idle'
                 || responseStatus === 'error'
               )
@@ -332,13 +334,13 @@ export const useProjects = create<ProjectStore>()(
         }
 
         const nowIso = new Date().toISOString();
-        const pausedProject: Project = {
+        const stoppedProject: Project = {
           ...target,
-          status: 'paused',
+          status: 'stopped',
           updatedAt: nowIso,
           lastScan: {
             ...(target.lastScan ?? {}),
-            status: 'paused',
+            status: 'stopped',
             finishedAt: nowIso,
             durationSeconds:
               typeof target.lastScan?.elapsedSeconds === 'number'
@@ -349,7 +351,7 @@ export const useProjects = create<ProjectStore>()(
         };
         set((inner) => ({
           projects: inner.projects.map((project) => (
-            project.id === id ? pausedProject : project
+            project.id === id ? stoppedProject : project
           )),
           runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
           startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
@@ -416,32 +418,9 @@ export const useProjects = create<ProjectStore>()(
 
         try {
           const remoteProjects = await listProjectsFromDesktop();
-          const localProjects = get().projects;
-
-          if (remoteProjects.length === 0 && localProjects.length > 0) {
-            for (const project of localProjects) {
-              await saveProjectToDesktop(project);
-            }
-            return;
-          }
 
           set((state) => {
-            const remoteById = new Map(remoteProjects.map((project) => [project.id, project]));
-            const mergedProjects: Project[] = [...remoteProjects];
-
-            const now = Date.now();
-            for (const project of localProjects) {
-              if (remoteById.has(project.id)) {
-                continue;
-              }
-              const updatedAt = new Date(project.updatedAt || project.createdAt || 0).getTime();
-              const ageMs = Number.isNaN(updatedAt) ? Number.POSITIVE_INFINITY : now - updatedAt;
-              // Relaxed: Keep local-only projects for 24 hours before assuming they were deleted elsewhere.
-              // This prevents accidental local deletion if the server list is temporarily incomplete.
-              if (ageMs <= 24 * 60 * 60_000) {
-                mergedProjects.unshift(project);
-              }
-            }
+            const nextProjects: Project[] = [...remoteProjects];
 
             // Preserve optimistic in-flight start state. Without this, periodic
             // hydrate can overwrite local "running" back to stale remote state
@@ -450,31 +429,31 @@ export const useProjects = create<ProjectStore>()(
               const startingId = state.startingProjectId;
               const localStarting = state.projects.find((project) => project.id === startingId);
               if (localStarting) {
-                const remoteIndex = mergedProjects.findIndex((project) => project.id === startingId);
+                const remoteIndex = nextProjects.findIndex((project) => project.id === startingId);
                 if (remoteIndex >= 0) {
-                  const remoteStarting = mergedProjects[remoteIndex];
+                  const remoteStarting = nextProjects[remoteIndex];
                   if (remoteStarting.status !== 'running') {
-                    mergedProjects[remoteIndex] = {
+                    nextProjects[remoteIndex] = {
                       ...remoteStarting,
                       ...localStarting,
                     };
                   }
                 } else {
-                  mergedProjects.unshift(localStarting);
+                  nextProjects.unshift(localStarting);
                 }
               }
             }
 
             const activeStillExists = state.activeProjectId
-              ? mergedProjects.some((p) => p.id === state.activeProjectId)
+              ? nextProjects.some((p) => p.id === state.activeProjectId)
               : false;
-            const runningProject = mergedProjects.find((p) => p.status === 'running');
+            const runningProject = nextProjects.find((p) => p.status === 'running');
 
             return {
-              projects: mergedProjects,
+              projects: nextProjects,
               activeProjectId: activeStillExists
                 ? state.activeProjectId
-                : mergedProjects[0]?.id ?? null,
+                : nextProjects[0]?.id ?? null,
               runningProjectId: runningProject?.id ?? null,
               startingProjectId: state.startingProjectId,
             };
@@ -486,39 +465,32 @@ export const useProjects = create<ProjectStore>()(
     }),
     {
       name: 'pf-projects',
+      version: 2,
+      partialize: (state): PersistedProjectStore => ({
+        activeProjectId: state.activeProjectId,
+      }),
+      migrate: (persistedState, version) => {
+        const state = (persistedState ?? {}) as Partial<ProjectStore>;
+        if (version < 2) {
+          return {
+            activeProjectId: typeof state.activeProjectId === 'string' ? state.activeProjectId : null,
+          };
+        }
+        return {
+          activeProjectId: typeof state.activeProjectId === 'string' ? state.activeProjectId : null,
+        };
+      },
       merge: (persisted, current) => {
-        const state = (persisted ?? {}) as Partial<ProjectStore>;
-        const projects = Array.isArray(state.projects) ? state.projects : current.projects;
+        const state = (persisted ?? {}) as Partial<PersistedProjectStore>;
         const activeProjectId = (
           typeof state.activeProjectId === 'string' || state.activeProjectId === null
         )
           ? state.activeProjectId
           : current.activeProjectId;
-        const runningProjectId = (
-          typeof state.runningProjectId === 'string' || state.runningProjectId === null
-        )
-          ? state.runningProjectId
-          : current.runningProjectId;
-        const startingProjectId = (
-          typeof state.startingProjectId === 'string' || state.startingProjectId === null
-        )
-          ? state.startingProjectId
-          : current.startingProjectId;
-
-        const hasRunningProjectByStatus = projects.some((project) => project.status === 'running');
-        const normalizedRunningProjectId = hasRunningProjectByStatus
-          ? (projects.find((project) => project.id === runningProjectId && project.status === 'running')?.id
-            ?? projects.find((project) => project.status === 'running')?.id
-            ?? null)
-          : null;
 
         return {
           ...current,
-          ...state,
-          projects,
           activeProjectId,
-          runningProjectId: normalizedRunningProjectId,
-          startingProjectId: null,
         };
       },
     }

@@ -1,0 +1,389 @@
+import React, { useEffect, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+export type OrchestratorStage = 'planner' | 'executer' | 'analyzer';
+export type OrchestratorStatus = 'idle' | 'thinking' | 'running' | 'completed' | 'error';
+
+export interface ActivityEntry {
+  type: 'thinking' | 'command' | 'result' | 'info';
+  message: string;
+  at?: string;
+}
+
+export interface NodeData {
+  stage: OrchestratorStage;
+  status: OrchestratorStatus;
+  label: string;
+  subtext?: string;
+  icon: React.ElementType;
+  progress?: number;
+  recentActivity?: ActivityEntry[];
+  actionPanel?: {
+    title: string;
+    detail: string;
+    tone?: 'info' | 'warn' | 'danger';
+    controls?: React.ReactNode;
+  } | null;
+}
+
+interface OrchestratorPipelineProps {
+  stages: Record<OrchestratorStage, NodeData>;
+  className?: string;
+}
+
+const STAGE_COLORS = {
+  planner: 'text-blue-400 border-blue-500/20',
+  executer: 'text-amber-400 border-amber-500/20',
+  analyzer: 'text-emerald-400 border-emerald-500/20',
+};
+
+const GLOW_COLORS = {
+  planner: 'rgba(59, 130, 246, 0.3)',
+  executer: 'rgba(245, 158, 11, 0.3)',
+  analyzer: 'rgba(16, 185, 129, 0.3)',
+};
+
+export const OrchestratorPipeline: React.FC<OrchestratorPipelineProps> = ({ stages, className }) => {
+  const stageOrder: OrchestratorStage[] = ['planner', 'executer', 'analyzer'];
+  const labels: Record<OrchestratorStage, string> = {
+    planner: 'PLANNER',
+    executer: 'EXECUTER',
+    analyzer: 'ANALYSER',
+  };
+
+  const activeStageIndex = [...stageOrder].reverse().findIndex(key => {
+    const s = stages[key]?.status;
+    return s === 'running' || s === 'thinking';
+  });
+  const currentActiveKey = activeStageIndex !== -1 ? stageOrder[stageOrder.length - 1 - activeStageIndex] : null;
+
+  return (
+    <div className={cn("flex h-full min-h-0 w-full flex-col items-center mx-auto", className)}>
+      {stageOrder.map((stageKey, index) => {
+        const node = stages[stageKey];
+        const isLast = index === stageOrder.length - 1;
+        const isActive = node.status === 'thinking' || node.status === 'running';
+        const isCompleted = node.status === 'completed';
+
+        return (
+          <div key={stageKey} className="w-full flex flex-col items-start relative">
+            {!isLast && (
+              <div className="absolute left-[1.25rem] top-[1.25rem] bottom-[-0.15rem] w-[2px]">
+                <PipelineConnector
+                  active={isActive || isCompleted}
+                  pulse={isActive && currentActiveKey === stageKey}
+                  color={GLOW_COLORS[stageKey]}
+                />
+              </div>
+            )}
+            <PipelineNode
+              node={{ ...node, label: labels[stageKey] }}
+              isCurrentActive={currentActiveKey === stageKey}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ node, isCurrentActive }) => {
+  const Icon = node.icon;
+  const hasActionPanel = Boolean(node.actionPanel);
+  const effectiveStatus: OrchestratorStatus = hasActionPanel && node.status === 'completed'
+    ? 'running'
+    : node.status;
+  const isWorking = (effectiveStatus === 'thinking' || effectiveStatus === 'running') && (isCurrentActive || hasActionPanel);
+  const recentActivity = node.recentActivity || [];
+  const filteredActivities = recentActivity.filter((activity) => {
+    if (effectiveStatus === 'running' || effectiveStatus === 'thinking') {
+      return activity.type !== 'result';
+    }
+    return true;
+  });
+  const visibleActivities = filteredActivities
+    .map((activity) => ({
+      ...activity,
+      message: activity.message?.trim() || '',
+    }))
+    .filter((activity) => activity.message.length > 0)
+    .slice(0, 3);
+  const renderedActivities = [...visibleActivities].reverse();
+  const actionTone = node.actionPanel?.tone || 'warn';
+  const [isCollapsed, setIsCollapsed] = useState(effectiveStatus === 'completed');
+  const shouldHideActivityFeed = Boolean(node.actionPanel);
+
+  useEffect(() => {
+    if (effectiveStatus === 'completed') {
+      setIsCollapsed(true);
+      return;
+    }
+    setIsCollapsed(false);
+  }, [effectiveStatus]);
+
+  const analyzerThinkingContext = () => {
+    const haystack = recentActivity.map((activity) => activity.message.toLowerCase()).join(' ');
+    if (
+      haystack.includes('vuln') ||
+      haystack.includes('vulnerability') ||
+      haystack.includes('[verify]') ||
+      haystack.includes('[retest]') ||
+      haystack.includes('confirmed')
+    ) {
+      return 'vuln...';
+    }
+    return 'info...';
+  };
+
+  const primaryStatusLine = () => {
+    if (effectiveStatus === 'thinking') {
+      if (node.stage === 'analyzer') {
+        return `thinking... ${analyzerThinkingContext()}`;
+      }
+      return 'thinking...';
+    }
+    if (effectiveStatus === 'running') {
+      if (hasActionPanel) {
+        return 'awaiting approval...';
+      }
+      return 'working...';
+    }
+    if (effectiveStatus === 'completed') {
+      return 'completed';
+    }
+    if (effectiveStatus === 'error') {
+      return 'error';
+    }
+    return 'idle';
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={cn(
+        "relative flex items-start gap-6 w-full transition-all duration-500 py-2.5",
+        STAGE_COLORS[node.stage]
+      )}
+    >
+      {/* Icon Hexagon/Circle */}
+      <div className="relative z-10">
+        <div className={cn(
+          "flex items-center justify-center w-10 h-10 rounded-xl border bg-surface-0",
+          isWorking ? "animate-pulse border-current" : "border-border"
+        )}>
+          {node.status === 'thinking' ? (
+            <Loader2 className="w-5 h-5 animate-spin text-blue-400" />
+          ) : (
+            <Icon className="w-5 h-5" />
+          )}
+        </div>
+
+        {/* Status Mini-Badge */}
+        <div className="absolute -top-1 -right-1">
+          <StatusBadge status={node.status} />
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="font-bold text-xl tracking-tight uppercase">{node.label}</h3>
+          {node.progress !== undefined && (
+            <span className="font-mono text-sm font-bold opacity-60">{node.progress}%</span>
+          )}
+        </div>
+
+        <div className="mt-3 relative min-h-[84px] pl-4 group">
+          {/* Vertical accent line - FIXED */}
+          <div className="absolute left-0 top-1 bottom-1 w-[1.5px] bg-blue-500/30 rounded-full z-10" />
+
+          <div className="space-y-2 py-1">
+            <div className="flex items-center gap-2">
+              <div className={cn(
+                "h-2 w-2 rounded-full shrink-0",
+                effectiveStatus === 'running' ? "bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.4)]" :
+                  effectiveStatus === 'thinking' ? "bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.35)]" :
+                    effectiveStatus === 'completed' ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.35)]" :
+                      effectiveStatus === 'error' ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.35)]" :
+                        "bg-text-muted/30",
+                (isCurrentActive || hasActionPanel) && (effectiveStatus === 'running' || effectiveStatus === 'thinking') && "animate-pulse"
+              )} />
+              <span className={cn(
+                "text-[12px] font-medium",
+                effectiveStatus === 'thinking' ? "text-sky-400 italic" :
+                  effectiveStatus === 'running' ? "text-orange-300" :
+                    effectiveStatus === 'completed' ? "text-emerald-400" :
+                      effectiveStatus === 'error' ? "text-red-400" :
+                        "text-text-secondary"
+              )}>
+                {primaryStatusLine()}
+              </span>
+              {effectiveStatus === 'completed' ? (
+                <button
+                  type="button"
+                  onClick={() => setIsCollapsed((value) => !value)}
+                  className="inline-flex items-center rounded-md p-0.5 text-emerald-400/80 transition hover:bg-emerald-500/10 hover:text-emerald-300"
+                  title={isCollapsed ? 'Show completed details' : 'Hide completed details'}
+                  aria-label={isCollapsed ? 'Show completed details' : 'Hide completed details'}
+                  aria-expanded={!isCollapsed}
+                >
+                  {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                </button>
+              ) : null}
+            </div>
+
+            {node.actionPanel ? (
+              <div
+                className={cn(
+                  "mt-2 max-h-[120px] overflow-hidden rounded-xl border px-2.5 py-2 shadow-sm backdrop-blur-sm",
+                  actionTone === 'warn' && "border-amber-500/30 bg-amber-500/10",
+                  actionTone === 'info' && "border-sky-500/30 bg-sky-500/10",
+                  actionTone === 'danger' && "border-red-500/30 bg-red-500/10",
+                )}
+              >
+                <div className="flex items-start gap-2.5">
+                  <div
+                    className={cn(
+                      "mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full",
+                      actionTone === 'warn' && "bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.45)]",
+                      actionTone === 'info' && "bg-sky-400 shadow-[0_0_10px_rgba(56,189,248,0.45)]",
+                      actionTone === 'danger' && "bg-red-400 shadow-[0_0_10px_rgba(248,113,113,0.45)]",
+                    )}
+                  />
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-semibold text-text-primary">
+                        {node.actionPanel.title}
+                      </p>
+                      <p
+                        title={node.actionPanel.detail}
+                        className="overflow-hidden text-ellipsis whitespace-nowrap text-[11px] leading-5 text-text-secondary"
+                      >
+                        {node.actionPanel.detail}
+                      </p>
+                    </div>
+                    {node.actionPanel.controls ? (
+                      <div className="flex flex-wrap items-center justify-end gap-2 pt-0.5">
+                        {node.actionPanel.controls}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            <AnimatePresence initial={false}>
+              {!isCollapsed ? (
+                <motion.div
+                  key="pipeline-node-body"
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.18, ease: 'easeInOut' }}
+                  className="overflow-hidden"
+                >
+                  <div className="space-y-2 pt-2">
+                    {!shouldHideActivityFeed && visibleActivities.length > 0 ? (
+                      <div className="space-y-1.5">
+                        {renderedActivities.map((activity, index) => {
+                          const isCommand = activity.type === 'command';
+                          return isCommand ? (
+                            <code
+                              key={`${activity.type}-${activity.at || index}-${activity.message}`}
+                              title={activity.message}
+                              className="block overflow-hidden text-ellipsis whitespace-nowrap rounded-md border border-border/40 bg-surface-2/40 px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
+                            >
+                              {activity.message}
+                            </code>
+                          ) : (
+                            <p
+                              key={`${activity.type}-${activity.at || index}-${activity.message}`}
+                              title={activity.message}
+                              className={cn(
+                                "overflow-hidden text-ellipsis whitespace-nowrap text-[11px] leading-5",
+                                activity.type === 'result'
+                                  ? "text-emerald-300"
+                                  : activity.type === 'thinking'
+                                    ? "text-sky-300"
+                                    : "text-text-secondary"
+                              )}
+                            >
+                              {activity.message}
+                            </p>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+
+                    {!shouldHideActivityFeed && visibleActivities.length === 0 && node.subtext ? (
+                      <p className="text-[11px] text-text-muted">
+                        {node.subtext}
+                      </p>
+                    ) : null}
+                  </div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </div>
+        </div>
+      </div>
+
+      {/* Decorative Glow */}
+      {isWorking && (
+        <div
+          className="absolute inset-0 rounded-2xl opacity-10 pointer-events-none"
+          style={{
+            background: `radial-gradient(circle at center, ${GLOW_COLORS[node.stage]} 0%, transparent 70%)`
+          }}
+        />
+      )}
+    </motion.div>
+  );
+};
+
+const PipelineConnector: React.FC<{ active: boolean; pulse: boolean; color: string }> = ({ active, pulse, color }) => {
+  return (
+    <div className="relative w-full h-full">
+      <div className="absolute left-0 w-[2px] h-full bg-border" />
+      {active && (
+        <motion.div
+          initial={{ height: 0 }}
+          animate={{ height: '100%' }}
+          className="absolute left-0 w-[2.5px] origin-top"
+          style={{ backgroundColor: color }}
+        />
+      )}
+      {pulse && (
+        <div className="absolute left-0 w-[2px] h-full overflow-hidden">
+          <motion.div
+            animate={{ y: ['-100%', '100%'] }}
+            transition={{ repeat: Infinity, duration: 2, ease: "linear" }}
+            className="w-full h-8 bg-gradient-to-b from-transparent via-current to-transparent opacity-100"
+            style={{ color }}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
+const StatusBadge: React.FC<{ status: OrchestratorStatus }> = ({ status }) => {
+  if (status === 'completed') {
+    return <div className="p-0.5 rounded-full bg-emerald-500 text-white shadow-lg shadow-emerald-500/20"><CheckCircle2 size={14} /></div>;
+  }
+  if (status === 'error') {
+    return <div className="p-0.5 rounded-full bg-red-500 text-white shadow-lg shadow-red-500/20"><AlertCircle size={14} /></div>;
+  }
+  if (status === 'thinking' || status === 'running') {
+    return (
+      <div className="relative flex h-3.5 w-3.5">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75"></span>
+        <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-current"></span>
+      </div>
+    );
+  }
+  return null;
+};

@@ -84,6 +84,9 @@ class Finding:
     poc_path: Optional[str] = None
     oob_confirmed: bool = False
     confidence: float = 0.0
+    claim_status: Literal["observed", "inferred", "assumed", "unsupported"] = "unsupported"
+    source_lineage: list[str] = field(default_factory=list)
+    cited_tool_output_ids: list[str] = field(default_factory=list)
     ssvc_decision: Optional[Literal["ACT", "ATTEND", "TRACK"]] = None
     related_findings: list[str] = field(default_factory=list)
     timestamp: str = field(default_factory=_utc_now_iso)
@@ -142,6 +145,9 @@ class Brain:
                     tool=str(item.get("tool", "")).strip() or None,
                     oob_confirmed=bool(item.get("oob_confirmed")),
                     confidence=_coerce_confidence(item.get("confidence", 0.0)),
+                    claim_status=_normalize_claim_status(item.get("claim_status")),
+                    source_lineage=_clean_string_list(item.get("source_lineage", []), limit=20),
+                    cited_tool_output_ids=_clean_string_list(item.get("cited_tool_output_ids", []), limit=20),
                     ssvc_decision=_normalize_ssvc(item.get("ssvc")),
                     timestamp=str(item.get("timestamp", _utc_now_iso())).strip() or _utc_now_iso(),
                 )
@@ -243,7 +249,14 @@ class Brain:
         )
 
     def for_planner(self) -> dict[str, Any]:
-        confirmed = [f for f in self.findings if f.type == "vulnerability"]
+        confirmed = [
+            f for f in self.findings
+            if f.type == "vulnerability" and f.claim_status in {"observed", "inferred"}
+        ]
+        hypotheses = [
+            f for f in self.findings
+            if f.type == "vulnerability" and f.claim_status in {"assumed", "unsupported"}
+        ]
         false_positives = [f for f in self.findings if f.type == "false_positive"]
         info_items = [f for f in self.findings if f.type == "info"]
         tool_efficiency = _compute_tool_efficiency(self.tool_results)
@@ -259,8 +272,19 @@ class Brain:
                     "endpoint": f.endpoint,
                     "severity": f.severity,
                     "ssvc": f.ssvc_decision,
+                    "claim_status": f.claim_status,
+                    "source_lineage": f.source_lineage[:6],
+                    "cited_tool_output_ids": f.cited_tool_output_ids[:6],
                 }
                 for f in confirmed
+            ],
+            "testing_hypotheses": [
+                {
+                    "name": f.name,
+                    "endpoint": f.endpoint,
+                    "claim_status": f.claim_status,
+                }
+                for f in hypotheses[-10:]
             ],
             "false_positives": [f.name for f in false_positives],
             "tool_efficiency": tool_efficiency,
@@ -330,12 +354,17 @@ class Brain:
         }
 
 
-def _clean_string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
+def _clean_string_list(value: Any, *, limit: int | None = None) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = [value]
+    else:
         return []
+
     out: list[str] = []
     seen: set[str] = set()
-    for item in value:
+    for item in raw_items:
         text = str(item or "").strip()
         if not text:
             continue
@@ -344,6 +373,8 @@ def _clean_string_list(value: Any) -> list[str]:
             continue
         seen.add(lowered)
         out.append(text)
+        if limit is not None and len(out) >= limit:
+            break
     return out
 
 
@@ -354,6 +385,13 @@ def _normalize_finding_type(value: Any) -> Literal["vulnerability", "info", "fal
     if text == "false_positive":
         return "false_positive"
     return "info"
+
+
+def _normalize_claim_status(value: Any) -> Literal["observed", "inferred", "assumed", "unsupported"]:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"observed", "inferred", "assumed", "unsupported"}:
+        return normalized
+    return "unsupported"
 
 
 def _normalize_tool_status(value: Any) -> Literal["success", "failed", "blocked", "timeout", "info"]:

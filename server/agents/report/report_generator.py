@@ -19,19 +19,19 @@ logger = structlog.get_logger(__name__)
 
 _REPORT_MAX_TOKENS = 8000
 _SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
-_SEVERITY_BADGE = {
-    "critical": "🔴 Critical",
-    "high": "🟠 High",
-    "medium": "🟡 Medium",
-    "low": "🔵 Low",
-    "info": "⚪ Info",
+_SEVERITY_LABEL = {
+    "critical": "Critical",
+    "high": "High",
+    "medium": "Medium",
+    "low": "Low",
+    "info": "Info",
 }
 
 
 def _format_finding(finding: dict[str, Any], index: int) -> str:
     """Format a single finding for the prompt."""
     severity = str(finding.get("severity", "info")).strip().lower()
-    badge = _SEVERITY_BADGE.get(severity, severity)
+    severity_label = _SEVERITY_LABEL.get(severity, severity.title() if severity else "Info")
     title = str(finding.get("title", "Untitled Finding")).strip()
     category = str(finding.get("category", "")).strip()
     status = str(finding.get("status", "open")).strip()
@@ -60,7 +60,7 @@ def _format_finding(finding: dict[str, Any], index: int) -> str:
 
     lines = [
         f"### Finding {index}: {title}",
-        f"- **Severity**: {badge}",
+        f"- **Severity**: {severity_label}",
         f"- **Status**: {status}",
     ]
     if category:
@@ -126,8 +126,8 @@ def _format_findings_section(findings: list[dict[str, Any]]) -> str:
         for i, finding in enumerate(open_findings, 1):
             severity = str(finding.get("severity", "info")).strip().lower()
             title = str(finding.get("title", "Untitled")).strip()
-            badge = _SEVERITY_BADGE.get(severity, severity)
-            sections.append(f"- {badge} — {title}")
+            severity_label = _SEVERITY_LABEL.get(severity, severity.title() if severity else "Info")
+            sections.append(f"- {severity_label} — {title}")
 
     # False positives.
     if false_positives:
@@ -145,7 +145,7 @@ def _format_findings_section(findings: list[dict[str, Any]]) -> str:
         sev = str(finding.get("severity", "info")).strip().lower()
         stats[sev] = stats.get(sev, 0) + 1
     stats_line = ", ".join(
-        f"{_SEVERITY_BADGE.get(s, s)}: {c}" for s, c in sorted(stats.items(), key=lambda x: _SEVERITY_ORDER.index(x[0]) if x[0] in _SEVERITY_ORDER else 99)
+        f"{_SEVERITY_LABEL.get(s, s.title() if s else 'Info')}: {c}" for s, c in sorted(stats.items(), key=lambda x: _SEVERITY_ORDER.index(x[0]) if x[0] in _SEVERITY_ORDER else 99)
     )
     if stats_line:
         sections.insert(0, f"**Summary**: {stats_line}\n")
@@ -184,9 +184,8 @@ def _format_checklist_section(project: dict[str, Any]) -> str:
         status = str(item.get("status", "pending")).strip()
         priority = str(item.get("priority", "")).strip()
         if name:
-            marker = "✅" if status in ("done", "completed") else "⬜"
             prio = f" [{priority}]" if priority else ""
-            lines.append(f"- {marker} {name}{prio}")
+            lines.append(f"- {name} ({status}){prio}")
 
     return "\n".join(lines) if lines else "No checklist items available."
 

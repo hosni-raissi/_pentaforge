@@ -35,6 +35,17 @@ export interface ProjectShareLinkResponse {
   created_at: string;
 }
 
+export interface MarkFindingFalsePositiveResponse {
+  ok: boolean;
+  success: boolean;
+  finding_id: string;
+  matched_finding_id?: string;
+  matched_finding_title?: string;
+  old_status?: string;
+  new_status?: string;
+  reason?: string;
+}
+
 export interface StartScanResponse {
   ok: boolean;
   scan_id: string;
@@ -59,7 +70,7 @@ export interface StartScanRequest {
 
 export interface StopScanRequest {
   projectId: string;
-  mode: "pause" | "cancel";
+  mode: "stop" | "pause" | "cancel";
 }
 
 export interface ScanEventPayload {
@@ -70,6 +81,59 @@ export interface ScanEventPayload {
   message: string;
   timestamp: string;
   data: Record<string, unknown>;
+  event_id?: string;
+  cycle?: number | null;
+  phase?: string;
+  phase_id?: string;
+  scenario_id?: string;
+  approval_id?: string;
+  finding_id?: string;
+  agent?: string;
+  tool?: string;
+  worker_id?: string;
+  reason_code?: string;
+}
+
+export interface ScanDebugTimelineEntry {
+  id: string;
+  kind: "scan_event" | "tool_audit";
+  at: string;
+  event: string;
+  level: "info" | "success" | "warn" | "error";
+  message: string;
+  project_id: string;
+  scan_id: string;
+  cycle?: number | null;
+  phase?: string;
+  phase_id?: string;
+  scenario_id?: string;
+  approval_id?: string;
+  finding_id?: string;
+  agent?: string;
+  tool?: string;
+  reason_code?: string;
+  worker_id?: string;
+}
+
+export interface ScanObservabilityMetrics {
+  average_cycle_time_seconds: number;
+  average_approval_delay_seconds: number;
+  tool_failure_rate: number;
+  false_positive_rate: number;
+  resume_success_rate: number;
+  cycle_count: number;
+  approval_count: number;
+  tool_log_count: number;
+  failed_tool_log_count: number;
+  false_positive_count: number;
+  verified_vulnerability_count: number;
+  resume_attempt_count: number;
+  resume_success_count: number;
+}
+
+export interface ScanObservabilitySnapshot {
+  timeline: ScanDebugTimelineEntry[];
+  metrics: ScanObservabilityMetrics;
 }
 
 export interface IntelTargetTypeOption {
@@ -316,7 +380,7 @@ function normalizeProjectRow(value: unknown): Project | null {
   const status = (
     row.status === "idle"
     || row.status === "running"
-    || row.status === "paused"
+    || row.status === "stopped"
     || row.status === "completed"
     || row.status === "error"
   ) ? row.status : "idle";
@@ -521,6 +585,28 @@ export async function deleteProjectFromDesktop(projectId: string): Promise<void>
   });
 }
 
+export async function markProjectFindingFalsePositiveFromDesktop(
+  projectId: string,
+  payload: {
+    findingId: string;
+    reason?: string;
+  },
+): Promise<MarkFindingFalsePositiveResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<MarkFindingFalsePositiveResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/findings/mark-false-positive`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        finding_id: payload.findingId,
+        reason: payload.reason ?? "Operator marked as false positive from dashboard.",
+      }),
+    },
+  );
+}
+
 export async function startProjectScanFromDesktop(
   request: StartScanRequest,
 ): Promise<StartScanResponse> {
@@ -551,7 +637,7 @@ export async function stopProjectScanFromDesktop(
     method: "POST",
     body: JSON.stringify({
       project_id: request.projectId,
-      mode: request.mode,
+      mode: request.mode === "stop" ? "pause" : request.mode,
     }),
   });
 }
@@ -702,6 +788,17 @@ function parseScanEventPayload(value: unknown): ScanEventPayload | null {
     message: value.message,
     timestamp: value.timestamp,
     data: value.data,
+    event_id: typeof value.event_id === "string" ? value.event_id : undefined,
+    cycle: typeof value.cycle === "number" ? value.cycle : undefined,
+    phase: typeof value.phase === "string" ? value.phase : undefined,
+    phase_id: typeof value.phase_id === "string" ? value.phase_id : undefined,
+    scenario_id: typeof value.scenario_id === "string" ? value.scenario_id : undefined,
+    approval_id: typeof value.approval_id === "string" ? value.approval_id : undefined,
+    finding_id: typeof value.finding_id === "string" ? value.finding_id : undefined,
+    agent: typeof value.agent === "string" ? value.agent : undefined,
+    tool: typeof value.tool === "string" ? value.tool : undefined,
+    worker_id: typeof value.worker_id === "string" ? value.worker_id : undefined,
+    reason_code: typeof value.reason_code === "string" ? value.reason_code : undefined,
   };
 }
 
@@ -761,6 +858,96 @@ export async function listProjectScanEventsFromDesktop(
   return rows
     .map((row) => parseScanEventPayload(row))
     .filter((row): row is ScanEventPayload => row !== null);
+}
+
+export async function getProjectScanObservabilityFromDesktop(
+  projectId: string,
+  limit: number = 120,
+  scanId?: string,
+): Promise<ScanObservabilitySnapshot> {
+  if (!supportsDesktopProjectBridge()) {
+    return {
+      timeline: [],
+      metrics: {
+        average_cycle_time_seconds: 0,
+        average_approval_delay_seconds: 0,
+        tool_failure_rate: 0,
+        false_positive_rate: 0,
+        resume_success_rate: 0,
+        cycle_count: 0,
+        approval_count: 0,
+        tool_log_count: 0,
+        failed_tool_log_count: 0,
+        false_positive_count: 0,
+        verified_vulnerability_count: 0,
+        resume_attempt_count: 0,
+        resume_success_count: 0,
+      },
+    };
+  }
+
+  const safeLimit = Math.max(10, Math.min(500, Math.floor(limit)));
+  const query = new URLSearchParams({ limit: String(safeLimit) });
+  if (scanId && scanId.trim()) {
+    query.set("scan_id", scanId.trim());
+  }
+  const payload = await requestJson<{
+    timeline?: unknown[];
+    metrics?: Partial<ScanObservabilityMetrics>;
+  }>(`/api/scans/${encodeURIComponent(projectId)}/observability?${query.toString()}`);
+
+  const rawTimeline = Array.isArray(payload.timeline) ? payload.timeline : [];
+  const timeline = rawTimeline
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => ({
+      id: typeof item.id === "string" ? item.id : "",
+      kind: (item.kind === "tool_audit" ? "tool_audit" : "scan_event") as
+        | "scan_event"
+        | "tool_audit",
+      at: typeof item.at === "string" ? item.at : "",
+      event: typeof item.event === "string" ? item.event : "",
+      level: (
+        item.level === "success" || item.level === "warn" || item.level === "error"
+          ? item.level
+          : "info"
+      ) as "info" | "success" | "warn" | "error",
+      message: typeof item.message === "string" ? item.message : "",
+      project_id: typeof item.project_id === "string" ? item.project_id : projectId,
+      scan_id: typeof item.scan_id === "string" ? item.scan_id : "",
+      cycle: typeof item.cycle === "number" ? item.cycle : undefined,
+      phase: typeof item.phase === "string" ? item.phase : undefined,
+      phase_id: typeof item.phase_id === "string" ? item.phase_id : undefined,
+      scenario_id: typeof item.scenario_id === "string" ? item.scenario_id : undefined,
+      approval_id: typeof item.approval_id === "string" ? item.approval_id : undefined,
+      finding_id: typeof item.finding_id === "string" ? item.finding_id : undefined,
+      agent: typeof item.agent === "string" ? item.agent : undefined,
+      tool: typeof item.tool === "string" ? item.tool : undefined,
+      reason_code: typeof item.reason_code === "string" ? item.reason_code : undefined,
+      worker_id: typeof item.worker_id === "string" ? item.worker_id : undefined,
+    }));
+
+  const metrics = payload.metrics ?? {};
+  return {
+    timeline,
+    metrics: {
+      average_cycle_time_seconds:
+        typeof metrics.average_cycle_time_seconds === "number" ? metrics.average_cycle_time_seconds : 0,
+      average_approval_delay_seconds:
+        typeof metrics.average_approval_delay_seconds === "number" ? metrics.average_approval_delay_seconds : 0,
+      tool_failure_rate: typeof metrics.tool_failure_rate === "number" ? metrics.tool_failure_rate : 0,
+      false_positive_rate: typeof metrics.false_positive_rate === "number" ? metrics.false_positive_rate : 0,
+      resume_success_rate: typeof metrics.resume_success_rate === "number" ? metrics.resume_success_rate : 0,
+      cycle_count: typeof metrics.cycle_count === "number" ? metrics.cycle_count : 0,
+      approval_count: typeof metrics.approval_count === "number" ? metrics.approval_count : 0,
+      tool_log_count: typeof metrics.tool_log_count === "number" ? metrics.tool_log_count : 0,
+      failed_tool_log_count: typeof metrics.failed_tool_log_count === "number" ? metrics.failed_tool_log_count : 0,
+      false_positive_count: typeof metrics.false_positive_count === "number" ? metrics.false_positive_count : 0,
+      verified_vulnerability_count:
+        typeof metrics.verified_vulnerability_count === "number" ? metrics.verified_vulnerability_count : 0,
+      resume_attempt_count: typeof metrics.resume_attempt_count === "number" ? metrics.resume_attempt_count : 0,
+      resume_success_count: typeof metrics.resume_success_count === "number" ? metrics.resume_success_count : 0,
+    },
+  };
 }
 
 export async function listProjectTargetTypesFromDesktop(): Promise<ProjectTargetTypeOption[]> {
@@ -1152,7 +1339,7 @@ export async function listIntelUpdateStatusFromDesktop(
 }
 
 export interface AIAssistStreamEvent {
-  type: "run" | "tool_start" | "tool_output" | "reply" | "context" | "error" | "ping" | "keepalive";
+  type: "run" | "tool_start" | "tool_output" | "password_request" | "reply" | "context" | "error" | "ping" | "keepalive";
   data: any;
 }
 
@@ -1369,10 +1556,14 @@ export interface ReportStatus {
   html: boolean;
   pdf: boolean;
   generated_at: string | null;
+  run_id?: string | null;
+  run_status?: TaskRunStatus | null;
 }
 
 export interface GenerateReportResponse {
   ok: boolean;
+  run_id: string;
+  status: TaskRunStatus;
   report_id: string;
   format: string;
   created_at: string;
@@ -1384,6 +1575,31 @@ export interface ReportContentResponse {
   content: string;
   metadata: Record<string, unknown>;
   created_at: string;
+}
+
+export type TaskRunStatus =
+  | "pending"
+  | "running"
+  | "stopped"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface ProjectTaskRun {
+  run_id: string;
+  task_type: "scan" | "assistant" | "report" | string;
+  status: TaskRunStatus;
+  scope_key: string;
+  created_at: string;
+  updated_at: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ProjectActiveRunsResponse {
+  ok: boolean;
+  project_id: string;
+  runs: ProjectTaskRun[];
+  scan: ProjectTaskRun | null;
 }
 
 export async function generateReportFromDesktop(
@@ -1414,6 +1630,74 @@ export async function getReportStatusFromDesktop(
     html: typeof payload.html === "boolean" ? payload.html : false,
     pdf: typeof payload.pdf === "boolean" ? payload.pdf : false,
     generated_at: typeof payload.generated_at === "string" ? payload.generated_at : null,
+    run_id: typeof payload.run_id === "string" ? payload.run_id : null,
+    run_status: (
+      payload.run_status === "pending"
+      || payload.run_status === "running"
+      || payload.run_status === "stopped"
+      || payload.run_status === "completed"
+      || payload.run_status === "failed"
+      || payload.run_status === "cancelled"
+    ) ? payload.run_status : null,
+  };
+}
+
+function normalizeTaskRun(value: unknown): ProjectTaskRun | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const status = value.status;
+  if (
+    typeof value.run_id !== "string"
+    || typeof value.task_type !== "string"
+    || typeof value.scope_key !== "string"
+    || typeof value.created_at !== "string"
+    || typeof value.updated_at !== "string"
+    || !isRecord(value.payload)
+    || (
+      status !== "pending"
+      && status !== "running"
+      && status !== "stopped"
+      && status !== "completed"
+      && status !== "failed"
+      && status !== "cancelled"
+    )
+  ) {
+    return null;
+  }
+  return {
+    run_id: value.run_id,
+    task_type: value.task_type,
+    status,
+    scope_key: value.scope_key,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    payload: value.payload,
+  };
+}
+
+export async function getActiveProjectRunsFromDesktop(
+  projectId: string,
+): Promise<ProjectActiveRunsResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    return { ok: true, project_id: projectId, runs: [], scan: null };
+  }
+  const payload = await requestJson<{
+    ok?: boolean;
+    project_id?: string;
+    runs?: unknown[];
+    scan?: unknown;
+  }>(
+    `/api/projects/${encodeURIComponent(projectId)}/runs/active`,
+    { cache: "no-store" },
+  );
+  return {
+    ok: payload.ok !== false,
+    project_id: typeof payload.project_id === "string" ? payload.project_id : projectId,
+    runs: Array.isArray(payload.runs)
+      ? payload.runs.map(normalizeTaskRun).filter((item): item is ProjectTaskRun => item !== null)
+      : [],
+    scan: normalizeTaskRun(payload.scan),
   };
 }
 
@@ -1447,21 +1731,7 @@ export async function downloadReportBlobFromDesktop(
   };
 }
 
-export async function createShareLinkFromDesktop(
-  projectId: string,
-  payload: { expires_hours: number; password?: string; one_time: boolean },
-): Promise<{ ok: boolean; access_url: string; token: string }> {
-  if (!supportsDesktopProjectBridge()) {
-    throw new Error("desktop project bridge is disabled");
-  }
-  return await requestJson(
-    `/api/projects/${encodeURIComponent(projectId)}/share-links`,
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-  );
-}
+
 
 export interface ClientMessage {
   id: string;
@@ -1543,5 +1813,17 @@ export async function sendPentesterMessageFromDesktop(
       method: "POST",
       body: JSON.stringify({ content, sender }),
     },
+  );
+}
+
+export async function requestClientRefreshFromDesktop(
+  projectId: string,
+): Promise<{ ok: boolean }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/share-refresh`,
+    { method: "POST" },
   );
 }

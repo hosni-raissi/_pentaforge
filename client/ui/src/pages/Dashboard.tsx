@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Bell,
   BellOff,
@@ -16,35 +16,55 @@ import {
   Square,
   Trash2,
   X,
-  Sparkles,
-  Lock,
-  ShieldAlert,
-  Key,
 } from "lucide-react";
 
 import { AIPromptPanel } from "@/components/dashboard/AIPromptPanel";
-import {
-  AgentStatePath,
-  type AgentGraphRole,
-  type AgentInsightPanelData,
+import type {
+  AgentGraphRole,
+  AgentInsightPanelData,
 } from "@/components/dashboard/AgentStatePath";
-
+import {
+  DashboardArchitecturePanel,
+  DashboardFindingDialog,
+  DashboardFindingsPanel,
+  DashboardProjectHeader,
+  DashboardTargetOverviewCard,
+} from "@/components/dashboard/DashboardPanels";
+import {
+  MissionControlPanel,
+  type MissionControlAction,
+  type MissionControlPhaseKey,
+  type MissionControlState,
+} from "@/components/dashboard/MissionControlPanel";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
+import { OrchestratorPipeline, type OrchestratorStage, type OrchestratorStatus } from "@/components/dashboard/OrchestratorPipeline";
+import {
+  Brain,
+  Zap,
+  Search,
+  LayoutDashboard,
+} from "lucide-react";
+
 import {
   approveInformationGatheringForProjectScanFromDesktop,
   approvePasswordForProjectScanFromDesktop,
   approveToolForProjectScanFromDesktop,
   approvePlannerForProjectScanFromDesktop,
+  getProjectScanObservabilityFromDesktop,
   listProjectScanEventsFromDesktop,
+  markProjectFindingFalsePositiveFromDesktop,
   saveProjectToDesktop,
   streamProjectScanEvents,
+  type ScanDebugTimelineEntry,
+  type ScanObservabilityMetrics,
   type ScanEventPayload,
 } from "@/lib/projectBridge";
+import { cn } from "@/lib/utils";
 import { useProjects } from "@/stores/projects";
 import { useConfig } from "@/stores/config";
 import type {
@@ -54,11 +74,12 @@ import type {
   FindingEvidenceStatus,
   FindingProofQuality,
   ProjectStatus,
+  RealtimeVulnFinding,
+  DashboardSeverity,
 } from "@/types";
 
 type InsightTab = "plan" | "checklist" | "information";
 type LogLevel = "info" | "success" | "warn" | "error";
-type DashboardSeverity = "critical" | "high" | "medium" | "low" | "info";
 
 interface StructuredChecklistItem {
   name: string;
@@ -192,25 +213,6 @@ interface DashboardLogEntry {
   source: string;
 }
 
-interface RealtimeVulnFinding {
-  id: string;
-  title: string;
-  severity: DashboardSeverity;
-  source: string;
-  at: string;
-  endpoint?: string;
-  status: string;
-  findingKey: string;
-  cve?: string;
-  cvss?: number | string;
-  category?: string;
-  description?: string;
-  evidence?: FindingEvidence;
-  evidenceStatus?: FindingEvidenceStatus;
-  proofQuality?: FindingProofQuality;
-  deterministicValidation?: boolean;
-  remediation?: string;
-}
 
 interface PendingToolApprovalView {
   approvalId: string;
@@ -235,7 +237,7 @@ const NOTIFICATION_PREF_KEY = "pentaforge_notifications_enabled";
 const PROJECT_STATUSES: ProjectStatus[] = [
   "idle",
   "running",
-  "paused",
+  "stopped",
   "completed",
   "error",
 ];
@@ -244,6 +246,42 @@ const AGENT_ROLES: AgentGraphRole[] = [
   "executer",
   "analyzer",
 ];
+const MISSION_PHASE_ORDER: Array<{
+  key: MissionControlPhaseKey;
+  label: string;
+  detail: string;
+}> = [
+    {
+      key: "intel",
+      label: "Intel",
+      detail: "Refreshes global knowledge and primes the target-specific brief.",
+    },
+    {
+      key: "information_gathering",
+      label: "Information Gathering",
+      detail: "Runs the grouped deterministic target profiling and static mapping pass.",
+    },
+    {
+      key: "brain",
+      label: "Brain",
+      detail: "Normalizes raw evidence into memory the agents can safely reason over.",
+    },
+    {
+      key: "planner",
+      label: "Planner",
+      detail: "Synthesizes the checklist, scenarios, and next execution wave.",
+    },
+    {
+      key: "executer",
+      label: "Executer",
+      detail: "Runs recon and exploit scenarios inside the active scan cycle.",
+    },
+    {
+      key: "analyzer",
+      label: "Analyzer",
+      detail: "Verifies findings, rejects false positives, and saves confirmed impact.",
+    },
+  ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -309,6 +347,67 @@ function detectEventAgentRole(event: ScanEventPayload): AgentGraphRole | null {
   return null;
 }
 
+function detectMissionPhaseFromText(value: string): MissionControlPhaseKey | null {
+  const text = value.trim().toLowerCase();
+  if (!text) {
+    return null;
+  }
+  if (text.includes("intel")) {
+    return "intel";
+  }
+  if (
+    text.includes("information gathering")
+    || text.includes("target_info_gathering")
+    || text.includes("fingerprinting")
+    || text.includes("surface mapping")
+    || text.includes("trust and auth")
+  ) {
+    return "information_gathering";
+  }
+  if (
+    text.includes("brain")
+    || text.includes("system memory")
+    || text.includes("target memory")
+    || text.includes("memory projection")
+  ) {
+    return "brain";
+  }
+  if (text.includes("planner") || text.includes("checklist")) {
+    return "planner";
+  }
+  if (
+    text.includes("executer")
+    || text.includes("recon")
+    || text.includes("exploit")
+    || text.includes("scenario")
+    || text.includes("worker")
+  ) {
+    return "executer";
+  }
+  if (
+    text.includes("analyzer")
+    || text.includes("verify")
+    || text.includes("retest")
+    || text.includes("perceptor")
+    || text.includes("report")
+  ) {
+    return "analyzer";
+  }
+  return null;
+}
+
+function detectMissionPhase(event: ScanEventPayload): MissionControlPhaseKey | null {
+  const data = isRecord(event.data) ? event.data : null;
+  const stage = typeof data?.stage === "string" ? data.stage : "";
+  const phase = typeof data?.phase === "string" ? data.phase : "";
+  return (
+    detectMissionPhaseFromText(stage)
+    ?? detectMissionPhaseFromText(phase)
+    ?? detectMissionPhaseFromText(event.event)
+    ?? detectMissionPhaseFromText(event.message)
+  );
+}
+
 function toProjectStatus(value: unknown): ProjectStatus | null {
   if (typeof value !== "string") {
     return null;
@@ -332,7 +431,7 @@ function normalizeRunningStatus(project: {
       : "";
   if (
     lastScanStatus === "completed" ||
-    lastScanStatus === "paused" ||
+    lastScanStatus === "stopped" ||
     lastScanStatus === "idle" ||
     lastScanStatus === "error"
   ) {
@@ -635,6 +734,39 @@ function normalizePriority(value: unknown): number | null {
 
 function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeFindingReference(value: string): string {
+  return value.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+}
+
+function findingMatchesReference(
+  finding: Finding,
+  matchedId: string,
+  matchedTitle: string,
+  requestedReference: string,
+): boolean {
+  if (matchedId && finding.id === matchedId) {
+    return true;
+  }
+
+  const findingTitle = normalizeFindingReference(finding.title || "");
+  const expectedTitle = normalizeFindingReference(matchedTitle);
+  if (expectedTitle && findingTitle === expectedTitle) {
+    return true;
+  }
+
+  const requested = normalizeFindingReference(requestedReference);
+  if (!requested) {
+    return false;
+  }
+
+  const description = normalizeFindingReference(finding.description || "");
+  return (
+    (findingTitle.length >= 12 && requested.includes(findingTitle))
+    || (description.length >= 20 && requested.includes(description))
+    || (requested.length >= 20 && description.includes(requested))
+  );
 }
 
 function normalizeScenarioStatus(
@@ -1395,6 +1527,7 @@ function buildTargetArchitectureDraft(
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const projects = useProjects((state) => state.projects);
   const activeProject = useProjects((state) => state.getActive());
   const setActive = useProjects((state) => state.setActive);
@@ -1406,7 +1539,7 @@ export default function Dashboard() {
   const activeProjectId = activeProject?.id ?? null;
   const activeScanId = (() => {
     const scanMeta = isRecord(activeProject?.lastScan)
-      ? activeProject.lastScan
+      ? activeProject?.lastScan
       : null;
     return typeof scanMeta?.scanId === "string" ? scanMeta.scanId.trim() : "";
   })();
@@ -1450,6 +1583,7 @@ export default function Dashboard() {
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   const [elapsedClockMs, setElapsedClockMs] = useState(() => Date.now());
   const logsContainerRef = useRef<HTMLDivElement | null>(null);
+  const findingsSectionRef = useRef<HTMLDivElement | null>(null);
   const [streamRetry, setStreamRetry] = useState(0);
   const streamRetryRef = useRef(0);
   const lastStreamErrorRef = useRef(0);
@@ -1463,6 +1597,24 @@ export default function Dashboard() {
   const [toolApprovalLoading, setToolApprovalLoading] = useState<"approve" | "skip" | null>(null);
   const [passwordResponseLoading, setPasswordResponseLoading] = useState<"approve" | "deny" | null>(null);
   const [pendingPasswordValue, setPendingPasswordValue] = useState("");
+  const [falsePositiveLoadingId, setFalsePositiveLoadingId] = useState<string | null>(null);
+  const [copilotDraft, setCopilotDraft] = useState<{ token: string; text: string } | null>(null);
+  const [debugTimeline, setDebugTimeline] = useState<ScanDebugTimelineEntry[]>([]);
+  const [observabilityMetrics, setObservabilityMetrics] = useState<ScanObservabilityMetrics>({
+    average_cycle_time_seconds: 0,
+    average_approval_delay_seconds: 0,
+    tool_failure_rate: 0,
+    false_positive_rate: 0,
+    resume_success_rate: 0,
+    cycle_count: 0,
+    approval_count: 0,
+    tool_log_count: 0,
+    failed_tool_log_count: 0,
+    false_positive_count: 0,
+    verified_vulnerability_count: 0,
+    resume_attempt_count: 0,
+    resume_success_count: 0,
+  });
   const [checklistActionKey, setChecklistActionKey] = useState<string | null>(
     null,
   );
@@ -1606,7 +1758,7 @@ export default function Dashboard() {
           .getState()
           .projects.find((project) => project.id === activeProjectId);
         const currentLastScan = isRecord(activeProject?.lastScan)
-          ? activeProject.lastScan
+          ? activeProject?.lastScan
           : {};
         updateProject(
           activeProjectId,
@@ -1669,9 +1821,9 @@ export default function Dashboard() {
             target: typeof finding.target === "string" ? finding.target : "",
             status:
               finding.status === "open"
-              || finding.status === "verified"
-              || finding.status === "fixed"
-              || finding.status === "false_positive"
+                || finding.status === "verified"
+                || finding.status === "fixed"
+                || finding.status === "false_positive"
                 ? finding.status
                 : "verified",
             cvss:
@@ -1752,8 +1904,8 @@ export default function Dashboard() {
           .getState()
           .projects.find((project) => project.id === activeProjectId);
         if (activeProject) {
-          const lastScan = isRecord(activeProject.lastScan)
-            ? activeProject.lastScan
+          const lastScan = isRecord(activeProject?.lastScan)
+            ? activeProject?.lastScan
             : {};
           const result = isRecord(lastScan.result) ? lastScan.result : {};
           const currentPlanner = isRecord(result.planner) ? result.planner : {};
@@ -1797,14 +1949,18 @@ export default function Dashboard() {
         event.event === "planner_checklist_started" ||
         event.event === "planner_checklist_complete" ||
         event.event === "planner_waiting_approval" ||
-        event.event === "planner_approval_received"
+        event.event === "planner_approval_received" ||
+        event.event === "planner_started" ||
+        event.event === "planner_complete" ||
+        event.event === "planner_failed" ||
+        event.event === "planner_crashed"
       ) {
         const activeProject = useProjects
           .getState()
           .projects.find((project) => project.id === activeProjectId);
         if (activeProject) {
-          const lastScan = isRecord(activeProject.lastScan)
-            ? activeProject.lastScan
+          const lastScan = isRecord(activeProject?.lastScan)
+            ? activeProject?.lastScan
             : {};
           const result = isRecord(lastScan.result) ? lastScan.result : {};
           const currentIntel = isRecord(result.intel) ? result.intel : {};
@@ -1828,12 +1984,28 @@ export default function Dashboard() {
             nextIntel.status = "awaiting_approval";
           }
 
+          const clearPlannerApproval =
+            event.event === "planner_approval_received" ||
+            event.event === "planner_started" ||
+            event.event === "planner_complete" ||
+            event.event === "planner_failed" ||
+            event.event === "planner_crashed";
+
           updateProject(
             activeProjectId,
             {
               updatedAt: event.timestamp,
               lastScan: {
                 ...lastScan,
+                ...(event.event === "planner_waiting_approval"
+                  ? { awaitingPlannerApproval: true, status: "awaiting_planner_approval" }
+                  : {}),
+                ...(event.event === "planner_checklist_started"
+                  ? { awaitingInformationGatheringApproval: false, status: "running" }
+                  : {}),
+                ...(clearPlannerApproval
+                  ? { awaitingPlannerApproval: false, status: "running" }
+                  : {}),
                 result: {
                   ...result,
                   intel: nextIntel,
@@ -1857,8 +2029,8 @@ export default function Dashboard() {
           .getState()
           .projects.find((project) => project.id === activeProjectId);
         if (activeProject) {
-          const lastScan = isRecord(activeProject.lastScan)
-            ? activeProject.lastScan
+          const lastScan = isRecord(activeProject?.lastScan)
+            ? activeProject?.lastScan
             : {};
           const result = isRecord(lastScan.result) ? lastScan.result : {};
           const currentGathering = isRecord(result.targetInfoGathering)
@@ -1937,6 +2109,13 @@ export default function Dashboard() {
               updatedAt: event.timestamp,
               lastScan: {
                 ...lastScan,
+                ...(event.event === "target_info_gathering_waiting_approval"
+                  ? { awaitingInformationGatheringApproval: true }
+                  : {}),
+                ...(event.event === "target_info_gathering_approval_received" ||
+                  event.event === "target_info_gathering_complete"
+                  ? { awaitingInformationGatheringApproval: false, status: "running" }
+                  : {}),
                 result: {
                   ...result,
                   targetInfoGathering: nextGathering,
@@ -2081,6 +2260,51 @@ export default function Dashboard() {
     };
   }, [activeProjectId, shouldStreamScanEvents, ingestScanEvent]);
 
+  useEffect(() => {
+    if (!activeProjectId) {
+      setDebugTimeline([]);
+      setObservabilityMetrics({
+        average_cycle_time_seconds: 0,
+        average_approval_delay_seconds: 0,
+        tool_failure_rate: 0,
+        false_positive_rate: 0,
+        resume_success_rate: 0,
+        cycle_count: 0,
+        approval_count: 0,
+        tool_log_count: 0,
+        failed_tool_log_count: 0,
+        false_positive_count: 0,
+        verified_vulnerability_count: 0,
+        resume_attempt_count: 0,
+        resume_success_count: 0,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const snapshot = await getProjectScanObservabilityFromDesktop(
+          activeProjectId,
+          120,
+          activeScanId || undefined,
+        );
+        if (cancelled) {
+          return;
+        }
+        setDebugTimeline(snapshot.timeline);
+        setObservabilityMetrics(snapshot.metrics);
+      } catch {
+        // Keep the last successful snapshot visible.
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId, activeScanId, scanEvents.length, activeProject?.findings.length]);
+
   // Handle Escape key to exit fullscreen mode
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -2102,7 +2326,7 @@ export default function Dashboard() {
   useEffect(() => {
     setElapsedClockMs(Date.now());
 
-    const lastScan = isRecord(activeProject?.lastScan) ? activeProject.lastScan : null;
+    const lastScan = isRecord(activeProject?.lastScan) ? activeProject?.lastScan : null;
     const startedAt =
       typeof lastScan?.startedAt === "string" ? lastScan.startedAt.trim() : "";
     const status =
@@ -2119,25 +2343,29 @@ export default function Dashboard() {
     return () => window.clearInterval(intervalId);
   }, [activeProject?.lastScan]);
 
-  if (!activeProject) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3">
-        <FolderOpen size={48} className="text-text-muted" />
-        <p className="text-sm text-text-secondary">No project selected.</p>
-        <Button onClick={() => navigate("/projects")}>Open Projects</Button>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (searchParams.get("focus") !== "findings") {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      findingsSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [searchParams, activeProject?.id]);
 
-  const effectiveStatus = normalizeRunningStatus(activeProject);
+  const effectiveStatus = activeProject ? normalizeRunningStatus(activeProject) : "idle";
   const isRunning = effectiveStatus === "running";
-  const isStarting = startingProjectId === activeProject.id;
-  const activeLastScan = isRecord(activeProject.lastScan)
-    ? activeProject.lastScan
+  const isStarting = activeProject ? startingProjectId === activeProject.id : false;
+  const activeLastScan = isRecord(activeProject?.lastScan)
+    ? activeProject?.lastScan
     : null;
+
   const persistedElapsedSeconds =
     typeof activeLastScan?.elapsedSeconds === "number" &&
-    Number.isFinite(activeLastScan.elapsedSeconds)
+      Number.isFinite(activeLastScan.elapsedSeconds)
       ? Math.max(0, Math.floor(activeLastScan.elapsedSeconds))
       : 0;
   const timerStartedAt =
@@ -2160,16 +2388,15 @@ export default function Dashboard() {
   const displayedPentestElapsed = formatPentestElapsed(liveElapsedSeconds);
   const hasAnotherRunningProject = projects.some(
     (project) =>
-      project.id !== activeProject.id &&
+      project.id !== activeProject?.id &&
       normalizeRunningStatus(project) === "running",
   );
   const canRun = !isRunning && !isStarting && !hasAnotherRunningProject;
   const awaitingInformationGatheringApproval = (() => {
+    if (!activeProject) return false;
     for (const event of scanEvents) {
-      if (event.event === "target_info_gathering_waiting_approval") {
-        return true;
-      }
       if (
+        event.event === "target_info_gathering_waiting_approval" ||
         event.event === "target_info_gathering_approval_received" ||
         event.event === "target_info_gathering_complete" ||
         event.event === "planner_checklist_started" ||
@@ -2178,12 +2405,12 @@ export default function Dashboard() {
         event.event === "scan_paused" ||
         event.event === "scan_cancelled"
       ) {
-        return false;
+        return event.event === "target_info_gathering_waiting_approval";
       }
     }
 
-    const lastScan = isRecord(activeProject.lastScan)
-      ? activeProject.lastScan
+    const lastScan = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
       : null;
     const waitingFlag = lastScan?.awaitingInformationGatheringApproval;
     if (typeof waitingFlag === "boolean") {
@@ -2192,11 +2419,10 @@ export default function Dashboard() {
     return lastScan?.awaiting_information_gathering_approval === true;
   })();
   const awaitingPlannerApproval = (() => {
+    if (!activeProject) return false;
     for (const event of scanEvents) {
-      if (event.event === "planner_waiting_approval") {
-        return true;
-      }
       if (
+        event.event === "planner_waiting_approval" ||
         event.event === "planner_approval_received" ||
         event.event === "planner_started" ||
         event.event === "planner_complete" ||
@@ -2207,12 +2433,12 @@ export default function Dashboard() {
         event.event === "scan_paused" ||
         event.event === "scan_cancelled"
       ) {
-        return false;
+        return event.event === "planner_waiting_approval";
       }
     }
 
-    const lastScan = isRecord(activeProject.lastScan)
-      ? activeProject.lastScan
+    const lastScan = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
       : null;
     const waitingFlag = lastScan?.awaitingPlannerApproval;
     if (typeof waitingFlag === "boolean") {
@@ -2222,6 +2448,7 @@ export default function Dashboard() {
   })();
 
   const pendingToolApproval: PendingToolApprovalView | null = (() => {
+    if (!activeProject) return null;
     for (const event of scanEvents) {
       if (event.event === "executer_tool_waiting_approval") {
         const data = event.data;
@@ -2253,8 +2480,8 @@ export default function Dashboard() {
       }
     }
 
-    const lastScan = isRecord(activeProject.lastScan)
-      ? activeProject.lastScan
+    const lastScan = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
       : null;
     const waitingFlag = lastScan?.awaitingToolApproval;
     const pending = isRecord(lastScan?.pendingToolApproval)
@@ -2288,6 +2515,7 @@ export default function Dashboard() {
     && !toolApprovalLoading,
   );
   const pendingPasswordRequest: PendingPasswordRequestView | null = (() => {
+    if (!activeProject) return null;
     for (const event of scanEvents) {
       if (event.event === "executer_password_request") {
         const data = event.data;
@@ -2320,6 +2548,7 @@ export default function Dashboard() {
     }
     return null;
   })();
+
 
   const handleApprovePlanner = async () => {
     if (!activeProjectId || plannerApprovalLoading || !isRunning) {
@@ -2658,9 +2887,9 @@ export default function Dashboard() {
   }, [awaitingPlannerApproval, activeProjectId, pushDesktopNotification]);
 
   const fallbackLogs: DashboardLogEntry[] = [];
-  const baseTimestamp = activeProject.updatedAt || new Date().toISOString();
-  const fallbackLastScan = isRecord(activeProject.lastScan)
-    ? activeProject.lastScan
+  const baseTimestamp = activeProject?.updatedAt || new Date().toISOString();
+  const fallbackLastScan = isRecord(activeProject?.lastScan)
+    ? activeProject?.lastScan
     : null;
   const fallbackLastScanError =
     typeof fallbackLastScan?.error === "string"
@@ -2686,7 +2915,7 @@ export default function Dashboard() {
       source: "system",
     });
   }
-  for (const phase of activeProject.phases) {
+  for (const phase of activeProject?.phases || []) {
     if (phase.status === "pending" && phase.progress <= 0) {
       continue;
     }
@@ -2729,7 +2958,7 @@ export default function Dashboard() {
 
     // ONLY show confirmed/persisted findings from the project store
     // This is the source of truth for real vulnerabilities
-    for (const finding of activeProject.findings) {
+    for (const finding of activeProject?.findings || []) {
       if (finding.status === "false_positive") {
         continue;
       }
@@ -2794,6 +3023,399 @@ export default function Dashboard() {
       })
       .slice(0, 24);
   })();
+  const streamLooksStale =
+    shouldStreamScanEvents
+    && lastLiveEventAtRef.current > 0
+    && elapsedClockMs - lastLiveEventAtRef.current > 7000;
+  const pendingApprovalCount = [
+    awaitingInformationGatheringApproval,
+    awaitingPlannerApproval,
+    Boolean(pendingToolApproval),
+    Boolean(pendingPasswordRequest),
+  ].filter(Boolean).length;
+  const missionControlState: MissionControlState = (() => {
+    if (isStarting) {
+      return "initializing";
+    }
+    if (effectiveStatus === "error") {
+      return "error";
+    }
+    if (pendingApprovalCount > 0) {
+      return "paused_for_approval";
+    }
+    if (effectiveStatus === "completed") {
+      return "completed";
+    }
+    if (effectiveStatus === "running" && (streamDegradedRef.current || streamLooksStale)) {
+      return "reconnecting_sse";
+    }
+    if (effectiveStatus === "running") {
+      return "running";
+    }
+    return "idle";
+  })();
+  const latestMissionPhase = (() => {
+    for (const event of scanEvents) {
+      const phase = detectMissionPhase(event);
+      if (phase) {
+        return phase;
+      }
+    }
+    if (effectiveStatus === "completed") {
+      return "analyzer" as MissionControlPhaseKey;
+    }
+    if (activeProject && (activeProject.scanProgress > 0 || effectiveStatus === "running")) {
+      return "planner" as MissionControlPhaseKey;
+    }
+    return "intel" as MissionControlPhaseKey;
+  })();
+  const activeMissionPhaseIndex = MISSION_PHASE_ORDER.findIndex(
+    (phase) => phase.key === latestMissionPhase,
+  );
+  const missionControlPhases = MISSION_PHASE_ORDER.map((phase, index) => {
+    let status: "pending" | "active" | "completed" = "pending";
+    if (missionControlState === "completed") {
+      status = "completed";
+    } else if (missionControlState !== "idle" && index < activeMissionPhaseIndex) {
+      status = "completed";
+    } else if (missionControlState !== "idle" && index === activeMissionPhaseIndex) {
+      status = "active";
+    }
+    return {
+      ...phase,
+      status,
+    };
+  });
+  const missionControlTitle = (() => {
+    if (missionControlState === "initializing") {
+      return "Preparing the scan runtime";
+    }
+    if (missionControlState === "paused_for_approval") {
+      return "Operator confirmation is blocking the next step";
+    }
+    if (missionControlState === "reconnecting_sse") {
+      return "Live event stream is resyncing with backend truth";
+    }
+    if (missionControlState === "error") {
+      return "Scan stopped before the current cycle finished";
+    }
+    if (missionControlState === "completed") {
+      return "Scan finished and the final operator view is stable";
+    }
+    if (missionControlState === "running") {
+      return `Live scan running through ${missionControlPhases[activeMissionPhaseIndex]?.label ?? "active"} phase`;
+    }
+    return "Ready to launch a new autonomous assessment";
+  })();
+  const missionControlDetail = (() => {
+    if (missionControlState === "paused_for_approval") {
+      return pendingPasswordRequest
+        ? "A tool hit an authentication gate. Provide credentials or deny the request so the cycle can continue with an explicit operator decision."
+        : pendingToolApproval
+          ? "The executer wants to run a gated tool step. Review the command and decide whether to approve or skip it."
+          : awaitingPlannerApproval
+            ? "The planner checklist is ready and waiting for your approval before scenario generation continues."
+            : "Static information gathering has been organized and is waiting for your sign-off before execution.";
+    }
+    if (missionControlState === "reconnecting_sse") {
+      return "The UI is keeping the scan alive while it reconnects to the live event stream. Recent history is being backfilled so you do not lose context during a transient disconnect.";
+    }
+    if (missionControlState === "error") {
+      return fallbackLastScanError.length > 0
+        ? fallbackLastScanError
+        : "The orchestrator reported a fatal error. Review the latest events and resync project state before restarting.";
+    }
+    if (missionControlState === "completed") {
+      return "Review the verified findings, planner output, and report generation paths from this finished run.";
+    }
+    if (missionControlState === "running") {
+      return "The operator console is following the active scan by phase, worker slot, and verified impact so approvals and findings are visible without hunting through logs.";
+    }
+    if (missionControlState === "initializing") {
+      return "Target configuration, scan identifiers, and runtime state are being prepared before the first live events arrive.";
+    }
+    return "Pick a project target and start the scan to turn this page into live mission control.";
+  })();
+  const streamStatusLabel = (() => {
+    if (!shouldStreamScanEvents) {
+      return "Idle until the next scan starts";
+    }
+    if (missionControlState === "reconnecting_sse") {
+      const retries = Math.max(streamRetryRef.current, streamRetry, 1);
+      return `Reconnecting live feed (attempt ${retries})`;
+    }
+    if (lastLiveEventAtRef.current === 0) {
+      return "Waiting for first live event";
+    }
+    return `Live and healthy as of ${formatTime(new Date(lastLiveEventAtRef.current).toISOString())}`;
+  })();
+  const latestVerifiedFinding = realtimeVulnFindings[0] ?? null;
+  const missionControlSignals = [
+    {
+      label: "Duration",
+      value: displayedPentestElapsed,
+      hint: timerStartedAt ? `Started ${formatDateTime(timerStartedAt)}` : "Timer begins on scan start",
+    },
+    {
+      label: "Progress",
+      value: activeProject ? `${Math.max(0, Math.round(activeProject.scanProgress))}%` : "0%",
+      hint: `Current status: ${effectiveStatus}`,
+    },
+    {
+      label: "Approvals",
+      value: pendingApprovalCount > 0 ? `${pendingApprovalCount} waiting` : approvalMode === "auto" ? "Auto mode" : "Clear",
+      hint: `Approval mode: ${approvalModeLabel[approvalMode]}`,
+    },
+    {
+      label: "Verified Findings",
+      value: `${realtimeVulnFindings.length}`,
+      hint: currentCycle ? `Current execution cycle ${currentCycle}` : "Pre-cycle or planning stage",
+    },
+  ];
+  const workerActivity = (() => {
+    const items: Array<{
+      label: string;
+      status: "active" | "completed" | "waiting";
+      detail: string;
+      at?: string;
+    }> = [];
+    const seen = new Set<string>();
+    for (const event of scanEvents) {
+      const message = normalizeText(event.message);
+      const match = message.match(/\[worker\s*(\d+)\]/i);
+      if (!match) {
+        continue;
+      }
+      const workerLabel = `Worker ${match[1]}`;
+      if (seen.has(workerLabel)) {
+        continue;
+      }
+      seen.add(workerLabel);
+      const normalized = `${event.event} ${message}`.toLowerCase();
+      const trimmedMessage = message.replace(/\[worker\s*\d+\]\s*/i, "").trim() || event.event.replaceAll("_", " ");
+      const status =
+        normalized.includes("completed") || normalized.includes("finished with status=complete")
+          ? "completed"
+          : normalized.includes("waiting approval") || normalized.includes("approval waiting")
+            ? "waiting"
+            : "active";
+      items.push({
+        label: workerLabel,
+        status,
+        detail: trimmedMessage,
+        at: formatTime(event.timestamp),
+      });
+      if (items.length >= 2) {
+        break;
+      }
+    }
+    return items;
+  })();
+  const missionAction: MissionControlAction | null = (() => {
+    if (pendingPasswordRequest) {
+      return {
+        title: `${pendingPasswordRequest.toolName || "External tool"} needs credentials`,
+        detail: pendingPasswordRequest.reason || pendingPasswordRequest.prompt || "Provide credentials or deny the prompt so the scan can continue safely.",
+        tone: "warn",
+        controls: (
+          <div className="flex flex-col gap-3">
+            <Input
+              type="password"
+              autoFocus
+              value={pendingPasswordValue}
+              onChange={(event) => setPendingPasswordValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && pendingPasswordValue.length > 0) {
+                  void handlePasswordResponse(true);
+                }
+              }}
+              placeholder="Verification password..."
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  void handlePasswordResponse(true);
+                }}
+                loading={passwordResponseLoading === "approve"}
+                disabled={pendingPasswordValue.length === 0}
+              >
+                Verify
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  void handlePasswordResponse(false);
+                }}
+                loading={passwordResponseLoading === "deny"}
+              >
+                Deny
+              </Button>
+            </div>
+          </div>
+        ),
+      };
+    }
+    if (pendingToolApproval && !autoApprovingPendingTool) {
+      return {
+        title: `Approve ${pendingToolApproval.role} tool call`,
+        detail: pendingToolCommandPreview || pendingToolApproval.toolName,
+        tone: "warn",
+        controls: (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => {
+                void handleToolApproval("approve");
+              }}
+              loading={toolApprovalLoading === "approve"}
+            >
+              <Check size={14} />
+              Approve Tool
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                void handleToolApproval("skip");
+              }}
+              loading={toolApprovalLoading === "skip"}
+            >
+              <X size={14} />
+              Skip Tool
+            </Button>
+          </div>
+        ),
+      };
+    }
+    if (pendingToolApproval && autoApprovingPendingTool) {
+      return {
+        title: `Auto-approving ${pendingToolApproval.role}`,
+        detail: pendingToolCommandPreview || pendingToolApproval.toolName,
+        tone: "info",
+      };
+    }
+    if (awaitingPlannerApproval) {
+      return {
+        title: approvalMode === "auto" ? "Planner approval is being handled automatically" : "Planner checklist is waiting for approval",
+        detail: approvalMode === "auto"
+          ? "The checklist is ready and the UI is letting the auto-approval flow continue to planner execution."
+          : "Review the checklist, then continue to planner so scenario generation can begin.",
+        tone: approvalMode === "auto" ? "info" : "warn",
+        controls: approvalMode === "auto"
+          ? undefined
+          : (
+            <Button
+              size="sm"
+              onClick={() => {
+                void handleApprovePlanner();
+              }}
+              loading={plannerApprovalLoading}
+            >
+              <Check size={14} />
+              Continue to Planner
+            </Button>
+          ),
+      };
+    }
+    if (awaitingInformationGatheringApproval) {
+      return {
+        title: approvalMode === "auto"
+          ? "Information gathering approval is being handled automatically"
+          : "Information gathering plan is waiting for approval",
+        detail: approvalMode === "auto"
+          ? "The grouped static plan is organized and auto mode is letting the scan proceed without another manual click."
+          : "Review the organized grouped blocks, then continue information gathering to let the deterministic pass start.",
+        tone: approvalMode === "auto" ? "info" : "warn",
+        controls: approvalMode === "auto"
+          ? undefined
+          : (
+            <Button
+              size="sm"
+              onClick={() => {
+                void handleApproveInformationGathering();
+              }}
+              loading={informationGatheringApprovalLoading}
+            >
+              <Check size={14} />
+              Continue Information Gathering
+            </Button>
+          ),
+      };
+    }
+    if (missionControlState === "reconnecting_sse") {
+      return {
+        title: "Resyncing scan state",
+        detail: "Recent scan events are being refetched so the UI catches back up with the orchestrator after the stream interruption.",
+        tone: "warn",
+        controls: (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              void hydrateFromDatabase();
+            }}
+          >
+            <Repeat2 size={14} />
+            Refresh State
+          </Button>
+        ),
+      };
+    }
+    if (missionControlState === "error") {
+      return {
+        title: "Review the failure and resync before restart",
+        detail: fallbackLastScanError || "The scan failed without a detailed orchestrator message.",
+        tone: "danger",
+        controls: (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              void hydrateFromDatabase();
+            }}
+          >
+            <Repeat2 size={14} />
+            Refresh State
+          </Button>
+        ),
+      };
+    }
+    return null;
+  })();
+  const logsEmptyMessage = (() => {
+    if (missionControlState === "initializing") {
+      return "The scan is bootstrapping. Live events will appear here once the first backend phase starts emitting.";
+    }
+    if (missionControlState === "paused_for_approval") {
+      return "The scan is paused for operator input. Approve or deny the pending action to resume the live feed.";
+    }
+    if (missionControlState === "reconnecting_sse") {
+      return "The live event stream is reconnecting. Recent history will repopulate here once the resync completes.";
+    }
+    if (missionControlState === "running") {
+      return "The scan is active. Waiting for the next live event from the current phase.";
+    }
+    if (missionControlState === "completed") {
+      return "The scan completed. Historical events will remain visible here as they sync.";
+    }
+    if (missionControlState === "error") {
+      return "The scan stopped unexpectedly before more events could be rendered.";
+    }
+    return "Start a scan to open the live event feed.";
+  })();
+  const findingsEmptyMessage = (() => {
+    if (missionControlState === "running" || missionControlState === "reconnecting_sse") {
+      return "Analyzer verification is still in progress. Confirmed vulnerabilities will land here once they are saved.";
+    }
+    if (missionControlState === "paused_for_approval") {
+      return "The next verification step is waiting on your input. Confirmed findings will resume updating after approval.";
+    }
+    if (missionControlState === "error") {
+      return "The scan ended before new findings could be confirmed.";
+    }
+    return "No vulnerabilities confirmed yet. Real findings will appear here after verification.";
+  })();
 
   const handleLogsScroll = () => {
     const container = logsContainerRef.current;
@@ -2809,6 +3431,15 @@ export default function Dashboard() {
   };
 
   const resolvedPlannerResult = (() => {
+    if (!activeProject) {
+      return {
+        summary: "",
+        needs: [],
+        planData: null,
+        status: "idle",
+        error: "",
+      };
+    }
     let plannerError = "";
     for (const event of scanEvents) {
       if (!isRecord(event.data)) {
@@ -2841,8 +3472,8 @@ export default function Dashboard() {
       }
     }
 
-    const lastScan = isRecord(activeProject.lastScan)
-      ? activeProject.lastScan
+    const lastScan = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
       : null;
     const result = isRecord(lastScan?.result) ? lastScan.result : null;
     const planner = isRecord(result?.planner) ? result.planner : null;
@@ -2862,9 +3493,10 @@ export default function Dashboard() {
   );
   const plannerPlanView = toPlannerPlanView(resolvedPlannerResult.planData);
   const informationGatheringView = (() => {
-    const activeResult = isRecord(activeProject.lastScan)
-      && isRecord(activeProject.lastScan.result)
-      ? activeProject.lastScan.result
+    if (!activeProject) return null;
+    const activeResult = isRecord(activeProject?.lastScan)
+      && isRecord(activeProject?.lastScan?.result)
+      ? activeProject?.lastScan?.result
       : null;
     const persisted = toInformationGatheringView(activeResult?.targetInfoGathering);
     if (persisted && (persisted.program.length > 0 || persisted.blocks.length > 0)) {
@@ -2917,7 +3549,7 @@ export default function Dashboard() {
 
   const removeInformationGatheringBlock = (blockId: string) => {
     if (!editableInformationGatheringProgram) return;
-    setEditableInformationGatheringProgram(prev => 
+    setEditableInformationGatheringProgram(prev =>
       prev ? prev.filter(b => b.id !== blockId) : null
     );
   };
@@ -2962,13 +3594,13 @@ export default function Dashboard() {
       }
     }
     // 2. Check project payload for persisted state
-    if (activeProject.payload && isRecord(activeProject.payload.architecture_draft)) {
+    if (activeProject?.payload && isRecord(activeProject.payload.architecture_draft)) {
       return (activeProject.payload.architecture_draft as unknown) as TargetArchitectureDraft;
     }
     // 3. Fallback to static initial draft
     return buildTargetArchitectureDraft(
-      activeProject.targetType,
-      activeProject.target,
+      activeProject?.targetType || "network",
+      activeProject?.target || "",
     );
   }, [scanEvents, activeProject]);
   const architectureHostMap = new Map(
@@ -2994,6 +3626,7 @@ export default function Dashboard() {
     );
 
   const resolvedChecklist = (() => {
+    if (!activeProject) return null;
     for (const event of scanEvents) {
       if (
         event.event !== "planner_checklist_complete" &&
@@ -3013,15 +3646,15 @@ export default function Dashboard() {
         typeof event.data.summary === "string" ? event.data.summary.trim() : "";
       const summaryFallback = checklistFromLabels(
         extractChecklistLabels(summary),
-        activeProject.targetType,
+        activeProject?.targetType || "network",
       );
       if (summaryFallback) {
         return summaryFallback;
       }
     }
 
-    const lastScan = isRecord(activeProject.lastScan)
-      ? activeProject.lastScan
+    const lastScan = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
       : null;
     const result = isRecord(lastScan?.result) ? lastScan.result : null;
     const intel = isRecord(result?.intel) ? result.intel : null;
@@ -3034,7 +3667,7 @@ export default function Dashboard() {
       typeof intel?.summary === "string" ? intel.summary.trim() : "";
     return checklistFromLabels(
       extractChecklistLabels(persistedSummary),
-      activeProject.targetType,
+      activeProject?.targetType || "network",
     );
   })();
   const displayChecklist = resolvedChecklist
@@ -3054,8 +3687,8 @@ export default function Dashboard() {
     setChecklistActionKey(actionKey);
     setChecklistError("");
     const nowIso = new Date().toISOString();
-    const lastScan = isRecord(activeProject.lastScan)
-      ? activeProject.lastScan
+    const lastScan = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
       : {};
     const result = isRecord(lastScan.result) ? lastScan.result : {};
     const intel = isRecord(result.intel) ? result.intel : {};
@@ -3262,6 +3895,14 @@ export default function Dashboard() {
   })();
 
   const agentInsights = (() => {
+    if (!activeProject) {
+      return Object.fromEntries(
+        AGENT_ROLES.map((role) => [
+          role,
+          { history: [] as AgentInsightPanelData["history"] },
+        ]),
+      ) as Record<AgentGraphRole, AgentInsightPanelData>;
+    }
     const byRole = Object.fromEntries(
       AGENT_ROLES.map((role) => [
         role,
@@ -3269,8 +3910,8 @@ export default function Dashboard() {
       ]),
     ) as Record<AgentGraphRole, AgentInsightPanelData>;
 
-    const scanMeta = isRecord(activeProject.lastScan)
-      ? activeProject.lastScan
+    const scanMeta = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
       : null;
     const currentScanId =
       typeof scanMeta?.scanId === "string" ? scanMeta.scanId.trim() : "";
@@ -3339,24 +3980,24 @@ export default function Dashboard() {
     byRole.analyzer.resultLabel = "Analyzer Summary";
     byRole.analyzer.result = latestAnalyzer
       ? latestAnalyzer.message
-      : `Scan status: ${effectiveStatus}. Progress: ${activeProject.scanProgress}%.`;
+      : `Scan status: ${effectiveStatus}. Progress: ${activeProject?.scanProgress || 0}%.`;
 
     return byRole;
   })();
 
   const visibleAgents = (() => {
     const roleOrder: AgentGraphRole[] = ["planner", "executer", "analyzer"];
-    const baseAgents = Array.isArray(activeProject.agents) ? activeProject.agents : [];
+    const baseAgents = Array.isArray(activeProject?.agents) ? activeProject.agents : [];
     const baseAgentByRole = new Map(
       baseAgents.map((agent) => [agent.name, agent] as const),
     );
     const roleProgress: Partial<Record<AgentGraphRole, number>> = {
       planner: resolvedPlannerResult.status === "completed" ? 100 : undefined,
-      executer: effectiveStatus === "running" || activeProject.scanProgress > 0
-        ? activeProject.scanProgress
+      executer: effectiveStatus === "running" || (activeProject?.scanProgress || 0) > 0
+        ? activeProject?.scanProgress
         : undefined,
       analyzer: agentInsights.analyzer?.history.length
-        ? activeProject.scanProgress
+        ? activeProject?.scanProgress
         : undefined,
     };
     const latestRole = roleOrder.reduce<AgentGraphRole | null>((current, role) => {
@@ -3388,7 +4029,7 @@ export default function Dashboard() {
       } else if (history.some((entry) => entry.level === "error")) {
         state = "error";
       } else if (history.length > 0) {
-        state = effectiveStatus === "paused" ? "waiting" : "success";
+        state = effectiveStatus === "stopped" ? "waiting" : "success";
       } else if (effectiveStatus === "running") {
         state = "waiting";
       }
@@ -3403,1468 +4044,1373 @@ export default function Dashboard() {
     });
   })();
 
-  return (
-    <div className="flex h-full w-full overflow-hidden bg-background">
-      <div className="flex-1 min-w-0 overflow-y-auto p-4 space-y-4 transition-all duration-300 ease-in-out scrollbar-pf">
-      <div>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-bold">{activeProject.name}</h1>
-              <Badge variant={effectiveStatus} dot>
-                {effectiveStatus}
-              </Badge>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {!isRunning ? (
-              <Button
-                size="xs"
-                onClick={() => {
-                  if (effectiveStatus === "completed") {
-                    const confirmed = window.confirm(
-                      "This scan already completed. Start a new scan and clear previous results?",
-                    );
-                    if (!confirmed) {
-                      return;
-                    }
-                    setStreamLogs([]);
-                    setScanEvents([]);
-                    setRunning(activeProject.id, {
-                      triggerScan: true,
-                      force: true,
-                    });
-                    return;
+  const pipelineStages = useMemo(() => {
+    const plannerAgent = visibleAgents.find(a => a.name === 'planner');
+    const executerAgent = visibleAgents.find(a => a.name === 'executer');
+    const analyzerAgent = visibleAgents.find(a => a.name === 'analyzer');
+
+    const phaseBelongsToStage = (
+      stage: OrchestratorStage,
+      phase: MissionControlPhaseKey | null,
+    ) => {
+      if (!phase) {
+        return false;
+      }
+      if (stage === 'planner') {
+        return phase === 'intel' || phase === 'information_gathering' || phase === 'planner';
+      }
+      if (stage === 'executer') {
+        return phase === 'executer';
+      }
+      return phase === 'brain' || phase === 'analyzer';
+    };
+
+    const onlyActiveStageCanRun = (
+      stage: OrchestratorStage,
+      status: OrchestratorStatus,
+    ): OrchestratorStatus => {
+      if (
+        (status === 'running' || status === 'thinking')
+        && missionControlState === 'running'
+        && !phaseBelongsToStage(stage, latestMissionPhase)
+      ) {
+        return 'idle';
+      }
+      return status;
+    };
+
+    const phaseToStage = (
+      phase: MissionControlPhaseKey | null,
+    ): OrchestratorStage => {
+      if (phase === 'intel' || phase === 'information_gathering' || phase === 'planner') {
+        return 'planner';
+      }
+      if (phase === 'brain' || phase === 'analyzer') {
+        return 'analyzer';
+      }
+      return 'executer';
+    };
+
+    const approvalRoleToStage = (role: string): OrchestratorStage => {
+      const normalizedRole = role
+        .replace(/\[worker\s*\d+\]\s*/gi, '')
+        .trim()
+        .toLowerCase();
+      if (
+        normalizedRole.includes('planner')
+        || normalizedRole.includes('intel')
+        || normalizedRole.includes('information_gathering')
+        || normalizedRole.includes('information gathering')
+        || normalizedRole.includes('checklist')
+      ) {
+        return 'planner';
+      }
+      if (
+        normalizedRole.includes('analyzer')
+        || normalizedRole.includes('verify')
+        || normalizedRole.includes('retest')
+        || normalizedRole.includes('brain')
+      ) {
+        return 'analyzer';
+      }
+      return 'executer';
+    };
+
+    const getStageActionPanel = (
+      stage: OrchestratorStage,
+    ): {
+      title: string;
+      detail: string;
+      tone?: 'info' | 'warn' | 'danger';
+      controls?: React.ReactNode;
+    } | null => {
+      if (pendingPasswordRequest) {
+        const passwordStage = phaseToStage(latestMissionPhase);
+        if (stage !== passwordStage) {
+          return null;
+        }
+        return {
+          title: `${pendingPasswordRequest.toolName || 'External tool'} needs credentials`,
+          detail:
+            pendingPasswordRequest.reason
+            || pendingPasswordRequest.prompt
+            || 'Provide credentials or deny the prompt so the scan can continue safely.',
+          tone: 'warn',
+          controls: (
+            <div className="flex flex-col gap-3">
+              <Input
+                type="password"
+                autoFocus
+                value={pendingPasswordValue}
+                onChange={(event) => setPendingPasswordValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && pendingPasswordValue.length > 0) {
+                    void handlePasswordResponse(true);
                   }
-                  if (effectiveStatus === "paused") {
-                    const confirmed = window.confirm(
-                      "Resume will start a new scan and keep previous history visible. Continue?",
-                    );
-                    if (!confirmed) {
-                      return;
-                    }
-                    setRunning(activeProject.id, {
-                      triggerScan: true,
-                      resume: true,
-                    });
-                    return;
-                  }
-                  if (effectiveStatus === "idle") {
-                    setStreamLogs([]);
-                    setScanEvents([]);
-                  }
-                  setRunning(activeProject.id, { triggerScan: true });
                 }}
-                disabled={!canRun}
-                loading={isStarting}
-                title={
-                  hasAnotherRunningProject
-                    ? "Another scan is already running"
-                    : "Start scan"
-                }
-              >
-                <Play size={12} />
-                Start Scan
-              </Button>
-            ) : (
-              <div className="flex items-center gap-2">
-                {awaitingPlannerApproval && approvalMode !== "auto" ? (
-                  <Button
-                    size="xs"
-                    variant="secondary"
-                    onClick={() => {
-                      void handleApprovePlanner();
-                    }}
-                    loading={plannerApprovalLoading}
-                    title="Approve checklist and continue to Planner"
-                  >
-                    <Check size={12} />
-                    Continue to Planner
-                  </Button>
-                ) : null}
-                {awaitingPlannerApproval && approvalMode === "auto" ? (
-                  <Badge variant="running" dot>
-                    Auto-approving planner
-                  </Badge>
-                ) : null}
-                {pendingToolApproval && !autoApprovingPendingTool ? (
-                  <>
-                    <Button
-                      size="xs"
-                      variant="primary"
-                      onClick={() => {
-                        void handleToolApproval("approve");
-                      }}
-                      loading={toolApprovalLoading === "approve"}
-                      title={`Approve ${pendingToolCommandPreview} (${pendingToolApproval.role})`}
-                    >
-                      <Check size={12} />
-                      Approve Tool
-                    </Button>
-                    <Button
-                      size="xs"
-                      variant="secondary"
-                      onClick={() => {
-                        void handleToolApproval("skip");
-                      }}
-                      loading={toolApprovalLoading === "skip"}
-                      title={`Skip ${pendingToolCommandPreview} (${pendingToolApproval.role})`}
-                    >
-                      <X size={12} />
-                      Skip Tool
-                    </Button>
-                  </>
-                ) : null}
-                {pendingToolApproval && autoApprovingPendingTool ? (
-                  <Badge variant="running" dot>
-                    Auto-approving {pendingToolApproval.role}
-                  </Badge>
-                ) : null}
-                <Button
-                  size="xs"
-                  variant="danger"
-                  onClick={() => {
-                    setStopDialogOpen(true);
-                  }}
-                  title="Stop running scan"
-                >
-                  <Square size={12} />
-                  Stop Scan
-                </Button>
-              </div>
-            )}
-            {isStarting && (
-              <span className="text-sm text-text-muted">
-                Starting scan...
-              </span>
-            )}
-            <Button
-              size="xs"
-              variant="secondary"
-              onClick={() => navigate("/projects")}
-            >
-              <Repeat2 size={12} />
-              Change
-            </Button>
-            <Button size="xs" variant="ghost" onClick={handleCloseProject}>
-              <X size={12} />
-              Close
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      <Card className="space-y-2 p-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-text-primary">
-            Target Overview
-          </h2>
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="secondary"
-              onClick={handleOpenProjectEdit}
-              title="Edit project details"
-            >
-              <Pencil size={12} />
-              Edit
-            </Button>
-            <span className="inline-flex items-center gap-1 text-xs text-text-muted">
-              <Clock3 size={12} />
-              Updated {formatDateTime(activeProject.updatedAt)}
-            </span>
-          </div>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
-            <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Target</p>
-            <p className="mt-1.5 break-all font-mono text-sm font-semibold text-pf-500 dark:text-pf-400">
-              {activeProject.target}
-            </p>
-          </div>
-          <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
-            <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Target Type</p>
-            <p className="mt-1.5 text-sm font-semibold text-text-primary capitalize">
-              {activeProject.targetType.replaceAll("_", " ")}
-            </p>
-          </div>
-          <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
-            <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">Created</p>
-            <p className="mt-1.5 text-sm font-semibold text-text-primary">
-              {formatDateTime(activeProject.createdAt)}
-            </p>
-          </div>
-          <div className={`rounded-xl p-3 border shadow-sm transition-all duration-300 ${
-            effectiveStatus === "running" 
-              ? "bg-pf-500/15 border-pf-500/30 ring-1 ring-pf-500/20" 
-              : "bg-surface-0/40 border-border/40"
-          }`}>
-            <p className={`text-[11px] font-bold uppercase tracking-wider ${
-              effectiveStatus === "running" ? "text-pf-600 dark:text-pf-400" : "text-text-muted"
-            }`}>Status</p>
-            <p className={`mt-1.5 text-lg font-bold capitalize ${
-              effectiveStatus === "running" ? "text-pf-700 dark:text-pf-300 animate-pulse" : "text-text-primary"
-            }`}>
-              {effectiveStatus}
-            </p>
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-border bg-surface-0/35 px-3 py-2.5">
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="rounded-md border border-pf-500/20 bg-pf-500/10 px-2.5 py-1.5">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-                  Pentest Timer
-                </p>
-                <p className="mt-1 font-mono text-lg font-semibold leading-none text-text-primary sm:text-xl">
-                  {displayedPentestElapsed}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-text-muted md:justify-end">
-              {timerStartedAt ? (
-                <span>Started {formatDateTime(timerStartedAt)}</span>
-              ) : (
-                <span>Waiting for first scan start</span>
-              )}
-              {typeof activeLastScan?.finishedAt === "string" && activeLastScan.finishedAt.trim() ? (
-                <span>Finished {formatDateTime(activeLastScan.finishedAt)}</span>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      </Card>
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card className="flex h-[560px] flex-col space-y-3 p-3">
-          <div className="flex items-center justify-between">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base font-semibold text-text-primary">
-                Real-Time Logs
-              </h2>
-
-              <select
-                value={logSourceFilter}
-                onChange={(event) => setLogSourceFilter(event.target.value)}
-                className="rounded-md border border-border bg-surface-1 px-2 py-1 text-sm text-text-primary outline-none transition-colors focus:border-pf-500/50 dark:[color-scheme:dark]"
-                title="Filter by source"
-              >
-                <option
-                  value="all"
-                  style={{
-                    backgroundColor: "var(--surface-1)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  All Sources
-                </option>
-                {sourceOptions.map((source) => (
-                  <option
-                    key={source}
-                    value={source}
-                    style={{
-                      backgroundColor: "var(--surface-1)",
-                      color: "var(--text-primary)",
-                    }}
-                  >
-                    {formatSourceLabel(source)}
-                  </option>
-                ))}
-              </select>
-
-              <div className="relative" ref={approvalModeMenuRef}>
-                <Button
-                  size="icon"
-                  variant="secondary"
-                  className="h-9 w-9"
-                  onClick={() => setShowApprovalModeMenu((open) => !open)}
-                  title="Approval mode"
-                >
-                  <Check size={18} />
-                </Button>
-                {showApprovalModeMenu ? (
-                  <div className="absolute left-0 top-9 z-30 w-72 rounded-md border border-border bg-surface-1 p-2 shadow-xl">
-                    <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-secondary">
-                      Approval Mode
-                    </p>
-                    <div className="flex flex-col gap-1">
-                      <Button
-                        size="xs"
-                        variant={approvalMode === "custom" ? "primary" : "secondary"}
-                        onClick={() => {
-                          handleApprovalModeChange("custom");
-                          setShowApprovalModeMenu(false);
-                        }}
-                      >
-                        Custom
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant={approvalMode === "auto" ? "primary" : "secondary"}
-                        onClick={() => {
-                          handleApprovalModeChange("auto");
-                          setShowApprovalModeMenu(false);
-                        }}
-                      >
-                        Auto
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-              <Button
-                size="icon"
-                variant="secondary"
-                className="h-9 w-9"
-                onClick={() => {
-                  void requestNotificationAccess();
-                }}
-                disabled={notificationsUnavailable}
-                title={
-                  notificationsUnavailable
-                    ? "Notifications unsupported in this environment"
-                    : notificationsEnabled
-                      ? "Disable desktop notifications"
-                      : `Enable desktop notifications (${notificationPermission})`
-                }
-              >
-                {notificationsUnavailable || !notificationsEnabled ? <BellOff size={18} /> : <Bell size={18} />}
-              </Button>
-            </div>
-            <div className="text-right">
-              <p className="text-sm text-text-muted">
-                {displayedLogs.length} events{currentCycle ? ` · cycle ${currentCycle}` : ""}
-              </p>
-            </div>
-          </div>
-          <div
-            ref={logsContainerRef}
-            onScroll={handleLogsScroll}
-            className="min-h-0 flex-1 space-y-1 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2"
-          >
-            {displayedLogs.length === 0 ? (
-              <p className="px-1 py-2 text-sm text-text-muted">
-                No logs match current filters.
-              </p>
-            ) : (
-              displayedLogs.map((entry) => (
-                <div
-                  key={entry.id}
-                  className="grid grid-cols-[100px_1fr] gap-2 rounded px-1 py-1 text-sm"
-                >
-                  <span className="font-mono text-sm text-text-muted">
-                    {formatTime(entry.at)}
-                  </span>
-                  <p
-                    title={`[${entry.source}] ${entry.message}`}
-                    className={
-                      entry.level === "warn" || entry.level === "error"
-                        ? "min-w-0 truncate whitespace-nowrap text-red-300"
-                        : entry.level === "success"
-                          ? "min-w-0 truncate whitespace-nowrap text-emerald-300"
-                          : "min-w-0 truncate whitespace-nowrap text-text-secondary"
-                    }
-                  >
-                    <span className="mr-1 text-sm uppercase tracking-wide text-text-muted">
-                      [{entry.source}]
-                    </span>
-                    {entry.message}
-                  </p>
-                </div>
-              ))
-            )}
-          </div>
-          {awaitingPlannerApproval && approvalMode !== "auto" ? (
-            <div className="flex justify-center pt-2">
-              <Button
-                size="sm"
-                variant="primary"
-                className="bg-blue-600 hover:bg-blue-700"
-                onClick={() => {
-                  void handleApprovePlanner();
-                }}
-                loading={plannerApprovalLoading}
-                title="Approve checklist and continue to Planner"
-              >
-                <Check size={14} />
-                Continue to Planner
-              </Button>
-            </div>
-          ) : null}
-          {awaitingPlannerApproval && approvalMode === "auto" ? (
-            <div className="flex justify-center pt-2">
-              <Badge variant="running" dot>
-                Auto-approving planner
-              </Badge>
-            </div>
-          ) : null}
-          {awaitingInformationGatheringApproval && approvalMode !== "auto" ? (
-            <div className="flex justify-center pt-2">
-              <Button
-                size="sm"
-                variant="primary"
-                className="bg-blue-600 hover:bg-blue-700"
-                onClick={() => {
-                  void handleApproveInformationGathering();
-                }}
-                loading={informationGatheringApprovalLoading}
-                title="Approve static information gathering plan and continue"
-              >
-                <Check size={14} />
-                Continue Information Gathering
-              </Button>
-            </div>
-          ) : null}
-          {awaitingInformationGatheringApproval && approvalMode === "auto" ? (
-            <div className="flex justify-center pt-2">
-              <Badge variant="running" dot>
-                Auto-approving information gathering
-              </Badge>
-            </div>
-          ) : null}
-          {pendingToolApproval && !autoApprovingPendingTool ? (
-            <div className="mt-2 flex flex-col items-center gap-2 pt-2">
-              <p className="text-xs text-text-muted text-center">
-                Executer requests approval: <span className="font-semibold">{pendingToolApproval.role}</span> →{" "}
-                <span className="font-semibold break-all">{pendingToolCommandPreview}</span>
-              </p>
-              <div className="flex items-center gap-2">
+                placeholder="Verification password..."
+              />
+              <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
                   variant="primary"
                   onClick={() => {
-                    void handleToolApproval("approve");
+                    void handlePasswordResponse(true);
                   }}
-                  loading={toolApprovalLoading === "approve"}
+                  loading={passwordResponseLoading === 'approve'}
+                  disabled={pendingPasswordValue.length === 0}
                 >
-                  <Check size={14} />
-                  Approve Tool
+                  Verify
                 </Button>
                 <Button
                   size="sm"
                   variant="secondary"
                   onClick={() => {
-                    void handleToolApproval("skip");
+                    void handlePasswordResponse(false);
                   }}
-                  loading={toolApprovalLoading === "skip"}
+                  loading={passwordResponseLoading === 'deny'}
                 >
-                  <X size={14} />
-                  Skip Tool
+                  Deny
                 </Button>
               </div>
             </div>
-          ) : null}
-          {pendingToolApproval && autoApprovingPendingTool ? (
-            <div className="mt-2 flex flex-col items-center gap-2 pt-2">
-              <p className="text-xs text-text-muted text-center">
-                Auto-approving <span className="font-semibold">{pendingToolApproval.role}</span> →{" "}
-                <span className="font-semibold break-all">{pendingToolCommandPreview}</span>
-              </p>
-            </div>
-          ) : null}
-          {pendingPasswordRequest ? (
-            <div className="mt-2 overflow-hidden rounded-xl border border-amber-500/40 bg-surface-1 shadow-lg animate-in fade-in zoom-in duration-300">
-              <div className="flex items-center gap-3 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2.5">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/20 text-amber-500">
-                  <ShieldAlert size={18} />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold tracking-tight text-text-primary">
-                    Security Challenge
-                  </h3>
-                  <p className="text-[10px] uppercase tracking-widest text-amber-500/80 font-bold">
-                    Authentication Required
-                  </p>
-                </div>
-              </div>
-              <div className="p-4">
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 rounded-full bg-surface-2 p-1.5 text-text-muted">
-                    <Lock size={14} />
-                  </div>
-                  <div className="flex-1 space-y-1">
-                    <p className="text-sm font-medium text-text-secondary">
-                      {pendingPasswordRequest.toolName || "External Tool"} requires your credentials
-                    </p>
-                    {pendingPasswordRequest.reason && (
-                      <p className="text-xs text-text-muted leading-relaxed">
-                        {pendingPasswordRequest.reason}
-                      </p>
-                    )}
-                    {pendingPasswordRequest.prompt && (
-                      <div className="mt-2 rounded bg-surface-0 px-2 py-1.5 border border-border/50">
-                        <p className="font-mono text-[11px] text-text-muted">
-                          Prompt: <span className="text-pf-400">{pendingPasswordRequest.prompt}</span>
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </div>
+          ),
+        };
+      }
 
-                <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-                  <div className="relative flex-1">
-                    <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-text-muted">
-                      <Key size={14} />
-                    </div>
-                    <Input
-                      type="password"
-                      autoFocus
-                      value={pendingPasswordValue}
-                      onChange={(event) => setPendingPasswordValue(event.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && pendingPasswordValue.length > 0) {
-                          void handlePasswordResponse(true);
-                        }
-                      }}
-                      placeholder="Verification password..."
-                      className="pl-9 bg-surface-0 border-border/60 focus:border-amber-500/50 focus:ring-amber-500/20"
-                    />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="primary"
-                      className="bg-amber-600 hover:bg-amber-500 text-white shadow-md shadow-amber-900/20 px-6"
-                      onClick={() => {
-                        void handlePasswordResponse(true);
-                      }}
-                      loading={passwordResponseLoading === "approve"}
-                      disabled={pendingPasswordValue.length === 0}
-                    >
-                      Verify
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      className="border-border/60 hover:bg-surface-2"
-                      onClick={() => {
-                        void handlePasswordResponse(false);
-                      }}
-                      loading={passwordResponseLoading === "deny"}
-                    >
-                      Deny
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </Card>
-
-        <Card className="flex h-[560px] flex-col space-y-3 p-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-text-primary">
-              ✅ Confirmed Vulnerabilities
-            </h2>
-            <p className="text-sm text-text-muted">
-              {realtimeVulnFindings.length} verified
-            </p>
-          </div>
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
-            {realtimeVulnFindings.length === 0 ? (
-              <p className="px-1 py-2 text-sm text-text-muted">
-                No vulnerabilities confirmed yet. Real findings will appear here after verification.
-              </p>
-            ) : (
-              realtimeVulnFindings.map((item) => (
-                <div
-                  key={item.id}
-                  onClick={() => {
-                    const fullFinding = activeProject.findings.find(
-                      (f: any) => f.id === item.id.replace("finding-", "")
-                    );
-                    setSelectedFinding(fullFinding || item);
-                  }}
-                  className="cursor-pointer rounded-md border border-border bg-surface-1/45 p-3 space-y-2 transition-colors hover:bg-surface-1/65"
-                >
-                  {/* Header: Title + Severity Badge */}
-                  <div className="flex items-start justify-between gap-2">
-                    <h3 className="text-sm font-bold text-text-primary leading-snug flex-1">
-                      {item.title}
-                    </h3>
-                    <Badge
-                      variant="default"
-                      className={`border text-xs uppercase tracking-wide whitespace-nowrap font-semibold ${severityBadgeClass(item.severity)}`}
-                    >
-                      {item.severity}
-                    </Badge>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {item.evidenceStatus ? (
-                      <Badge
-                        variant="default"
-                        className={`border text-[11px] uppercase tracking-wide ${evidenceBadgeClass(item.evidenceStatus)}`}
-                      >
-                        {item.evidenceStatus.replace(/_/g, " ")}
-                      </Badge>
-                    ) : null}
-                    {item.proofQuality ? (
-                      <Badge
-                        variant="default"
-                        className={`border text-[11px] uppercase tracking-wide ${proofQualityBadgeClass(item.proofQuality)}`}
-                      >
-                        {item.proofQuality} proof
-                      </Badge>
-                    ) : null}
-                  </div>
-
-                  {/* CVE + CVSS */}
-                  {(item.cve || item.cvss) && (
-                    <div className="text-xs text-text-secondary font-mono bg-surface-0/40 px-2 py-1 rounded">
-                      {item.cve && <span>{item.cve}</span>}
-                      {item.cve && item.cvss && <span> • </span>}
-                      {item.cvss && <span>CVSS {item.cvss}</span>}
-                    </div>
-                  )}
-
-                  {/* Target + Category */}
-                  <div className="space-y-1 text-xs">
-                    {item.endpoint && (
-                      <div className="flex items-start gap-2">
-                        <span className="text-text-muted min-w-fit font-semibold">Target:</span>
-                        <span className="text-text-secondary break-all font-mono">{item.endpoint}</span>
-                      </div>
-                    )}
-                    {item.category && (
-                      <div className="flex items-start gap-2">
-                        <span className="text-text-muted min-w-fit font-semibold">Type:</span>
-                        <span className="text-text-secondary">{item.category}</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Quick Remediation Hint */}
-                  {item.remediation && (
-                    <div className="text-xs text-indigo-900 dark:text-indigo-100 bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/30 px-2 py-1 rounded shadow-sm font-medium">
-                      💡 {item.remediation.split('\n')[0].slice(0, 120)}
-                      {item.remediation.length > 120 ? "..." : ""}
-                    </div>
-                  )}
-
-                  {/* Footer: Status + Time */}
-                  <div className="flex items-center justify-between pt-1 border-t border-border/30">
-                    <span className="text-xs text-text-muted uppercase tracking-wide">
-                      ✅ Verified
-                    </span>
-                    <span className="text-xs text-text-muted">{formatTime(item.at)}</span>
-                  </div>
-
-                  <div className="text-xs text-text-muted/70 italic text-right">
-                    Click for details →
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </Card>
-      </div>
-
-      {/* Fullscreen overlay for Execution Notes */}
-      {isInsightFullscreen && (
-        <div
-          className="fixed inset-0 z-50 bg-surface-0/95 backdrop-blur-sm"
-          onClick={() => setIsInsightFullscreen(false)}
-        />
-      )}
-
-      <div className={isInsightFullscreen ? "" : "grid gap-4 xl:grid-cols-[1.15fr_0.85fr]"}>
-        <Card
-          className={
-            isInsightFullscreen
-              ? "fixed inset-4 z-50 flex flex-col space-y-3 overflow-hidden p-4"
-              : "flex h-[560px] flex-col space-y-3 p-3"
-          }
-        >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <h2 className={`font-semibold text-text-primary ${isInsightFullscreen ? "text-lg" : "text-base"}`}>
-                Execution Notes
-              </h2>
-              {insightTab === "checklist" ? (
-                <Button
-                  size="icon"
-                  variant="secondary"
-                  onClick={() => {
-                    setChecklistError("");
-                    setIsAddEditorOpen((open) => !open);
-                  }}
-                  disabled={isChecklistSaving}
-                  title={
-                    isAddEditorOpen
-                      ? "Close add item form"
-                      : "Add checklist item"
-                  }
-                >
-                  <Plus size={13} />
-                </Button>
-              ) : null}
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-0/40 p-1">
-                <Button
-                  size="xs"
-                  variant={insightTab === "information" ? "secondary" : "ghost"}
-                  onClick={() => setInsightTab("information")}
-                >
-                  Information
-                </Button>
-                <Button
-                  size="xs"
-                  variant={insightTab === "checklist" ? "secondary" : "ghost"}
-                  onClick={() => setInsightTab("checklist")}
-                >
-                  Checklist
-                </Button>
-                <Button
-                  size="xs"
-                  variant={insightTab === "plan" ? "secondary" : "ghost"}
-                  onClick={() => setInsightTab("plan")}
-                >
-                  Plan
-                </Button>
-              </div>
+      if (pendingToolApproval) {
+        const approvalStage = approvalRoleToStage(String(pendingToolApproval.role || ''));
+        if (stage !== approvalStage) {
+          return null;
+        }
+        if (autoApprovingPendingTool) {
+          return null;
+        }
+        return {
+          title: `Approve ${pendingToolApproval.role} tool call`,
+          detail: pendingToolCommandPreview || pendingToolApproval.toolName,
+          tone: 'warn',
+          controls: (
+            <div className="flex flex-wrap items-center gap-2">
               <Button
-                size="icon"
-                variant="ghost"
-                onClick={() => setIsInsightFullscreen((prev) => !prev)}
-                title={isInsightFullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+                size="sm"
+                onClick={() => {
+                  void handleToolApproval('approve');
+                }}
+                loading={toolApprovalLoading === 'approve'}
               >
-                {isInsightFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                <Check size={14} />
+                Approve Tool
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  void handleToolApproval('skip');
+                }}
+                loading={toolApprovalLoading === 'skip'}
+              >
+                <X size={14} />
+                Skip Tool
               </Button>
             </div>
-          </div>
+          ),
+        };
+      }
 
-          {insightTab === "plan" ? (
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
-              {plannerPlanView?.phases?.length ? (
-                <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
-                  {plannerPlanView.phases.map((phase, phaseIndex) => (
-                    <div
-                      key={`${phase.phase}-${phaseIndex}`}
-                      className="rounded-md border border-border bg-surface-1/45"
-                    >
-                      <div className={`flex items-center justify-between gap-2 border-b border-border ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}>
-                        <p className={`font-semibold text-text-primary text-[15px]`}>
-                          Phase {phaseIndex + 1}: {phase.phase}
-                        </p>
-                        <span className={`text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
-                          {phase.steps.length} steps
-                        </span>
-                      </div>
-                      <div className={`space-y-2 ${isInsightFullscreen ? "p-3 space-y-3" : "p-2"}`}>
-                        {phase.steps.length === 0 ? (
-                          <p className={`text-text-muted text-sm`}>
-                            No steps yet.
-                          </p>
-                        ) : (
-                          phase.steps.map((step, stepIndex) => (
-                            <div
-                              key={`${phase.phase}-${step.step}-${stepIndex}`}
-                              className="rounded-md border border-border bg-surface-0/35"
-                            >
-                              <p className={`border-b border-border font-medium text-text-primary ${isInsightFullscreen ? "px-3 py-2 text-sm" : "px-2 py-1.5 text-sm"}`}>
-                                {stepIndex + 1}. {step.step}
-                              </p>
-                              {step.scenarios.length === 0 ? (
-                                <p className={`text-text-muted ${isInsightFullscreen ? "px-3 py-2 text-sm" : "px-2 py-1.5 text-sm"}`}>
-                                  No scenarios yet.
-                                </p>
-                              ) : (
-                                <div className="divide-y divide-border">
-                                  {step.scenarios.map(
-                                    (scenario, scenarioIndex) => (
-                                      (() => {
-                                        const statusTone =
-                                          scenario.status === "completed"
-                                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                                            : scenario.status === "working"
-                                              ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
-                                              : "border-border bg-surface-1/55 text-text-muted";
-                                        return (
-                                          <div
-                                            key={`${phase.phase}-${step.step}-scenario-${scenarioIndex}`}
-                                            className={`flex items-center justify-between gap-2 ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
-                                          >
-                                            <p className="text-text-secondary text-[13px]">
-                                              {scenario.scenario}
-                                            </p>
-                                            <div className="flex items-center gap-1.5">
-                                              {scenario.plannerRound ? (
-                                                <span className="rounded border border-pf-500/30 bg-pf-500/10 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-pf-200">
-                                                  {scenario.plannerRound}
-                                                </span>
-                                              ) : null}
-                                              <span
-                                                className={`rounded border px-1.5 py-0.5 text-[11px] capitalize ${statusTone}`}
-                                              >
-                                                {scenario.status}
-                                              </span>
-                                              <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs">
-                                                {scenario.agent}
-                                              </span>
-                                            </div>
-                                          </div>
-                                        );
-                                      })()
-                                    ),
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className={`px-1 py-2 text-text-muted text-sm`}>
-                  {isRunning
-                    ? "Plan is loading. We will show planner phases as soon as they are persisted."
-                    : "No planner result available yet."}
-                </p>
-              )}
-            </div>
-          ) : insightTab === "information" ? (
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
-              {informationGatheringView ? (
-                <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
-                  {(() => {
-                    const topStatus = informationGatheringView.status === "completed"
-                      ? "complete"
-                      : awaitingInformationGatheringApproval || informationGatheringView.status === "organized"
-                        ? "not yet"
-                        : "working";
-                    return (
-                  <div className="rounded-md border border-border bg-surface-1/45 p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm font-semibold text-text-primary">
-                        Static Information Gathering
-                      </p>
-                      <span className="rounded border border-border bg-surface-0/55 px-2 py-0.5 text-xs capitalize text-text-muted">
-                        {topStatus}
-                      </span>
-                    </div>
-                    {awaitingInformationGatheringApproval && approvalMode !== "auto" ? (
-                      <div className="mt-3 flex items-center justify-end">
+      if (awaitingPlannerApproval && stage === 'planner') {
+        if (approvalMode === 'auto') {
+          return null;
+        }
+        return {
+          title: 'Planner checklist is waiting for approval',
+          detail: 'Review the checklist, then continue to planner so scenario generation can begin.',
+          tone: 'warn',
+          controls: (
+            <Button
+              size="sm"
+              onClick={() => {
+                void handleApprovePlanner();
+              }}
+              loading={plannerApprovalLoading}
+            >
+              <Check size={14} />
+              Continue to Planner
+            </Button>
+          ),
+        };
+      }
+
+      if (awaitingInformationGatheringApproval && stage === 'planner') {
+        if (approvalMode === 'auto') {
+          return null;
+        }
+        return {
+          title: 'Information gathering plan is waiting for approval',
+          detail: 'Review the organized grouped blocks, then continue information gathering to start the deterministic pass.',
+          tone: 'warn',
+          controls: (
+            <Button
+              size="sm"
+              onClick={() => {
+                void handleApproveInformationGathering();
+              }}
+              loading={informationGatheringApprovalLoading}
+            >
+              <Check size={14} />
+              Continue Information Gathering
+            </Button>
+          ),
+        };
+      }
+
+      return null;
+    };
+
+    const getStatus = (agent: any, phaseKey?: MissionControlPhaseKey): OrchestratorStatus => {
+      // Check if this specific phase is active based on scan events
+      if (phaseKey) {
+        const lastEvent = [...scanEvents].reverse().find(e => {
+          const p = detectMissionPhase(e);
+          return p === phaseKey;
+        });
+        if (lastEvent) {
+          if (lastEvent.event.includes('_started') || lastEvent.event.includes('_running')) return 'running';
+          if (lastEvent.event.includes('_complete')) return 'completed';
+          if (lastEvent.event.includes('_failed')) return 'error';
+        }
+      }
+
+      if (agent?.state === 'running') return 'running';
+      if (agent?.state === 'thinking') return 'thinking';
+      if (agent?.state === 'success') return 'completed';
+      if (agent?.state === 'error') return 'error';
+      return 'idle';
+    };
+
+    // Helper to find the latest specific commands from logs
+    const getRecentActivity = (role: string, phaseKey?: MissionControlPhaseKey) => {
+      const logs = agentInsights[role as AgentGraphRole]?.history || [];
+      const activities: any[] = [];
+
+      // Phase-specific logic (Strict Whitelist)
+      if (phaseKey === 'intel') {
+        const intelEvents = [...scanEvents].reverse()
+          .filter(e => detectMissionPhase(e) === 'intel' && e.message)
+          .slice(0, 10);
+        intelEvents.forEach(e => {
+          const msg = e.message?.toLowerCase() || '';
+          let displayMsg = '';
+
+          if (msg.includes('refreshing')) displayMsg = 'checking rag update';
+          else if (msg.includes('updating')) displayMsg = 'updating';
+          else if (msg.includes('skip') || msg.includes('fresh')) displayMsg = 'skip';
+
+          if (displayMsg) {
+            activities.push({ type: 'info', message: displayMsg, at: e.timestamp });
+          }
+        });
+      }
+
+      if (phaseKey === 'information_gathering') {
+        const infoEvents = [...scanEvents].reverse()
+          .filter(e => detectMissionPhase(e) === 'information_gathering' && e.message)
+          .slice(0, 10);
+        infoEvents.forEach(e => {
+          const msg = e.message?.toLowerCase() || '';
+          if (msg.includes('thinking') || msg.includes('running') || msg.includes('start')) {
+            activities.push({
+              type: msg.includes('thinking') ? 'thinking' : 'info',
+              message: e.message,
+              at: e.timestamp
+            });
+          }
+        });
+      }
+
+      // General Agent Logs (Strict Whitelist)
+      const filteredLogs = [...logs].reverse()
+        .filter(l => l.message && !l.message.includes('Mission control'))
+        .slice(0, 20);
+
+      filteredLogs.forEach(l => {
+        const msg = l.message;
+        const lowerMsg = msg.toLowerCase();
+        let type: 'thinking' | 'command' | 'result' | 'info' | null = null;
+        let displayMsg = msg;
+
+        // Whitelist Logic
+        if (lowerMsg.includes('[run tool]') || lowerMsg.includes('executing') || lowerMsg.includes('tool call:')) {
+          type = 'command';
+          const match = msg.match(/\[run tool\]\s+(.+)/i) || msg.match(/executing\s+(.+)/i) || msg.match(/tool call:\s+(.+)/i);
+          displayMsg = match ? match[1] : msg;
+        }
+        else if (role === 'analyzer') {
+          if (lowerMsg.includes('thinking') || lowerMsg.includes('[verify]') || lowerMsg.includes('[retest]')) {
+            type = 'thinking';
+          } else if (lowerMsg.includes('finished') || lowerMsg.includes('confirmed')) {
+            type = 'result';
+          }
+        }
+        else if (role === 'executer') {
+          if (lowerMsg.includes('[exploit]') && lowerMsg.includes('thinking')) {
+            type = 'thinking';
+          }
+        }
+        else if (role === 'planner') {
+          if (lowerMsg.includes('thinking') || lowerMsg.includes('round') || lowerMsg.includes('fetch info')) {
+            type = 'thinking';
+          }
+        }
+
+        // Only add if it matched a whitelisted type and isn't a duplicate
+        if (type && !activities.some(a => a.message === displayMsg)) {
+          activities.push({ type, message: displayMsg, at: l.at });
+        }
+      });
+
+      return activities.length > 0 ? activities.slice(0, 4) : undefined;
+    };
+
+    const plannerStatus = getStatus(plannerAgent);
+    const intelStatus = getStatus(null, 'intel');
+
+    const executerStatus = getStatus(executerAgent);
+    const infoGatherStatus = getStatus(null, 'information_gathering');
+
+    const analyzerStatus = getStatus(analyzerAgent);
+    const brainStatus = getStatus(null, 'brain');
+
+    const plannerDisplayPhase: MissionControlPhaseKey =
+      latestMissionPhase === 'intel' || latestMissionPhase === 'information_gathering' || latestMissionPhase === 'planner'
+        ? latestMissionPhase
+        : 'planner';
+
+    const plannerCompositeStatus =
+      plannerDisplayPhase === 'intel'
+        ? intelStatus
+        : plannerDisplayPhase === 'information_gathering'
+          ? infoGatherStatus
+          : plannerStatus;
+
+    return {
+      planner: {
+        stage: 'planner' as OrchestratorStage,
+        status: onlyActiveStageCanRun(
+          'planner',
+          plannerCompositeStatus,
+        ),
+        label:
+          plannerDisplayPhase === 'intel'
+            ? 'Intel Phase'
+            : plannerDisplayPhase === 'information_gathering'
+              ? 'Information Gathering'
+              : 'Planner',
+        icon: Brain,
+        subtext:
+          plannerDisplayPhase === 'intel'
+            ? 'Refreshing RAG & synthesizing checklist...'
+            : plannerDisplayPhase === 'information_gathering'
+              ? 'Running information gathering blocks...'
+              : (plannerAgent?.currentTask || 'Synthesizing target checklist...'),
+        recentActivity:
+          plannerDisplayPhase === 'information_gathering'
+            ? getRecentActivity('executer', 'information_gathering')
+            : plannerDisplayPhase === 'intel'
+              ? getRecentActivity('planner', 'intel')
+              : getRecentActivity('planner', 'planner'),
+        actionPanel: getStageActionPanel('planner'),
+      },
+      executer: {
+        stage: 'executer' as OrchestratorStage,
+        status: onlyActiveStageCanRun(
+          'executer',
+          executerStatus,
+        ),
+        label: 'Executer',
+        icon: Zap,
+        subtext: executerAgent?.currentTask || 'Waiting for plan execution...',
+        recentActivity: getRecentActivity('executer', 'executer'),
+        actionPanel: getStageActionPanel('executer'),
+      },
+      analyzer: {
+        stage: 'analyzer' as OrchestratorStage,
+        status: onlyActiveStageCanRun(
+          'analyzer',
+          brainStatus === 'running' || brainStatus === 'error' ? brainStatus : analyzerStatus,
+        ),
+        label: brainStatus === 'running' ? 'Brain' : 'Analyser',
+        icon: Search,
+        subtext: brainStatus === 'running'
+          ? 'Processing findings into system memory...'
+          : (analyzerAgent?.currentTask || 'Verifying impact and findings...'),
+        recentActivity: getRecentActivity('analyzer', 'brain') || (realtimeVulnFindings.length > 0 ? [`${realtimeVulnFindings.length} findings verified`] : undefined),
+        actionPanel: getStageActionPanel('analyzer'),
+      }
+    };
+  }, [
+    visibleAgents,
+    agentInsights,
+    realtimeVulnFindings,
+    scanEvents,
+    latestMissionPhase,
+    missionControlState,
+    pendingPasswordRequest,
+    pendingPasswordValue,
+    passwordResponseLoading,
+    pendingToolApproval,
+    autoApprovingPendingTool,
+    pendingToolCommandPreview,
+    toolApprovalLoading,
+    awaitingPlannerApproval,
+    approvalMode,
+    plannerApprovalLoading,
+    awaitingInformationGatheringApproval,
+    informationGatheringApprovalLoading,
+    handleApprovePlanner,
+    handleApproveInformationGathering,
+  ]);
+
+  const handleStartScanClick = () => {
+    if (effectiveStatus === "completed") {
+      const confirmed = window.confirm(
+        "This scan already completed. Start a new scan and clear previous results?",
+      );
+      if (!confirmed) {
+        return;
+      }
+      setStreamLogs([]);
+      setScanEvents([]);
+      setRunning(activeProject?.id || "", {
+        triggerScan: true,
+        force: true,
+      });
+      return;
+    }
+    if (effectiveStatus === "stopped") {
+      const confirmed = window.confirm(
+        "Resume will start a new scan and keep previous history visible. Continue?",
+      );
+      if (!confirmed) {
+        return;
+      }
+      setRunning(activeProject?.id || "", {
+        triggerScan: true,
+        resume: true,
+      });
+      return;
+    }
+    if (effectiveStatus === "idle") {
+      setStreamLogs([]);
+      setScanEvents([]);
+    }
+    setRunning(activeProject?.id || "", { triggerScan: true });
+  };
+
+  const handleSelectRealtimeFinding = (item: RealtimeVulnFinding) => {
+    const fullFinding = activeProject?.findings?.find(
+      (finding: any) => finding.id === item.id.replace("finding-", ""),
+    );
+    setSelectedFinding(fullFinding || item);
+  };
+
+  const handleAddFindingToEchoPrompt = useCallback((item: RealtimeVulnFinding) => {
+    const payload = {
+      finding_id: item.id.replace(/^finding-/, ""),
+      title: item.title,
+      severity: item.severity,
+      category: item.category ?? "",
+      target: item.endpoint ?? "",
+      description: item.description ?? "",
+      evidence_status: item.evidenceStatus ?? "",
+      proof_quality: item.proofQuality ?? "",
+      cve: item.cve ?? "",
+      cvss: item.cvss ?? "",
+    };
+    setIsCopilotOpen(true);
+    setCopilotDraft({
+      token: `finding-json-${payload.finding_id || Date.now()}`,
+      text: JSON.stringify(payload, null, 2),
+    });
+  }, [setIsCopilotOpen]);
+
+  const handleMarkFindingFalsePositive = useCallback(async (item: RealtimeVulnFinding) => {
+    if (!activeProjectId) {
+      return;
+    }
+    const findingReference = item.id.replace(/^finding-/, "") || item.title;
+    if (!findingReference) {
+      return;
+    }
+
+    setFalsePositiveLoadingId(item.id);
+    try {
+      const result = await markProjectFindingFalsePositiveFromDesktop(activeProjectId, {
+        findingId: findingReference,
+        reason: "Operator marked as false positive from confirmed vulnerabilities panel.",
+      });
+
+      const projectState = useProjects.getState();
+      const currentProject = projectState.projects.find((project) => project.id === activeProjectId);
+      if (currentProject && Array.isArray(currentProject.findings)) {
+        let changed = false;
+        const nextFindings = currentProject.findings.map((finding) => {
+          if (!findingMatchesReference(
+            finding,
+            typeof result.matched_finding_id === "string" ? result.matched_finding_id : "",
+            typeof result.matched_finding_title === "string" ? result.matched_finding_title : "",
+            findingReference,
+          )) {
+            return finding;
+          }
+          changed = true;
+          return {
+            ...finding,
+            status: "false_positive" as const,
+          };
+        });
+        if (changed) {
+          projectState.updateProject(activeProjectId, { findings: nextFindings }, { persist: false });
+        }
+      }
+
+      await hydrateFromDatabase();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to mark finding as false positive.";
+      setStreamLogs((previous) => [
+        ...previous,
+        {
+          id: `false-positive-error-${Math.random().toString(36).slice(2, 10)}`,
+          level: "warn",
+          message,
+          at: new Date().toISOString(),
+          source: "system",
+        },
+      ]);
+    } finally {
+      setFalsePositiveLoadingId(null);
+    }
+  }, [activeProjectId, hydrateFromDatabase]);
+
+  if (!activeProject) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3">
+        <FolderOpen size={48} className="text-text-muted" />
+        <p className="text-sm text-text-secondary">No project selected.</p>
+        <Button onClick={() => navigate("/projects")}>Open Projects</Button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(59, 130, 246, 0.2);
+          border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: rgba(59, 130, 246, 0.4);
+        }
+      `}</style>
+      <div className="flex h-full w-full overflow-hidden bg-background">
+        <div className="flex-1 min-w-0 overflow-y-auto p-4 space-y-4 transition-all duration-300 ease-in-out scrollbar-pf">
+          <DashboardProjectHeader
+            projectName={activeProject.name}
+            effectiveStatus={effectiveStatus}
+            isRunning={isRunning}
+            canRun={canRun}
+            isStarting={isStarting}
+            hasAnotherRunningProject={hasAnotherRunningProject}
+            onStartScan={handleStartScanClick}
+            onStopScan={() => setStopDialogOpen(true)}
+            onChangeProject={() => navigate("/projects")}
+            onCloseProject={handleCloseProject}
+          />
+
+          <DashboardTargetOverviewCard
+            target={activeProject.target}
+            targetType={activeProject.targetType}
+            createdAt={activeProject.createdAt}
+            updatedAt={activeProject.updatedAt}
+            effectiveStatus={effectiveStatus}
+            displayedPentestElapsed={displayedPentestElapsed}
+            onEditProject={handleOpenProjectEdit}
+            formatDateTime={formatDateTime}
+          />
+
+          <div className="grid gap-4 xl:grid-cols-2">
+            <div className="min-w-0 flex flex-col">
+              <Card className="flex h-[650px] flex-col space-y-1 p-3 overflow-hidden">
+                <div className="flex items-center justify-between">
+                  <div className="flex flex-col">
+                    <h2 className="text-base font-bold  uppercase tracking-widest">
+                      Orchestrator Pipeline
+                    </h2>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5">
+                      <div className="relative" ref={approvalModeMenuRef}>
                         <Button
-                          size="sm"
-                          variant="primary"
-                          className="bg-blue-600 hover:bg-blue-700"
-                          onClick={() => {
-                            void handleApproveInformationGathering();
-                          }}
-                          loading={informationGatheringApprovalLoading}
-                          title="Approve static information gathering plan and continue"
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 text-text-muted hover:text-text-primary"
+                          onClick={() => setShowApprovalModeMenu((open) => !open)}
+                          title="Approval mode"
                         >
-                          <Check size={14} />
-                          Continue Information Gathering
+                          <Check size={16} />
                         </Button>
-                      </div>
-                    ) : null}
-                    {awaitingInformationGatheringApproval && approvalMode === "auto" ? (
-                      <div className="mt-3 flex items-center justify-end">
-                        <Badge variant="running" dot>
-                          Auto-approving information gathering
-                        </Badge>
-                      </div>
-                    ) : null}
-                  </div>
-                    );
-                  })()}
-
-                  <div className="rounded-md border border-border bg-surface-1/45">
-                    <div className={`border-b border-border ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}>
-                      <p className="text-sm font-semibold text-text-primary">Final Static Blocks</p>
-                    </div>
-                    <div className={`${isInsightFullscreen ? "p-3 space-y-3" : "p-2 space-y-2"}`}>
-                      {(() => {
-                        const currentProgram = (awaitingInformationGatheringApproval && editableInformationGatheringProgram) 
-                          ? editableInformationGatheringProgram 
-                          : informationGatheringView.program;
-
-                        const renderedBlocks = currentProgram.length > 0
-                          ? currentProgram.map((programBlock) => {
-                              const executedBlock = informationGatheringView.blocks.find(
-                                (block) => block.id === programBlock.id,
-                              );
-                              return {
-                                id: programBlock.id,
-                                name: programBlock.name,
-                                goal: programBlock.goal || executedBlock?.goal || "",
-                                decision: programBlock.status || executedBlock?.status || "keep",
-                                rationale: programBlock.selectionRationale || executedBlock?.selectionRationale || "",
-                                plannedTools: programBlock.plannedTools,
-                                skippedTools: programBlock.skippedTools,
-                                summary: executedBlock?.summary || "",
-                                executionStatus: informationGatheringCompletedIds.has(programBlock.id)
-                                  ? "complete"
-                                  : informationGatheringView.workingBlockId === programBlock.id
-                                    ? "working"
-                                    : "not yet",
-                              };
-                            })
-                          : informationGatheringView.blocks.map((block) => ({
-                              id: block.id,
-                              name: block.name,
-                              goal: block.goal,
-                              decision: block.status || "keep",
-                              rationale: block.selectionRationale,
-                              plannedTools: block.plannedTools.map((tool) => ({ label: tool, kind: "builtin" as const })),
-                              skippedTools: block.skippedTools,
-                              summary: block.summary,
-                              executionStatus: informationGatheringCompletedIds.has(block.id)
-                                ? "complete"
-                                : informationGatheringView.workingBlockId === block.id
-                                  ? "working"
-                                  : "not yet",
-                            }));
-
-                        if (renderedBlocks.length === 0) {
-                          return (
-                            <p className="text-sm text-text-muted">
-                              Information Gathering details are not available yet.
+                        {showApprovalModeMenu ? (
+                          <div className="absolute right-0 top-9 z-30 w-48 rounded-md border border-border bg-surface-1 p-2 shadow-xl">
+                            <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-text-secondary">
+                              Approval Mode
                             </p>
-                          );
-                        }
-
-                        return renderedBlocks.map((block, blockIndex) => (
-                          <div
-                            key={`${block.id}-${blockIndex}`}
-                            className="group relative rounded-md border border-border bg-surface-0/35 p-3"
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-sm font-semibold text-text-primary">
-                                {blockIndex + 1}. {block.name}
-                              </p>
-                              <div className="flex items-center gap-2">
-                                {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
-                                  <button
-                                    onClick={() => removeInformationGatheringBlock(block.id)}
-                                    className="rounded-md p-1 text-text-muted hover:bg-red-500/10 hover:text-red-400"
-                                    title="Delete this gathering block"
-                                  >
-                                    <Trash2 size={14} />
-                                  </button>
-                                )}
-                                <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-xs capitalize text-text-muted">
-                                  {block.executionStatus}
-                                </span>
-                              </div>
+                            <div className="flex flex-col gap-1">
+                              <Button
+                                size="xs"
+                                variant={approvalMode === "custom" ? "primary" : "secondary"}
+                                onClick={() => {
+                                  handleApprovalModeChange("custom");
+                                  setShowApprovalModeMenu(false);
+                                }}
+                              >
+                                Custom
+                              </Button>
+                              <Button
+                                size="xs"
+                                variant={approvalMode === "auto" ? "primary" : "secondary"}
+                                onClick={() => {
+                                  handleApprovalModeChange("auto");
+                                  setShowApprovalModeMenu(false);
+                                }}
+                              >
+                                Auto
+                              </Button>
                             </div>
-                            {block.goal ? (
-                              <div className="mt-2">
-                                <p className="text-xs font-medium text-text-primary">Scenario</p>
-                                <p className="mt-1 text-xs text-text-secondary">{block.goal}</p>
-                              </div>
-                            ) : null}
-                            <div className="mt-2">
-                              <p className="text-xs font-medium text-text-primary">Full tools</p>
-                              <div className="mt-1 flex flex-wrap gap-1.5">
-                                {block.plannedTools.length === 0 ? (
-                                  <span className="text-xs text-text-muted">No tools selected.</span>
-                                ) : (
-                                  block.plannedTools.map((tool: { label: string; kind: string }, toolIndex: number) => (
-                                    <div
-                                      key={`${block.id}-tool-${toolIndex}`}
-                                      className={`group/tool relative flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${tool.kind === "custom" ? "border-amber-500/50 bg-amber-500/10 text-amber-400 font-medium" : "border-border bg-surface-1/55 text-text-secondary"}`}
-                                    >
-                                      <span>{tool.label}</span>
-                                      {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
-                                        <button
-                                          onClick={() => removeInformationGatheringTool(block.id, tool.label)}
-                                          className="text-text-muted hover:text-red-400"
-                                          title="Remove tool"
-                                        >
-                                          <X size={10} />
-                                        </button>
-                                      )}
-                                    </div>
-                                  ))
-                                )}
-                                {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
-                                  <div className="flex items-center gap-1">
-                                    <input
-                                      type="text"
-                                      placeholder="Add tool/command..."
-                                      className="h-6 w-32 rounded border border-border bg-surface-1/55 px-2 text-[10px] text-text-primary outline-none focus:border-pf-500/50"
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter") {
-                                          addInformationGatheringTool(block.id, e.currentTarget.value);
-                                          e.currentTarget.value = "";
-                                        }
-                                      }}
-                                    />
-                                    <div className="rounded border border-border bg-surface-1/55 p-1 text-text-muted">
-                                      <Plus size={10} />
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                            {block.skippedTools.length > 0 ? (
-                              <div className="mt-2">
-                                <p className="text-xs font-medium text-text-primary">Skipped tools</p>
-                                <p className="mt-1 text-xs text-text-muted">{block.skippedTools.join(", ")}</p>
-                              </div>
-                            ) : null}
-                            <div className="mt-2">
-                              <p className="text-xs font-medium text-text-primary">LLM remark</p>
-                              <p className="mt-1 text-xs text-text-muted capitalize">{block.decision || "keep"}</p>
-                              {block.rationale ? (
-                                <p className="mt-1 text-xs text-text-secondary">{block.rationale}</p>
-                              ) : null}
-                            </div>
-                            {block.summary ? (
-                              <div className="mt-2">
-                                <p className="text-xs font-medium text-text-primary">Result</p>
-                                <p className="mt-1 text-xs text-text-secondary">{block.summary}</p>
-                              </div>
-                            ) : null}
                           </div>
-                        ));
-                      })()}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <p className="px-1 py-2 text-sm text-text-muted">
-                  Information Gathering details are not available yet.
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
-              {isAddEditorOpen ? (
-                <div className="space-y-2 rounded-md border border-border bg-surface-1/50 p-2">
-                  <div className="grid gap-2 lg:grid-cols-[1fr_auto_auto_auto]">
-                    <input
-                      value={addItemName}
-                      onChange={(event) => setAddItemName(event.target.value)}
-                      placeholder="New checklist item"
-                      disabled={isChecklistSaving}
-                      className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-sm text-text-primary outline-none focus:border-pf-500/50"
-                    />
-                    <select
-                      value={selectedAddPhase}
-                      onChange={(event) => setAddItemPhase(event.target.value)}
-                      disabled={isChecklistSaving}
-                      className={dashboardSelectClass}
-                      title="Target phase"
-                    >
-                      {checklistBlocks.length === 0 ? (
-                        <option
-                          value="0"
-                          style={{
-                            backgroundColor: "var(--surface-1)",
-                            color: "var(--text-primary)",
-                          }}
-                        >
-                          Phase 4 - Authentication, Authorization & Injection Testing
-                        </option>
-                      ) : (
-                        checklistBlocks.map((block, blockIndex) => (
-                          <option
-                            key={`${block.phase}-${block.title}-${blockIndex}`}
-                            value={String(blockIndex)}
-                            style={{
-                              backgroundColor: "var(--surface-1)",
-                              color: "var(--text-primary)",
-                            }}
-                          >
-                            {block.phase ? `Phase ${block.phase}` : "Phase"} -{" "}
-                            {block.title}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <select
-                      value={String(addItemPriority)}
-                      onChange={(event) => {
-                        const next = Number.parseInt(event.target.value, 10);
-                        setAddItemPriority(Number.isInteger(next) ? next : 3);
-                      }}
-                      disabled={isChecklistSaving}
-                      className={dashboardSelectClass}
-                      title="Severity"
-                    >
-                      {[1, 2, 3, 4, 5].map((priority) => (
-                        <option
-                          key={priority}
-                          value={String(priority)}
-                          style={{
-                            backgroundColor: "var(--surface-1)",
-                            color: "var(--text-primary)",
-                          }}
-                        >
-                          S{priority}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="flex items-center justify-end gap-1">
-                      <Button
-                        size="icon"
-                        variant="secondary"
-                        onClick={() => {
-                          void handleAddChecklistItem();
-                        }}
-                        loading={checklistActionKey === "checklist-add"}
-                        disabled={
-                          isChecklistSaving || addItemName.trim().length === 0
-                        }
-                        title="Save new item"
-                      >
-                        <Check size={13} />
-                      </Button>
+                        ) : null}
+                      </div>
+
                       <Button
                         size="icon"
                         variant="ghost"
+                        className="h-8 w-8 text-text-muted hover:text-text-primary"
                         onClick={() => {
-                          setIsAddEditorOpen(false);
-                          setChecklistError("");
+                          void requestNotificationAccess();
                         }}
-                        disabled={isChecklistSaving}
-                        title="Cancel"
+                        disabled={notificationsUnavailable}
+                        title={
+                          notificationsUnavailable
+                            ? "Notifications unsupported"
+                            : notificationsEnabled
+                              ? "Disable notifications"
+                              : "Enable notifications"
+                        }
                       >
-                        <X size={13} />
+                        {notificationsUnavailable || !notificationsEnabled ? <BellOff size={16} /> : <Bell size={16} />}
                       </Button>
                     </div>
                   </div>
                 </div>
-              ) : null}
+                <div className="h-px w-full bg-border/60" />
 
-              {checklistBlocks.length === 0 ? (
-                <p className={`px-1 py-2 text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
-                  {isRunning
-                    ? "Checklist is generating and will appear after Intel finalizes set_checklist."
-                    : "No checklist generated yet."}
-                </p>
-              ) : (
-                checklistBlocks.map((block, blockIndex) => (
-                  <div
-                    key={`${block.phase}-${block.title}-${blockIndex}`}
-                    className={`rounded-md border border-border bg-surface-1/45 ${isInsightFullscreen ? "space-y-3 p-3" : "space-y-2 p-2"}`}
+                <div className="min-h-0 flex-1 rounded-md border border-border bg-surface-0/35 p-4">
+                  <div className="flex h-full flex-col min-h-0">
+                    <OrchestratorPipeline stages={pipelineStages} />
+                  </div>
+                </div>
+              </Card>
+            </div>
+
+            <div ref={findingsSectionRef} className="min-w-0 flex flex-col">
+              <DashboardFindingsPanel
+                findings={realtimeVulnFindings}
+                findingsEmptyMessage={findingsEmptyMessage}
+                onSelectFinding={handleSelectRealtimeFinding}
+                onMarkFalsePositive={handleMarkFindingFalsePositive}
+                onAddToEchoPrompt={handleAddFindingToEchoPrompt}
+                falsePositiveLoadingId={falsePositiveLoadingId}
+                severityBadgeClass={severityBadgeClass}
+                evidenceBadgeClass={evidenceBadgeClass}
+                proofQualityBadgeClass={proofQualityBadgeClass}
+                formatTime={formatTime}
+              />
+            </div>
+          </div>
+
+          {/* Fullscreen overlay for Execution Notes */}
+          {isInsightFullscreen && (
+            <div
+              className="fixed inset-0 z-50 bg-surface-0/95 backdrop-blur-sm"
+              onClick={() => setIsInsightFullscreen(false)}
+            />
+          )}
+
+          <div className="grid gap-4">
+            <Card
+              className={
+                isInsightFullscreen
+                  ? "fixed inset-4 z-50 flex flex-col space-y-3 overflow-hidden p-4"
+                  : "flex h-[650px] flex-col space-y-3 p-3"
+              }
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <h2 className={`font-semibold text-text-primary ${isInsightFullscreen ? "text-lg" : "text-base"}`}>
+                    Execution Notes
+                  </h2>
+                  {insightTab === "checklist" ? (
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      onClick={() => {
+                        setChecklistError("");
+                        setIsAddEditorOpen((open) => !open);
+                      }}
+                      disabled={isChecklistSaving}
+                      title={
+                        isAddEditorOpen
+                          ? "Close add item form"
+                          : "Add checklist item"
+                      }
+                    >
+                      <Plus size={13} />
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-0/40 p-1">
+                    <Button
+                      size="xs"
+                      variant={insightTab === "information" ? "secondary" : "ghost"}
+                      onClick={() => setInsightTab("information")}
+                    >
+                      Information
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant={insightTab === "checklist" ? "secondary" : "ghost"}
+                      onClick={() => setInsightTab("checklist")}
+                    >
+                      Checklist
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant={insightTab === "plan" ? "secondary" : "ghost"}
+                      onClick={() => setInsightTab("plan")}
+                    >
+                      Plan
+                    </Button>
+                  </div>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => setIsInsightFullscreen((prev) => !prev)}
+                    title={isInsightFullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[15px] font-semibold leading-5 text-text-primary">
-                        {block.phase ? `Phase ${block.phase}` : "Phase"} -{" "}
-                        {block.title}
-                      </p>
-                      <span className={`text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
-                        {block.items.length} items
-                      </span>
-                    </div>
-                    <div className={isInsightFullscreen ? "space-y-2" : "space-y-1.5"}>
-                      {block.items.map((item, itemIndex) => {
-                        const rowKey = `${blockIndex}:${itemIndex}`;
-                        const updateActionKey = `checklist-update-${blockIndex}-${itemIndex}`;
-                        const removeActionKey = `checklist-remove-${blockIndex}-${itemIndex}`;
-                        const isEditingThisRow = editingRowKey === rowKey;
-                        return (
-                          <div
-                            key={rowKey}
-                            className={`space-y-2 rounded-md border border-border bg-surface-0/35 text-sm ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
-                          >
-                            <div className="flex flex-wrap items-center gap-2">
-                              <p className={`flex-1 text-text-secondary ${isInsightFullscreen ? "min-w-[280px]" : "min-w-[220px]"}`}>
-                                {item.name}
+                    {isInsightFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                  </Button>
+                </div>
+              </div>
+
+              {insightTab === "plan" ? (
+                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
+                  {plannerPlanView?.phases?.length ? (
+                    <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
+                      {plannerPlanView.phases.map((phase, phaseIndex) => (
+                        <div
+                          key={`${phase.phase}-${phaseIndex}`}
+                          className="rounded-md border border-border bg-surface-1/45"
+                        >
+                          <div className={`flex items-center justify-between gap-2 border-b border-border ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}>
+                            <p className={`font-semibold text-text-primary text-[15px]`}>
+                              Phase {phaseIndex + 1}: {phase.phase}
+                            </p>
+                            <span className={`text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
+                              {phase.steps.length} steps
+                            </span>
+                          </div>
+                          <div className={`space-y-2 ${isInsightFullscreen ? "p-3 space-y-3" : "p-2"}`}>
+                            {phase.steps.length === 0 ? (
+                              <p className={`text-text-muted text-sm`}>
+                                No steps yet.
                               </p>
-                              <span className={`rounded-md border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted ${isInsightFullscreen ? "text-xs" : "text-xs"}`}>
-                                S{item.priority}
+                            ) : (
+                              phase.steps.map((step, stepIndex) => (
+                                <div
+                                  key={`${phase.phase}-${step.step}-${stepIndex}`}
+                                  className="rounded-md border border-border bg-surface-0/35"
+                                >
+                                  <p className={`border-b border-border font-medium text-text-primary ${isInsightFullscreen ? "px-3 py-2 text-sm" : "px-2 py-1.5 text-sm"}`}>
+                                    {stepIndex + 1}. {step.step}
+                                  </p>
+                                  {step.scenarios.length === 0 ? (
+                                    <p className={`text-text-muted ${isInsightFullscreen ? "px-3 py-2 text-sm" : "px-2 py-1.5 text-sm"}`}>
+                                      No scenarios yet.
+                                    </p>
+                                  ) : (
+                                    <div className="divide-y divide-border">
+                                      {step.scenarios.map(
+                                        (scenario, scenarioIndex) => (
+                                          (() => {
+                                            const statusTone =
+                                              scenario.status === "completed"
+                                                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                                                : scenario.status === "working"
+                                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                                                  : "border-border bg-surface-1/55 text-text-muted";
+                                            return (
+                                              <div
+                                                key={`${phase.phase}-${step.step}-scenario-${scenarioIndex}`}
+                                                className={`flex items-center justify-between gap-2 ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
+                                              >
+                                                <p className="text-text-secondary text-[13px]">
+                                                  {scenario.scenario}
+                                                </p>
+                                                <div className="flex items-center gap-1.5">
+                                                  {scenario.plannerRound ? (
+                                                    <span className="rounded border border-pf-500/30 bg-pf-500/10 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-pf-200">
+                                                      {scenario.plannerRound}
+                                                    </span>
+                                                  ) : null}
+                                                  <span
+                                                    className={`rounded border px-1.5 py-0.5 text-[11px] capitalize ${statusTone}`}
+                                                  >
+                                                    {scenario.status}
+                                                  </span>
+                                                  <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs">
+                                                    {scenario.agent}
+                                                  </span>
+                                                </div>
+                                              </div>
+                                            );
+                                          })()
+                                        ),
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className={`px-1 py-2 text-text-muted text-sm`}>
+                      {isRunning
+                        ? "Plan is loading. We will show planner phases as soon as they are persisted."
+                        : "No planner result available yet."}
+                    </p>
+                  )}
+                </div>
+              ) : insightTab === "information" ? (
+                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
+                  {informationGatheringView ? (
+                    <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
+                      {(() => {
+                        const topStatus = informationGatheringView.status === "completed"
+                          ? "complete"
+                          : awaitingInformationGatheringApproval || informationGatheringView.status === "organized"
+                            ? "not yet"
+                            : "working";
+                        return (
+                          <div className="rounded-md border border-border bg-surface-1/45 p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-semibold text-text-primary">
+                                Static Information Gathering
+                              </p>
+                              <span className="rounded border border-border bg-surface-0/55 px-2 py-0.5 text-xs capitalize text-text-muted">
+                                {topStatus}
                               </span>
-                              <Button
-                                size="icon"
-                                variant="secondary"
-                                onClick={() => {
-                                  if (isEditingThisRow) {
-                                    setEditingRowKey(null);
-                                    setChecklistError("");
-                                    return;
-                                  }
-                                  setChecklistError("");
-                                  setEditingRowKey(rowKey);
-                                  setEditItemName(item.name);
-                                  setEditItemPriority(item.priority);
-                                }}
-                                disabled={isChecklistSaving}
-                                title="Edit item"
-                              >
-                                <Pencil size={isInsightFullscreen ? 15 : 13} />
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="secondary"
-                                onClick={() => {
-                                  void handleRemoveChecklistItem(
-                                    blockIndex,
-                                    itemIndex,
-                                  );
-                                }}
-                                loading={checklistActionKey === removeActionKey}
-                                disabled={isChecklistSaving}
-                                title="Remove item"
-                              >
-                                <Trash2 size={isInsightFullscreen ? 15 : 13} />
-                              </Button>
                             </div>
-                            {isEditingThisRow ? (
-                              <div className="grid gap-2 border-t border-border pt-2 lg:grid-cols-[1fr_auto_auto_auto]">
-                                <input
-                                  value={editItemName}
-                                  onChange={(event) =>
-                                    setEditItemName(event.target.value)
-                                  }
-                                  disabled={isChecklistSaving}
-                                  className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-xs text-text-primary outline-none focus:border-pf-500/50"
-                                />
-                                <select
-                                  value={String(editItemPriority)}
-                                  onChange={(event) => {
-                                    const next = Number.parseInt(
-                                      event.target.value,
-                                      10,
-                                    );
-                                    setEditItemPriority(
-                                      Number.isInteger(next)
-                                        ? next
-                                        : item.priority,
-                                    );
-                                  }}
-                                  disabled={isChecklistSaving}
-                                  className={dashboardSelectClass}
-                                  title="Severity"
-                                >
-                                  {[1, 2, 3, 4, 5].map((priority) => (
-                                    <option
-                                      key={priority}
-                                      value={String(priority)}
-                                      style={{
-                                        backgroundColor: "var(--surface-1)",
-                                        color: "var(--text-primary)",
-                                      }}
-                                    >
-                                      S{priority}
-                                    </option>
-                                  ))}
-                                </select>
+                            {awaitingInformationGatheringApproval && approvalMode !== "auto" ? (
+                              <div className="mt-3 flex items-center justify-end">
                                 <Button
-                                  size="icon"
-                                  variant="secondary"
+                                  size="sm"
+                                  variant="primary"
+                                  className="bg-blue-600 hover:bg-blue-700"
                                   onClick={() => {
-                                    void handleUpdateChecklistItem(
-                                      blockIndex,
-                                      itemIndex,
-                                      rowKey,
-                                    );
+                                    void handleApproveInformationGathering();
                                   }}
-                                  loading={
-                                    checklistActionKey === updateActionKey
-                                  }
-                                  disabled={
-                                    isChecklistSaving ||
-                                    editItemName.trim().length === 0
-                                  }
-                                  title="Save edit"
+                                  loading={informationGatheringApprovalLoading}
+                                  title="Approve static information gathering plan and continue"
                                 >
-                                  <Check size={13} />
+                                  <Check size={14} />
+                                  Continue Information Gathering
                                 </Button>
-                                <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  onClick={() => {
-                                    setEditingRowKey(null);
-                                    setChecklistError("");
-                                  }}
-                                  disabled={isChecklistSaving}
-                                  title="Cancel edit"
-                                >
-                                  <X size={13} />
-                                </Button>
+                              </div>
+                            ) : null}
+                            {awaitingInformationGatheringApproval && approvalMode === "auto" ? (
+                              <div className="mt-3 flex items-center justify-end">
+                                <Badge variant="running" dot>
+                                  Auto-approving information gathering
+                                </Badge>
                               </div>
                             ) : null}
                           </div>
                         );
-                      })}
+                      })()}
+
+                      <div className="rounded-md border border-border bg-surface-1/45">
+                        <div className={`border-b border-border ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}>
+                          <p className="text-sm font-semibold text-text-primary">Final Static Blocks</p>
+                        </div>
+                        <div className={`${isInsightFullscreen ? "p-3 space-y-3" : "p-2 space-y-2"}`}>
+                          {(() => {
+                            const currentProgram = (awaitingInformationGatheringApproval && editableInformationGatheringProgram)
+                              ? editableInformationGatheringProgram
+                              : informationGatheringView.program;
+
+                            const renderedBlocks = currentProgram.length > 0
+                              ? currentProgram.map((programBlock) => {
+                                const executedBlock = informationGatheringView.blocks.find(
+                                  (block) => block.id === programBlock.id,
+                                );
+                                return {
+                                  id: programBlock.id,
+                                  name: programBlock.name,
+                                  goal: programBlock.goal || executedBlock?.goal || "",
+                                  decision: programBlock.status || executedBlock?.status || "keep",
+                                  rationale: programBlock.selectionRationale || executedBlock?.selectionRationale || "",
+                                  plannedTools: programBlock.plannedTools,
+                                  skippedTools: programBlock.skippedTools,
+                                  summary: executedBlock?.summary || "",
+                                  executionStatus: informationGatheringCompletedIds.has(programBlock.id)
+                                    ? "complete"
+                                    : informationGatheringView.workingBlockId === programBlock.id
+                                      ? "working"
+                                      : "not yet",
+                                };
+                              })
+                              : informationGatheringView.blocks.map((block) => ({
+                                id: block.id,
+                                name: block.name,
+                                goal: block.goal,
+                                decision: block.status || "keep",
+                                rationale: block.selectionRationale,
+                                plannedTools: block.plannedTools.map((tool) => ({ label: tool, kind: "builtin" as const })),
+                                skippedTools: block.skippedTools,
+                                summary: block.summary,
+                                executionStatus: informationGatheringCompletedIds.has(block.id)
+                                  ? "complete"
+                                  : informationGatheringView.workingBlockId === block.id
+                                    ? "working"
+                                    : "not yet",
+                              }));
+
+                            if (renderedBlocks.length === 0) {
+                              return (
+                                <p className="text-sm text-text-muted">
+                                  Information Gathering details are not available yet.
+                                </p>
+                              );
+                            }
+
+                            return renderedBlocks.map((block, blockIndex) => (
+                              <div
+                                key={`${block.id}-${blockIndex}`}
+                                className="group relative rounded-md border border-border bg-surface-0/35 p-3"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-sm font-semibold text-text-primary">
+                                    {blockIndex + 1}. {block.name}
+                                  </p>
+                                  <div className="flex items-center gap-2">
+                                    {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
+                                      <button
+                                        onClick={() => removeInformationGatheringBlock(block.id)}
+                                        className="rounded-md p-1 text-text-muted hover:bg-red-500/10 hover:text-red-400"
+                                        title="Delete this gathering block"
+                                      >
+                                        <Trash2 size={14} />
+                                      </button>
+                                    )}
+                                    <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-xs capitalize text-text-muted">
+                                      {block.executionStatus}
+                                    </span>
+                                  </div>
+                                </div>
+                                {block.goal ? (
+                                  <div className="mt-2">
+                                    <p className="text-xs font-medium text-text-primary">Scenario</p>
+                                    <p className="mt-1 text-xs text-text-secondary">{block.goal}</p>
+                                  </div>
+                                ) : null}
+                                <div className="mt-2">
+                                  <p className="text-xs font-medium text-text-primary">Full tools</p>
+                                  <div className="mt-1 flex flex-wrap gap-1.5">
+                                    {block.plannedTools.length === 0 ? (
+                                      <span className="text-xs text-text-muted">No tools selected.</span>
+                                    ) : (
+                                      block.plannedTools.map((tool: { label: string; kind: string }, toolIndex: number) => (
+                                        <div
+                                          key={`${block.id}-tool-${toolIndex}`}
+                                          className={`group/tool relative flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${tool.kind === "custom" ? "border-amber-500/50 bg-amber-500/10 text-amber-400 font-medium" : "border-border bg-surface-1/55 text-text-secondary"}`}
+                                        >
+                                          <span>{tool.label}</span>
+                                          {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
+                                            <button
+                                              onClick={() => removeInformationGatheringTool(block.id, tool.label)}
+                                              className="text-text-muted hover:text-red-400"
+                                              title="Remove tool"
+                                            >
+                                              <X size={10} />
+                                            </button>
+                                          )}
+                                        </div>
+                                      ))
+                                    )}
+                                    {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
+                                      <div className="flex items-center gap-1">
+                                        <input
+                                          type="text"
+                                          placeholder="Add tool/command..."
+                                          className="h-6 w-32 rounded border border-border bg-surface-1/55 px-2 text-[10px] text-text-primary outline-none focus:border-pf-500/50"
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") {
+                                              addInformationGatheringTool(block.id, e.currentTarget.value);
+                                              e.currentTarget.value = "";
+                                            }
+                                          }}
+                                        />
+                                        <div className="rounded border border-border bg-surface-1/55 p-1 text-text-muted">
+                                          <Plus size={10} />
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                {block.skippedTools.length > 0 ? (
+                                  <div className="mt-2">
+                                    <p className="text-xs font-medium text-text-primary">Skipped tools</p>
+                                    <p className="mt-1 text-xs text-text-muted">{block.skippedTools.join(", ")}</p>
+                                  </div>
+                                ) : null}
+                                <div className="mt-2">
+                                  <p className="text-xs font-medium text-text-primary">LLM remark</p>
+                                  <p className="mt-1 text-xs text-text-muted capitalize">{block.decision || "keep"}</p>
+                                  {block.rationale ? (
+                                    <p className="mt-1 text-xs text-text-secondary">{block.rationale}</p>
+                                  ) : null}
+                                </div>
+                                {block.summary ? (
+                                  <div className="mt-2">
+                                    <p className="text-xs font-medium text-text-primary">Result</p>
+                                    <p className="mt-1 text-xs text-text-secondary">{block.summary}</p>
+                                  </div>
+                                ) : null}
+                              </div>
+                            ));
+                          })()}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ))
-              )}
-              {checklistError ? (
-                <p className="px-1 text-xs text-red-300">
-                  {checklistError}
-                </p>
-              ) : null}
-            </div>
-          )}
-        </Card>
-
-        <AgentStatePath
-          agents={visibleAgents}
-          agentInsights={agentInsights}
-          showHeader
-          subtitle="Planner -> Executer -> Analyzer -> Planner"
-          className="flex h-[560px] flex-col"
-          graphHeightClassName="min-h-0 flex-1"
-        />
-      </div>
-
-      <Card className="space-y-3 p-3">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-text-primary">
-            Target Architecture (Draft)
-          </h2>
-          <span className="rounded-md border border-border bg-surface-0/40 px-2 py-0.5 text-xs uppercase tracking-wide text-text-muted">
-            Planned View
-          </span>
-        </div>
-        <p className="text-xs text-text-muted">{architectureDraft.title}</p>
-
-        <div className="hidden md:block">
-          <div
-            className="relative h-[430px] overflow-hidden rounded-xl border border-border/70 bg-surface-0/55"
-            style={{
-              backgroundImage: [
-                "radial-gradient(circle at 22% 18%, rgba(56,189,248,0.10), transparent 36%)",
-                "radial-gradient(circle at 84% 14%, rgba(59,130,246,0.09), transparent 33%)",
-                "radial-gradient(circle at 72% 78%, rgba(14,165,233,0.08), transparent 40%)",
-                "radial-gradient(circle at 10% 88%, rgba(148,163,184,0.10), transparent 45%)",
-              ].join(", "),
-            }}
-          >
-            <div
-              className="pointer-events-none absolute inset-0 opacity-40"
-              style={{
-                backgroundImage: [
-                  "radial-gradient(circle at 12% 18%, rgba(100,116,139,0.38) 1px, transparent 2px)",
-                  "radial-gradient(circle at 42% 26%, rgba(100,116,139,0.30) 1px, transparent 2px)",
-                  "radial-gradient(circle at 64% 10%, rgba(100,116,139,0.34) 1px, transparent 2px)",
-                  "radial-gradient(circle at 77% 39%, rgba(100,116,139,0.28) 1px, transparent 2px)",
-                  "radial-gradient(circle at 21% 58%, rgba(100,116,139,0.36) 1px, transparent 2px)",
-                  "radial-gradient(circle at 56% 72%, rgba(100,116,139,0.26) 1px, transparent 2px)",
-                  "radial-gradient(circle at 89% 82%, rgba(100,116,139,0.32) 1px, transparent 2px)",
-                ].join(", "),
-              }}
-            />
-
-            <svg
-              className="pointer-events-none absolute inset-0 h-full w-full"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-            >
-              <defs>
-                <marker
-                  id="architecture-arrow"
-                  markerWidth="8"
-                  markerHeight="8"
-                  refX="7"
-                  refY="3.5"
-                  orient="auto"
-                  markerUnits="strokeWidth"
-                >
-                  <path d="M0,0 L7,3.5 L0,7 z" fill="rgba(125,211,252,0.8)" />
-                </marker>
-              </defs>
-              {architectureEdges.map((edge, index) => {
-                return (
-                  <g key={`${edge.from.id}-${edge.to.id}-${index}`}>
-                    <line
-                      x1={edge.from.x}
-                      y1={edge.from.y}
-                      x2={edge.to.x}
-                      y2={edge.to.y}
-                      stroke="rgba(125,211,252,0.75)"
-                      strokeWidth="0.45"
-                      strokeDasharray="1.4 0.8"
-                      markerEnd="url(#architecture-arrow)"
-                    />
-                    <circle
-                      cx={edge.from.x}
-                      cy={edge.from.y}
-                      r="0.7"
-                      fill="rgba(167,243,208,0.9)"
-                    />
-                    <circle
-                      cx={edge.to.x}
-                      cy={edge.to.y}
-                      r="0.7"
-                      fill="rgba(191,219,254,0.9)"
-                    />
-                  </g>
-                );
-              })}
-            </svg>
-
-            {architectureDraft.hosts.map((host) => (
-              <div
-                key={host.id}
-                className="absolute w-[210px] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/65 bg-surface-1/85 p-2 shadow-sm backdrop-blur-sm"
-                style={{
-                  left: `${host.x}%`,
-                  top: `${host.y}%`,
-                }}
-              >
-                <p className="text-xs font-semibold text-text-primary">
-                  {host.name}
-                </p>
-                <p className="mt-0.5 text-xs text-text-muted">
-                  {host.role}
-                </p>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {host.ports.map((port) => (
-                    <span
-                      key={`${host.id}-${port}`}
-                      className="rounded border border-border/55 bg-surface-0/70 px-1.5 py-0.5 text-xs text-text-secondary"
-                    >
-                      {port}
-                    </span>
-                  ))}
+                  ) : (
+                    <p className="px-1 py-2 text-sm text-text-muted">
+                      Information Gathering details are not available yet.
+                    </p>
+                  )}
                 </div>
-                <p className="mt-1 text-xs text-text-secondary">
-                  {host.note}
-                </p>
-              </div>
-            ))}
+              ) : (
+                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
+                  {isAddEditorOpen ? (
+                    <div className="space-y-2 rounded-md border border-border bg-surface-1/50 p-2">
+                      <div className="grid gap-2 lg:grid-cols-[1fr_auto_auto_auto]">
+                        <input
+                          value={addItemName}
+                          onChange={(event) => setAddItemName(event.target.value)}
+                          placeholder="New checklist item"
+                          disabled={isChecklistSaving}
+                          className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-sm text-text-primary outline-none focus:border-pf-500/50"
+                        />
+                        <select
+                          value={selectedAddPhase}
+                          onChange={(event) => setAddItemPhase(event.target.value)}
+                          disabled={isChecklistSaving}
+                          className={dashboardSelectClass}
+                          title="Target phase"
+                        >
+                          {checklistBlocks.length === 0 ? (
+                            <option
+                              value="0"
+                              style={{
+                                backgroundColor: "var(--surface-1)",
+                                color: "var(--text-primary)",
+                              }}
+                            >
+                              Phase 4 - Authentication, Authorization & Injection Testing
+                            </option>
+                          ) : (
+                            checklistBlocks.map((block, blockIndex) => (
+                              <option
+                                key={`${block.phase}-${block.title}-${blockIndex}`}
+                                value={String(blockIndex)}
+                                style={{
+                                  backgroundColor: "var(--surface-1)",
+                                  color: "var(--text-primary)",
+                                }}
+                              >
+                                {block.phase ? `Phase ${block.phase}` : "Phase"} -{" "}
+                                {block.title}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                        <select
+                          value={String(addItemPriority)}
+                          onChange={(event) => {
+                            const next = Number.parseInt(event.target.value, 10);
+                            setAddItemPriority(Number.isInteger(next) ? next : 3);
+                          }}
+                          disabled={isChecklistSaving}
+                          className={dashboardSelectClass}
+                          title="Severity"
+                        >
+                          {[1, 2, 3, 4, 5].map((priority) => (
+                            <option
+                              key={priority}
+                              value={String(priority)}
+                              style={{
+                                backgroundColor: "var(--surface-1)",
+                                color: "var(--text-primary)",
+                              }}
+                            >
+                              S{priority}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            size="icon"
+                            variant="secondary"
+                            onClick={() => {
+                              void handleAddChecklistItem();
+                            }}
+                            loading={checklistActionKey === "checklist-add"}
+                            disabled={
+                              isChecklistSaving || addItemName.trim().length === 0
+                            }
+                            title="Save new item"
+                          >
+                            <Check size={13} />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => {
+                              setIsAddEditorOpen(false);
+                              setChecklistError("");
+                            }}
+                            disabled={isChecklistSaving}
+                            title="Cancel"
+                          >
+                            <X size={13} />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {checklistBlocks.length === 0 ? (
+                    <p className={`px-1 py-2 text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
+                      {isRunning
+                        ? "Checklist is generating and will appear after Intel finalizes set_checklist."
+                        : "No checklist generated yet."}
+                    </p>
+                  ) : (
+                    checklistBlocks.map((block, blockIndex) => (
+                      <div
+                        key={`${block.phase}-${block.title}-${blockIndex}`}
+                        className={`rounded-md border border-border bg-surface-1/45 ${isInsightFullscreen ? "space-y-3 p-3" : "space-y-2 p-2"}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[15px] font-semibold leading-5 text-text-primary">
+                            {block.phase ? `Phase ${block.phase}` : "Phase"} -{" "}
+                            {block.title}
+                          </p>
+                          <span className={`text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
+                            {block.items.length} items
+                          </span>
+                        </div>
+                        <div className={isInsightFullscreen ? "space-y-2" : "space-y-1.5"}>
+                          {block.items.map((item, itemIndex) => {
+                            const rowKey = `${blockIndex}:${itemIndex}`;
+                            const updateActionKey = `checklist-update-${blockIndex}-${itemIndex}`;
+                            const removeActionKey = `checklist-remove-${blockIndex}-${itemIndex}`;
+                            const isEditingThisRow = editingRowKey === rowKey;
+                            return (
+                              <div
+                                key={rowKey}
+                                className={`space-y-2 rounded-md border border-border bg-surface-0/35 text-sm ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}
+                              >
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className={`flex-1 text-text-secondary ${isInsightFullscreen ? "min-w-[280px]" : "min-w-[220px]"}`}>
+                                    {item.name}
+                                  </p>
+                                  <span className={`rounded-md border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted ${isInsightFullscreen ? "text-xs" : "text-xs"}`}>
+                                    S{item.priority}
+                                  </span>
+                                  <Button
+                                    size="icon"
+                                    variant="secondary"
+                                    onClick={() => {
+                                      if (isEditingThisRow) {
+                                        setEditingRowKey(null);
+                                        setChecklistError("");
+                                        return;
+                                      }
+                                      setChecklistError("");
+                                      setEditingRowKey(rowKey);
+                                      setEditItemName(item.name);
+                                      setEditItemPriority(item.priority);
+                                    }}
+                                    disabled={isChecklistSaving}
+                                    title="Edit item"
+                                  >
+                                    <Pencil size={isInsightFullscreen ? 15 : 13} />
+                                  </Button>
+                                  <Button
+                                    size="icon"
+                                    variant="secondary"
+                                    onClick={() => {
+                                      void handleRemoveChecklistItem(
+                                        blockIndex,
+                                        itemIndex,
+                                      );
+                                    }}
+                                    loading={checklistActionKey === removeActionKey}
+                                    disabled={isChecklistSaving}
+                                    title="Remove item"
+                                  >
+                                    <Trash2 size={isInsightFullscreen ? 15 : 13} />
+                                  </Button>
+                                </div>
+                                {isEditingThisRow ? (
+                                  <div className="grid gap-2 border-t border-border pt-2 lg:grid-cols-[1fr_auto_auto_auto]">
+                                    <input
+                                      value={editItemName}
+                                      onChange={(event) =>
+                                        setEditItemName(event.target.value)
+                                      }
+                                      disabled={isChecklistSaving}
+                                      className="h-7 rounded-md border border-border bg-surface-0/60 px-2 text-xs text-text-primary outline-none focus:border-pf-500/50"
+                                    />
+                                    <select
+                                      value={String(editItemPriority)}
+                                      onChange={(event) => {
+                                        const next = Number.parseInt(
+                                          event.target.value,
+                                          10,
+                                        );
+                                        setEditItemPriority(
+                                          Number.isInteger(next)
+                                            ? next
+                                            : item.priority,
+                                        );
+                                      }}
+                                      disabled={isChecklistSaving}
+                                      className={dashboardSelectClass}
+                                      title="Severity"
+                                    >
+                                      {[1, 2, 3, 4, 5].map((priority) => (
+                                        <option
+                                          key={priority}
+                                          value={String(priority)}
+                                          style={{
+                                            backgroundColor: "var(--surface-1)",
+                                            color: "var(--text-primary)",
+                                          }}
+                                        >
+                                          S{priority}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <Button
+                                      size="icon"
+                                      variant="secondary"
+                                      onClick={() => {
+                                        void handleUpdateChecklistItem(
+                                          blockIndex,
+                                          itemIndex,
+                                          rowKey,
+                                        );
+                                      }}
+                                      loading={
+                                        checklistActionKey === updateActionKey
+                                      }
+                                      disabled={
+                                        isChecklistSaving ||
+                                        editItemName.trim().length === 0
+                                      }
+                                      title="Save edit"
+                                    >
+                                      <Check size={13} />
+                                    </Button>
+                                    <Button
+                                      size="icon"
+                                      variant="ghost"
+                                      onClick={() => {
+                                        setEditingRowKey(null);
+                                        setChecklistError("");
+                                      }}
+                                      disabled={isChecklistSaving}
+                                      title="Cancel edit"
+                                    >
+                                      <X size={13} />
+                                    </Button>
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  {checklistError ? (
+                    <p className="px-1 text-xs text-red-300">
+                      {checklistError}
+                    </p>
+                  ) : null}
+                </div>
+              )}
+            </Card>
           </div>
+
+          {!isInsightFullscreen ? (
+            <DashboardArchitecturePanel
+              architectureDraft={architectureDraft}
+              architectureEdges={architectureEdges}
+              debugTimeline={debugTimeline}
+              observabilityMetrics={observabilityMetrics}
+            />
+          ) : null}
         </div>
 
-        <div className="space-y-2 md:hidden">
-          <p className="text-xs text-text-muted">
-            Graph view opens on larger screens. Mobile fallback:
-          </p>
-          {architectureDraft.hosts.map((host) => (
-            <div
-              key={host.id}
-              className="space-y-1 rounded-md border border-border/70 bg-surface-1/45 p-2"
-            >
-              <p className="text-xs font-semibold text-text-primary">
-                {host.name}
-              </p>
-              <p className="text-xs text-text-muted">{host.role}</p>
-              <p className="text-xs text-text-secondary">{host.note}</p>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      </div>
-
-      <div
-        className={`border-l border-border bg-surface-1/95 backdrop-blur-md transition-all duration-300 ease-in-out overflow-hidden flex flex-col relative z-30 ${
-          isCopilotOpen ? "w-[460px] opacity-100" : "w-0 opacity-0 border-l-0"
-          }`}
-      >
-        <div className="flex-1 overflow-hidden min-w-[460px] flex flex-col h-full">
-          <AIPromptPanel
-            projectId={activeProject.id}
-            projectName={activeProject.name}
-            target={activeProject.target}
-            targetType={activeProject.targetType}
-            agents={visibleAgents}
-            history={activeProject.copilotHistory}
-            onClose={() => setIsCopilotOpen(false)}
-          />
+        <div
+          className={`border-l border-border bg-surface-1/95 backdrop-blur-md transition-all duration-300 ease-in-out overflow-hidden flex flex-col relative z-30 ${isCopilotOpen ? "w-[460px] opacity-100" : "w-0 opacity-0 border-l-0"
+            }`}
+        >
+          <div className="flex-1 overflow-hidden min-w-[460px] flex flex-col h-full">
+            <AIPromptPanel
+              projectId={activeProject.id}
+              projectName={activeProject.name}
+              target={activeProject.target}
+              targetType={activeProject.targetType}
+              agents={visibleAgents}
+              history={activeProject.copilotHistory}
+              injectedPrompt={copilotDraft}
+              onClose={() => setIsCopilotOpen(false)}
+            />
+          </div>
         </div>
       </div>
 
@@ -4970,192 +5516,20 @@ export default function Dashboard() {
         </div>
       </Dialog>
 
-      <Dialog
-        open={Boolean(selectedFinding)}
+      <DashboardFindingDialog
+        selectedFinding={selectedFinding}
         onClose={() => setSelectedFinding(null)}
-        title="Vulnerability Details"
-      >
-        {selectedFinding ? (
-          <div className="space-y-4 max-h-[75vh] overflow-y-auto">
-            {/* Title + Severity */}
-            <div className="space-y-2 border-b border-border pb-3">
-              <h2 className="text-lg font-bold text-text-primary">{selectedFinding.title}</h2>
-              <div className="flex items-center gap-3">
-                <Badge
-                  variant="default"
-                  className={`border text-sm uppercase tracking-wide font-semibold ${severityBadgeClass(
-                    normalizeDashboardSeverity(selectedFinding.severity)
-                  )}`}
-                >
-                  {selectedFinding.severity}
-                </Badge>
-                {selectedFinding.category && (
-                  <span className="text-sm text-text-secondary bg-surface-0/50 px-2 py-1 rounded">
-                    {selectedFinding.category}
-                  </span>
-                )}
-                {normalizeEvidenceStatus(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status) ? (
-                  <Badge
-                    variant="default"
-                    className={`border text-xs uppercase tracking-wide ${evidenceBadgeClass(
-                      normalizeEvidenceStatus(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status)
-                    )}`}
-                  >
-                    {String(
-                      normalizeEvidenceStatus(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status)
-                    ).replace(/_/g, " ")}
-                  </Badge>
-                ) : null}
-                {normalizeProofQuality(selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality) ? (
-                  <Badge
-                    variant="default"
-                    className={`border text-xs uppercase tracking-wide ${proofQualityBadgeClass(
-                      normalizeProofQuality(selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality)
-                    )}`}
-                  >
-                    {normalizeProofQuality(selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality)} proof
-                  </Badge>
-                ) : null}
-                {findingUsesOobProof(selectedFinding) ? (
-                  <Badge
-                    variant="default"
-                    className="border border-sky-500/40 bg-sky-500/15 text-sky-200 text-xs uppercase tracking-wide"
-                  >
-                    {findingOobProtocol(selectedFinding)
-                      ? `OOB ${findingOobProtocol(selectedFinding)?.toUpperCase()}`
-                      : "OOB"}
-                  </Badge>
-                ) : null}
-              </div>
-            </div>
-
-            {(selectedFinding.evidenceStatus || selectedFinding.proofQuality || selectedFinding.deterministicValidation !== undefined || selectedFinding.verificationMethods?.length) && (
-              <div className="space-y-1 bg-surface-0/40 p-3 rounded border border-border">
-                <p className="text-xs font-semibold text-text-muted uppercase">Proof Summary</p>
-                <div className="space-y-1 text-sm text-text-secondary">
-                  {(selectedFinding.evidenceStatus || selectedFinding.evidence?.evidence_status) && (
-                    <div>
-                      Evidence Tier: {String(selectedFinding.evidenceStatus ?? selectedFinding.evidence?.evidence_status).replace(/_/g, " ")}
-                    </div>
-                  )}
-                  {(selectedFinding.proofQuality || selectedFinding.evidence?.proof_quality) && (
-                    <div>
-                      Proof Quality: {selectedFinding.proofQuality ?? selectedFinding.evidence?.proof_quality}
-                    </div>
-                  )}
-                  {(selectedFinding.deterministicValidation !== undefined
-                    || selectedFinding.evidence?.deterministic_validation !== undefined) && (
-                    <div>
-                      Deterministic Validation: {(selectedFinding.deterministicValidation ?? selectedFinding.evidence?.deterministic_validation) ? "yes" : "no"}
-                    </div>
-                  )}
-                  {findingUsesOobProof(selectedFinding) && (
-                    <div>
-                      OOB Confirmation: {findingOobProtocol(selectedFinding)
-                        ? `yes (${findingOobProtocol(selectedFinding)?.toUpperCase()} callback)`
-                        : "yes"}
-                    </div>
-                  )}
-                  {Array.isArray(selectedFinding.evidence?.callbacks) && selectedFinding.evidence.callbacks.length > 0 && (
-                    <div>
-                      OOB Callback Count: {selectedFinding.evidence.callbacks.length}
-                    </div>
-                  )}
-                  {typeof selectedFinding.evidence?.remote_address === "string" && selectedFinding.evidence.remote_address.trim() && (
-                    <div>
-                      OOB Remote Address: {selectedFinding.evidence.remote_address}
-                    </div>
-                  )}
-                  {((Array.isArray(selectedFinding.verificationMethods) && selectedFinding.verificationMethods.length > 0)
-                    || (Array.isArray(selectedFinding.evidence?.verification_methods) && selectedFinding.evidence.verification_methods.length > 0)) && (
-                    <div>
-                      Verification Methods: {((selectedFinding.verificationMethods ?? selectedFinding.evidence?.verification_methods) as string[])
-                        .map((item) => formatVerificationMethod(item))
-                        .filter(Boolean)
-                        .join(", ")}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* CVE + CVSS */}
-            {(selectedFinding.cve || selectedFinding.cvss) && (
-              <div className="space-y-1 bg-surface-0/40 p-3 rounded border border-border">
-                <p className="text-xs font-semibold text-text-muted uppercase">Identifiers</p>
-                <div className="text-sm text-text-secondary font-mono">
-                  {selectedFinding.cve && <div>CVE: {selectedFinding.cve}</div>}
-                  {selectedFinding.cvss && <div>CVSS Score: {selectedFinding.cvss}</div>}
-                </div>
-              </div>
-            )}
-
-            {/* Target */}
-            {selectedFinding.target && (
-              <div className="space-y-1">
-                <p className="text-xs font-semibold text-text-muted uppercase">Target</p>
-                <p className="text-sm text-text-secondary font-mono bg-surface-0/40 px-3 py-2 rounded break-all">
-                  {selectedFinding.target}
-                </p>
-              </div>
-            )}
-
-            {/* Description - Professional Format */}
-            {selectedFinding.description && (
-              <div className="space-y-1">
-                <p className="text-xs font-semibold text-text-muted uppercase">Description</p>
-                <div className="text-sm text-text-secondary whitespace-pre-wrap break-words bg-surface-0/40 p-3 rounded border border-border">
-                  {selectedFinding.description}
-                </div>
-              </div>
-            )}
-
-            {/* Evidence */}
-            {selectedFinding.evidence && Object.keys(selectedFinding.evidence).length > 0 && (
-              <div className="space-y-1">
-                <p className="text-xs font-semibold text-text-muted uppercase">Verification Evidence</p>
-                <div className="text-xs text-text-secondary space-y-1 bg-surface-0/40 p-3 rounded border border-border max-h-48 overflow-y-auto">
-                  {Object.entries(selectedFinding.evidence).map(([key, value]) => (
-                    <div key={key} className="border-b border-border/30 pb-2 last:border-b-0 last:pb-0">
-                      <div className="font-semibold text-text-secondary">{key}:</div>
-                      <div className="text-text-muted break-all ml-2">{String(value).slice(0, 300)}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Remediation */}
-            {selectedFinding.remediation && (
-              <div className="space-y-1">
-                <p className="text-xs font-semibold text-text-muted uppercase">Remediation</p>
-                <div className="text-sm text-indigo-900 dark:text-indigo-100 bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/30 p-3 rounded whitespace-pre-wrap break-words shadow-inner font-medium">
-                  {selectedFinding.remediation}
-                </div>
-              </div>
-            )}
-
-            {/* Verification Status */}
-            <div className="border-t border-border pt-3 space-y-1">
-              <p className="text-xs font-semibold text-text-muted uppercase">Status</p>
-              <p className="text-sm text-text-secondary">
-                ✅ Verified & Saved
-              </p>
-              <p className="text-xs text-text-muted">{formatTime(selectedFinding.timestamp)}</p>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => setSelectedFinding(null)}
-              >
-                Close
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </Dialog>
-    </div>
+        normalizeDashboardSeverity={normalizeDashboardSeverity}
+        severityBadgeClass={severityBadgeClass}
+        normalizeEvidenceStatus={normalizeEvidenceStatus}
+        evidenceBadgeClass={evidenceBadgeClass}
+        normalizeProofQuality={normalizeProofQuality}
+        proofQualityBadgeClass={proofQualityBadgeClass}
+        findingUsesOobProof={findingUsesOobProof}
+        findingOobProtocol={findingOobProtocol}
+        formatVerificationMethod={formatVerificationMethod}
+        formatTime={formatTime}
+      />
+    </>
   );
 }

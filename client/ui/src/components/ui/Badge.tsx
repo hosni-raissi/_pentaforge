@@ -12,7 +12,7 @@ const variantStyles: Record<string, string> = {
   info:      'bg-slate-500/15 text-slate-400 border-slate-500/20',
   running:   'bg-pf-500/15 text-pf-400 border-pf-500/20',
   idle:      'bg-slate-500/15 text-slate-400 border-slate-500/20',
-  paused:    'bg-yellow-500/15 text-yellow-400 border-yellow-500/20',
+  stopped:    'bg-slate-500/15 text-slate-400 border-slate-500/20',
   completed: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
   error:     'bg-red-500/15 text-red-400 border-red-500/20',
   success:   'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',

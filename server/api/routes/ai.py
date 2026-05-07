@@ -146,6 +146,75 @@ def _scope_run_key(project_id: str | None, scope_key: str) -> str:
     return f"{str(project_id or '').strip()}::{scope_key}"
 
 
+def _assistant_run_payload(run: AssistantRun) -> dict[str, Any]:
+    return {
+        "prompt": run.prompt,
+        "target": run.target,
+        "target_type": run.target_type,
+        "reply": run.reply,
+        "route": run.route,
+        "blocked": run.blocked,
+        "next_context": run.next_context,
+        "backlog": run.backlog[-200:],
+        "toolLogs": run.toolLogs,
+        "password_requests": run.password_requests,
+    }
+
+
+def _persist_assistant_run(run: AssistantRun) -> None:
+    if not run.project_id:
+        return
+    try:
+        projects_store.upsert_task_run(
+            run_id=run.request_id,
+            project_id=run.project_id,
+            task_type="assistant",
+            status=run.status,
+            scope_key=run.scope_key,
+            payload=_assistant_run_payload(run),
+        )
+    except Exception:
+        logger.exception("assistant_run_persist_failed", request_id=run.request_id)
+
+
+def _restore_assistant_run(record: dict[str, Any]) -> AssistantRun | None:
+    if str(record.get("task_type", "")).strip().lower() != "assistant":
+        return None
+    payload = record.get("payload", {})
+    if not isinstance(payload, dict):
+        payload = {}
+    run = AssistantRun(
+        request_id=str(record.get("run_id", "")).strip(),
+        project_id=str(record.get("project_id", "")).strip(),
+        scope_key=str(record.get("scope_key", "")).strip(),
+        prompt=str(payload.get("prompt", "") or "").strip(),
+        target=str(payload.get("target", "") or "").strip(),
+        target_type=str(payload.get("target_type", "") or "").strip(),
+        created_at=str(record.get("created_at", "") or _utc_now_iso()),
+        updated_at=str(record.get("updated_at", "") or _utc_now_iso()),
+        status=str(record.get("status", "") or "failed").strip().lower() or "failed",
+        reply=str(payload.get("reply", "") or "").strip(),
+        route=str(payload.get("route", "") or "assistant").strip() or "assistant",
+        blocked=bool(payload.get("blocked", False)),
+        next_context=str(payload.get("next_context", "") or "").strip(),
+        backlog=[
+            item for item in payload.get("backlog", [])
+            if isinstance(item, dict)
+        ],
+        toolLogs=[
+            item for item in payload.get("toolLogs", [])
+            if isinstance(item, dict)
+        ],
+        password_requests=[
+            item for item in payload.get("password_requests", [])
+            if isinstance(item, dict)
+        ],
+    )
+    if not run.request_id:
+        return None
+    return run
+
+
 def _prune_finished_runs() -> None:
     now = datetime.now(timezone.utc)
     expired_ids: list[str] = []
@@ -190,6 +259,7 @@ def _publish_run_event(run: AssistantRun, event_type: str, data: dict[str, Any])
     run.backlog.append(payload)
     if len(run.backlog) > 200:
         run.backlog = run.backlog[-200:]
+    _persist_assistant_run(run)
     for queue in tuple(run.subscribers):
         _queue_run_event(queue, payload)
 
@@ -249,6 +319,7 @@ async def _execute_assistant_run(
             run.route = "blocked"
             run.blocked = True
             run.status = "completed"
+            _persist_assistant_run(run)
             _publish_run_event(
                 run,
                 "reply",
@@ -304,6 +375,7 @@ async def _execute_assistant_run(
             _publish_run_event(run, event_type, event_data)
 
         run.status = "completed"
+        _persist_assistant_run(run)
         if run.project_id:
             projects_store.append_project_copilot_history(
                 run.project_id,
@@ -327,6 +399,7 @@ async def _execute_assistant_run(
 
     except asyncio.CancelledError:
         run.status = "cancelled"
+        _persist_assistant_run(run)
         _publish_run_event(
             run,
             "error",
@@ -336,6 +409,7 @@ async def _execute_assistant_run(
     except Exception as exc:
         logger.exception("assistant_stream_failed", request_id=run.request_id)
         run.status = "error"
+        _persist_assistant_run(run)
         _publish_run_event(
             run,
             "error",
@@ -344,6 +418,7 @@ async def _execute_assistant_run(
     finally:
         _executer_callback_context.reset(token)
         run.updated_at = _utc_now_iso()
+        _persist_assistant_run(run)
 
 
 async def _resolve_or_create_run(
@@ -365,6 +440,12 @@ async def _resolve_or_create_run(
             existing = _assistant_runs.get(requested_id)
             if existing is not None:
                 return existing
+            stored = projects_store.get_task_run(requested_id)
+            restored = _restore_assistant_run(stored) if isinstance(stored, dict) else None
+            if restored is not None:
+                _assistant_runs[requested_id] = restored
+                _assistant_scope_index[scope_run_key] = requested_id
+                return restored
 
         run_id = requested_id or str(uuid.uuid4())
         now_iso = _utc_now_iso()
@@ -380,6 +461,7 @@ async def _resolve_or_create_run(
         )
         _assistant_runs[run_id] = run
         _assistant_scope_index[scope_run_key] = run_id
+        _persist_assistant_run(run)
         run.task = asyncio.create_task(
             _execute_assistant_run(
                 run,
@@ -461,7 +543,14 @@ async def ai_assist_stream(payload: AIAssistPayload, request: Request) -> Stream
 
 @router.post("/api/ai/assist/{request_id}/cancel")
 async def cancel_ai_assist(request_id: str) -> AICancelAssistResponse:
-    run = _assistant_runs.get(str(request_id or "").strip())
+    clean_request_id = str(request_id or "").strip()
+    run = _assistant_runs.get(clean_request_id)
+    if run is None:
+        stored = projects_store.get_task_run(clean_request_id)
+        restored = _restore_assistant_run(stored) if isinstance(stored, dict) else None
+        if restored is not None:
+            _assistant_runs[clean_request_id] = restored
+            run = restored
     if run is None:
         raise HTTPException(status_code=404, detail="Assistant request not found")
 
@@ -469,6 +558,7 @@ async def cancel_ai_assist(request_id: str) -> AICancelAssistResponse:
         run.task.cancel()
     run.status = "cancelled"
     run.updated_at = _utc_now_iso()
+    _persist_assistant_run(run)
     return AICancelAssistResponse(
         ok=True,
         request_id=run.request_id,
@@ -484,7 +574,14 @@ class AIAssistInputPayload(BaseModel):
 
 @router.post("/api/ai/assist/{request_id}/input")
 async def ai_assist_input(request_id: str, payload: AIAssistInputPayload) -> dict[str, bool]:
-    run = _assistant_runs.get(str(request_id or "").strip())
+    clean_request_id = str(request_id or "").strip()
+    run = _assistant_runs.get(clean_request_id)
+    if run is None:
+        stored = projects_store.get_task_run(clean_request_id)
+        restored = _restore_assistant_run(stored) if isinstance(stored, dict) else None
+        if restored is not None:
+            _assistant_runs[clean_request_id] = restored
+            run = restored
     if run is None:
         raise HTTPException(status_code=404, detail="Assistant request not found")
 

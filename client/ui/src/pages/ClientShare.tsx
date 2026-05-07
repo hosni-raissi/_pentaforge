@@ -12,6 +12,7 @@ import {
   getReportStatusFromDesktop,
   getReportContentFromDesktop,
   generateReportFromDesktop,
+  getActiveProjectRunsFromDesktop,
   setPentesterTypingFromDesktop,
   downloadReportBlobFromDesktop,
   getActiveShareLinkFromDesktop,
@@ -53,7 +54,7 @@ export default function ClientShare() {
   const [messages, setMessages] = useState<ClientMessage[]>([]);
   const [clientTyping, setClientTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [reportHtml, setReportHtml] = useState<string | null>(null);
   const [reportMarkdown, setReportMarkdown] = useState<string | null>(null);
@@ -168,16 +169,42 @@ export default function ClientShare() {
     loadReport();
   }, [project?.id]);
 
+  useEffect(() => {
+    if (!project || !generatingReport) {
+      return;
+    }
+    const interval = setInterval(() => {
+      void (async () => {
+        try {
+          const [status, activeRuns] = await Promise.all([
+            getReportStatusFromDesktop(project.id),
+            getActiveProjectRunsFromDesktop(project.id),
+          ]);
+          const activeReportRun = activeRuns.runs.find((run) => run.task_type === "report");
+          if (!activeReportRun) {
+            setGeneratingReport(false);
+            if (status.html || status.markdown) {
+              await loadReport();
+            }
+          }
+        } catch {
+          // Keep polling until the next successful read.
+        }
+      })();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [generatingReport, project?.id]);
+
   const handleGenerateReport = async () => {
     if (!project) return;
     setGeneratingReport(true);
     try {
       await generateReportFromDesktop(project.id);
-      await loadReport();
     } catch (err) {
       console.error("Failed to generate report", err);
-    } finally {
       setGeneratingReport(false);
+    } finally {
+      // Polling effect will clear the loading state once the backend run finishes.
     }
   };
 
@@ -253,7 +280,7 @@ export default function ClientShare() {
 
   async function sendMessage() {
     const clean = draft.trim();
-    if (!clean || !project) return;
+    if (!clean  || !project) return;
     setDraft("");
     try {
       await sendPentesterMessageFromDesktop(project.id, clean, "pentester");
@@ -274,8 +301,8 @@ export default function ClientShare() {
   }
 
   return (
-    <div className="h-full overflow-hidden p-4">
-      <div className="flex h-full flex-col gap-4 overflow-hidden">
+    <div className="h-screen overflow-hidden p-4">
+      <div className="flex h-full flex-col gap-4">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">Client Share</h1>
@@ -289,7 +316,7 @@ export default function ClientShare() {
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[650px_1fr]">
         
         {/* Left Column */}
-        <div className="flex flex-col gap-4 overflow-y-auto pr-2">
+        <div className="flex flex-col gap-4 overflow-hidden pr-2 h-full">
           <Card className="shrink-0 space-y-3 p-4">
             <CardHeader className="mb-0 p-0">
               <CardTitle className="flex items-center gap-2 text-xl">
@@ -394,11 +421,11 @@ export default function ClientShare() {
             )}
           </Card>
 
-          <Card className="flex min-h-[380px] flex-1 flex-col space-y-3 p-4">
-            <CardHeader className="mb-0 p-0">
-              <CardTitle className="flex items-center gap-2 text-xl">
-                <MessageSquare size={18} className="text-pf-400" />
-                Client Communication
+          <Card className="flex flex-1 flex-col space-y-3 p-4 min-h-0">
+            <CardHeader className="mb-0 p-0 shrink-0">
+              <CardTitle className="flex items-center gap-2 text-2xl py-1">
+                <MessageSquare size={22} className="text-pf-400" />
+                Client Discussion
                 {clientTyping && (
                   <span className="text-xs font-normal italic text-pf-400/80 animate-pulse">
                     client is typing...
@@ -430,13 +457,13 @@ export default function ClientShare() {
                       {isPentester && <span className="text-emerald-400">You</span>}
                     </div>
                     <div
-                      className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm shadow-lg ring-1 transition-all hover:ring-2 ${
+                      className={`max-w-[85%] rounded-2xl px-5 py-3.5 text-base shadow-lg ring-1 transition-all hover:ring-2 ${
                         isPentester
                           ? "rounded-tr-none bg-pf-600 text-white ring-pf-400/30"
                           : "rounded-tl-none bg-surface-2 text-text-primary ring-border"
                       }`}
                     >
-                      <p className="leading-relaxed whitespace-pre-wrap break-words">{message.content}</p>
+                      <p className="leading-relaxed whitespace-pre-wrap break-words text-base">{message.content}</p>
                     </div>
                   </div>
                 );
@@ -444,16 +471,16 @@ export default function ClientShare() {
               <div ref={messagesEndRef} />
             </div>
 
-            <div className="flex items-end gap-2 pt-2">
+            <div className="flex items-end gap-3 pt-3 shrink-0">
               <textarea
                 value={draft}
                 onChange={handleDraftChange}
                 placeholder="Write update or response..."
-                className="focus-ring min-h-[70px] flex-1 resize-none rounded-md border border-border bg-surface-0 px-3 py-2 text-sm text-text-primary placeholder:text-text-muted"
-                rows={2}
+                className="focus-ring min-h-[100px] flex-1 resize-none rounded-lg border border-border bg-surface-0 px-4 py-3 text-lg text-text-primary placeholder:text-text-muted"
+                rows={3}
               />
-              <Button size="sm" onClick={sendMessage} disabled={!draft.trim()} className="h-[70px] px-4">
-                <SendHorizontal size={18} />
+              <Button size="sm" onClick={sendMessage} disabled={!draft.trim()} className="h-[100px] px-6">
+                <SendHorizontal size={24} />
               </Button>
             </div>
           </Card>

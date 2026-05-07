@@ -36,6 +36,10 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 from server.agents.executer.sandbox import get_sandbox_root, get_sandbox_tmp_dir
+from server.agents.executer.sandbox_client import (
+    execute_run_python_remotely,
+    sandbox_remote_enabled,
+)
 
 # ══════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -666,6 +670,23 @@ def run_python(
             success=False, code=code[:2000], reason=reason,
             error=f"Validation error: {exc}",
         ).model_dump()
+
+    if sandbox_remote_enabled():
+        return execute_run_python_remotely(
+            {
+                "code": req.code,
+                "reason": req.reason,
+                "which_file": req.which_file,
+                "script_filename": req.script_filename,
+                "run_parallel": req.run_parallel,
+                "code_two": req.code_two,
+                "which_file_two": req.which_file_two,
+                "install_deps": req.install_deps,
+                "timeout": req.timeout,
+                "memory_limit_mb": req.memory_limit_mb,
+            },
+            timeout=req.timeout,
+        )
 
     # Optional dual-run mode: run two scripts in parallel against file1.py / file2.py.
     if req.run_parallel and req.code_two:

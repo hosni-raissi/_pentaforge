@@ -6,6 +6,8 @@ import asyncio
 import json
 import re
 import shlex
+import time
+from urllib.parse import urlparse
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
@@ -47,6 +49,15 @@ _DIRECT_COMMAND_BINARIES = {
     "openssl", "whois", "dig", "nslookup", "httpx", "ftp", "hydra",
     "whatweb", "arjun", "dalfox", "katana", "feroxbuster", "gobuster",
     "nuclei",
+}
+_PRIVILEGE_RETRY_COMMANDS = {
+    "nmap",
+    "ike-scan",
+    "arp-scan",
+    "tcpdump",
+    "tshark",
+    "masscan",
+    "mtr",
 }
 _VAGUE_COMMAND_TOKENS = {
     "it", "that", "this", "them", "result", "results", "output", "command",
@@ -123,6 +134,31 @@ _ASSISTANT_SCOPE_QUESTION_PATTERNS = (
     "other targets",
     "another target",
     "current target only",
+)
+_DIRECT_COMMAND_PREFIX_PATTERNS = (
+    "run ",
+    "execute ",
+    "run command ",
+    "execute command ",
+)
+_STRUCTURED_FINDING_ANALYSIS_MARKERS = (
+    '"finding_id"',
+    '"title"',
+    '"description"',
+    "confirmation commands",
+    "tools used",
+    "verification methods",
+)
+_STRUCTURED_FINDING_ANALYSIS_INTENTS = (
+    "explain",
+    "expalne",
+    "analyze",
+    "analyse",
+    "retest",
+    "confirm",
+    "verify",
+    "is this real",
+    "is it real",
 )
 
 _RUN_CUSTOM_SCHEMA = {
@@ -395,11 +431,13 @@ class AssistantAgent:
 
             # Ensure tool calls have 'type': 'function' as required by some providers
             normalized_tool_calls = []
-            for tc in tool_calls:
+            for idx, tc in enumerate(tool_calls):
                 if isinstance(tc, dict):
                     ntc = tc.copy()
                     if "type" not in ntc:
                         ntc["type"] = "function"
+                    if not str(ntc.get("id", "")).strip():
+                        ntc["id"] = f"call_{idx}_{int(time.time() * 1000)}"
                     normalized_tool_calls.append(ntc)
                 else:
                     normalized_tool_calls.append(tc)
@@ -412,8 +450,8 @@ class AssistantAgent:
                 )
             )
 
-            for idx, tool_call in enumerate(tool_calls):
-                tool_call_id = tool_call.get("id") or f"call_{idx}_{int(time.time())}"
+            for idx, tool_call in enumerate(normalized_tool_calls):
+                tool_call_id = str(tool_call.get("id") or f"call_{idx}_{int(time.time() * 1000)}").strip()
                 tool_name = (
                     tool_call.get("function", {}).get("name", "")
                     if isinstance(tool_call, dict)
@@ -549,7 +587,7 @@ class AssistantAgent:
                     ChatMessage(
                         role="tool",
                         name=tool_name or "assistant_tool",
-                        tool_call_id=str(tool_call.get("id", "")),
+                        tool_call_id=tool_call_id,
                         content=self._guard.sanitize(
                             json.dumps(tool_payload, ensure_ascii=True),
                             source=f"assistant_{tool_name or 'tool'}",
@@ -693,7 +731,7 @@ class AssistantAgent:
                 "logged": False,
             }
 
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             assistant_run_custom,
             command=command,
             args=normalized_args,
@@ -702,6 +740,62 @@ class AssistantAgent:
             env=env if isinstance(env, dict) else {},
             cwd=str(cwd) if cwd else None,
         )
+        if self._should_retry_with_sudo(command, normalized_args, result):
+            sudo_args = ["-S", command, *normalized_args]
+            return await asyncio.to_thread(
+                assistant_run_custom,
+                command="sudo",
+                args=sudo_args,
+                reason=f"{reason} (privileged retry)",
+                timeout=int(timeout) if str(timeout).strip() else 300,
+                env=env if isinstance(env, dict) else {},
+                cwd=None,
+            )
+        return result
+
+    @staticmethod
+    def _should_retry_with_sudo(
+        command: str,
+        args: list[str],
+        result: dict[str, Any],
+    ) -> bool:
+        normalized_command = str(command or "").strip().lower()
+        if not normalized_command or normalized_command == "sudo":
+            return False
+        if normalized_command not in _PRIVILEGE_RETRY_COMMANDS:
+            return False
+        if bool(result.get("success")):
+            return False
+
+        haystack = " ".join(
+            str(result.get(key, "") or "").strip().lower()
+            for key in ("error", "stderr", "stdout")
+        )
+        if not haystack:
+            return False
+
+        privilege_markers = (
+            "requires root",
+            "required root",
+            "root privileges",
+            "must be root",
+            "need root",
+            "permission denied",
+            "operation not permitted",
+            "you requested a scan type which requires root privileges",
+            "are you root",
+            "sudo",
+        )
+        if not any(marker in haystack for marker in privilege_markers):
+            return False
+
+        joined_args = " ".join(args).lower()
+        if normalized_command == "nmap":
+            if not any(flag in joined_args for flag in ("-su", "-ss", "-o", "--traceroute", "-a")):
+                if "root privileges" not in haystack and "requires root" not in haystack:
+                    return False
+
+        return True
 
     async def _execute_search_project_vectors(
         self,
@@ -727,6 +821,17 @@ class AssistantAgent:
 
     async def _execute_get_page(self, args: dict[str, Any], *, target: str) -> dict[str, Any]:
         url = str(args.get("url", "")).strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return {
+                "success": False,
+                "url": url,
+                "css_selector": str(args.get("css_selector", "")).strip(),
+                "error": (
+                    "Assistant page access requires a complete http(s) URL on the current target. "
+                    f"Received: {url or '<empty>'}"
+                ),
+            }
         scope_issue = describe_url_scope_issue(url, target)
         if scope_issue:
             return {
@@ -891,6 +996,9 @@ class AssistantAgent:
         lowered = text.lower()
         normalized_target = str(target or "").strip()
 
+        if AssistantAgent._looks_like_structured_finding_analysis_request(text):
+            return None
+
         if "nmap" in lowered and "script vuln" in lowered and normalized_target:
             return {
                 "command": "nmap",
@@ -898,21 +1006,22 @@ class AssistantAgent:
                 "reason": "User-requested assistant vulnerability scan with Nmap against the configured target",
             }
 
-        prefixes = ("run ", "execute ", "run command ", "execute command ")
         command_text = ""
-        for prefix in prefixes:
+        for prefix in _DIRECT_COMMAND_PREFIX_PATTERNS:
             if lowered.startswith(prefix):
                 command_text = text[len(prefix):].strip()
                 break
         if not command_text and text.split(" ", 1)[0] in _DIRECT_COMMAND_BINARIES:
             command_text = text
+        if not command_text:
+            command_text = AssistantAgent._extract_embedded_direct_command(text)
 
         if not command_text:
             return None
 
         # Let the LLM/tool path interpret vague natural-language requests instead
         # of sending prose fragments directly to the shell.
-        if lowered.startswith(prefixes) and not any(
+        if any(lowered.startswith(prefix) for prefix in _DIRECT_COMMAND_PREFIX_PATTERNS) and not any(
             marker in command_text for marker in ("-", "--", "/")
         ):
             prose_markers = (" with ", " to ", " for ", " using ", " against ", " on the target")
@@ -928,7 +1037,7 @@ class AssistantAgent:
         first = str(parts[0]).strip().lower()
         if not first or first in _VAGUE_COMMAND_TOKENS:
             return None
-        if lowered.startswith(prefixes):
+        if any(lowered.startswith(prefix) for prefix in _DIRECT_COMMAND_PREFIX_PATTERNS):
             if first not in _DIRECT_COMMAND_BINARIES and not any(ch in first for ch in ("-", "/", ".")):
                 return None
 
@@ -937,6 +1046,57 @@ class AssistantAgent:
             "args": parts[1:],
             "reason": f"User-requested command execution from assistant chat: {parts[0]}",
         }
+
+    @staticmethod
+    def _looks_like_structured_finding_analysis_request(text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        lowered = raw.lower()
+        has_structure = (
+            ("{" in raw and "}" in raw)
+            or any(marker in lowered for marker in _STRUCTURED_FINDING_ANALYSIS_MARKERS)
+        )
+        if not has_structure:
+            return False
+        return any(intent in lowered for intent in _STRUCTURED_FINDING_ANALYSIS_INTENTS)
+
+    @staticmethod
+    def _extract_embedded_direct_command(text: str) -> str:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return ""
+
+        for line in stripped.splitlines():
+            candidate = str(line or "").strip().strip("`").strip()
+            if not candidate:
+                continue
+            try:
+                parts = shlex.split(candidate)
+            except ValueError:
+                continue
+            if parts and str(parts[0]).strip().lower() in _DIRECT_COMMAND_BINARIES:
+                return candidate
+
+        binary_pattern = "|".join(sorted(re.escape(binary) for binary in _DIRECT_COMMAND_BINARIES))
+        match = re.search(
+            rf"(?<![\w./-])(?P<cmd>(?:{binary_pattern})\b[^\n`]*)",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+
+        candidate = str(match.group("cmd") or "").strip().strip("`").strip()
+        if not candidate:
+            return ""
+        try:
+            parts = shlex.split(candidate)
+        except ValueError:
+            return ""
+        if not parts or str(parts[0]).strip().lower() not in _DIRECT_COMMAND_BINARIES:
+            return ""
+        return candidate
 
     @staticmethod
     def _extract_embedded_tool_call(content: str) -> dict[str, Any] | None:
@@ -1086,13 +1246,45 @@ class AssistantAgent:
 
     @staticmethod
     def _answer_capability_question(prompt: str, *, target: str, target_type: str) -> str | None:
-        lowered = str(prompt or "").strip().lower()
+        raw_prompt = str(prompt or "").strip()
+        lowered = raw_prompt.lower()
         if not lowered:
             return None
+
+        # Do not mistake structured finding payloads or explicit analysis requests
+        # for a capability question just because they mention "tools" or "access".
+        if (
+            ("{" in raw_prompt and '"title"' in raw_prompt)
+            or ("confirmation commands" in lowered)
+            or ("tools used" in lowered)
+            or any(
+                marker in lowered
+                for marker in (
+                    "explain this",
+                    "explain the finding",
+                    "retest it",
+                    "retest this",
+                    "confirm it",
+                    "confirm this",
+                    "analyze this",
+                    "analyse this",
+                    "verify this",
+                    "verify it",
+                )
+            )
+        ):
+            return None
+
+        is_question_like = (
+            "?" in raw_prompt
+            or lowered.startswith(("what ", "which ", "can you ", "do you ", "have you ", "list "))
+        )
         heuristic_match = (
-            ("tool" in lowered and any(token in lowered for token in ("have", "use", "available", "access")))
-            or ("command" in lowered and any(token in lowered for token in ("have", "run", "available")))
-            or ("access" in lowered and any(token in lowered for token in ("what", "which", "have")))
+            is_question_like and (
+                ("tool" in lowered and any(token in lowered for token in ("have", "use", "available", "access")))
+                or ("command" in lowered and any(token in lowered for token in ("have", "run", "available")))
+                or ("access" in lowered and any(token in lowered for token in ("what", "which", "have")))
+            )
         )
         if not heuristic_match and not any(marker in lowered for marker in _ASSISTANT_CAPABILITY_QUESTION_PATTERNS):
             return None

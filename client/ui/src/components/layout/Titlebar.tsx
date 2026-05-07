@@ -2,13 +2,13 @@ import { Moon, Sun, Minus, Square, X } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
+import { routeLabelForPath } from '../../lib/productWorkflows';
 import { useTheme } from '../../stores/theme';
 
 export function Titlebar() {
   const { isDark, toggle } = useTheme();
   const location = useLocation();
-  const normalizedPath = location.pathname.replace(/\/+$/, '') || '/';
-  const routeLabel = `pentaforge${normalizedPath}`;
+  const routeLabel = routeLabelForPath(location.pathname, location.search);
   const handleMinimize = async () => {
     try {
       await getCurrentWindow().minimize();
@@ -44,9 +44,14 @@ export function Titlebar() {
       {/* App name */}
       <div className="flex min-w-0 items-center gap-2 flex-1" data-tauri-drag-region>
         <div className="h-3 w-3 rounded-sm bg-pf-600" />
-        <div className="min-w-0 leading-tight">
+        <div className="flex items-center min-w-0 gap-2">
           <div className="text-sm font-semibold tracking-wide text-text-primary">PENTAFORGE</div>
-          <div className="truncate font-mono text-sm text-text-muted">{routeLabel}</div>
+          {routeLabel && (
+            <>
+              <div className="text-text-muted">/</div>
+              <div className="truncate font-mono text-sm text-text-muted">{routeLabel}</div>
+            </>
+          )}
         </div>
       </div>
 

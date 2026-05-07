@@ -153,6 +153,89 @@ def _match_entry(entries: list[dict[str, Any]], reference: str) -> dict[str, Any
     return best_entry if best_score >= 900 else None
 
 
+def _entry_matches_any_reference(
+    entry: dict[str, Any],
+    references: list[str],
+) -> bool:
+    valid_references = [str(item or "").strip() for item in references if str(item or "").strip()]
+    if not isinstance(entry, dict) or not valid_references:
+        return False
+
+    entry_id = str(entry.get("id", "")).strip()
+    entry_title = str(entry.get("title", "")).strip()
+    texts = _collect_finding_texts(entry)
+
+    for reference in valid_references:
+        if entry_id and reference == entry_id:
+            return True
+        if entry_title and reference == entry_title:
+            return True
+        matcher = _match_entry(
+            [
+                {
+                    "id": entry_id,
+                    "title": entry_title,
+                    "texts": texts,
+                }
+            ],
+            reference,
+        )
+        if matcher is not None:
+            return True
+    return False
+
+
+def _entry_matches_canonical_finding(
+    entry: dict[str, Any],
+    *,
+    finding_id: str,
+    finding_title: str,
+) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    safe_id = str(finding_id or "").strip()
+    safe_title = str(finding_title or "").strip()
+
+    entry_id = str(entry.get("id", "")).strip()
+    if safe_id and entry_id == safe_id:
+        return True
+
+    if safe_id:
+        return False
+
+    entry_title = str(entry.get("title", "")).strip()
+    return bool(safe_title and entry_title == safe_title)
+
+
+def _mark_entry_false_positive(
+    entry: dict[str, Any],
+    *,
+    reason: str,
+    now_iso: str,
+    fallback_id: str,
+    fallback_title: str,
+    fallback_description: str,
+    fallback_target: str,
+    fallback_severity: str,
+) -> None:
+    if not isinstance(entry, dict):
+        return
+    if fallback_id and not str(entry.get("id", "")).strip():
+        entry["id"] = fallback_id
+    if fallback_title and not str(entry.get("title", "")).strip():
+        entry["title"] = fallback_title
+    if fallback_description and not str(entry.get("summary", "")).strip():
+        entry["summary"] = fallback_description
+    if fallback_target and not str(entry.get("target", "")).strip():
+        entry["target"] = fallback_target
+    entry["status"] = "false_positive"
+    entry["verdict"] = "false_positive"
+    entry["false_positive_reason"] = reason
+    entry["updated_at"] = now_iso
+    if fallback_severity and not str(entry.get("severity", "")).strip():
+        entry["severity"] = fallback_severity
+
+
 def _resolve_project_cache_dir(project: dict[str, Any]) -> str:
     last_scan = project.get("lastScan", {})
     if not isinstance(last_scan, dict):
@@ -202,19 +285,11 @@ async def _sync_false_positive_to_system_memory(
         for item in verified_findings:
             if not isinstance(item, dict):
                 continue
-            item_id = str(item.get("id", "")).strip()
-            item_title = str(item.get("title", "")).strip()
-            if actual_id and item_id == actual_id:
-                matched = True
-            elif actual_title and item_title == actual_title:
-                matched = True
-            else:
-                entry = {
-                    "id": item_id,
-                    "title": item_title,
-                    "texts": _collect_finding_texts(item),
-                }
-                matched = _match_entry([entry], actual_description or actual_title) is not None
+            matched = _entry_matches_canonical_finding(
+                item,
+                finding_id=actual_id,
+                finding_title=actual_title,
+            )
 
             if not matched:
                 continue
@@ -328,27 +403,96 @@ async def mark_false_positive(
             ),
         }
 
-    if target_finding_entry["source"] == "rag":
+    target_finding = target_finding_entry["ref"]
+    actual_finding_id = str(target_finding.get("id", safe_finding_id)).strip()
+    actual_title = str(target_finding.get("title", "")).strip()
+    actual_description = str(target_finding.get("description", "")).strip()
+    actual_target = str(target_finding.get("target", "")).strip()
+    actual_severity = str(target_finding.get("severity", "info")).strip() or "info"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    match_references = [
+        safe_finding_id,
+        actual_finding_id,
+        actual_title,
+        actual_description,
+        str(target_finding_entry.get("title", "")).strip(),
+    ]
+
+    old_status = target_finding.get("status")
+    matched_project_findings = 0
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        if not _entry_matches_canonical_finding(
+            finding,
+            finding_id=actual_finding_id,
+            finding_title=actual_title,
+        ):
+            continue
+        matched_project_findings += 1
+        _mark_entry_false_positive(
+            finding,
+            reason=safe_reason,
+            now_iso=now_iso,
+            fallback_id=actual_finding_id,
+            fallback_title=actual_title,
+            fallback_description=actual_description,
+            fallback_target=actual_target,
+            fallback_severity=actual_severity,
+        )
+
+    if matched_project_findings == 0:
         new_finding = {
-            "id": target_finding_entry["id"],
-            "title": target_finding_entry["title"],
+            "id": actual_finding_id or str(target_finding_entry.get("id", "")).strip() or uuid.uuid4().hex,
+            "title": actual_title or str(target_finding_entry.get("title", "")).strip() or "False positive finding",
+            "description": actual_description,
+            "target": actual_target,
             "status": "false_positive",
-            "severity": "info",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": actual_severity,
+            "false_positive_reason": safe_reason,
+            "timestamp": now_iso,
+            "updated_at": now_iso,
         }
         findings.append(new_finding)
-        project["findings"] = findings
         target_finding = new_finding
     else:
-        target_finding = target_finding_entry["ref"]
+        project["findings"] = findings
+        for finding in findings:
+            if isinstance(finding, dict) and _entry_matches_canonical_finding(
+                finding,
+                finding_id=actual_finding_id,
+                finding_title=actual_title,
+            ):
+                target_finding = finding
+                break
 
-    actual_finding_id = str(target_finding.get("id", safe_finding_id)).strip()
-
-    # Update finding status
-    old_status = target_finding.get("status")
-    target_finding["status"] = "false_positive"
-    target_finding["false_positive_reason"] = safe_reason
-    target_finding["updated_at"] = datetime.now(timezone.utc).isoformat()
+    last_scan = project.get("lastScan")
+    if isinstance(last_scan, dict):
+        result = last_scan.get("result")
+        if isinstance(result, dict):
+            target_memory = result.get("targetMemory")
+            if isinstance(target_memory, dict):
+                verified_findings = target_memory.get("verified_findings")
+                if isinstance(verified_findings, list):
+                    for item in verified_findings:
+                        if not isinstance(item, dict):
+                            continue
+                        if not _entry_matches_canonical_finding(
+                            item,
+                            finding_id=actual_finding_id,
+                            finding_title=actual_title,
+                        ):
+                            continue
+                        _mark_entry_false_positive(
+                            item,
+                            reason=safe_reason,
+                            now_iso=now_iso,
+                            fallback_id=actual_finding_id,
+                            fallback_title=actual_title,
+                            fallback_description=actual_description,
+                            fallback_target=actual_target,
+                            fallback_severity=actual_severity,
+                        )
 
     try:
         doc_identity = _artifact_doc_identity(safe_project_id, "verified_vulnerability", actual_finding_id)
@@ -369,6 +513,48 @@ async def mark_false_positive(
         target_finding=target_finding,
         reason=safe_reason,
     )
+    if not (memory_sync.get("updated") or memory_sync.get("appended")):
+        project_cache_dir = _resolve_project_cache_dir(project)
+        if project_cache_dir:
+            try:
+                memory = load_system_memory(project_cache_dir)
+                verified_findings = (
+                    memory.get("verified_findings", [])
+                    if isinstance(memory.get("verified_findings"), list)
+                    else []
+                )
+                now_iso = datetime.now(timezone.utc).isoformat()
+                verified_findings.append(
+                    {
+                        "id": actual_finding_id or uuid.uuid4().hex,
+                        "title": str(target_finding.get("title", "")).strip() or "False positive finding",
+                        "summary": str(target_finding.get("description", "")).strip()
+                        or str(target_finding.get("title", "")).strip(),
+                        "status": "false_positive",
+                        "verdict": "false_positive",
+                        "severity": str(target_finding.get("severity", "info")).strip() or "info",
+                        "target": str(target_finding.get("target", "")).strip(),
+                        "endpoint": str(target_finding.get("target", "")).strip(),
+                        "false_positive_reason": safe_reason,
+                        "timestamp": now_iso,
+                        "updated_at": now_iso,
+                    }
+                )
+                memory["verified_findings"] = verified_findings[-200:]
+                await save_system_memory(project_cache_dir, memory)
+                memory_sync = {
+                    **memory_sync,
+                    "available": True,
+                    "updated": bool(memory_sync.get("updated")),
+                    "appended": True,
+                    "fallback": True,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "false_positive_system_memory_fallback_failed",
+                    finding_id=actual_finding_id,
+                    error=str(exc),
+                )
 
     try:
         project_store.append_scan_event_cache(
@@ -382,6 +568,7 @@ async def mark_false_positive(
                     "finding_id": actual_finding_id,
                     "status": "false_positive",
                     "reason": safe_reason,
+                    "reason_code": "manual_false_positive_marked",
                     "finding": {
                         "id": actual_finding_id,
                         "title": str(target_finding.get("title", "")).strip(),

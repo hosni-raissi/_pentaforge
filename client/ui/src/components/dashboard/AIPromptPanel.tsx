@@ -5,6 +5,7 @@ import {
   askAIAssistStreamFromDesktop,
   cancelAIAssistRunFromDesktop,
   clearAIAssistConversationFromDesktop,
+  getActiveProjectRunsFromDesktop,
   updateProjectSavedContextFromDesktop,
   sendAIAssistInputFromDesktop,
 } from '@/lib/projectBridge';
@@ -21,6 +22,10 @@ interface AIPromptPanelProps {
   targetType: string;
   agents: AgentInfo[];
   history?: CopilotMessage[];
+  injectedPrompt?: {
+    token: string;
+    text: string;
+  } | null;
   onClose?: () => void;
 }
 
@@ -104,6 +109,72 @@ function mergeMessages(
   }
 
   return merged.slice(-MAX_CHAT_MESSAGES);
+}
+
+function mergeActiveAssistantRun(
+  messages: PanelMessage[],
+  run: {
+    run_id: string;
+    status: string;
+    created_at: string;
+    updated_at: string;
+    payload: Record<string, unknown>;
+  },
+): PanelMessage[] {
+  const prompt = typeof run.payload.prompt === 'string' ? run.payload.prompt.trim() : '';
+  const reply = typeof run.payload.reply === 'string' ? run.payload.reply : '';
+  const route = (
+    run.payload.route === 'assistant'
+    || run.payload.route === 'planner'
+    || run.payload.route === 'reporting'
+    || run.payload.route === 'blocked'
+  ) ? run.payload.route : undefined;
+  const blocked = typeof run.payload.blocked === 'boolean' ? run.payload.blocked : undefined;
+  const toolLogs = Array.isArray(run.payload.toolLogs) ? run.payload.toolLogs as PanelMessage['toolLogs'] : [];
+  const passwordRequests = Array.isArray(run.payload.password_requests)
+    ? run.payload.password_requests as PanelMessage['passwordRequests']
+    : [];
+  const existingUser = messages.find((message) => message.id === `u-${run.run_id}`);
+  const existingAssistant = messages.find((message) => message.id === `a-${run.run_id}`);
+
+  const next = [...messages];
+  if (prompt && !existingUser) {
+    next.push({
+      id: `u-${run.run_id}`,
+      role: 'user',
+      text: prompt,
+      timestamp: run.created_at,
+    });
+  }
+
+  const assistantMessage: PanelMessage = {
+    id: `a-${run.run_id}`,
+    requestId: run.run_id,
+    role: 'assistant',
+    text: reply,
+    route,
+    blocked,
+    timestamp: run.updated_at || run.created_at,
+    toolLogs,
+    passwordRequests,
+    localState: run.status === 'pending' || run.status === 'running'
+      ? 'pending'
+      : run.status === 'cancelled'
+        ? 'cancelled'
+        : run.status === 'failed'
+          ? 'error'
+          : undefined,
+  };
+
+  if (!existingAssistant) {
+    next.push(assistantMessage);
+  } else {
+    return next.map((message) => (
+      message.id === existingAssistant.id ? { ...message, ...assistantMessage } : message
+    )).slice(-MAX_CHAT_MESSAGES);
+  }
+
+  return next.slice(-MAX_CHAT_MESSAGES);
 }
 
 function findPendingAssistantMessage(messages: PanelMessage[]): PanelMessage | null {
@@ -399,6 +470,7 @@ export function AIPromptPanel({
   targetType,
   agents,
   history,
+  injectedPrompt,
   onClose,
 }: AIPromptPanelProps) {
   const introMessage: CopilotMessage = useMemo(
@@ -468,6 +540,45 @@ export function AIPromptPanel({
   }, [projectId, target, targetType, storageKey]); // Removed 'history' from deps to prevent re-sync on every turn
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const activeRuns = await getActiveProjectRunsFromDesktop(projectId);
+        if (cancelled) {
+          return;
+        }
+        const matchingRun = activeRuns.runs.find((run) => {
+          if (run.task_type !== 'assistant') {
+            return false;
+          }
+          if (run.status !== 'pending' && run.status !== 'running') {
+            return false;
+          }
+          const payloadTarget = typeof run.payload.target === 'string' ? run.payload.target : '';
+          const payloadTargetType = typeof run.payload.target_type === 'string' ? run.payload.target_type : '';
+          return payloadTarget === target && payloadTargetType === targetType;
+        });
+        if (!matchingRun) {
+          return;
+        }
+        setLoadingStep(
+          Array.isArray(matchingRun.payload.toolLogs)
+            && matchingRun.payload.toolLogs.some((log) => typeof log === 'object' && log !== null && (log as { status?: string }).status === 'running')
+            ? 'working'
+            : 'thinking',
+        );
+        setSending(true);
+        setMessages((prev) => mergeActiveAssistantRun(prev, matchingRun));
+      } catch {
+        // Ignore resume lookup failures; local state/history still works.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, target, targetType]);
+
+  useEffect(() => {
     if (historySuppressed) {
       return;
     }
@@ -488,6 +599,13 @@ export function AIPromptPanel({
       setMessages([{ ...introMessage }]);
     }
   }, [historySuppressed, introMessage]);
+
+  useEffect(() => {
+    if (!injectedPrompt?.token || !injectedPrompt.text.trim()) {
+      return;
+    }
+    setPrompt(injectedPrompt.text);
+  }, [injectedPrompt]);
 
   // Persist to sessionStorage
   useEffect(() => {

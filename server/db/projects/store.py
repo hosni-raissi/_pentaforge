@@ -14,6 +14,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .config import projects_db_config
+from .scan_observability import (
+    build_debug_timeline,
+    compute_observability_metrics,
+    enrich_scan_event_payload,
+)
 
 _INTEL_RESOURCE_CONTENT_TYPES = {
     "strategies",
@@ -27,6 +32,8 @@ _INTEL_RESOURCE_UPDATE_MODES = {
     "every_3_days",
     "static",
 }
+_TASK_RUN_ACTIVE_STATUSES = {"pending", "running", "paused"}
+_TASK_RUN_ALL_STATUSES = _TASK_RUN_ACTIVE_STATUSES | {"completed", "failed", "cancelled"}
 
 
 def _normalize_static_plan_target_type(value: str) -> str:
@@ -241,6 +248,72 @@ class ProjectsStore:
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS project_task_runs (
+                    run_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    task_type TEXT NOT NULL,
+                    scope_key TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_task_runs_project_type_updated
+                ON project_task_runs (project_id, task_type, updated_at DESC);
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_task_runs_project_status_updated
+                ON project_task_runs (project_id, status, updated_at DESC);
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS project_tool_audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL,
+                    scan_id TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT '',
+                    tool_name TEXT NOT NULL,
+                    command_name TEXT NOT NULL DEFAULT '',
+                    safety_category TEXT NOT NULL DEFAULT '',
+                    risk_level TEXT NOT NULL DEFAULT '',
+                    requires_human_approval INTEGER NOT NULL DEFAULT 0,
+                    full_command TEXT NOT NULL,
+                    args TEXT NOT NULL DEFAULT '[]',
+                    reason TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'unknown',
+                    execution_cwd TEXT NOT NULL DEFAULT '',
+                    return_code INTEGER,
+                    execution_time REAL NOT NULL DEFAULT 0,
+                    error TEXT,
+                    artifact_paths TEXT NOT NULL DEFAULT '[]',
+                    stripped_args TEXT NOT NULL DEFAULT '[]',
+                    redirected_output_paths TEXT NOT NULL DEFAULT '[]',
+                    scope_target TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_tool_audit_logs_project_created
+                ON project_tool_audit_logs (project_id, id DESC);
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_tool_audit_logs_project_tool_created
+                ON project_tool_audit_logs (project_id, tool_name, id DESC);
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS client_messages (
                     id TEXT PRIMARY KEY,
                     project_id TEXT NOT NULL,
@@ -352,6 +425,47 @@ class ProjectsStore:
 
         return recovered
 
+    def recover_interrupted_task_runs(self) -> int:
+        """Mark stale non-scan task runs as failed after server restarts."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        recovered = 0
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT run_id, payload
+                FROM project_task_runs
+                WHERE status IN ('pending', 'running');
+                """
+            )
+            rows = cur.fetchall()
+
+            for row in rows:
+                run_id = str(row["run_id"])
+                try:
+                    payload = json.loads(row["payload"])
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                payload["error"] = "Task interrupted because server restarted."
+                payload["interrupted_at"] = now_iso
+                cur.execute(
+                    """
+                    UPDATE project_task_runs
+                    SET status = 'failed',
+                        payload = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE run_id = ?;
+                    """,
+                    (json.dumps(payload, ensure_ascii=True), run_id),
+                )
+                recovered += 1
+            conn.commit()
+
+        return recovered
+
     def list_projects(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             cur = conn.cursor()
@@ -385,6 +499,8 @@ class ProjectsStore:
         safe_project_id = str(project_id or "").strip()
         if not safe_project_id:
             return
+
+        payload = enrich_scan_event_payload(safe_project_id, payload)
 
         scan_id = str(payload.get("scan_id", "") or "")
         event = str(payload.get("event", "") or "")
@@ -469,15 +585,18 @@ class ProjectsStore:
                 parsed_data = {}
 
             out.append(
-                {
-                    "event": str(row["event"]),
-                    "project_id": str(row["project_id"]),
-                    "scan_id": str(row["scan_id"]),
-                    "level": str(row["level"]),
-                    "message": str(row["message"]),
-                    "timestamp": str(row["timestamp"]),
-                    "data": parsed_data,
-                }
+                enrich_scan_event_payload(
+                    str(row["project_id"]),
+                    {
+                        "event": str(row["event"]),
+                        "project_id": str(row["project_id"]),
+                        "scan_id": str(row["scan_id"]),
+                        "level": str(row["level"]),
+                        "message": str(row["message"]),
+                        "timestamp": str(row["timestamp"]),
+                        "data": parsed_data,
+                    },
+                )
             )
         return out
 
@@ -497,6 +616,158 @@ class ProjectsStore:
             deleted = int(cur.rowcount or 0)
             conn.commit()
         return deleted
+
+    def append_tool_audit_log(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        project_id = str(payload.get("project_id", "")).strip()
+        tool_name = str(payload.get("tool_name", "")).strip()
+        full_command = str(payload.get("full_command", "")).strip()
+        if not project_id or not tool_name or not full_command:
+            return
+
+        args = payload.get("args", [])
+        artifact_paths = payload.get("artifact_paths", [])
+        stripped_args = payload.get("stripped_args", [])
+        redirected_output_paths = payload.get("redirected_output_paths", [])
+
+        def _safe_json(value: Any, *, fallback: str) -> str:
+            try:
+                return json.dumps(value, ensure_ascii=True)
+            except (TypeError, ValueError):
+                return fallback
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO project_tool_audit_logs (
+                    project_id, scan_id, role, tool_name, command_name,
+                    safety_category, risk_level, requires_human_approval,
+                    full_command, args, reason, status, execution_cwd,
+                    return_code, execution_time, error, artifact_paths,
+                    stripped_args, redirected_output_paths, scope_target
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    project_id,
+                    str(payload.get("scan_id", "")).strip(),
+                    str(payload.get("role", "")).strip().lower(),
+                    tool_name,
+                    str(payload.get("command_name", "")).strip().lower(),
+                    str(payload.get("safety_category", "")).strip().lower(),
+                    str(payload.get("risk_level", "")).strip().lower(),
+                    1 if bool(payload.get("requires_human_approval")) else 0,
+                    full_command,
+                    _safe_json(args if isinstance(args, list) else [], fallback="[]"),
+                    str(payload.get("reason", "")).strip(),
+                    str(payload.get("status", "unknown")).strip().lower() or "unknown",
+                    str(payload.get("execution_cwd", "")).strip(),
+                    payload.get("return_code"),
+                    float(payload.get("execution_time", 0.0) or 0.0),
+                    str(payload.get("error", "")).strip() or None,
+                    _safe_json(artifact_paths if isinstance(artifact_paths, list) else [], fallback="[]"),
+                    _safe_json(stripped_args if isinstance(stripped_args, list) else [], fallback="[]"),
+                    _safe_json(redirected_output_paths if isinstance(redirected_output_paths, list) else [], fallback="[]"),
+                    str(payload.get("scope_target", "")).strip(),
+                ),
+            )
+            conn.commit()
+
+    def list_tool_audit_logs(
+        self,
+        project_id: str,
+        *,
+        scan_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            return []
+
+        clauses = ["project_id = ?"]
+        params: list[Any] = [safe_project_id]
+        clean_scan_id = str(scan_id or "").strip()
+        if clean_scan_id:
+            clauses.append("scan_id = ?")
+            params.append(clean_scan_id)
+
+        safe_limit = max(1, min(int(limit), 1000))
+        where_clause = " AND ".join(clauses)
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT
+                    id, project_id, scan_id, role, tool_name, command_name,
+                    safety_category, risk_level, requires_human_approval,
+                    full_command, args, reason, status, execution_cwd,
+                    return_code, execution_time, error, artifact_paths,
+                    stripped_args, redirected_output_paths, scope_target, created_at
+                FROM project_tool_audit_logs
+                WHERE {where_clause}
+                ORDER BY id DESC
+                LIMIT ?;
+                """,
+                (*params, safe_limit),
+            )
+            rows = cur.fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            def _parse_json_column(name: str) -> Any:
+                try:
+                    return json.loads(row[name])
+                except (TypeError, json.JSONDecodeError):
+                    return []
+
+            results.append(
+                {
+                    "id": int(row["id"]),
+                    "project_id": str(row["project_id"]),
+                    "scan_id": str(row["scan_id"] or ""),
+                    "role": str(row["role"] or ""),
+                    "tool_name": str(row["tool_name"] or ""),
+                    "command_name": str(row["command_name"] or ""),
+                    "safety_category": str(row["safety_category"] or ""),
+                    "risk_level": str(row["risk_level"] or ""),
+                    "requires_human_approval": bool(int(row["requires_human_approval"] or 0)),
+                    "full_command": str(row["full_command"] or ""),
+                    "args": _parse_json_column("args"),
+                    "reason": str(row["reason"] or ""),
+                    "status": str(row["status"] or ""),
+                    "execution_cwd": str(row["execution_cwd"] or ""),
+                    "return_code": row["return_code"],
+                    "execution_time": float(row["execution_time"] or 0.0),
+                    "error": str(row["error"] or ""),
+                    "artifact_paths": _parse_json_column("artifact_paths"),
+                    "stripped_args": _parse_json_column("stripped_args"),
+                    "redirected_output_paths": _parse_json_column("redirected_output_paths"),
+                    "scope_target": str(row["scope_target"] or ""),
+                    "created_at": str(row["created_at"] or ""),
+                }
+            )
+        return results
+
+    def get_scan_observability_snapshot(
+        self,
+        project_id: str,
+        *,
+        scan_id: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        events = self.list_scan_event_cache(project_id, limit=max(limit, 400))
+        clean_scan_id = str(scan_id or "").strip()
+        if clean_scan_id:
+            events = [event for event in events if str(event.get("scan_id", "")).strip() == clean_scan_id]
+        tool_logs = self.list_tool_audit_logs(project_id, scan_id=clean_scan_id or None, limit=max(limit, 400))
+        return {
+            "timeline": build_debug_timeline(events, tool_logs, limit=limit),
+            "metrics": compute_observability_metrics(events, tool_logs),
+        }
 
     def upsert_project(self, project: dict[str, Any]) -> None:
         project_id = str(project.get("id", "")).strip()
@@ -655,6 +926,8 @@ class ProjectsStore:
             cur.execute("DELETE FROM records WHERE id = ?;", (project_id,))
             cur.execute("DELETE FROM share_links WHERE project_id = ?;", (project_id,))
             cur.execute("DELETE FROM scan_event_cache WHERE project_id = ?;", (project_id,))
+            cur.execute("DELETE FROM project_task_runs WHERE project_id = ?;", (project_id,))
+            cur.execute("DELETE FROM project_tool_audit_logs WHERE project_id = ?;", (project_id,))
             conn.commit()
 
     def create_share_link(
@@ -872,6 +1145,198 @@ class ProjectsStore:
         if not isinstance(payload, dict):
             return None
         return payload
+
+    def upsert_task_run(
+        self,
+        *,
+        run_id: str,
+        project_id: str,
+        task_type: str,
+        status: str,
+        payload: dict[str, Any] | None = None,
+        scope_key: str | None = None,
+    ) -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        clean_project_id = str(project_id or "").strip()
+        clean_task_type = str(task_type or "").strip().lower()
+        clean_status = str(status or "").strip().lower()
+        clean_scope_key = str(scope_key or "").strip()
+        if not clean_run_id:
+            raise ValueError("run_id is required")
+        if not clean_project_id:
+            raise ValueError("project_id is required")
+        if not clean_task_type:
+            raise ValueError("task_type is required")
+        if clean_status not in _TASK_RUN_ALL_STATUSES:
+            raise ValueError(f"unsupported task run status: {clean_status}")
+
+        safe_payload = dict(payload) if isinstance(payload, dict) else {}
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO project_task_runs (
+                    run_id, project_id, task_type, scope_key, status, payload, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    project_id = EXCLUDED.project_id,
+                    task_type = EXCLUDED.task_type,
+                    scope_key = EXCLUDED.scope_key,
+                    status = EXCLUDED.status,
+                    payload = EXCLUDED.payload,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (
+                    clean_run_id,
+                    clean_project_id,
+                    clean_task_type,
+                    clean_scope_key,
+                    clean_status,
+                    json.dumps(safe_payload, ensure_ascii=True),
+                ),
+            )
+            conn.commit()
+
+        saved = self.get_task_run(clean_run_id)
+        if saved is None:
+            raise RuntimeError("failed to save task run")
+        return saved
+
+    def get_task_run(self, run_id: str) -> dict[str, Any] | None:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            return None
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT run_id, project_id, task_type, scope_key, status, payload, created_at, updated_at
+                FROM project_task_runs
+                WHERE run_id = ?
+                LIMIT 1;
+                """,
+                (clean_run_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "run_id": str(row["run_id"]),
+            "project_id": str(row["project_id"]),
+            "task_type": str(row["task_type"]),
+            "scope_key": str(row["scope_key"] or ""),
+            "status": str(row["status"]),
+            "payload": payload,
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def list_task_runs(
+        self,
+        project_id: str,
+        *,
+        task_type: str | None = None,
+        scope_key: str | None = None,
+        statuses: list[str] | tuple[str, ...] | set[str] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        clean_project_id = str(project_id or "").strip()
+        if not clean_project_id:
+            return []
+
+        clauses = ["project_id = ?"]
+        params: list[Any] = [clean_project_id]
+        clean_task_type = str(task_type or "").strip().lower()
+        if clean_task_type:
+            clauses.append("task_type = ?")
+            params.append(clean_task_type)
+
+        clean_scope_key = str(scope_key or "").strip()
+        if clean_scope_key:
+            clauses.append("scope_key = ?")
+            params.append(clean_scope_key)
+
+        if statuses:
+            clean_statuses = [
+                str(item or "").strip().lower()
+                for item in statuses
+                if str(item or "").strip().lower() in _TASK_RUN_ALL_STATUSES
+            ]
+            if clean_statuses:
+                placeholders = ", ".join("?" for _ in clean_statuses)
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(clean_statuses)
+
+        safe_limit = max(1, min(int(limit), 200))
+        where_clause = " AND ".join(clauses)
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT run_id, project_id, task_type, scope_key, status, payload, created_at, updated_at
+                FROM project_task_runs
+                WHERE {where_clause}
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
+                LIMIT ?;
+                """,
+                (*params, safe_limit),
+            )
+            rows = cur.fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            results.append(
+                {
+                    "run_id": str(row["run_id"]),
+                    "project_id": str(row["project_id"]),
+                    "task_type": str(row["task_type"]),
+                    "scope_key": str(row["scope_key"] or ""),
+                    "status": str(row["status"]),
+                    "payload": payload,
+                    "created_at": str(row["created_at"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+            )
+        return results
+
+    def get_latest_task_run(
+        self,
+        project_id: str,
+        *,
+        task_type: str,
+        scope_key: str | None = None,
+        statuses: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        runs = self.list_task_runs(
+            project_id,
+            task_type=task_type,
+            scope_key=scope_key,
+            statuses=statuses,
+            limit=1,
+        )
+        return runs[0] if runs else None
+
+    def list_active_task_runs(self, project_id: str) -> list[dict[str, Any]]:
+        return self.list_task_runs(
+            project_id,
+            statuses=_TASK_RUN_ACTIVE_STATUSES,
+            limit=50,
+        )
 
     def list_static_recon_plans(self) -> list[dict[str, Any]]:
         with self._connect() as conn:

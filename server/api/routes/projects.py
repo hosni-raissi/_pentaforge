@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from server.api.dependencies import projects_store
+from server.agents.assistant.tools.mark_false_positive import mark_false_positive as mark_project_finding_false_positive
 
 router = APIRouter(tags=["projects"])
 
@@ -20,6 +21,11 @@ class ProjectPayload(BaseModel):
 
     model_config = ConfigDict(extra="allow")
     id: str
+
+
+class FalsePositivePayload(BaseModel):
+    finding_id: str
+    reason: str | None = None
 
 
 def _cache_root() -> Path:
@@ -91,3 +97,58 @@ def delete_project(project_id: str) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to delete project: {exc}") from exc
     return {"ok": True, "id": project_id, **deleted_cache}
+
+
+@router.get("/api/projects/{project_id}/runs/active")
+def get_active_project_runs(project_id: str) -> dict[str, Any]:
+    try:
+        project = projects_store.get_project(project_id)
+        if not isinstance(project, dict):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        runs = projects_store.list_active_task_runs(project_id)
+        last_scan = project.get("lastScan", {})
+        if not isinstance(last_scan, dict):
+            last_scan = {}
+        scan_status = str(last_scan.get("status", "")).strip().lower()
+        scan_run: dict[str, Any] | None = None
+        if scan_status in {"pending", "running", "paused"}:
+            scan_run = {
+                "run_id": str(last_scan.get("scanId", "")).strip(),
+                "task_type": "scan",
+                "status": scan_status,
+                "scope_key": "",
+                "created_at": str(last_scan.get("startedAt", "")).strip(),
+                "updated_at": str(project.get("updatedAt", "")).strip(),
+                "payload": last_scan,
+            }
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "runs": runs,
+            "scan": scan_run,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read active runs: {exc}") from exc
+
+
+@router.post("/api/projects/{project_id}/findings/mark-false-positive")
+async def mark_finding_false_positive(
+    project_id: str,
+    payload: FalsePositivePayload,
+) -> dict[str, Any]:
+    try:
+        result = await mark_project_finding_false_positive(
+            project_id=project_id,
+            finding_id=payload.finding_id,
+            reason=payload.reason or "Operator marked as false positive from dashboard.",
+            project_store=projects_store,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to mark finding as false positive: {exc}") from exc
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=str(result.get("error") or "Unable to mark finding as false positive"))
+    return {"ok": True, **result}

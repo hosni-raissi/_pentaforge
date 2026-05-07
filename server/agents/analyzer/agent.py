@@ -12,6 +12,7 @@ from server.agents.executer.base import (
     ExecuterCallback,
     ExecuterResult,
 )
+from server.app.scan.verification import VerificationTier, VERIFICATION_PLAYBOOKS, classify_evidence
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
 
 from .config import (
@@ -643,12 +644,22 @@ class AnalyzerAgent:
             verification_methods.append("llm_reasoning")
 
         verdict = self._extract_verdict(verify_data)
+        vuln_type = self._derive_vulnerability_type(candidate)
+        
+        # Use new deterministic classification
+        verification_tier = classify_evidence(vuln_type, {
+            "summary": str(verify_data.get("summary", "")),
+            "raw_output": str(verify_data.get("result", "")),
+            "deterministic_validation": deterministic_validation,
+        })
+
         if verdict == "real_vulnerability":
-            if deterministic_validation:
-                evidence_status = "confirmed"
+            evidence_status = verification_tier.value
+            if verification_tier == VerificationTier.CONFIRMED:
                 proof_quality = "strong"
+            elif verification_tier == VerificationTier.REPRODUCED:
+                proof_quality = "high"
             else:
-                evidence_status = "evidence_backed"
                 proof_quality = "moderate"
         else:
             evidence_status = "suspicion"
@@ -657,6 +668,7 @@ class AnalyzerAgent:
         return {
             "evidence_status": evidence_status,
             "proof_quality": proof_quality,
+            "verification_tier": verification_tier.value,
             "deterministic_validation": deterministic_validation,
             "verification_methods": verification_methods,
             "artifact_quality": {
@@ -725,6 +737,8 @@ class AnalyzerAgent:
         evidence_map.setdefault("artifact_quality", verification_artifacts["artifact_quality"])
         evidence_map.setdefault("commands", verification_artifacts["commands"])
         evidence_map.setdefault("tools_used", verification_artifacts["tools_used"])
+        data.setdefault("tier", verification_artifacts.get("verification_tier", "needs_manual_review"))
+        data.setdefault("reasoning", data.get("reasoning", "LLM-based analysis of verification evidence."))
         data["evidence"] = evidence_map
         data.setdefault("normalized_outputs", candidate.normalized_outputs)
         data.setdefault("ssvc", candidate.assessment.get("overall", {}).get("ssvc", "TRACK"))

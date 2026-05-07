@@ -1,27 +1,31 @@
 """API route modules."""
 
-from .ai import router as ai_router
-from .debug import router as debug_router
-from .health import router as health_router
-from .intel import router as intel_router
-from .projects import router as projects_router
-from .reports import router as reports_router
-from .scans import router as scans_router
-from .share import router as share_router
-from .target_types import router as target_types_router
-from .web_auth import router as web_auth_router
-from .settings import router as settings_router
+from __future__ import annotations
 
-__all__ = [
-    "ai_router",
-    "debug_router",
-    "health_router",
-    "intel_router",
-    "projects_router",
-    "reports_router",
-    "scans_router",
-    "share_router",
-    "target_types_router",
-    "web_auth_router",
-    "settings_router",
-]
+from importlib import import_module
+
+_ROUTER_MODULES = {
+    "ai_router": ".ai",
+    "debug_router": ".debug",
+    "health_router": ".health",
+    "intel_router": ".intel",
+    "projects_router": ".projects",
+    "reports_router": ".reports",
+    "scans_router": ".scans",
+    "share_router": ".share",
+    "target_types_router": ".target_types",
+    "web_auth_router": ".web_auth",
+    "settings_router": ".settings",
+}
+
+__all__ = list(_ROUTER_MODULES.keys())
+
+
+def __getattr__(name: str):
+    module_name = _ROUTER_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(module_name, __name__)
+    router = getattr(module, "router")
+    globals()[name] = router
+    return router

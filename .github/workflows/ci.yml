@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r server/requirements-api.txt pytest
+
+      - name: Backend Syntax Gate
+        run: python -m compileall server
+
+      - name: Backend Tests
+        run: >
+          pytest -q
+          server/test/test_executer_safety.py
+          server/test/test_analyzer_handoff.py
+          server/test/test_planner_checklist_and_profiles.py
+          server/test/test_workflow_regressions.py
+          server/test/test_operator_smoke.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend Typecheck
+        run: npm run typecheck
+
+      - name: Frontend Build
+        run: npm run web:build

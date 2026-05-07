@@ -170,6 +170,8 @@ RULES:
   If a route family is already disproved or 404-only, do not add new checklist items against it without fresh evidence.
 - Prefer checklist items tied to anonymous_routes, authenticated_routes, parameter_hints, auth_surface_delta,
   confirmed_vulns, tech_inventory, known_vulnerability_signals, and tool_false_positive_rates already present in brain_json.
+- Treat confirmed_vulns as grounded facts only when they carry observed/inferred support.
+- Treat testing_hypotheses as assumptions to validate, never as confirmed vulnerabilities or completed exploit paths.
 
 AVAILABLE CHECKLIST TOOLS:
   - get_checklists(target_type, info): fetch baseline OWASP / MITRE checklist material for the target type
@@ -250,6 +252,7 @@ PLAN RULES:
   route families unless new evidence explicitly overrides them.
 - Prefer scenarios grounded in anonymous_routes, authenticated_routes, parameter_hints, auth_surface_delta,
   confirmed_vulns, recent_info, tech_inventory, and known_vulnerability_signals from brain_json.
+- Treat confirmed_vulns as grounded facts and testing_hypotheses as hypotheses only. Never escalate a hypothesis into a confirmed exploit path without fresh evidence in the scenario prerequisites.
 - For route-specific scenarios, use an observed route. Do not invent framework/module paths because a product looks familiar.
 - Every exploitation scenario must have explicit prerequisites satisfied in evidence. If prerequisites are incomplete,
   keep it as recon with validation wording instead of exploit wording.
@@ -421,10 +424,14 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
                 "endpoint": str(item.get("endpoint", item.get("target", ""))).strip(),
                 "severity": str(item.get("severity", "")).strip(),
                 "ssvc": str(item.get("ssvc", "")).strip(),
+                "claim_status": str(item.get("claim_status", "")).strip(),
+                "source_lineage": item.get("source_lineage", []),
+                "cited_tool_output_ids": item.get("cited_tool_output_ids", []),
             }
             for item in raw_verified
             if isinstance(item, dict)
             and str(item.get("status", "")).strip().lower() in {"real_vulnerability", "verified", "vulnerability"}
+            and str(item.get("claim_status", "")).strip().lower() not in {"assumed", "unsupported"}
         ][:12]
     false_positives = brain.get("false_positives", [])
     if not false_positives and isinstance(raw_verified, list):
@@ -433,6 +440,19 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
             if isinstance(item, dict)
             and str(item.get("status", "")).strip().lower() == "false_positive"
         ]
+    testing_hypotheses = brain.get("testing_hypotheses", [])
+    if not testing_hypotheses and isinstance(raw_verified, list):
+        testing_hypotheses = [
+            {
+                "name": str(item.get("title", item.get("summary", ""))).strip(),
+                "endpoint": str(item.get("endpoint", item.get("target", ""))).strip(),
+                "claim_status": str(item.get("claim_status", "")).strip() or "unsupported",
+            }
+            for item in raw_verified
+            if isinstance(item, dict)
+            and str(item.get("status", "")).strip().lower() in {"real_vulnerability", "verified", "vulnerability"}
+            and str(item.get("claim_status", "")).strip().lower() in {"assumed", "unsupported"}
+        ][:12]
     recent_info = brain.get("recent_info", brain.get("info_findings", []))
     if not recent_info and isinstance(raw_verified, list):
         recent_info = [
@@ -452,6 +472,7 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
         "recommended_run_custom_tools": brain.get("recommended_run_custom_tools", [])[:10] if isinstance(brain.get("recommended_run_custom_tools", []), list) else [],
         "nuclei_scan_hints": brain.get("nuclei_scan_hints", {}) if isinstance(brain.get("nuclei_scan_hints"), dict) else {},
         "confirmed_vulns": confirmed_vulns,
+        "testing_hypotheses": testing_hypotheses[:12] if isinstance(testing_hypotheses, list) else [],
         "recent_info": recent_info[-16:] if isinstance(recent_info, list) else [],
         "false_positives": _false_positive_names(false_positives),
         "anonymous_routes": _clean_route_list(brain.get("anonymous_routes", [])),

@@ -53,3 +53,38 @@ class IntelNode:
             max_checklist_items=max_checklist_items,
             callback=self._callback,
         )
+
+    async def run(
+        self,
+        *,
+        target: str,
+        target_type: str,
+        project_id: str,
+        force_update: bool = False,
+    ) -> Any:
+        """Unified entry point for the Intel phase execution."""
+
+        # 1. Refresh RAG to ensure we have latest knowledge for this target type
+        rag_result = await self.refresh_rag(
+            target_type=target_type,
+            info=target,  # Use target as info for RAG context
+            force_update=force_update,
+        )
+
+        # 2. Synthesize the deterministic checklist
+        checklist_result = await self.synthesize_checklist(
+            target_type=target_type,
+            info=target,
+        )
+
+        # 3. Combine results
+        return {
+            "status": "complete",
+            "summary": f"{rag_result.summary}\n{checklist_result.summary}",
+            "rag": {
+                "status": rag_result.status,
+                "stats": rag_result.stats,
+            },
+            "checklist": checklist_result.checklist,
+            "vulnerabilities": checklist_result.vulnerabilities,
+        }

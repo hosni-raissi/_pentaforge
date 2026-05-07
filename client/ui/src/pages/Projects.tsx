@@ -535,7 +535,7 @@ export default function Projects() {
 
   function openClientShare(projectId: string) {
     setActive(projectId);
-    navigate('/client-share');
+    navigate('/reports');
   }
 
   return (
@@ -657,12 +657,12 @@ export default function Projects() {
                                     setRunning(project.id, { triggerScan: true, force: true });
                                     return;
                                   }
-                                  if (project.status === 'paused') {
-                                    const confirmed = window.confirm('Resume will start a new scan and keep previous history visible. Continue?');
+                                  if (project.status === 'stopped') {
+                                    const confirmed = window.confirm('This scan was stopped. Restart will begin a fresh analysis. Continue?');
                                     if (!confirmed) {
                                       return;
                                     }
-                                    setRunning(project.id, { triggerScan: true, resume: true });
+                                    setRunning(project.id, { triggerScan: true });
                                     return;
                                   }
                                   setRunning(project.id, { triggerScan: true });
@@ -701,7 +701,7 @@ export default function Projects() {
                         variant="ghost"
                         size="sm"
                         onClick={() => openClientShare(project.id)}
-                        title="Share scan result"
+                        title="Open reports and share delivery"
                       >
                         <Share2 size={12} />
                       </Button>
@@ -1058,11 +1058,11 @@ export default function Projects() {
         open={stopDialogOpen}
         onClose={() => setStopDialogOpen(false)}
         title="Stop Scan"
-        description="Choose whether to pause or cancel the current scan."
+        description="Choose whether to stop or cancel the current scan."
       >
         <div className="space-y-3 text-sm text-text-secondary">
           <p>
-            Pause will keep current logs and results so you can review them. Cancel will clear logs,
+            Stop will keep current logs and results so you can review them. Cancel will clear logs,
             agent results, and reset status to idle.
           </p>
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
@@ -1081,10 +1081,10 @@ export default function Projects() {
                   return;
                 }
                 setStopDialogOpen(false);
-                void stopScan(stopProjectId, 'pause');
+                void stopScan(stopProjectId, 'stop');
               }}
             >
-              Pause Scan
+              Stop Scan
             </Button>
             <Button
               variant="danger"

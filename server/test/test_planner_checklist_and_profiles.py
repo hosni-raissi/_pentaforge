@@ -6,8 +6,16 @@ from pathlib import Path
 
 from server.agents.planner.prompts import trim_brain
 from server.agents.planner.tools.pentest_plan import _apply_scenario_evidence_gating
-from server.app.orchestrator import (
+from server.app.scan.grounding import (
+    _build_target_memory_evidence_text,
+    _validate_grounded_verified_finding_entry,
+)
+from server.app.scan.warmup import (
     _display_cycle_number,
+    _scenario_max_rounds,
+    _select_warmup_recon_batches,
+)
+from server.app.scan.utils import (
     _extract_prioritized_exec_scenarios,
     _scenario_missing_prerequisites,
 )
@@ -15,6 +23,7 @@ from server.agents.executer.recon.tools import ALL_RECON_TOOLS
 from server.agents.planner.agent import PlannerAgent
 from server.core.llm import LLMResponse
 from server.core.tool import tool
+from server.nodes.system_memory.schema import Brain
 
 
 def test_target_info_profiles_only_reference_registered_recon_tools() -> None:
@@ -195,6 +204,115 @@ def test_trim_brain_keeps_routes_blocked_context_and_hints() -> None:
     assert "\"tool_false_positive_rates\"" in rendered
 
 
+def test_trim_brain_demotes_unsupported_verified_findings_to_hypotheses() -> None:
+    payload = {
+        "verified_findings": [
+            {
+                "title": "Confirmed SQL injection on /login",
+                "target": "/login",
+                "status": "real_vulnerability",
+                "severity": "high",
+                "claim_status": "observed",
+                "cited_tool_output_ids": ["sqlmap#1"],
+            },
+            {
+                "title": "Possible SSRF on /proxy",
+                "target": "/proxy",
+                "status": "real_vulnerability",
+                "severity": "medium",
+                "claim_status": "assumed",
+            },
+        ]
+    }
+
+    rendered = trim_brain(payload)
+
+    assert "Confirmed SQL injection on /login" in rendered
+    assert "\"testing_hypotheses\": [{\"name\": \"Possible SSRF on /proxy\"" in rendered
+    assert "\"claim_status\": \"assumed\"" in rendered
+
+
+def test_brain_for_planner_only_exposes_grounded_findings_as_confirmed() -> None:
+    memory = {
+        "verified_findings": [
+            {
+                "id": "f-1",
+                "title": "Observed IDOR on /user/1",
+                "status": "real_vulnerability",
+                "severity": "high",
+                "claim_status": "observed",
+                "source_lineage": ["tool:run_custom"],
+                "cited_tool_output_ids": ["run_custom#1"],
+            },
+            {
+                "id": "f-2",
+                "title": "Assumed SSRF on /proxy",
+                "status": "real_vulnerability",
+                "severity": "medium",
+                "claim_status": "assumed",
+            },
+        ]
+    }
+
+    planner_brain = Brain.from_system_memory(memory).for_planner()
+
+    assert [item["name"] for item in planner_brain["confirmed_vulns"]] == ["Observed IDOR on /user/1"]
+    assert planner_brain["testing_hypotheses"] == [
+        {"name": "Assumed SSRF on /proxy", "endpoint": None, "claim_status": "assumed"}
+    ]
+
+
+def test_grounding_validation_rejects_unsupported_or_uncited_findings() -> None:
+    unsupported = {
+        "claim_status": "unsupported",
+        "evidence": {
+            "claim_status": "unsupported",
+            "cited_tool_output_ids": [],
+        },
+    }
+    inferred_without_citation = {
+        "claim_status": "inferred",
+        "evidence": {
+            "claim_status": "inferred",
+            "cited_tool_output_ids": [],
+        },
+    }
+    observed_with_citation = {
+        "claim_status": "observed",
+        "evidence": {
+            "claim_status": "observed",
+            "cited_tool_output_ids": ["run_custom#4"],
+        },
+    }
+
+    assert _validate_grounded_verified_finding_entry(unsupported) == (False, "claim_status=unsupported")
+    assert _validate_grounded_verified_finding_entry(inferred_without_citation) == (
+        False,
+        "missing_cited_tool_output_ids",
+    )
+    assert _validate_grounded_verified_finding_entry(observed_with_citation) == (True, "")
+
+
+def test_target_memory_evidence_text_keeps_grounding_metadata() -> None:
+    rendered = _build_target_memory_evidence_text(
+        {
+            "verified_findings": [
+                {
+                    "title": "Observed SQL injection",
+                    "summary": "Confirmed with deterministic validation.",
+                    "status": "real_vulnerability",
+                    "claim_status": "observed",
+                    "source_lineage": ["tool:run_custom", "citation:run_custom:run_custom#1"],
+                    "cited_tool_output_ids": ["run_custom#1"],
+                }
+            ]
+        }
+    )
+
+    assert "\"claim_status\": \"observed\"" in rendered
+    assert "\"cited_tool_output_ids\": [\"run_custom#1\"]" in rendered
+
+
 def test_scenario_evidence_gating_adds_metadata_and_demotes_hypothesized_exploit() -> None:
     scenario = {
         "task": "Validate whether POST /login email parameter is vulnerable to SQL injection",
@@ -344,3 +462,35 @@ def test_display_cycle_number_starts_main_loop_at_one_without_warmup_offset() ->
     assert _display_cycle_number(1) == 1
     assert _display_cycle_number(2) == 2
     assert _display_cycle_number(1, prior_cycles=2) == 3
+
+
+def test_select_warmup_recon_batches_limits_work_by_worker_capacity() -> None:
+    plan = {
+        "phases": [
+            {
+                "steps": [
+                    {
+                        "scenarios": [
+                            {"task": "one", "agent": "recon", "done": False},
+                            {"task": "two", "agent": "recon", "done": False},
+                            {"task": "three", "agent": "recon", "done": False},
+                            {"task": "four", "agent": "recon", "done": False},
+                            {"task": "skip-exploit", "agent": "exploit", "done": False},
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+    batches = _select_warmup_recon_batches(plan, worker_count=2, scenarios_per_worker=2)
+
+    assert len(batches) == 2
+    assert [item["task"] for item in batches[0]] == ["one", "two"]
+    assert [item["task"] for item in batches[1]] == ["three", "four"]
+
+
+def test_scenario_max_rounds_stays_clamped_to_safe_bounds() -> None:
+    assert _scenario_max_rounds({}, default=1) == 1
+    assert _scenario_max_rounds({"max_rounds": 0}, default=1) == 1
+    assert _scenario_max_rounds({"max_rounds": 5}, default=1) == 3

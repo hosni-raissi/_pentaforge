@@ -29,7 +29,7 @@ Produce a markdown report with the following sections:
 ### 4. Findings
 
 For each verified finding, include:
-- **Title** with severity badge
+- **Title** without emoji or badge decorations
 - **Severity**: Critical / High / Medium / Low / Info
 - **CVSS Score** (if available)
 - **CVE** (if available)
@@ -61,7 +61,7 @@ Group findings by severity (Critical → High → Medium → Low → Info).
 - Be precise and evidence-driven
 - Do not invent findings or evidence that are not in the data
 - Use markdown formatting for readability
-- Include severity badges: 🔴 Critical, 🟠 High, 🟡 Medium, 🔵 Low, ⚪ Info
+- Do not use emojis or severity badges anywhere in the report
 - Keep the executive summary concise (3-5 sentences max)
 - For each finding, the evidence section should include actual commands/outputs from the scan
 - If no findings exist, state that clearly and focus on testing coverage

@@ -120,6 +120,7 @@ def add_finding_to_brain(
                 "level": "info",
                 "message": f"New finding added via assistant: {safe_title}",
                 "data": {
+                    "reason_code": "assistant_finding_added",
                     "assessment": {
                         "compact_summary": f"[User Contributed] {safe_title}: {safe_description[:50]}...",
                         "severity": safe_severity,

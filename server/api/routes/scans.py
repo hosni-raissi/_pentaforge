@@ -80,7 +80,7 @@ async def start_scan(payload: StartScanPayload) -> dict[str, Any]:
 @router.post("/api/scans/stop")
 async def stop_scan(payload: StopScanPayload) -> dict[str, Any]:
     try:
-        result = scan_orchestrator.stop_scan(payload.project_id, mode=payload.mode)
+        result = await scan_orchestrator.stop_scan(payload.project_id, mode=payload.mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -245,4 +245,29 @@ async def list_scan_events(
         "ok": True,
         "project_id": project_id,
         "events": events,
+    }
+
+
+@router.get("/api/scans/{project_id}/observability")
+async def get_scan_observability(
+    project_id: str,
+    limit: int = Query(default=120, ge=10, le=500),
+    scan_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        snapshot = scan_orchestrator.get_scan_observability(
+            project_id,
+            scan_id=scan_id,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to build scan observability snapshot: {exc}") from exc
+
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "scan_id": scan_id or "",
+        **snapshot,
     }

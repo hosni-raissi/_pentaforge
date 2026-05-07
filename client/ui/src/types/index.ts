@@ -1,6 +1,6 @@
 /* ── Core types ──────────────────────────────────────────── */
 
-export type ProjectStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error';
+export type ProjectStatus = 'idle' | 'running' | 'stopped' | 'completed' | 'error';
 export type SeverityLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type AgentName = 'planner' | 'executer' | 'analyzer';
 export type AgentState = 'idle' | 'running' | 'success' | 'error' | 'waiting';
@@ -8,6 +8,28 @@ export type PhaseName = 'Reconnaissance' | 'Enumeration' | 'Exploitation' | 'Pos
 export type FindingStatus = 'open' | 'verified' | 'fixed' | 'false_positive';
 export type FindingEvidenceStatus = 'suspicion' | 'evidence_backed' | 'confirmed';
 export type FindingProofQuality = 'weak' | 'moderate' | 'strong';
+export type DashboardSeverity = SeverityLevel;
+
+export interface RealtimeVulnFinding {
+  id: string;
+  title: string;
+  severity: DashboardSeverity;
+  source: string;
+  at: string;
+  endpoint?: string;
+  status: string;
+  findingKey: string;
+  cve?: string;
+  cvss?: number | string;
+  category?: string;
+  description?: string;
+  evidence?: FindingEvidence;
+  evidenceStatus?: FindingEvidenceStatus;
+  proofQuality?: FindingProofQuality;
+  deterministicValidation?: boolean;
+  remediation?: string;
+  timestamp?: string; // Add timestamp as it's sometimes used interchangeably with 'at'
+}
 
 export interface CopilotMessage {
   id: string;

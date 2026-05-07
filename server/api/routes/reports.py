@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import markdown as md
@@ -14,10 +15,13 @@ from server.api.dependencies import projects_store
 
 router = APIRouter(tags=["reports"])
 logger = structlog.get_logger(__name__)
+_report_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 class GenerateReportResponse(BaseModel):
     ok: bool = True
+    run_id: str = ""
+    status: str = "pending"
     report_id: str = ""
     format: str = "markdown"
     created_at: str = ""
@@ -28,6 +32,8 @@ class ReportStatusResponse(BaseModel):
     html: bool = False
     pdf: bool = False
     generated_at: str | None = None
+    run_id: str | None = None
+    run_status: str | None = None
 
 
 class ReportContentResponse(BaseModel):
@@ -47,31 +53,42 @@ _HTML_REPORT_TEMPLATE = """\
 <title>PentaForge Pentest Report — {target}</title>
 <style>
   :root {{
+    --bg: #ffffff;
+    --surface: #f8fafc;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --text-muted: #64748b;
+    --accent: #4f46e5;
+    --critical: #ef4444;
+    --high: #f97316;
+    --medium: #eab308;
+    --low: #3b82f6;
+    --info: #6b7280;
+    --heading: #0f172a;
+  }}
+  [data-theme="dark"] {{
     --bg: #0c1220;
     --surface: #111827;
     --border: #1e293b;
     --text: #e2e8f0;
     --text-muted: #94a3b8;
     --accent: #6366f1;
-    --critical: #ef4444;
-    --high: #f97316;
-    --medium: #eab308;
-    --low: #3b82f6;
-    --info: #6b7280;
+    --heading: #f1f5f9;
   }}
   * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: var(--bg);
     color: var(--text);
+    color-scheme: light dark;
     line-height: 1.7;
     padding: 2rem;
     max-width: 960px;
     margin: 0 auto;
   }}
-  h1 {{ font-size:1.8rem; margin:1.5rem 0 1rem; color:#f1f5f9; border-bottom:2px solid var(--accent); padding-bottom:.5rem; }}
-  h2 {{ font-size:1.4rem; margin:1.5rem 0 .8rem; color:#e2e8f0; }}
-  h3 {{ font-size:1.1rem; margin:1.2rem 0 .5rem; color:#cbd5e1; }}
+  h1 {{ font-size:1.8rem; margin:1.5rem 0 1rem; color:var(--heading); border-bottom:2px solid var(--accent); padding-bottom:.5rem; }}
+  h2 {{ font-size:1.4rem; margin:1.5rem 0 .8rem; color:var(--heading); }}
+  h3 {{ font-size:1.1rem; margin:1.2rem 0 .5rem; color:var(--heading); }}
   p {{ margin:.5rem 0; }}
   ul, ol {{ margin:.5rem 0 .5rem 1.5rem; }}
   li {{ margin:.25rem 0; }}
@@ -102,8 +119,8 @@ _HTML_REPORT_TEMPLATE = """\
     border:1px solid var(--border);
     text-align:left;
   }}
-  th {{ background:var(--surface); font-weight:600; }}
-  strong {{ color:#f1f5f9; }}
+  th {{ background:var(--surface); font-weight:600; color:var(--heading); }}
+  strong {{ color:var(--heading); }}
   a {{ color: var(--accent); text-decoration:none; }}
   a:hover {{ text-decoration:underline; }}
   hr {{ border:none; border-top:1px solid var(--border); margin:1.5rem 0; }}
@@ -148,8 +165,19 @@ _HTML_REPORT_TEMPLATE = """\
 
 def _markdown_to_html(markdown_content: str, target: str, generated_at: str) -> str:
     """Convert markdown report to styled HTML."""
+    content = markdown_content.strip()
+    # Remove LLM wrapping if present
+    if content.startswith("```markdown"):
+        content = content[len("```markdown") :].strip()
+        if content.endswith("```"):
+            content = content[:-3].strip()
+    elif content.startswith("```"):
+        content = content[3:].strip()
+        if content.endswith("```"):
+            content = content[:-3].strip()
+
     body = md.markdown(
-        markdown_content,
+        content,
         extensions=["tables", "fenced_code", "toc"],
     )
     return _HTML_REPORT_TEMPLATE.format(
@@ -159,63 +187,163 @@ def _markdown_to_html(markdown_content: str, target: str, generated_at: str) -> 
     )
 
 
-@router.post("/api/projects/{project_id}/reports/generate")
-async def generate_project_report(project_id: str) -> GenerateReportResponse:
-    """Generate a pentest report for a project using LLM."""
-    project = projects_store.get_project(project_id)
-    if not isinstance(project, dict):
-        raise HTTPException(status_code=404, detail="Project not found")
+def _persist_report_run(
+    *,
+    project_id: str,
+    run_id: str,
+    status: str,
+    payload: dict,
+) -> None:
+    projects_store.upsert_task_run(
+        run_id=run_id,
+        project_id=project_id,
+        task_type="report",
+        status=status,
+        payload=payload,
+    )
 
+
+async def _generate_project_report_task(project_id: str, run_id: str) -> None:
+    payload: dict = {
+        "project_id": project_id,
+        "report_id": "",
+        "format": "markdown",
+        "error": "",
+    }
     try:
+        _persist_report_run(
+            project_id=project_id,
+            run_id=run_id,
+            status="running",
+            payload=payload,
+        )
+        project = projects_store.get_project(project_id)
+        if not isinstance(project, dict):
+            raise LookupError("Project not found")
+
         result = await generate_report(project_id, projects_store)
+        report_id = str(result["report_id"])
+        content = str(result["content"])
+        created_at = str(result["created_at"])
+        metadata = result.get("metadata", {})
+
+        projects_store.save_report(
+            project_id,
+            report_id=report_id,
+            format="markdown",
+            content=content,
+            metadata=metadata,
+        )
+
+        target = str(metadata.get("target", "")).strip() or project_id
+        html_content = _markdown_to_html(content, target=target, generated_at=created_at)
+        projects_store.save_report(
+            project_id,
+            report_id=str(uuid.uuid4()),
+            format="html",
+            content=html_content,
+            metadata=metadata,
+        )
+
+        logger.info(
+            "report_generated",
+            project_id=project_id,
+            run_id=run_id,
+            report_id=report_id,
+            content_length=len(content),
+        )
+        _persist_report_run(
+            project_id=project_id,
+            run_id=run_id,
+            status="completed",
+            payload={
+                **payload,
+                "report_id": report_id,
+                "format": "markdown",
+                "created_at": created_at,
+                "metadata": metadata,
+            },
+        )
+    except asyncio.CancelledError:
+        _persist_report_run(
+            project_id=project_id,
+            run_id=run_id,
+            status="cancelled",
+            payload={
+                **payload,
+                "error": "Report generation was cancelled.",
+            },
+        )
+        raise
     except Exception as exc:
         logger.exception(
             "report_generation_failed",
             project_id=project_id,
+            run_id=run_id,
             error=str(exc),
         )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Report generation failed: {str(exc).strip() or type(exc).__name__}",
+        _persist_report_run(
+            project_id=project_id,
+            run_id=run_id,
+            status="failed",
+            payload={
+                **payload,
+                "error": str(exc).strip() or type(exc).__name__,
+            },
+        )
+    finally:
+        _report_tasks.pop(run_id, None)
+
+
+@router.post("/api/projects/{project_id}/reports/generate")
+async def generate_project_report(project_id: str) -> GenerateReportResponse:
+    """Start pentest report generation as a durable background run."""
+    project = projects_store.get_project(project_id)
+    if not isinstance(project, dict):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    active_run = projects_store.get_latest_task_run(
+        project_id,
+        task_type="report",
+        statuses={"pending", "running"},
+    )
+    if isinstance(active_run, dict):
+        payload = active_run.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        return GenerateReportResponse(
+            ok=True,
+            run_id=str(active_run.get("run_id", "")),
+            status=str(active_run.get("status", "running")),
+            report_id=str(payload.get("report_id", "")),
+            format=str(payload.get("format", "markdown")),
+            created_at=str(active_run.get("created_at", "")),
         )
 
-    report_id = str(result["report_id"])
-    content = str(result["content"])
-    created_at = str(result["created_at"])
-    metadata = result.get("metadata", {})
-
-    # Save markdown.
-    projects_store.save_report(
-        project_id,
-        report_id=report_id,
-        format="markdown",
-        content=content,
-        metadata=metadata,
-    )
-
-    # Generate and save HTML.
-    target = str(metadata.get("target", "")).strip() or project_id
-    html_content = _markdown_to_html(content, target=target, generated_at=created_at)
-    projects_store.save_report(
-        project_id,
-        report_id=str(uuid.uuid4()),
-        format="html",
-        content=html_content,
-        metadata=metadata,
-    )
-
-    logger.info(
-        "report_generated",
+    run_id = str(uuid.uuid4())
+    _persist_report_run(
         project_id=project_id,
-        report_id=report_id,
-        content_length=len(content),
+        run_id=run_id,
+        status="pending",
+        payload={
+            "project_id": project_id,
+            "report_id": "",
+            "format": "markdown",
+            "error": "",
+        },
+    )
+    _report_tasks[run_id] = asyncio.create_task(
+        _generate_project_report_task(project_id, run_id),
+        name=f"report_run_{run_id}",
     )
 
     return GenerateReportResponse(
         ok=True,
-        report_id=report_id,
+        run_id=run_id,
+        status="pending",
+        report_id="",
         format="markdown",
-        created_at=created_at,
+        created_at="",
     )
 
 
@@ -229,11 +357,17 @@ async def get_report_status(project_id: str, response: Response) -> ReportStatus
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     status = projects_store.list_report_status(project_id)
+    latest_run = projects_store.get_latest_task_run(
+        project_id,
+        task_type="report",
+    )
     return ReportStatusResponse(
         markdown=bool(status.get("markdown")),
         html=bool(status.get("html")),
         pdf=bool(status.get("pdf")),
         generated_at=status.get("generated_at"),
+        run_id=str(latest_run.get("run_id", "")) if isinstance(latest_run, dict) else None,
+        run_status=str(latest_run.get("status", "")) if isinstance(latest_run, dict) else None,
     )
 
 
