@@ -42,12 +42,16 @@ class AssistantRun:
     status: str = "running"
     reply: str = ""
     route: str = "assistant"
+    mode: str = "Ask"
+    lane: str = "lightweight"
+    style: str = "natural"
     blocked: bool = False
     next_context: str = ""
     backlog: list[dict[str, Any]] = field(default_factory=list)
     subscribers: set[asyncio.Queue] = field(default_factory=set)
     toolLogs: list[dict[str, Any]] = field(default_factory=list)
     password_requests: list[dict[str, Any]] = field(default_factory=list)
+    learning_signals: dict[str, Any] = field(default_factory=dict)
     callback: Any | None = None
     task: asyncio.Task[Any] | None = None
 
@@ -153,11 +157,15 @@ def _assistant_run_payload(run: AssistantRun) -> dict[str, Any]:
         "target_type": run.target_type,
         "reply": run.reply,
         "route": run.route,
+        "mode": run.mode,
+        "lane": run.lane,
+        "style": run.style,
         "blocked": run.blocked,
         "next_context": run.next_context,
         "backlog": run.backlog[-200:],
         "toolLogs": run.toolLogs,
         "password_requests": run.password_requests,
+        "learning_signals": run.learning_signals,
     }
 
 
@@ -195,6 +203,9 @@ def _restore_assistant_run(record: dict[str, Any]) -> AssistantRun | None:
         status=str(record.get("status", "") or "failed").strip().lower() or "failed",
         reply=str(payload.get("reply", "") or "").strip(),
         route=str(payload.get("route", "") or "assistant").strip() or "assistant",
+        mode=str(payload.get("mode", "") or "Ask").strip() or "Ask",
+        lane=str(payload.get("lane", "") or "lightweight").strip() or "lightweight",
+        style=str(payload.get("style", "") or "natural").strip() or "natural",
         blocked=bool(payload.get("blocked", False)),
         next_context=str(payload.get("next_context", "") or "").strip(),
         backlog=[
@@ -209,6 +220,7 @@ def _restore_assistant_run(record: dict[str, Any]) -> AssistantRun | None:
             item for item in payload.get("password_requests", [])
             if isinstance(item, dict)
         ],
+        learning_signals=payload.get("learning_signals", {}) if isinstance(payload.get("learning_signals"), dict) else {},
     )
     if not run.request_id:
         return None
@@ -317,20 +329,23 @@ async def _execute_assistant_run(
             )
             run.reply = reply
             run.route = "blocked"
+            run.mode = "Ask"
+            run.lane = "lightweight"
+            run.style = "natural"
             run.blocked = True
             run.status = "completed"
             _persist_assistant_run(run)
             _publish_run_event(
                 run,
                 "reply",
-                {"text": reply, "route": "blocked", "blocked": True},
+                {"text": reply, "route": "blocked", "mode": run.mode, "lane": run.lane, "style": run.style, "blocked": True},
             )
             if run.project_id:
                 projects_store.append_project_copilot_history(
                     run.project_id,
                     [
                         {"role": "user", "text": prompt},
-                        {"role": "assistant", "text": reply, "route": "blocked", "blocked": True},
+                        {"role": "assistant", "text": reply, "route": "blocked", "mode": run.mode, "lane": run.lane, "style": run.style, "blocked": True},
                     ],
                     scope_key=run.scope_key,
                 )
@@ -352,9 +367,14 @@ async def _execute_assistant_run(
             if event_type == "reply":
                 run.reply = str(event_data.get("text", "")).strip()
                 run.route = str(event_data.get("route", "assistant") or "assistant").strip() or "assistant"
+                run.mode = str(event_data.get("mode", "Ask") or "Ask").strip() or "Ask"
+                run.lane = str(event_data.get("lane", "lightweight") or "lightweight").strip() or "lightweight"
+                run.style = str(event_data.get("style", "natural") or "natural").strip() or "natural"
                 run.blocked = bool(event_data.get("blocked", False))
             elif event_type == "context":
                 run.next_context = str(event_data.get("next_context", "") or "").strip()
+            elif event_type == "learning":
+                run.learning_signals = event_data if isinstance(event_data, dict) else {}
             elif event_type == "tool_start":
                 run.toolLogs.append({
                     "id": event_data.get("call_id"),
@@ -385,8 +405,12 @@ async def _execute_assistant_run(
                         "role": "assistant",
                         "text": run.reply,
                         "route": run.route,
+                        "mode": run.mode,
+                        "lane": run.lane,
+                        "style": run.style,
                         "blocked": run.blocked,
                         "toolLogs": run.toolLogs,
+                        "learningSignals": run.learning_signals,
                     },
                 ],
                 scope_key=run.scope_key,
@@ -654,7 +678,7 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
                 payload.project_id,
                 [
                     {"role": "user", "text": prompt},
-                    {"role": "assistant", "text": reply, "route": "blocked", "blocked": True},
+                    {"role": "assistant", "text": reply, "route": "blocked", "mode": "Ask", "lane": "lightweight", "style": "natural", "blocked": True},
                 ],
                 scope_key=scope_key,
             )
@@ -662,6 +686,9 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
             "ok": True,
             "blocked": True,
             "route": "blocked",
+            "mode": "Ask",
+            "lane": "lightweight",
+            "style": "natural",
             "reply": reply,
             "classification": {
                 "reason": decision.reason,
@@ -688,6 +715,9 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
             "ok": True,
             "blocked": False,
             "route": "assistant",
+            "mode": "Ask",
+            "lane": "lightweight",
+            "style": "natural",
             "reply": reply,
             "classification": {
                 "reason": decision.reason,
@@ -702,7 +732,16 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
             payload.project_id,
             [
                 {"role": "user", "text": prompt},
-                {"role": "assistant", "text": result.reply, "route": "assistant", "blocked": False},
+                {
+                    "role": "assistant",
+                    "text": result.reply,
+                    "route": "assistant",
+                    "mode": result.mode,
+                    "lane": result.lane,
+                    "style": result.style,
+                    "blocked": False,
+                    "learningSignals": result.learning_signals,
+                },
             ],
             scope_key=scope_key,
         )
@@ -716,8 +755,12 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
         "ok": True,
         "blocked": False,
         "route": "assistant",
+        "mode": result.mode,
+        "lane": result.lane,
+        "style": result.style,
         "reply": result.reply,
         "next_context": result.next_context,
+        "learning_signals": result.learning_signals,
         "classification": {
             "reason": decision.reason,
             "confidence": decision.confidence,

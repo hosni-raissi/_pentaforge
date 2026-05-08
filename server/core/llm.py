@@ -1,7 +1,8 @@
 """
 LLMClient — Unified async chat completion client for PentaForge.
 
-Supports Cerebras (Qwen-3), Mistral, Groq, OpenAI, and any OpenAI-compatible endpoint.
+Supports Cerebras (Qwen-3), Mistral, Groq, OpenAI, Gemini (via Google's
+OpenAI-compatible endpoint), and other OpenAI-compatible endpoints.
 Configuration is read directly from environment variables.
 
 Usage:
@@ -31,25 +32,29 @@ logger = structlog.get_logger(__name__)
 
 # ── Environment file loading ──────────────────────────────────────────────────
 
-_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+_ENV_FILES = (
+    Path(__file__).resolve().parent.parent.parent / ".env",
+    Path(__file__).resolve().parent.parent / ".env",
+)
 
 def _load_env_file() -> None:
-    """Load .env file if it exists (simple key=value parsing)."""
-    if not _ENV_FILE.exists():
-        return
-    try:
-        with open(_ENV_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
-    except Exception:
-        pass
+    """Load .env files if they exist (simple key=value parsing)."""
+    for env_file in _ENV_FILES:
+        if not env_file.exists():
+            continue
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+        except Exception:
+            pass
 
 _load_env_file()
 
@@ -59,7 +64,7 @@ _LLM_DEBUG_LOGS = os.getenv("LLM_DEBUG_LOGS", "").strip().lower() in {"1", "true
 
 # ── LLM Configuration ─────────────────────────────────────────────────────────
 
-LLMProvider = Literal["cerebras", "mistral", "groq", "openai", "together", "ollama", "nvidia", "custom"]
+LLMProvider = Literal["cerebras", "mistral", "groq", "openai", "gemini", "together", "ollama", "nvidia", "custom"]
 
 _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
     "cerebras": {
@@ -81,6 +86,11 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
         "model": "gpt-4o",
         "api_url": "https://api.openai.com/v1",
         "max_tokens": 4096,
+    },
+    "gemini": {
+        "model": "gemini-2.5-flash",
+        "api_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "max_tokens": 8192,
     },
     "together": {
         "model": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
@@ -150,12 +160,15 @@ class LLMConfig:
         """Load configuration from environment variables."""
         provider = os.getenv(f"{prefix}API_PROVIDER", "cerebras").strip().lower()
         provider_defaults = _provider_defaults(provider)
+        default_api_key = os.getenv(f"{prefix}API_KEY", "")
+        if provider == "gemini" and not str(default_api_key).strip():
+            default_api_key = os.getenv("GEMINI_API_KEY", "")
 
         return cls(
             provider=provider,
             model=os.getenv(f"{prefix}MODEL", provider_defaults["model"]),
             api_url=os.getenv(f"{prefix}API_URL", provider_defaults["api_url"]),
-            api_key=os.getenv(f"{prefix}API_KEY", ""),
+            api_key=default_api_key,
             temperature=float(os.getenv(f"{prefix}TEMPERATURE", "0.0")),
             max_tokens=int(os.getenv(f"{prefix}MAX_TOKENS", str(provider_defaults["max_tokens"]))),
         )
@@ -197,9 +210,10 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
     3) AGENT_LLM_* global setting
     4) Provider defaults
 
-    NVIDIA compatibility:
+    Provider compatibility:
     - Accepts both NVIDIA_* and legacy misspelled NVIDEA_* variables.
     - If provider is nvidia and role-specific API key is unset, uses NVIDIA_API_KEY/NVIDEA_API_KEY.
+    - If provider is gemini and role-specific API key is unset, uses GEMINI_API_KEY.
     """
     base = LLMConfig.from_env("AGENT_LLM_")
     role_token = _agent_role_token(agent_role)
@@ -210,6 +224,7 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
     role_prefix = f"AGENT_LLM_{role_token.upper()}_"
     group_name = _ROLE_GROUPS.get(role_token, "")
     group_prefix = f"AGENT_LLM_GROUP_{group_name}_" if group_name else ""
+    role_provider_override = os.getenv(f"{role_prefix}API_PROVIDER", "").strip().lower()
 
     provider = _env_first(
         f"{role_prefix}API_PROVIDER",
@@ -217,11 +232,16 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
         default=base.provider,
     ).lower()
     defaults = _provider_defaults(provider)
+    provider_changed = provider != str(base.provider or "").strip().lower()
 
     if provider == "nvidia":
         default_model = _env_first("NVIDIA_MODEL", "NVIDEA_MODEL", default=str(defaults["model"]))
         default_url = _env_first("NVIDIA_API_URL", "NVIDEA_API_URL", default=str(defaults["api_url"]))
         default_key = _env_first("NVIDIA_API_KEY", "NVIDEA_API_KEY", default=base.api_key)
+    elif provider == "gemini":
+        default_model = _env_first("GEMINI_MODEL", default=str(defaults["model"]))
+        default_url = _env_first("GEMINI_API_URL", default=str(defaults["api_url"]))
+        default_key = _env_first("GEMINI_API_KEY", default=base.api_key)
     else:
         default_model = str(defaults["model"])
         default_url = str(defaults["api_url"])
@@ -229,17 +249,17 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
 
     model = _env_first(
         f"{role_prefix}MODEL",
-        *((f"{group_prefix}MODEL",) if group_prefix else ()),
-        default=base.model or default_model,
+        *((f"{group_prefix}MODEL",) if group_prefix and not role_provider_override else ()),
+        default=default_model if provider_changed else (base.model or default_model),
     )
     api_url = _env_first(
         f"{role_prefix}API_URL",
-        *((f"{group_prefix}API_URL",) if group_prefix else ()),
-        default=base.api_url or default_url,
+        *((f"{group_prefix}API_URL",) if group_prefix and not role_provider_override else ()),
+        default=default_url if provider_changed else (base.api_url or default_url),
     )
     api_key = _env_first(
         f"{role_prefix}API_KEY",
-        *((f"{group_prefix}API_KEY",) if group_prefix else ()),
+        *((f"{group_prefix}API_KEY",) if group_prefix and not role_provider_override else ()),
         default=default_key,
     )
 
@@ -285,6 +305,8 @@ def get_backup_llm_config() -> LLMConfig | None:
         return None
 
     api_key = os.getenv("BACKUP_LLM_API_KEY", "").strip()
+    if provider == "gemini" and not api_key:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
 

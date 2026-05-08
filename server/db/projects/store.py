@@ -836,6 +836,9 @@ class ProjectsStore:
                 "timestamp": str(item.get("timestamp", "")).strip()
                 or datetime.now(timezone.utc).isoformat(),
             }
+            mode = str(item.get("mode", "")).strip()
+            if mode:
+                entry["mode"] = mode
             if role == "assistant":
                 route = str(item.get("route", "")).strip().lower()
                 if route:
@@ -846,6 +849,8 @@ class ProjectsStore:
                     entry["toolLogs"] = item.get("toolLogs")
                 if "passwordRequests" in item:
                     entry["passwordRequests"] = item.get("passwordRequests")
+                if "learningSignals" in item:
+                    entry["learningSignals"] = item.get("learningSignals")
             normalized_new.append(entry)
 
         if not normalized_new:

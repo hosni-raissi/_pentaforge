@@ -15,12 +15,27 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Optional
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+def _default_queue_limits() -> tuple[int, int]:
+    provider = str(os.getenv("AGENT_LLM_ASSISTANT_API_PROVIDER", "")).strip().lower()
+    max_concurrent_env = os.getenv("GLOBAL_LLM_QUEUE_MAX_CONCURRENT")
+    max_calls_env = os.getenv("GLOBAL_LLM_QUEUE_MAX_CALLS_PER_MINUTE")
+    if max_concurrent_env and max_calls_env:
+        try:
+            return max(1, int(max_concurrent_env)), max(1, int(max_calls_env))
+        except ValueError:
+            logger.warning("global_llm_queue_env_invalid", max_concurrent=max_concurrent_env, max_calls=max_calls_env)
+    if provider == "gemini":
+        return 4, 8
+    return 2, 3
 
 
 class BackupLLMFallback:
@@ -205,7 +220,11 @@ def get_global_llm_queue() -> GlobalLLMQueue:
     """Get or create the global LLM queue singleton."""
     global _global_llm_queue
     if _global_llm_queue is None:
-        _global_llm_queue = GlobalLLMQueue(max_concurrent=2, max_calls_per_minute=3)
+        max_concurrent, max_calls_per_minute = _default_queue_limits()
+        _global_llm_queue = GlobalLLMQueue(
+            max_concurrent=max_concurrent,
+            max_calls_per_minute=max_calls_per_minute,
+        )
     return _global_llm_queue
 
 

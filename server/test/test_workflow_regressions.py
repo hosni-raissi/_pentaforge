@@ -23,6 +23,9 @@ scans_routes = import_module("server.api.routes.scans")
 reports_routes = import_module("server.api.routes.reports")
 mark_false_positive_module = import_module("server.agents.assistant.tools.mark_false_positive")
 scan_observability_module = import_module("server.db.projects.scan_observability")
+assistant_agent_module = import_module("server.agents.assistant.agent")
+llm_module = import_module("server.core.llm")
+rate_limiter_module = import_module("server.agents.rate_limiter")
 
 
 def _seed_project(store: ProjectsStore, project_id: str = "proj-1") -> dict[str, Any]:
@@ -149,6 +152,549 @@ def test_assistant_run_can_reload_from_store_and_cancel(tmp_path, monkeypatch) -
     finally:
         ai_routes._assistant_runs.clear()
         ai_routes._assistant_scope_index.clear()
+
+
+def test_assistant_external_research_is_explicit_and_schema_is_gated() -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    assert agent._allows_external_research("Please look it up online and check the latest CVE details.") is True
+    assert agent._allows_external_research("Explain this saved finding from the current project.") is False
+
+    gated = agent._tool_schemas_for_turn(allow_external_research=False)
+    allowed = agent._tool_schemas_for_turn(allow_external_research=True)
+    gated_names = [row["function"]["name"] for row in gated]
+    allowed_names = [row["function"]["name"] for row in allowed]
+
+    assert "search_web" not in gated_names
+    assert "search_web" in allowed_names
+
+
+def test_assistant_project_vector_payload_adds_citations() -> None:
+    payload = {
+        "success": True,
+        "matches": [
+            {
+                "id": "doc-1",
+                "kind": "verified_vulnerability",
+                "title": "Open Redirect",
+                "excerpt": "Confirmed redirect through next parameter.",
+                "metadata": {
+                    "record_id": "finding-123",
+                    "title": "Open Redirect",
+                },
+            }
+        ],
+    }
+
+    enriched = assistant_agent_module.AssistantAgent._normalize_vector_search_payload(payload)
+    assert enriched["matches"][0]["citation"] == "[project:verified_vulnerability:finding-123]"
+    assert enriched["citations"] == ["[project:verified_vulnerability:finding-123]"]
+
+
+def test_assistant_structured_reply_includes_sections_and_citations() -> None:
+    tool_results = [
+        {
+            "success": True,
+            "matches": [
+                {
+                    "title": "Open Redirect",
+                    "excerpt": "Confirmed redirect through next parameter.",
+                    "citation": "[project:verified_vulnerability:finding-123]",
+                }
+            ],
+        }
+    ]
+
+    reply = assistant_agent_module.AssistantAgent._ensure_structured_reply(
+        "Open redirect appears to be confirmed on the active target.",
+        tool_results=tool_results,
+        prompt="Verify this finding",
+        target="https://example.com",
+    )
+
+    assert "**Summary**" in reply
+    assert "**Verdict**" in reply
+    assert "**Evidence**" in reply
+    assert "**Unknowns**" in reply
+    assert "**Next Step**" in reply
+    assert "**Confidence**" in reply
+    assert "[project:verified_vulnerability:finding-123]" in reply
+
+
+def test_assistant_structured_reply_assigns_false_positive_verdict() -> None:
+    reply = assistant_agent_module.AssistantAgent._ensure_structured_reply(
+        "This looks like a false positive after review.",
+        tool_results=[
+            {
+                "success": True,
+                "status": "false_positive",
+                "title": "Open Redirect",
+            }
+        ],
+        prompt="Mark this as a false positive",
+        target="https://example.com",
+    )
+
+    assert "**Verdict**\nfalse_positive" in reply
+
+
+def test_assistant_detects_operator_modes() -> None:
+    assert assistant_agent_module.AssistantAgent._detect_operator_mode("Generate the report for this project") == "Report"
+    assert assistant_agent_module.AssistantAgent._detect_operator_mode("Retest this finding and check again") == "Retest"
+    assert assistant_agent_module.AssistantAgent._detect_operator_mode("Investigate why this endpoint is exposed") == "Investigate"
+    assert assistant_agent_module.AssistantAgent._detect_operator_mode("What does this finding mean?") == "Ask"
+
+
+def test_assistant_capability_question_handles_identity_prompt() -> None:
+    assert assistant_agent_module.AssistantAgent._is_capability_question("who are you?") is True
+
+
+def test_assistant_lightweight_meta_prompt_uses_llm_reply(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    async def fake_chat(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(content="I am Echo. I help with pentest workflow for the active target.")
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+
+    reply = asyncio.run(
+        agent._answer_lightweight_lane_prompt(
+            prompt="who are you?",
+            target="https://example.com",
+            target_type="web_app",
+            project_id="proj-1",
+            saved_context="",
+            history=[],
+        )
+    )
+
+    assert "I am Echo" in reply
+    assert assistant_agent_module.AssistantAgent._resolve_execution_lane(prompt="who are you?", operator_mode="Ask") == "lightweight"
+    assert assistant_agent_module.AssistantAgent._resolve_response_style(
+        operator_mode="Ask",
+        execution_lane="lightweight",
+        prompt="who are you?",
+    ) == "natural"
+
+
+def test_assistant_lightweight_meta_prompt_omits_findings_context_when_not_requested(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+    captured: dict[str, str] = {}
+
+    async def fake_chat(messages: list[Any], **_kwargs: Any) -> Any:
+        captured["content"] = str(messages[1].content)
+        return SimpleNamespace(content="Hi! I'm Echo.")
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+
+    reply = asyncio.run(
+        agent._answer_lightweight_lane_prompt(
+            prompt="hi",
+            target="https://example.com",
+            target_type="web_app",
+            project_id="proj-1",
+            saved_context='{"verified_evidence":["finding present"]}',
+            history=[{"role": "assistant", "text": "Previous finding summary"}],
+        )
+    )
+
+    assert "Hi! I'm Echo." in reply
+    assert "Findings context requested: no" in captured["content"]
+    assert "Minimal project state:" not in captured["content"]
+    assert "Working memory:" not in captured["content"]
+
+
+def test_assistant_connectivity_failure_forces_needs_retest_even_with_saved_matches() -> None:
+    verdict = assistant_agent_module.AssistantAgent._estimate_verdict(
+        [
+            {
+                "success": True,
+                "matches": [
+                    {
+                        "kind": "verified_vulnerability",
+                        "title": "Exposed WSDL",
+                        "citation": "[project:finding:abc]",
+                    }
+                ],
+            },
+            {
+                "success": False,
+                "command": "curl",
+                "return_code": 6,
+                "stderr": "curl: (6) Could not resolve host: pentest-ground.com",
+                "error": "Exited with code 6",
+            },
+        ],
+        [],
+        prompt="Retest the WSDL finding",
+    )
+
+    assert verdict == "needs_retest"
+
+
+def test_assistant_blocks_false_positive_marking_after_connectivity_failure() -> None:
+    issue = assistant_agent_module.AssistantAgent._mark_false_positive_safety_issue(
+        tool_results=[
+            {
+                "success": False,
+                "command": "curl",
+                "return_code": 28,
+                "stderr": "curl: (28) Operation timed out after 5000 milliseconds",
+                "error": "Exited with code 28",
+            }
+        ]
+    )
+
+    assert "automatic false-positive marking is blocked" in issue.lower()
+
+
+def test_assistant_search_web_tool_only_reply_summarizes_results() -> None:
+    reply = assistant_agent_module.AssistantAgent._format_tool_only_reply(
+        [
+            {
+                "query": "latest SOAP XXE guidance",
+                "engine": "google",
+                "results": [
+                    {
+                        "title": "OWASP XXE Prevention",
+                        "url": "https://owasp.org/example",
+                        "snippet": "Guidance for preventing XML external entity attacks.",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert 'latest SOAP XXE guidance' in reply
+    assert "OWASP XXE Prevention" in reply
+    assert "https://owasp.org/example" in reply
+    assert "[search_web]" not in reply
+
+
+def test_assistant_formats_command_failures_with_likely_cause() -> None:
+    payload = assistant_agent_module.AssistantAgent._augment_command_failure_payload(
+        "ffuf",
+        [
+            "-u",
+            "https://pentest-ground.com:9000/FUZZ",
+            "-e",
+            ".wsdl,.xml,.svc,.asmx,?wsdl",
+        ],
+        {
+            "success": False,
+            "command": "ffuf",
+            "args": [
+                "-u",
+                "https://pentest-ground.com:9000/FUZZ",
+                "-e",
+                ".wsdl,.xml,.svc,.asmx,?wsdl",
+            ],
+            "return_code": 2,
+            "error": "Exited with code 2",
+        },
+    )
+
+    reply = assistant_agent_module.AssistantAgent._format_direct_command_reply(payload)
+
+    assert "Likely cause:" in reply
+    assert "FFUF" in reply or "ffuf" in reply
+
+
+def test_assistant_blocked_payload_recommends_safe_next_command() -> None:
+    payload = assistant_agent_module.AssistantAgent._blocked_tool_payload(
+        tool_name="run_custom",
+        parsed_args={"command": "python3", "args": ["-c", "print(1)"]},
+        target="https://example.com",
+        operator_mode="Investigate",
+        error="Policy violation: local interpreter blocked",
+    )
+
+    assert payload["blocked"] is True
+    assert "recommendation" in payload
+    assert "curl -I https://example.com" == payload["recommendation"]["suggested_command"]
+
+
+def test_assistant_scope_check_allows_ffuf_extension_lists_on_current_target() -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    issue = agent._assistant_scope_issue_for_command(
+        command="ffuf",
+        args=[
+            "-u",
+            "https://pentest-ground.com:4280/FUZZ",
+            "-w",
+            "/server/share/wordlists/short.txt",
+            "-e",
+            ".wsdl,.xml,.svc,.asmx,?wsdl",
+            "-k",
+            "-s",
+            "-t",
+            "50",
+        ],
+        target="https://pentest-ground.com:4280",
+    )
+
+    assert issue is None
+
+
+def test_assistant_normalizes_curl_write_out_args() -> None:
+    normalized = assistant_agent_module.AssistantAgent._normalize_run_custom_args(
+        "curl",
+        [
+            "-I",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "%{content_type}\\n",
+            "https://pentest-ground.com:9000/?wsdl",
+        ],
+    )
+
+    assert normalized == [
+        "-I",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code} %{content_type}\\n",
+        "https://pentest-ground.com:9000/?wsdl",
+    ]
+
+
+def test_assistant_scope_check_blocks_external_target_even_with_safe_binary() -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    issue = agent._assistant_scope_issue_for_command(
+        command="curl",
+        args=["https://example.org/admin"],
+        target="https://pentest-ground.com:4280",
+    )
+
+    assert issue is not None
+    assert "current target" in issue.lower()
+
+
+def test_assistant_learning_signals_capture_corrections_and_false_positives() -> None:
+    learning = assistant_agent_module.AssistantAgent._extract_learning_signals(
+        prompt="That finding is a false positive, and that's wrong because the redirect is internal only.",
+        tool_results=[
+            {
+                "success": True,
+                "status": "false_positive",
+                "title": "Open Redirect",
+            }
+        ],
+    )
+
+    assert learning["operator_corrections"]
+    assert any("false positive" in row.lower() for row in learning["lessons_learned"])
+
+
+def test_assistant_context_block_unifies_project_state_and_investigation_brief(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    dependencies_module = import_module("server.api.dependencies")
+    monkeypatch.setattr(dependencies_module, "projects_store", store)
+
+    memory_payload = asyncio.run(
+        save_system_memory(
+            str(tmp_path / "assistant-memory"),
+            {
+                "overview": "Login flow exposes a legacy admin surface.",
+                "tech_stack": ["nginx", "php"],
+                "verified_findings": [
+                    {
+                        "title": "Missing CSP",
+                        "status": "real_vulnerability",
+                        "claim_status": "confirmed",
+                        "cited_tool_output_ids": ["tool-1"],
+                    }
+                ],
+                "tool_observations": [
+                    {"tool": "nmap", "status": "success"},
+                ],
+            },
+        )
+    )
+
+    project = store.get_project("proj-1")
+    assert project is not None
+    project["findings"] = [
+        {
+            "id": "finding-1",
+            "title": "Missing CSP",
+            "description": "Content-Security-Policy header is absent.",
+            "severity": "high",
+            "status": "confirmed",
+            "target": "https://example.com",
+        }
+    ]
+    project["lastScan"] = {
+        "scanId": "scan-1",
+        "status": "completed",
+        "result": {
+            "targetMemory": {
+                "json": memory_payload["paths"]["json"],
+            }
+        },
+    }
+    store.upsert_project(project)
+    store.save_report(
+        "proj-1",
+        report_id="report-1",
+        format="markdown",
+        content="# Pentest Report\n\nConfirmed header issues.",
+        metadata={"verified_findings": 1, "total_findings": 1},
+    )
+    store.append_scan_event_cache(
+        "proj-1",
+        {
+            "scan_id": "scan-1",
+            "event": "verified_finding_saved",
+            "level": "success",
+            "message": "Confirmed finding persisted",
+            "timestamp": "2026-05-08T10:00:00+00:00",
+            "data": {"finding_id": "finding-1"},
+        },
+    )
+
+    agent = assistant_agent_module.AssistantAgent()
+    context_block = agent._build_context_block(
+        project_id="proj-1",
+        target="https://example.com",
+        target_type="web_app",
+        prompt="Investigate why the header issue keeps appearing",
+        context="operator_selected_tab=assistant",
+        saved_context='{"hypotheses":["header issue may be global"],"unresolved_questions":["is the admin path separate?"],"verdicts":["missing csp: observed"]}',
+        external_research_allowed=False,
+        operator_mode="Investigate",
+        execution_lane="investigation",
+        response_style="structured",
+        history=[],
+    )
+
+    assert "unified_project_state" in context_block
+    assert "[project:finding:finding-1]" in context_block
+    assert "latest_report_heading: Pentest Report" in context_block
+    assert "metrics:" in context_block
+    assert "investigation_brief" in context_block
+    assert "step_1:" in context_block
+
+
+def test_assistant_build_next_context_skips_llm_for_lightweight_meta_prompt(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    async def fail_chat(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("LLM compression should not run for lightweight meta prompts")
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fail_chat)
+
+    next_context = asyncio.run(
+        agent._build_next_context(
+            project_id="proj-1",
+            saved_context="",
+            history=[],
+            prompt="who are you?",
+            reply="I am Echo.",
+            tool_results=[],
+            target="https://example.com",
+            target_type="web_app",
+            execution_lane="lightweight",
+            response_style="natural",
+            operator_mode="Ask",
+        )
+    )
+
+    assert '"operator_mode": "Ask"' in next_context
+    assert '"execution_lane": "lightweight"' in next_context
+    assert '"response_style": "natural"' in next_context
+    assert "I am Echo." in next_context
+
+
+def test_assistant_build_next_context_uses_local_first_for_simple_investigation(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    async def fail_chat(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("Simple investigation context should stay local-first")
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fail_chat)
+
+    next_context = asyncio.run(
+        agent._build_next_context(
+            project_id="proj-1",
+            saved_context="",
+            history=[],
+            prompt="Explain this finding",
+            reply="This finding suggests a missing CSP header.",
+            tool_results=[],
+            target="https://example.com",
+            target_type="web_app",
+            execution_lane="lightweight",
+            response_style="natural",
+            operator_mode="Ask",
+        )
+    )
+
+    assert '"response_style": "natural"' in next_context
+
+
+def test_assistant_context_block_uses_minimal_grounding_for_lightweight_lane(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    dependencies_module = import_module("server.api.dependencies")
+    monkeypatch.setattr(dependencies_module, "projects_store", store)
+
+    project = store.get_project("proj-1")
+    assert project is not None
+    project["findings"] = [
+        {"id": "finding-1", "title": "Missing CSP", "description": "Header absent.", "severity": "high", "status": "confirmed", "target": "https://example.com"}
+    ]
+    store.upsert_project(project)
+
+    agent = assistant_agent_module.AssistantAgent()
+    context_block = agent._build_context_block(
+        project_id="proj-1",
+        target="https://example.com",
+        target_type="web_app",
+        prompt="What can you do?",
+        context="",
+        saved_context="",
+        external_research_allowed=False,
+        operator_mode="Ask",
+        execution_lane="lightweight",
+        response_style="natural",
+        history=[],
+    )
+
+    assert "execution_lane: lightweight" in context_block
+    assert "response_style: natural" in context_block
+    assert "task_runs:" not in context_block
+    assert "observability:" not in context_block
+
+
+def test_gemini_queue_defaults_are_retuned(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_LLM_ASSISTANT_API_PROVIDER", "gemini")
+    monkeypatch.delenv("GLOBAL_LLM_QUEUE_MAX_CONCURRENT", raising=False)
+    monkeypatch.delenv("GLOBAL_LLM_QUEUE_MAX_CALLS_PER_MINUTE", raising=False)
+
+    max_concurrent, max_calls = rate_limiter_module._default_queue_limits()
+
+    assert max_concurrent == 4
+    assert max_calls == 8
+
+
+def test_assistant_llm_config_can_target_gemini(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_LLM_ASSISTANT_API_PROVIDER", "gemini")
+    monkeypatch.setenv("AGENT_LLM_ASSISTANT_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("AGENT_LLM_ASSISTANT_API_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+    monkeypatch.setenv("AGENT_LLM_ASSISTANT_API_KEY", "test-gemini-key")
+
+    cfg = llm_module.get_public_agent_config("assistant")
+
+    assert cfg.provider == "gemini"
+    assert cfg.model == "gemini-2.5-flash"
+    assert cfg.api_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
+    assert cfg.api_key == "test-gemini-key"
 
 
 def test_report_regenerate_replaces_old_content_and_status_stays_fresh(tmp_path, monkeypatch) -> None:
