@@ -1459,6 +1459,17 @@ export async function compressAIAssistHistory(history: CopilotMessage[]): Promis
   return response.summary || "";
 }
 
+export async function compressAIAssistWorkingContext(context: string): Promise<string> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  const response = await requestJson<{ context: string }>("/api/ai/assist/compress", {
+    method: "POST",
+    body: JSON.stringify({ context }),
+  });
+  return response.context || "";
+}
+
 export async function askAIAssistFromDesktop(
   request: AIAssistRequest,
 ): Promise<AIAssistResponse> {

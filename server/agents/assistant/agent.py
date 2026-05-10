@@ -406,7 +406,7 @@ class AssistantAgent:
         natural_triggers = (
             "what ", "how ", "why ", "when ", "who ", "where ", 
             "can you ", "could you ", "are you ", "is ", "hi", "hello", "hey",
-            "explain ", "describe ", "tell me ", "summarize ", "what's ", "how's ",
+            "explain ", "describe ", "tell me ", "summarize ", "summary ", "summarise ", "sum up ", "what's ", "how's ",
             "give ", "show ", "list ", "status ", "brief "
         )
         if lowered.startswith(natural_triggers):
@@ -475,6 +475,122 @@ class AssistantAgent:
         except Exception as exc:
             logger.exception("assistant_history_compression_failed")
             return f"History compression failed. (Error: {str(exc)})"
+
+    @classmethod
+    def _normalize_context_memory_payload(
+        cls,
+        text: str,
+        *,
+        operator_mode: str,
+        execution_lane: str,
+        response_style: str,
+        learning_signals: dict[str, Any] | None = None,
+    ) -> str | None:
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return None
+        try:
+            parsed = json.loads(clean_text)
+        except json.JSONDecodeError:
+            return clean_text[:_MAX_CONTEXT_CHARS].strip()
+        if not isinstance(parsed, dict):
+            return clean_text[:_MAX_CONTEXT_CHARS].strip()
+
+        normalized: dict[str, Any] = {}
+        mode_value = str(parsed.get("operator_mode", "")).strip()
+        normalized["operator_mode"] = mode_value if mode_value in _OPERATOR_MODES else operator_mode
+        lane_value = str(parsed.get("execution_lane", "")).strip().lower()
+        normalized["execution_lane"] = lane_value if lane_value in _EXECUTION_LANES else execution_lane
+        style_value = str(parsed.get("response_style", "")).strip().lower()
+        normalized["response_style"] = style_value if style_value in _RESPONSE_STYLES else response_style
+        for key in (
+            "target_facts",
+            "operator_goals",
+            "investigation_plan",
+            "hypotheses",
+            "verified_evidence",
+            "verdicts",
+            "project_state_signals",
+            "unresolved_questions",
+            "next_steps",
+            "recent_checks",
+            "operator_corrections",
+            "lessons_learned",
+        ):
+            raw_items = parsed.get(key, [])
+            if not isinstance(raw_items, list):
+                raw_items = [raw_items] if raw_items else []
+            normalized[key] = [str(item).strip()[:240] for item in raw_items if str(item).strip()][:4]
+
+        signals = learning_signals if isinstance(learning_signals, dict) else {}
+        for key, values in signals.items():
+            if key not in normalized or not isinstance(normalized[key], list):
+                normalized[key] = []
+            if not isinstance(values, list):
+                values = [values] if values else []
+            for value in values[:4]:
+                text_value = str(value).strip()
+                if text_value and text_value not in normalized[key]:
+                    normalized[key].append(text_value[:240])
+            normalized[key] = normalized[key][:4]
+        return json.dumps(normalized, ensure_ascii=True)
+
+    async def compress_working_memory(self, saved_context: str) -> str:
+        raw = str(saved_context or "").strip()
+        if not raw:
+            return ""
+
+        parsed = self._parse_saved_context_json(raw)
+        operator_mode = str(parsed.get("operator_mode", "Ask")).strip()
+        if operator_mode not in _OPERATOR_MODES:
+            operator_mode = "Ask"
+        execution_lane = self._normalize_lane(str(parsed.get("execution_lane", "investigation")).strip().lower())
+        response_style = self._normalize_style(str(parsed.get("response_style", "natural")).strip().lower())
+        rendered_memory = self._render_working_memory(raw) or raw[:_MAX_CONTEXT_CHARS].strip()
+
+        user_content = "\n".join(
+            [
+                f"Operator mode: {operator_mode}",
+                f"Execution lane: {execution_lane}",
+                f"Response style: {response_style}",
+                "Current structured working memory:",
+                rendered_memory or "(none)",
+                "",
+                "Compress this working memory while preserving:",
+                "1. Verified evidence and concrete technical facts.",
+                "2. Active operator goals, open questions, and next steps.",
+                "3. Important recent checks, corrections, and lessons learned.",
+                "",
+                "Return the refreshed working memory in the same structured JSON format.",
+            ]
+        )
+
+        try:
+            response = await self._chat_with_fallback(
+                [
+                    ChatMessage(role="system", content=CONTEXT_COMPRESSION_PROMPT),
+                    ChatMessage(role="user", content=user_content),
+                ],
+                allow_tools=False,
+            )
+            normalized = self._normalize_context_memory_payload(
+                str(response.content or "").strip(),
+                operator_mode=operator_mode,
+                execution_lane=execution_lane,
+                response_style=response_style,
+            )
+            if normalized:
+                return normalized
+        except Exception:
+            logger.warning("assistant_working_memory_compression_failed", exc_info=True)
+
+        normalized = self._normalize_context_memory_payload(
+            raw,
+            operator_mode=operator_mode,
+            execution_lane=execution_lane,
+            response_style=response_style,
+        )
+        return normalized or rendered_memory[:_MAX_CONTEXT_CHARS].strip()
 
     async def answer(
         self,
@@ -703,23 +819,29 @@ class AssistantAgent:
         # Decommissioned direct command fast-path to ensure LLM always handles intent.
 
 
-        # Rolling Summary Management (Two-storage logic)
-        # 1. Full History (for UI) stays intact.
-        # 2. Compressed Context (for LLM) is updated when tokens exceed threshold.
+        # Working-memory management (two-storage logic)
+        # 1. Full history (for UI) stays intact.
+        # 2. Saved backend context (for the LLM) is refreshed when near the token limit.
         compressed_history_summary = None
         history_text = "\n".join([str(m.get('text', '')) for m in (history or [])])
         parsed_context = self._parse_saved_context_json(saved_context)
-        
-        if history and (len(history_text) // 4) > (_HISTORY_TOKEN_LIMIT * 0.98):
+
+        if (len(str(saved_context or "").strip()) // 4) > (_HISTORY_TOKEN_LIMIT * 0.95):
+            yield {"type": "ping", "data": {"step": "optimizing_context"}}
+            saved_context = await self.compress_working_memory(saved_context)
+            parsed_context = self._parse_saved_context_json(saved_context)
+            yield {"type": "context", "data": {"next_context": saved_context}}
+        elif history and (len(history_text) // 4) > (_HISTORY_TOKEN_LIMIT * 0.98):
             yield {"type": "ping", "data": {"step": "optimizing_context"}}
             
             # Generate a new summary that includes the previous one + recent history
             # We don't truncate history here; we just update the background context.
             new_summary = await self.compress_history(history)
             parsed_context["rolling_summary"] = new_summary
+            saved_context = json.dumps(parsed_context)
             
             # Yield event to update the background context (working memory)
-            yield {"type": "context", "data": {"next_context": json.dumps(parsed_context)}}
+            yield {"type": "context", "data": {"next_context": saved_context}}
             
             # We also add a transient notification that WON'T be persisted to history 
             # to avoid cluttering the database with compression logs, but we still 
@@ -3699,12 +3821,12 @@ class AssistantAgent:
         if cls._looks_like_raw_tool_trace(text):
             text = ""
         if style == "structured":
-            return cls._ensure_structured_reply(
-                text,
-                tool_results=tool_results,
-                prompt=prompt,
-                target=target,
-            )
+            if text:
+                return text.strip()
+            if tool_results:
+                fallback = cls._format_tool_only_reply(tool_results)
+                return str(fallback or "").strip() or "No useful answer was produced."
+            return "No useful answer was produced."
         if style == "report":
             if not text:
                 text = "No report update was produced."
@@ -3927,46 +4049,15 @@ class AssistantAgent:
             )
             text = str(response.content or "").strip()
             if text:
-                try:
-                    parsed = json.loads(text)
-                    if isinstance(parsed, dict):
-                        normalized: dict[str, Any] = {}
-                        mode_value = str(parsed.get("operator_mode", "")).strip()
-                        normalized["operator_mode"] = mode_value if mode_value in _OPERATOR_MODES else operator_mode
-                        lane_value = str(parsed.get("execution_lane", "")).strip().lower()
-                        normalized["execution_lane"] = lane_value if lane_value in _EXECUTION_LANES else execution_lane
-                        style_value = str(parsed.get("response_style", "")).strip().lower()
-                        normalized["response_style"] = style_value if style_value in _RESPONSE_STYLES else response_style
-                        for key in (
-                            "target_facts",
-                            "operator_goals",
-                            "investigation_plan",
-                            "hypotheses",
-                            "verified_evidence",
-                            "verdicts",
-                            "project_state_signals",
-                            "unresolved_questions",
-                            "next_steps",
-                            "recent_checks",
-                            "operator_corrections",
-                            "lessons_learned",
-                        ):
-                            raw_items = parsed.get(key, [])
-                            if not isinstance(raw_items, list):
-                                raw_items = [raw_items] if raw_items else []
-                            normalized[key] = [str(item).strip()[:240] for item in raw_items if str(item).strip()][:4]
-                        for key, values in learning_signals.items():
-                            if key not in normalized or not isinstance(normalized[key], list):
-                                normalized[key] = []
-                            for value in values[:4]:
-                                text = str(value).strip()
-                                if text and text not in normalized[key]:
-                                    normalized[key].append(text[:240])
-                            normalized[key] = normalized[key][:4]
-                        return json.dumps(normalized, ensure_ascii=True)
-                except json.JSONDecodeError:
-                    pass
-                return text[:_MAX_CONTEXT_CHARS].strip()
+                normalized = self._normalize_context_memory_payload(
+                    text,
+                    operator_mode=operator_mode,
+                    execution_lane=execution_lane,
+                    response_style=response_style,
+                    learning_signals=learning_signals,
+                )
+                if normalized:
+                    return normalized
         except Exception:
             logger.warning("assistant_context_compression_failed", exc_info=True)
 

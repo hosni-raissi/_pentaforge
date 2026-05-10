@@ -522,7 +522,9 @@ class LLMClient:
             headers=headers,
             timeout=httpx.Timeout(
                 600.0,
-                connect=10.0,
+                connect=30.0,
+                read=300.0,
+                write=60.0,
             ),
         )
 
@@ -647,9 +649,35 @@ class LLMClient:
                     tools=len(tools) if tools else 0,
                 )
 
-            resp = await self._http.post("/chat/completions", json=payload)
+            # Send request with retry logic for 429 and connection errors
+            retries = 0
+            resp = None
+            while retries <= max_retries:
+                try:
+                    resp = await self._http.post("/chat/completions", json=payload)
+                    if resp.status_code != 429:
+                        break
+                    
+                    # Handle 429
+                    wait_raw = float(resp.headers.get("retry-after", 2 ** (retries + 1)))
+                    wait = min(wait_raw, 30.0)
+                    logger.warning("llm_rate_limited", retry=retries, wait=wait)
+                    await asyncio.sleep(wait)
+                except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+                    retries += 1
+                    if retries > max_retries:
+                        logger.error("llm_connection_failed_max_retries", error=repr(exc))
+                        raise
+                    wait = 2 ** retries
+                    logger.warning("llm_connection_retry", retry=retries, wait=wait, error=repr(exc))
+                    await asyncio.sleep(wait)
+                
+                retries += 1
 
-            # Log error body for non-2xx responses (except 429 which is retried)
+            if resp is None:
+                 raise RuntimeError("LLM request failed: No response received")
+
+            # Log error body for non-2xx responses (except 429 which is handled above)
             if resp.status_code >= 400 and resp.status_code != 429:
                 logger.error(
                     "llm_api_error",
@@ -657,16 +685,6 @@ class LLMClient:
                     status=resp.status_code,
                     body=resp.text[:500],
                 )
-
-            # Retry on rate-limit (429) with exponential backoff
-            retries = 0
-            while resp.status_code == 429 and retries < max_retries:
-                retries += 1
-                wait_raw = float(resp.headers.get("retry-after", 2 ** retries))
-                wait = min(wait_raw, 30.0)
-                logger.warning("llm_rate_limited", retry=retries, wait=wait, original_wait=wait_raw)
-                await asyncio.sleep(wait)
-                resp = await self._http.post("/chat/completions", json=payload)
 
             if resp.status_code == 429:
                 # Try backup provider if configured

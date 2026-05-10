@@ -10,6 +10,7 @@ import {
   updateProjectSavedContextFromDesktop,
   sendAIAssistInputFromDesktop,
   compressAIAssistHistory,
+  compressAIAssistWorkingContext,
 } from '@/lib/projectBridge';
 import type { CopilotMessage } from '@/types';
 import type { AgentInfo, Finding } from '../../types';
@@ -45,32 +46,29 @@ function estimateMessagesTokens(messages: CopilotMessage[]): number {
   return messages.reduce((acc, m) => acc + estimateTokens(m.text || ''), 0);
 }
 
+function estimateSavedContextTokens(savedContext?: string): number {
+  const raw = String(savedContext || '').trim();
+  if (!raw) {
+    return 0;
+  }
+  return estimateTokens(raw);
+}
+
 type PanelMessage = CopilotMessage & {
   localState?: 'pending' | 'error' | 'cancelled';
   requestId?: string;
   isCompressionSeparator?: boolean;
 };
 
-const TokenUsageCircle = ({ messages, rollingSummary }: { messages: PanelMessage[], rollingSummary?: string }) => {
-  // Two-storage logic:
-  // 1. If we have a rolling summary, the LLM context is Summary + recent messages.
-  // 2. Otherwise, it's just the messages.
-  const summaryTokens = rollingSummary ? Math.ceil(rollingSummary.length / 4) : 0;
-  // Two-storage logic: The LLM context window is the Rolling Summary + last 5 messages
-  const activeMessages = rollingSummary ? messages.slice(-5) : messages;
-  const historyTokens = activeMessages.reduce((acc, m) => {
-      if (m.isCompressionSummary || m.isCompressionSeparator) return acc;
-      return acc + Math.ceil((m.text || '').length / 4);
-  }, 0);
-  
-  const currentTokens = summaryTokens + historyTokens;
+const TokenUsageCircle = ({ savedContext }: { savedContext?: string }) => {
+  const currentTokens = estimateSavedContextTokens(savedContext);
   const percentage = Math.min(100, (currentTokens / HISTORY_TOKEN_LIMIT) * 100);
   const radius = 6.5;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - (percentage / 100) * circumference;
 
   return (
-    <div className="group relative flex items-center justify-center h-5 w-5" title={`Context usage: ${Math.round(percentage)}% (${currentTokens}/${HISTORY_TOKEN_LIMIT} tokens)`}>
+    <div className="group relative flex items-center justify-center h-5 w-5" title={`Working memory usage: ${Math.round(percentage)}% (${currentTokens}/${HISTORY_TOKEN_LIMIT} tokens)`}>
       <svg className="h-4 w-4 -rotate-90 transform">
         <circle
           cx="8"
@@ -139,6 +137,19 @@ function messageSignature(message: Pick<CopilotMessage, 'role' | 'text' | 'route
   ].join('|');
 }
 
+function comparePanelMessages(a: PanelMessage, b: PanelMessage): number {
+  const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+  const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+  if (timeA !== timeB) {
+    return timeA - timeB;
+  }
+  if (a.role !== b.role) {
+    if (a.role === 'user') return -1;
+    if (b.role === 'user') return 1;
+  }
+  return String(a.id || '').localeCompare(String(b.id || ''));
+}
+
 function mergeMessages(
   baseHistory: CopilotMessage[] | undefined,
   localMessages: PanelMessage[],
@@ -146,11 +157,15 @@ function mergeMessages(
 ): PanelMessage[] {
   const merged: PanelMessage[] = [];
   const historyDupes = new Map<string, number>();
+  const historyIds = new Set<string>();
 
   if (baseHistory) {
     for (const item of baseHistory) {
       const row = { ...item };
       merged.push(row);
+      if (typeof row.id === 'string' && row.id.trim()) {
+        historyIds.add(row.id);
+      }
       const key = messageSignature(row);
       historyDupes.set(key, (historyDupes.get(key) ?? 0) + 1);
     }
@@ -158,6 +173,9 @@ function mergeMessages(
 
   for (const item of localMessages) {
     if (item.id === 'intro') {
+      continue;
+    }
+    if (historyIds.has(item.id)) {
       continue;
     }
     const key = messageSignature(item);
@@ -170,11 +188,7 @@ function mergeMessages(
   }
 
   // Sort chronologically by timestamp, but always keep intro at top
-  merged.sort((a, b) => {
-    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-    return timeA - timeB;
-  });
+  merged.sort(comparePanelMessages);
 
   return [{ ...introMessage }, ...merged].slice(-MAX_CHAT_MESSAGES);
 }
@@ -796,6 +810,8 @@ export function AIPromptPanel({
   const assistantDraftPrompt = useConfig((s) => s.assistantDraftPrompt);
   const updateConfig = useConfig((s) => s.updateConfig);
   const projects = useProjects((s) => s.projects);
+  const updateProject = useProjects((s) => s.updateProject);
+  const hydrateFromDatabase = useProjects((s) => s.hydrateFromDatabase);
   const project = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
 
   const [prompt, setPrompt] = useState('');
@@ -952,6 +968,16 @@ export function AIPromptPanel({
       updateConfig({ assistantDraftPrompt: undefined });
     }
   }, [assistantDraftPrompt, updateConfig]);
+
+  useEffect(() => {
+    void hydrateFromDatabase();
+    const intervalId = window.setInterval(() => {
+      void hydrateFromDatabase();
+    }, 60_000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [hydrateFromDatabase, projectId]);
 
   // Persist to sessionStorage
   useEffect(() => {
@@ -1135,6 +1161,7 @@ export function AIPromptPanel({
               }
 
               if (event.type === 'context') {
+                updateProject(projectId, { copilotContext: event.data.next_context }, { persist: false });
                 void updateProjectSavedContextFromDesktop(projectId, event.data.next_context);
                 return m;
               }
@@ -1143,7 +1170,7 @@ export function AIPromptPanel({
                 const step = event.data.step;
                 if (step === 'generating_final_reply') {
                   setLoadingStep('working');
-                } else if (step === 'compressing_history') {
+                } else if (step === 'compressing_history' || step === 'optimizing_context') {
                   // Inject a transient notification for history compression
                   setMessages((prev) => {
                     const now = Date.now();
@@ -1152,11 +1179,11 @@ export function AIPromptPanel({
                       const ts = new Date(m.timestamp).getTime();
                       return !isNaN(ts) && (now - ts < 10000);
                     });
-                    if (alreadyNotified) return prev;
+                  if (alreadyNotified) return prev;
                     const separator: PanelMessage = {
                       id: `opt-${now}`,
                       role: 'assistant',
-                      text: 'Optimizing conversation history for better context...',
+                      text: 'Automatically compacting context',
                       isCompressionSeparator: true,
                       timestamp: new Date().toISOString(),
                     };
@@ -1268,7 +1295,7 @@ export function AIPromptPanel({
       );
       cancelledRequestIdsRef.current.delete(requestId);
     }
-  }, [agents, buildFallbackReply, projectId, target, targetType]);
+  }, [agents, buildFallbackReply, projectId, target, targetType, updateProject]);
 
   const handleClear = useCallback(async () => {
     activeAbortControllerRef.current?.abort();
@@ -1285,12 +1312,13 @@ export function AIPromptPanel({
       // Keep local reset behavior even if backend cleanup fails.
     } finally {
       setHistorySuppressed(true);
+      updateProject(projectId, { copilotContext: '' }, { persist: false });
       writeStoredMessages(storageKey, []);
       setMessages([{ ...introMessage }]);
       setPrompt('');
       setClearing(false);
     }
-  }, [introMessage, projectId, storageKey, target, targetType]);
+  }, [introMessage, projectId, storageKey, target, targetType, updateProject]);
 
   const handleCancelSend = useCallback(() => {
     const requestId = activeRequestIdRef.current;
@@ -1325,37 +1353,36 @@ export function AIPromptPanel({
     const clean = text.trim();
     if (!clean || sending || clearing) return;
 
-    // Check for history overflow and perform pre-prompt optimization if needed.
-    // This ensures the background context is updated BEFORE the LLM sees the new prompt.
-    const currentTokens = estimateMessagesTokens(messages);
-    if (currentTokens > (HISTORY_TOKEN_LIMIT * 0.95)) {
+    const workingContext = String(project?.copilotContext || '').trim();
+    const workingContextTokens = estimateSavedContextTokens(workingContext);
+    const projectedContextTokens = workingContextTokens + estimateTokens(clean);
+    const needsBootstrapCompression = !workingContext && estimateMessagesTokens(messages) > (HISTORY_TOKEN_LIMIT * 0.95);
+
+    // Keep the backend working memory under budget before the next agent turn starts.
+    if (projectedContextTokens > (HISTORY_TOKEN_LIMIT * 0.95) || needsBootstrapCompression) {
       setSending(true);
       const optimizationId = `opt-${Date.now()}`;
       
-      // Inject optimization notification (transient, won't be truncated)
+      // Inject optimization notification (transient, won't be truncated).
       setMessages(prev => [...prev, {
         id: optimizationId,
         role: 'assistant',
-        text: '🔄 **OPTIMIZING CONVERSATION CONTEXT**\n\nHistory limit reached. I am updating my background memory to keep our conversation focused...',
+        text: 'Automatically compacting context',
+        isCompressionSeparator: true,
         timestamp: new Date().toISOString()
       }]);
 
       try {
-        // 1. Generate new rolling summary from the current full history
-        const summary = await compressAIAssistHistory(messages);
-        
-        // 2. Update the background context storage (Storage #2)
-        const nextContext = JSON.stringify({ rolling_summary: summary });
+        let nextContext = workingContext;
+        if (workingContext) {
+          nextContext = await compressAIAssistWorkingContext(workingContext);
+        } else {
+          const summary = await compressAIAssistHistory(messages);
+          nextContext = JSON.stringify({ rolling_summary: summary });
+        }
+
+        updateProject(projectId, { copilotContext: nextContext }, { persist: false });
         await updateProjectSavedContextFromDesktop(projectId, nextContext);
-        
-        // 3. Keep the UI history (Storage #1) intact, but notify the user
-        setMessages(prev => prev.map(m => m.id === optimizationId ? {
-          ...m,
-          text: '🔄 **Context Optimized**\n\nI have summarized our prior discussion into my background memory. Full history remains visible here, but my active focus is now on the most relevant points.'
-        } : m));
-        
-        // Short pause to ensure state synchronicity
-        await new Promise(r => setTimeout(r, 800));
       } catch (err) {
         console.error('History optimization failed:', err);
       }
@@ -1383,7 +1410,7 @@ export function AIPromptPanel({
     setMessages((prev) => [...prev, userMessage, assistantMessage].slice(-MAX_CHAT_MESSAGES));
     setPrompt('');
     void attachToRequest(requestId, clean);
-  }, [attachToRequest, clearing, sending, messages, introMessage]);
+  }, [attachToRequest, clearing, sending, messages, project?.copilotContext, projectId, updateProject]);
 
   useEffect(() => {
     const pendingMessage = findPendingAssistantMessage(messages);
@@ -1456,13 +1483,12 @@ export function AIPromptPanel({
           if (message.isCompressionSeparator) {
             return (
               <div key={message.id} className="my-6 flex items-center justify-center px-4">
-                <div className="flex w-full items-center gap-3">
-                  <div className="h-[1px] flex-1 bg-gradient-to-r from-transparent via-border/50 to-transparent" />
-                  <div className="flex items-center gap-2 rounded-full border border-pf-500/20 bg-surface-2 px-4 py-1.5 text-[10px] font-semibold text-text-muted shadow-sm backdrop-blur-sm uppercase tracking-wider">
-                    <Sparkles size={11} className="text-pf-400 animate-pulse" />
-                    <span>Optimizing conversation context</span>
-                  </div>
-                  <div className="h-[1px] flex-1 bg-gradient-to-r from-transparent via-border/50 to-transparent" />
+                <div className="flex w-full max-w-[92%] items-center gap-4">
+                  <div className="h-px flex-1 bg-border/40" />
+                  <span className="text-[11px] font-medium text-text-muted/65">
+                    {message.text || 'Automatically compacting context'}
+                  </span>
+                  <div className="h-px flex-1 bg-border/40" />
                 </div>
               </div>
             );
@@ -1649,17 +1675,7 @@ export function AIPromptPanel({
               <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
                 <Sparkles size={12} className="text-pf-400" />
                 <span>Echo 3.5</span>
-                <TokenUsageCircle 
-                  messages={messages} 
-                  rollingSummary={(() => {
-                    try {
-                      const parsed = JSON.parse(project?.copilotContext || '{}');
-                      return parsed.rolling_summary;
-                    } catch {
-                      return undefined;
-                    }
-                  })()} 
-                />
+                <TokenUsageCircle savedContext={project?.copilotContext} />
               </div>
               <div className=" absolute top-4 right-14  pointer-events-none">
               <span className={`text-[9px] font-mono ${prompt.length >= MAX_PROMPT_CHARS ? 'text-red-500 font-bold' : 'text-text-muted/30'}`}>

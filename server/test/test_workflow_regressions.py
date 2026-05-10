@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -155,6 +156,75 @@ def test_assistant_run_can_reload_from_store_and_cancel(tmp_path, monkeypatch) -
         ai_routes._assistant_scope_index.clear()
 
 
+def test_assistant_stream_persists_stable_turn_ids_for_history_merge(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    monkeypatch.setattr(ai_routes, "projects_store", store)
+    ai_routes._assistant_runs.clear()
+    ai_routes._assistant_scope_index.clear()
+
+    class FakeDecision:
+        is_injection = False
+        reason = "clean"
+        confidence = 0.99
+        classifier = "test"
+        detections: list[str] = []
+
+    class FakePromptGuard:
+        async def classify_user_prompt(self, prompt: str, *, context: str, use_llm: bool = True) -> FakeDecision:
+            return FakeDecision()
+
+    class FakeAssistantAgent:
+        async def stream_answer(self, **_: Any):
+            yield {
+                "type": "reply",
+                "data": {"text": "Port 3031 is closed.", "route": "assistant", "blocked": False},
+            }
+            yield {
+                "type": "context",
+                "data": {"next_context": '{"verified_evidence":["3031/tcp closed"]}'},
+            }
+
+    monkeypatch.setattr(ai_routes, "_prompt_guard", FakePromptGuard())
+    monkeypatch.setattr(ai_routes, "_assistant_agent", FakeAssistantAgent())
+
+    async def _run() -> None:
+        payload = ai_routes.AIAssistPayload(
+            prompt="Check if port 3031 is open",
+            project_id="proj-1",
+            target="192.168.100.81",
+            target_type="linux_server",
+            request_id="assist-3031",
+        )
+        scope_key = ai_routes.normalize_target_scope(payload.target, payload.target_type)
+        saved_context, saved_history = await ai_routes._load_saved_assistant_context(
+            project_id=payload.project_id,
+            scope_key=scope_key,
+        )
+        run = await ai_routes._resolve_or_create_run(
+            payload,
+            prompt=payload.prompt,
+            scope_key=scope_key,
+            context="project_id=proj-1",
+            saved_context=saved_context,
+            saved_history=saved_history,
+        )
+        if run.task is not None:
+            await run.task
+
+        project = store.get_project("proj-1")
+        history = project.get("copilotHistory", [])
+        assert history[0]["id"] == "u-assist-3031"
+        assert history[0]["requestId"] == "assist-3031"
+        assert history[1]["id"] == "a-assist-3031"
+        assert history[1]["requestId"] == "assist-3031"
+
+    try:
+        asyncio.run(_run())
+    finally:
+        ai_routes._assistant_runs.clear()
+        ai_routes._assistant_scope_index.clear()
+
+
 def test_assistant_external_research_is_explicit_and_schema_is_gated() -> None:
     agent = assistant_agent_module.AssistantAgent()
 
@@ -278,6 +348,14 @@ def test_assistant_lightweight_meta_prompt_uses_llm_reply(monkeypatch) -> None:
     ) == "natural"
 
 
+def test_assistant_summary_prompt_prefers_natural_style() -> None:
+    assert assistant_agent_module.AssistantAgent._resolve_response_style(
+        operator_mode="Ask",
+        execution_lane="investigation",
+        prompt="summary what we find",
+    ) == "natural"
+
+
 def test_assistant_lightweight_meta_prompt_omits_findings_context_when_not_requested(monkeypatch) -> None:
     agent = assistant_agent_module.AssistantAgent()
     captured: dict[str, str] = {}
@@ -345,6 +423,71 @@ def test_assistant_masks_credentials_in_run_custom_preview_and_display_payload()
     assert payload["args"] == ["-u", "msfadmin:****", "ftp://192.168.100.81/"]
     assert "msfadmin:msfadmin" not in payload["full_command"]
     assert "msfadmin:****" in payload["full_command"]
+
+
+def test_assistant_stream_answer_uses_direct_ftp_auth_path_for_exact_login_prompt(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    async def fail_chat(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("LLM should not run for the direct FTP auth shortcut")
+
+    async def fake_execute_run_custom(args: dict[str, Any], *, target: str, project_id: str | None = None) -> dict[str, Any]:
+        assert args["command"] == "curl"
+        assert args["args"] == ["-u", "msfadmin:msfadmin", "ftp://192.168.100.81/"]
+        raw_payload = {
+            "success": True,
+            "command": "curl",
+            "args": list(args["args"]),
+            "reason": args["reason"],
+            "full_command": "curl -u msfadmin:msfadmin ftp://192.168.100.81/",
+            "stdout": "drwxr-xr-x 2 root root 4096 Jan 01 00:00 pub\n",
+            "stderr": "",
+            "return_code": 0,
+            "execution_time": 0.42,
+            "logged": True,
+        }
+        return agent._sanitize_run_custom_result_for_display(raw_payload)
+
+    async def fake_build_next_context(**_kwargs: Any) -> str:
+        return '{"execution_lane": "investigation"}'
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fail_chat)
+    monkeypatch.setattr(agent, "_execute_run_custom", fake_execute_run_custom)
+    monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
+
+    async def _collect() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in agent.stream_answer(
+                prompt="try login msfadmin and password msfadmin",
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="",
+                saved_context="",
+                history=[
+                    {
+                        "role": "assistant",
+                        "text": "FTP on port 21 is reachable.",
+                        "toolLogs": [
+                            {"tool": "run_custom", "input": "nmap -sV -p21 192.168.100.81", "status": "done"}
+                        ],
+                    }
+                ],
+            )
+        ]
+
+    events = asyncio.run(_collect())
+    tool_start = next(event for event in events if event["type"] == "tool_start")
+    tool_output = next(event for event in events if event["type"] == "tool_output")
+    reply_event = next(event for event in events if event["type"] == "reply")
+
+    assert "curl -u 'msfadmin:****' ftp://192.168.100.81/" == tool_start["data"]["input"]
+    assert "msfadmin:msfadmin" not in str(tool_output["data"]["output"])
+    assert "msfadmin:****" in str(tool_output["data"]["output"])
+    assert "msfadmin:msfadmin" not in reply_event["data"]["text"]
+    assert "msfadmin:****" in reply_event["data"]["text"]
+    assert "pub" in reply_event["data"]["text"]
 
 
 def test_assistant_stream_answer_falls_back_to_local_tool_summary_when_llm_round_fails(monkeypatch) -> None:
@@ -415,6 +558,96 @@ def test_assistant_stream_answer_falls_back_to_local_tool_summary_when_llm_round
     assert "ftp 192.168.100.81" in reply_event["data"]["text"]
     assert "Login incorrect" in reply_event["data"]["text"]
     assert any(event["type"] == "context" for event in events)
+
+
+def test_ai_compress_route_supports_backend_working_context(monkeypatch) -> None:
+    class FakeAssistantAgent:
+        async def compress_working_memory(self, context: str) -> str:
+            assert '"verified_evidence"' in context
+            return '{"operator_mode":"Ask","execution_lane":"investigation","response_style":"natural"}'
+
+        async def compress_history(self, history: list[dict[str, Any]]) -> str:
+            raise AssertionError("history compression should not be used for working-context refresh")
+
+    monkeypatch.setattr(ai_routes, "_assistant_agent", FakeAssistantAgent())
+
+    result = asyncio.run(
+        ai_routes.ai_compress_history(
+            ai_routes.AICompressPayload(
+                context='{"verified_evidence":["FTP reachable and banner collected"]}',
+            )
+        )
+    )
+
+    assert result == {
+        "context": '{"operator_mode":"Ask","execution_lane":"investigation","response_style":"natural"}'
+    }
+
+
+def test_assistant_stream_answer_precompresses_large_saved_context_before_llm(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+    huge_context = json.dumps(
+        {
+            "operator_mode": "Investigate",
+            "execution_lane": "investigation",
+            "response_style": "natural",
+            "verified_evidence": ["A" * 33000],
+        }
+    )
+    compressed_context = json.dumps(
+        {
+            "operator_mode": "Investigate",
+            "execution_lane": "investigation",
+            "response_style": "natural",
+            "verified_evidence": ["FTP reachable on port 21."],
+            "next_steps": ["Try a narrow anonymous login check."],
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_compress_working_memory(saved_context: str) -> str:
+        captured["compressed_from"] = saved_context
+        return compressed_context
+
+    def fake_build_context_block(*, saved_context: str, **_kwargs: Any) -> str:
+        captured["saved_context_in_block"] = saved_context
+        return "Frontend assistant context:\n- working_memory: compressed"
+
+    async def fake_chat(messages: list[Any], **_kwargs: Any) -> Any:
+        captured["llm_user_content"] = messages[-1].content
+        return SimpleNamespace(content="Grounded FTP summary.", tool_calls=[])
+
+    async def fake_build_next_context(**_kwargs: Any) -> str:
+        return compressed_context
+
+    monkeypatch.setattr(agent, "compress_working_memory", fake_compress_working_memory)
+    monkeypatch.setattr(agent, "_build_context_block", fake_build_context_block)
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+    monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
+
+    async def _collect() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in agent.stream_answer(
+                prompt="summarize the ftp evidence",
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="",
+                saved_context=huge_context,
+                history=[],
+            )
+        ]
+
+    events = asyncio.run(_collect())
+    context_events = [event for event in events if event["type"] == "context"]
+    reply_event = next(event for event in events if event["type"] == "reply")
+
+    assert captured["compressed_from"] == huge_context
+    assert captured["saved_context_in_block"] == compressed_context
+    assert context_events[0]["data"]["next_context"] == compressed_context
+    assert "working_memory: compressed" in captured["llm_user_content"]
+    assert reply_event["data"]["text"] == "Grounded FTP summary."
 
 
 def test_privacy_gate_verbose_output_ignores_blocking_stdout(monkeypatch) -> None:
@@ -545,8 +778,8 @@ def test_assistant_identifies_getaddrinfo_thread_failure_as_environment_issue() 
     assert "resolver failure" in str(payload.get("likely_cause", "")).lower()
 
 
-def test_assistant_structured_reply_repairs_stale_prompt_mismatch() -> None:
-    repaired = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
+def test_assistant_structured_reply_preserves_llm_text_without_backend_repair() -> None:
+    preserved = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
         """**Summary**
 The finding "missing CSP header" means the site does not send a Content Security Policy header.
 
@@ -571,12 +804,12 @@ Low
         tool_results=[],
     )
 
-    assert "missing CSP header" not in repaired
-    assert "WSDL" in repaired or "wsdl" in repaired
+    assert "missing CSP header" in preserved
+    assert "WSDL" not in preserved and "wsdl" not in preserved
 
 
-def test_assistant_structured_reply_repairs_raw_web_trace_with_results() -> None:
-    repaired = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
+def test_assistant_structured_reply_sanitizes_raw_web_trace_but_preserves_llm_text() -> None:
+    preserved = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
         """[search_web]
 "latest SOAP XXE vulnerabilities and exploitation guidance 2024"
 
@@ -616,13 +849,13 @@ Low
         ],
     )
 
-    assert "[search_web]" not in repaired
-    assert "OWASP XXE Prevention Cheat Sheet" in repaired
-    assert "No direct evidence was collected in this turn." not in repaired
+    assert "[search_web]" not in preserved
+    assert "No direct evidence was collected in this turn." in preserved
+    assert "OWASP XXE Prevention Cheat Sheet" not in preserved
 
 
-def test_assistant_structured_reply_repairs_invented_live_checks_without_tool_results() -> None:
-    repaired = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
+def test_assistant_structured_reply_preserves_nonempty_llm_output_even_if_it_is_weak() -> None:
+    preserved = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
         """Summary:
 You asked two things—first, the difference between observed and confirmed verdicts, and second, whether there are SOAP-related paths beyond /wsdl.
 
@@ -649,9 +882,8 @@ Medium
         tool_results=[],
     )
 
-    assert "You asked two things" not in repaired
-    assert "HTTP 404" not in repaired
-    assert "No direct evidence was collected in this turn." in repaired
+    assert "You asked two things" in preserved
+    assert "HTTP 404" in preserved
 
 
 def test_assistant_blocked_payload_recommends_safe_next_command() -> None:

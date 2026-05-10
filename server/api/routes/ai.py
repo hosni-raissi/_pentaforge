@@ -344,8 +344,18 @@ async def _execute_assistant_run(
                 projects_store.append_project_copilot_history(
                     run.project_id,
                     [
-                        {"role": "user", "text": prompt},
-                        {"role": "assistant", "text": reply, "route": "blocked", "mode": run.mode, "lane": run.lane, "style": run.style, "blocked": True},
+                        {"id": f"u-{run.request_id}", "requestId": run.request_id, "role": "user", "text": prompt},
+                        {
+                            "id": f"a-{run.request_id}",
+                            "requestId": run.request_id,
+                            "role": "assistant",
+                            "text": reply,
+                            "route": "blocked",
+                            "mode": run.mode,
+                            "lane": run.lane,
+                            "style": run.style,
+                            "blocked": True,
+                        },
                     ],
                     scope_key=run.scope_key,
                 )
@@ -404,8 +414,10 @@ async def _execute_assistant_run(
             projects_store.append_project_copilot_history(
                 run.project_id,
                 [
-                    {"role": "user", "text": prompt},
+                    {"id": f"u-{run.request_id}", "requestId": run.request_id, "role": "user", "text": prompt},
                     {
+                        "id": f"a-{run.request_id}",
+                        "requestId": run.request_id,
                         "role": "assistant",
                         "text": run.reply,
                         "route": run.route,
@@ -638,6 +650,7 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
     prompt = payload.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
+    turn_id = str(payload.request_id or "").strip() or str(uuid.uuid4())
 
     scope_key = normalize_target_scope(payload.target, payload.target_type)
     saved_context = ""
@@ -681,8 +694,18 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
             projects_store.append_project_copilot_history(
                 payload.project_id,
                 [
-                    {"role": "user", "text": prompt},
-                    {"role": "assistant", "text": reply, "route": "blocked", "mode": "Ask", "lane": "lightweight", "style": "natural", "blocked": True},
+                    {"id": f"u-{turn_id}", "requestId": turn_id, "role": "user", "text": prompt},
+                    {
+                        "id": f"a-{turn_id}",
+                        "requestId": turn_id,
+                        "role": "assistant",
+                        "text": reply,
+                        "route": "blocked",
+                        "mode": "Ask",
+                        "lane": "lightweight",
+                        "style": "natural",
+                        "blocked": True,
+                    },
                 ],
                 scope_key=scope_key,
             )
@@ -735,8 +758,10 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
         projects_store.append_project_copilot_history(
             payload.project_id,
             [
-                {"role": "user", "text": prompt},
+                {"id": f"u-{turn_id}", "requestId": turn_id, "role": "user", "text": prompt},
                 {
+                    "id": f"a-{turn_id}",
+                    "requestId": turn_id,
                     "role": "assistant",
                     "text": result.reply,
                     "route": "assistant",
@@ -776,10 +801,14 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
 
 class AICompressPayload(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
+    context: str = ""
 
 
 @router.post("/api/ai/assist/compress")
 async def ai_compress_history(payload: AICompressPayload) -> dict[str, str]:
+    if str(payload.context or "").strip():
+        context = await _assistant_agent.compress_working_memory(payload.context)
+        return {"context": context}
     summary = await _assistant_agent.compress_history(payload.history)
     return {"summary": summary}
 
