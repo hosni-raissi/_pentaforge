@@ -183,3 +183,22 @@ class ScanOrchestratorService:
             scan_id=scan_id,
             limit=limit,
         )
+
+    def emit_event(
+        self,
+        project_id: str,
+        *,
+        event: str,
+        scan_id: str | None = None,
+        level: str = "info",
+        message: str = "",
+        data: Dict[str, Any] | None = None,
+    ) -> None:
+        self._full._emit_event(
+            project_id,
+            event=event,
+            scan_id=scan_id,
+            level=level,
+            message=message,
+            data=data,
+        )

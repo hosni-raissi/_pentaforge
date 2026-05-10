@@ -351,7 +351,7 @@ class PromptInjectionGuard:
         context: str = "",
     ) -> PromptRouteDecision | None:
         try:
-            from server.config.agent import llm_mode, local_llm_config, public_llm_config
+            from server.config.agent import llm_mode, local_llm_config, public_llm_config, get_public_agent_config
             from server.core.llm import ChatMessage, LLMClient
             import httpx
         except Exception as exc:  # pragma: no cover - defensive import fallback
@@ -359,11 +359,14 @@ class PromptInjectionGuard:
             return None
 
         mode = str(llm_mode.mode or "public").strip().lower()
-        if mode != "local" and not str(getattr(public_llm_config, "api_key", "") or "").strip():
+        selected_public_config = get_public_agent_config("assistant")
+        if not str(getattr(selected_public_config, "api_key", "") or "").strip():
+            selected_public_config = public_llm_config
+        if mode != "local" and not str(getattr(selected_public_config, "api_key", "") or "").strip():
             self._llm_disabled_reason = "missing_api_key"
             return None
         llm = LLMClient(
-            local_llm_config if mode == "local" else public_llm_config,
+            local_llm_config if mode == "local" else selected_public_config,
             mode=mode,
         )
         timeout_s_raw = os.getenv("PROMPT_GUARD_LLM_TIMEOUT_S", "5").strip()
@@ -447,6 +450,9 @@ class PromptInjectionGuard:
     def _extract_llm_json(raw: str) -> dict[str, object] | None:
         if not raw:
             return None
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.IGNORECASE | re.DOTALL)
+        if fenced:
+            raw = fenced.group(1).strip()
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):

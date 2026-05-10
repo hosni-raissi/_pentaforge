@@ -128,7 +128,10 @@ async def _normalize_string_target_field(field: str, value: str) -> tuple[str, d
             return value, None
 
     if _is_url_field(field) or is_target_field:
-        url_result = await UrlNormalizer(value).normalize()
+        # API target validation should stay cheap and syntax-focused.
+        # Live reachability probes here create noisy background traffic for
+        # assistant endpoints like context-metrics and stream setup.
+        url_result = await UrlNormalizer(value, probe_reachability=False).normalize()
         if not bool(url_result.get("valid")):
             return value, {
                 "field": field,

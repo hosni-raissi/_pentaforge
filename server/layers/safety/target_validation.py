@@ -35,9 +35,16 @@ class UrlNormalizer:
                                              default URL instead of hard-failing
     """
 
-    def __init__(self, url: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        *,
+        probe_reachability: bool = True,
+    ) -> None:
         self.raw = (url or "").strip()
         self.timeout = timeout
+        self.probe_reachability = bool(probe_reachability)
 
     async def normalize(self) -> dict:
         if not self.raw:
@@ -50,7 +57,7 @@ class UrlNormalizer:
             host = self._extract_host(raw)
             if not self._is_reasonable_host(host):
                 return self._result(host=host, error="invalid host")
-            valid = await self._probe(raw)
+            valid = await self._probe(raw) if self.probe_reachability else False
             return self._result(
                 host=host,
                 port=urlsplit(raw).port or 443,
@@ -63,7 +70,7 @@ class UrlNormalizer:
             host = self._extract_host(raw)
             if not self._is_reasonable_host(host):
                 return self._result(host=host, error="invalid host")
-            valid = await self._probe(raw)
+            valid = await self._probe(raw) if self.probe_reachability else False
             return self._result(
                 host=host,
                 port=urlsplit(raw).port or 80,
@@ -80,12 +87,22 @@ class UrlNormalizer:
         if not self._is_reasonable_host(host):
             return self._result(host=host, error="invalid host")
 
+        preferred_scheme = "http" if DEFAULT_CLIENT == "http" else "https"
+        if not self.probe_reachability:
+            normalized_url = https_url if preferred_scheme == "https" else http_url
+            port = 443 if preferred_scheme == "https" else 80
+            return self._result(
+                host=host,
+                port=port,
+                valid=True,
+                normalized_url=normalized_url,
+                reachable=False,
+            )
+
         https_ok, http_ok = await asyncio.gather(
             self._probe(https_url),
             self._probe(http_url),
         )
-
-        preferred_scheme = "http" if DEFAULT_CLIENT == "http" else "https"
 
         if https_ok and http_ok:
             chosen_scheme = preferred_scheme

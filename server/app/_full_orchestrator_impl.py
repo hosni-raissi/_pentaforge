@@ -50,6 +50,7 @@ from server.nodes.system_memory import (
 )
 from server.agents.architect.agent import ArchitectAgent
 from server.tools.session.session_manager import SessionContext, SessionManager
+from server.utils.target_scope import normalize_target_scope
 
 logger = structlog.get_logger(__name__)
 
@@ -7808,9 +7809,15 @@ class ScanOrchestratorService:
             architect = ArchitectAgent(project_id=project_id, project_cache_dir=project_cache_dir)
             current_project = self._projects_store.get_project(project_id)
             previous_architecture = current_project.get("payload", {}).get("architecture_draft")
+            scope_key = normalize_target_scope(target, target_type)
             
             # Build memory and vulnerability context for synthesis
-            arch_memory_block = _build_target_memory_prompt_block(target_memory)
+            arch_memory_parts = [_build_target_memory_prompt_block(target_memory)]
+            if str(current_project.get("copilotContextScope", "")).strip() == scope_key:
+                assistant_memory = str(current_project.get("copilotContext", "") or "").strip()
+                if assistant_memory:
+                    arch_memory_parts.extend(["### ASSISTANT WORKING MEMORY", assistant_memory[:6000]])
+            arch_memory_block = "\n\n".join(part for part in arch_memory_parts if str(part).strip())
             arch_vulnerabilities_block = ""
             for item in verify_results_organized["real_vulnerabilities"]:
                 arch_vulnerabilities_block += f"- {item['verify_summary']}\n"

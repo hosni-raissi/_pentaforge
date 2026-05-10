@@ -1598,6 +1598,8 @@ export default function Dashboard() {
   const [passwordResponseLoading, setPasswordResponseLoading] = useState<"approve" | "deny" | null>(null);
   const [pendingPasswordValue, setPendingPasswordValue] = useState("");
   const [falsePositiveLoadingId, setFalsePositiveLoadingId] = useState<string | null>(null);
+  const [isArchitectRefreshing, setIsArchitectRefreshing] = useState(false);
+  const [isArchitectCompressing, setIsArchitectCompressing] = useState(false);
   const [copilotDraft, setCopilotDraft] = useState<{ token: string; text: string } | null>(null);
   const [debugTimeline, setDebugTimeline] = useState<ScanDebugTimelineEntry[]>([]);
   const [observabilityMetrics, setObservabilityMetrics] = useState<ScanObservabilityMetrics>({
@@ -1784,6 +1786,27 @@ export default function Dashboard() {
           },
           { persist: false },
         );
+      }
+
+      // Architecture Agent States
+      if (event.event === "architect_synthesizing") {
+        setIsArchitectRefreshing(true);
+      }
+      if (event.event === "architect_compressing") {
+        setIsArchitectCompressing(true);
+      }
+      if (event.event === "architect_updated") {
+        setIsArchitectRefreshing(false);
+        setIsArchitectCompressing(false);
+        const architecture_draft = event.data.architecture_draft;
+        if (isRecord(architecture_draft)) {
+          updateProject(activeProjectId, {
+            payload: {
+              ...(activeProject?.payload ?? {}),
+              architecture_draft: architecture_draft as any,
+            }
+          } as any, { persist: false });
+        }
       }
 
       if (event.event === "verify_finding_saved" && isRecord(event.data.finding)) {
@@ -2549,6 +2572,23 @@ export default function Dashboard() {
     return null;
   })();
 
+
+  const handleRefreshArchitecture = async () => {
+    if (!activeProjectId || isArchitectRefreshing || isArchitectCompressing) {
+      return;
+    }
+    setIsArchitectRefreshing(true);
+    try {
+      const { synthesizeProjectArchitectureFromDesktop } = await import("@/lib/projectBridge");
+      await synthesizeProjectArchitectureFromDesktop(activeProjectId);
+    } catch (error) {
+      console.error("Failed to refresh architecture:", error);
+      setIsArchitectRefreshing(false);
+      setIsArchitectCompressing(false);
+    }
+    // We don't reset states in finally because ingestScanEvent will handle
+    // the 'architect_updated' event which resets the loading states.
+  };
 
   const handleApprovePlanner = async () => {
     if (!activeProjectId || plannerApprovalLoading || !isRunning) {
@@ -5402,6 +5442,9 @@ export default function Dashboard() {
               architectureEdges={architectureEdges}
               debugTimeline={debugTimeline}
               observabilityMetrics={observabilityMetrics}
+              onRefresh={handleRefreshArchitecture}
+              isRefreshing={isArchitectRefreshing}
+              isCompressing={isArchitectCompressing}
             />
           ) : null}
         </div>

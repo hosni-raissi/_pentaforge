@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -29,7 +29,10 @@ def _parse_iso(value: Any) -> datetime | None:
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except ValueError:
         return None
 
@@ -322,6 +325,7 @@ def build_debug_timeline(
     *,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
+    min_dt = datetime.min.replace(tzinfo=timezone.utc)
     items: list[dict[str, Any]] = []
     for event in events:
         enriched = enrich_scan_event_payload(_normalize_text(event.get("project_id")), event)
@@ -374,7 +378,7 @@ def build_debug_timeline(
         )
 
     items.sort(
-        key=lambda item: _parse_iso(item.get("at")) or datetime.min,
+        key=lambda item: _parse_iso(item.get("at")) or min_dt,
         reverse=True,
     )
     return items[: max(1, min(limit, 500))]
@@ -384,11 +388,12 @@ def compute_observability_metrics(
     events: list[dict[str, Any]],
     tool_audits: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    min_dt = datetime.min.replace(tzinfo=timezone.utc)
     enriched_events = [
         enrich_scan_event_payload(_normalize_text(event.get("project_id")), event)
         for event in events
     ]
-    enriched_events.sort(key=lambda item: _parse_iso(item.get("timestamp")) or datetime.min)
+    enriched_events.sort(key=lambda item: _parse_iso(item.get("timestamp")) or min_dt)
 
     cycle_starts: dict[str, datetime] = {}
     cycle_durations: list[float] = []

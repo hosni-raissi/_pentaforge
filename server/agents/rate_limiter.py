@@ -25,7 +25,6 @@ logger = structlog.get_logger(__name__)
 
 
 def _default_queue_limits() -> tuple[int, int]:
-    provider = str(os.getenv("AGENT_LLM_ASSISTANT_API_PROVIDER", "")).strip().lower()
     max_concurrent_env = os.getenv("GLOBAL_LLM_QUEUE_MAX_CONCURRENT")
     max_calls_env = os.getenv("GLOBAL_LLM_QUEUE_MAX_CALLS_PER_MINUTE")
     if max_concurrent_env and max_calls_env:
@@ -33,6 +32,14 @@ def _default_queue_limits() -> tuple[int, int]:
             return max(1, int(max_concurrent_env)), max(1, int(max_calls_env))
         except ValueError:
             logger.warning("global_llm_queue_env_invalid", max_concurrent=max_concurrent_env, max_calls=max_calls_env)
+    provider = str(os.getenv("AGENT_LLM_ASSISTANT_API_PROVIDER", "")).strip().lower()
+    if not provider:
+        try:
+            from server.config.agent import get_public_agent_config
+
+            provider = str(get_public_agent_config("assistant").provider or "").strip().lower()
+        except Exception:
+            provider = ""
     if provider == "gemini":
         return 4, 8
     return 2, 3
@@ -225,177 +232,6 @@ def get_global_llm_queue() -> GlobalLLMQueue:
             max_concurrent=max_concurrent,
             max_calls_per_minute=max_calls_per_minute,
         )
-    return _global_llm_queue
-
-
-class LLMRateLimiter:
-    """Per-agent rate limiter for LLM calls.
-
-    Deprecated in favor of GlobalLLMQueue, but kept for backward compatibility.
-    New implementations should use GlobalLLMQueue.get_global_llm_queue().
-    """
-
-    def __init__(self, *, max_calls_per_minute: int = 3):
-        """Initialize rate limiter.
-
-        Args:
-            max_calls_per_minute: Maximum LLM calls allowed per minute (default: 3, safe for Mistral 4 req/min limit)
-        """
-        self._max_calls_per_minute = max_calls_per_minute
-        self._call_times: list[float] = []
-        self._lock = asyncio.Lock()
-
-    async def wait_if_needed(self) -> None:
-        """Wait if necessary to respect rate limit."""
-        async with self._lock:
-            now = time.time()
-            minute_ago = now - 60.0
-
-            # Remove calls older than 1 minute
-            self._call_times = [t for t in self._call_times if t > minute_ago]
-
-            # If we've hit the limit, wait until the oldest call drops out
-            if len(self._call_times) >= self._max_calls_per_minute:
-                oldest = self._call_times[0]
-                wait_time = (oldest - minute_ago) + 0.1  # Small buffer
-                if wait_time > 0:
-                    logger.warning(
-                        "llm_rate_limit_wait",
-                        calls_in_minute=len(self._call_times),
-                        max_allowed=self._max_calls_per_minute,
-                        wait_seconds=round(wait_time, 2),
-                    )
-                    await asyncio.sleep(wait_time)
-                    now = time.time()
-                    self._call_times = [t for t in self._call_times if t > now - 60.0]
-
-            # Record this call
-            self._call_times.append(now)
-            calls_in_window = len(self._call_times)
-            logger.info(
-                "llm_call_recorded",
-                calls_in_minute=calls_in_window,
-                max_allowed=self._max_calls_per_minute,
-            )
-
-    def reset(self) -> None:
-        """Reset the call history."""
-        self._call_times = []
-        logger.info("llm_rate_limiter_reset")
-
-
-class GlobalLLMQueue:
-    """Global queue to coordinate LLM calls across all agents.
-
-    Ensures maximum 3 concurrent API requests (safe for Mistral 4 req/min limit).
-    All agents register and await through this queue before making LLM calls.
-    """
-
-    def __init__(self, *, max_concurrent: int = 2, max_calls_per_minute: int = 3):
-        """Initialize global queue.
-
-        Args:
-            max_concurrent: Maximum concurrent LLM requests allowed (default: 3, safe for Mistral 4 req/min)
-        """
-        self._max_concurrent = max_concurrent
-        self._max_calls_per_minute = max(1, int(max_calls_per_minute or 1))
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._active_calls: int = 0
-        self._lock = asyncio.Lock()
-        self._call_times: list[float] = []
-
-    async def acquire(self, agent_name: str) -> None:
-        """Acquire permission to make an LLM call.
-
-        This is a blocking call that waits if necessary to respect rate limits.
-        Call this BEFORE making any LLM API call.
-
-        Args:
-            agent_name: Name of the agent making the call (for logging)
-        """
-        while True:
-            async with self._lock:
-                now = time.time()
-                minute_ago = now - 60.0
-                self._call_times = [t for t in self._call_times if t > minute_ago]
-                if len(self._call_times) < self._max_calls_per_minute:
-                    self._call_times.append(now)
-                    break
-                oldest = self._call_times[0]
-                wait_time = max((oldest + 60.0) - now, 0.1)
-            logger.warning(
-                "global_llm_queue_rate_wait",
-                agent=agent_name,
-                wait_seconds=round(wait_time, 2),
-                calls_in_minute=len(self._call_times),
-                max_per_minute=self._max_calls_per_minute,
-            )
-            await asyncio.sleep(wait_time)
-
-        await self._semaphore.acquire()
-        self._active_calls += 1
-        logger.info(
-            "global_llm_queue_acquired",
-            agent=agent_name,
-            active_concurrent=self._active_calls,
-            max_concurrent=self._max_concurrent,
-            calls_in_minute=len(self._call_times),
-            max_per_minute=self._max_calls_per_minute,
-        )
-
-    def release(self, agent_name: str) -> None:
-        """Release an LLM call slot.
-
-        Call this AFTER your LLM API call completes (success or failure).
-
-        Args:
-            agent_name: Name of the agent releasing the call (for logging)
-        """
-        self._active_calls -= 1
-        self._semaphore.release()
-        logger.info(
-            "global_llm_queue_released",
-            agent=agent_name,
-            active_concurrent=self._active_calls,
-        )
-
-    async def call_with_queue(
-        self,
-        agent_name: str,
-        coro,
-    ):
-        """Execute a coroutine with global queue protection.
-
-        Automatically acquires queue slot, runs the coroutine, and releases.
-        This is the recommended way to use the queue.
-
-        Args:
-            agent_name: Name of the agent making the call
-            coro: Coroutine to execute (typically an LLM API call)
-
-        Returns:
-            Result of the coroutine
-
-        Raises:
-            Any exception raised by the coroutine
-        """
-        await self.acquire(agent_name)
-        try:
-            result = await coro
-            return result
-        finally:
-            self.release(agent_name)
-
-
-# Global singleton instance
-_global_llm_queue: Optional[GlobalLLMQueue] = None
-
-
-def get_global_llm_queue() -> GlobalLLMQueue:
-    """Get or create the global LLM queue singleton."""
-    global _global_llm_queue
-    if _global_llm_queue is None:
-        _global_llm_queue = GlobalLLMQueue(max_concurrent=2, max_calls_per_minute=3)
     return _global_llm_queue
 
 

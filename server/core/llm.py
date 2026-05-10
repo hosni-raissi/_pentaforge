@@ -37,9 +37,23 @@ _ENV_FILES = (
     Path(__file__).resolve().parent.parent / ".env",
 )
 
-def _load_env_file() -> None:
-    """Load .env files if they exist (simple key=value parsing)."""
-    for env_file in _ENV_FILES:
+def _load_env_file(
+    env_files: tuple[Path, ...] | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> None:
+    """Load .env files with shell env precedence and file-order override.
+
+    Rules:
+    - Values already present in the real process environment stay untouched.
+    - Later entries in the same file override earlier duplicates.
+    - Later env files override earlier env files.
+    """
+    target_env = environ if environ is not None else os.environ
+    locked_keys = set(target_env.keys())
+    parsed_values: dict[str, str] = {}
+
+    for env_file in env_files or _ENV_FILES:
         if not env_file.exists():
             continue
         try:
@@ -51,10 +65,12 @@ def _load_env_file() -> None:
                     key, _, value = line.partition("=")
                     key = key.strip()
                     value = value.strip().strip('"').strip("'")
-                    if key and key not in os.environ:
-                        os.environ[key] = value
+                    if key and key not in locked_keys:
+                        parsed_values[key] = value
         except Exception:
             pass
+
+    target_env.update(parsed_values)
 
 _load_env_file()
 
@@ -142,6 +158,7 @@ _ROLE_GROUPS: dict[str, str] = {
     "system_memory": "INFO_MEMORY",
     "retest": "RETEST_VERIFY",
     "verify": "RETEST_VERIFY",
+    "architect": "PLANNER",
 }
 
 @dataclass(frozen=True)
@@ -696,14 +713,22 @@ class LLMClient:
                         backup_provider=backup_config.provider,
                     )
                     # Use a fresh client for the backup request
-                    async with LLMClient(backup_config, client_name=f"{self._client_name}_fallback") as fallback_llm:
-                        return await fallback_llm.chat(
-                            messages=messages,
-                            tools=tools,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            use_config_max_tokens=use_config_max_tokens,
-                            max_retries=1,  # Avoid deep recursion
+                    try:
+                        async with LLMClient(backup_config, client_name=f"{self._client_name}_fallback") as fallback_llm:
+                            return await fallback_llm.chat(
+                                messages=messages,
+                                tools=tools,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                use_config_max_tokens=use_config_max_tokens,
+                                max_retries=1,  # Avoid deep recursion
+                            )
+                    except Exception as exc:
+                        logger.error(
+                            "llm_rate_limit_fallback_failed",
+                            original_provider=self._provider,
+                            backup_provider=backup_config.provider,
+                            error=repr(exc),
                         )
 
             resp.raise_for_status()

@@ -73,6 +73,19 @@ export interface StopScanRequest {
   mode: "stop" | "pause" | "cancel";
 }
 
+export interface AIAssistContextMetrics {
+  display_tokens: number;
+  effective_tokens: number;
+  limit_tokens: number;
+  threshold_tokens: number;
+  should_compress_before_send: boolean;
+  operator_mode: string;
+  execution_lane: string;
+  response_style: string;
+  has_working_memory: boolean;
+  uses_recent_history_fallback: boolean;
+}
+
 export interface ScanEventPayload {
   event: string;
   project_id: string;
@@ -1468,6 +1481,40 @@ export async function compressAIAssistWorkingContext(context: string): Promise<s
     body: JSON.stringify({ context }),
   });
   return response.context || "";
+}
+
+export async function getAIAssistContextMetricsFromDesktop(request: {
+  projectId?: string;
+  target?: string;
+  targetType?: string;
+  context?: string;
+  prompt?: string;
+  savedContextOverride?: string;
+}): Promise<AIAssistContextMetrics> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<AIAssistContextMetrics>("/api/ai/assist/context-metrics", {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: request.projectId ?? "",
+      target: request.target ?? "",
+      target_type: request.targetType ?? "",
+      context: request.context ?? "",
+      prompt: request.prompt ?? "",
+      saved_context_override: request.savedContextOverride ?? "",
+    }),
+  });
+}
+
+export async function synthesizeProjectArchitectureFromDesktop(projectId: string): Promise<{ ok: boolean; architecture_draft: any }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(`/api/ai/architect/synthesize`, {
+    method: "POST",
+    body: JSON.stringify({ project_id: projectId }),
+  }, 120000);
 }
 
 export async function askAIAssistFromDesktop(

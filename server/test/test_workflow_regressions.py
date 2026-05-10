@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,9 +26,13 @@ reports_routes = import_module("server.api.routes.reports")
 mark_false_positive_module = import_module("server.agents.assistant.tools.mark_false_positive")
 scan_observability_module = import_module("server.db.projects.scan_observability")
 assistant_agent_module = import_module("server.agents.assistant.agent")
+architect_agent_module = import_module("server.agents.architect.agent")
 llm_module = import_module("server.core.llm")
 rate_limiter_module = import_module("server.agents.rate_limiter")
 privacy_gate_node_module = import_module("server.layers.PrivacyGate.node")
+prompt_guard_module = import_module("server.layers.safety.prompt_guard")
+target_validation_module = import_module("server.layers.safety.target_validation")
+config_agent_module = import_module("server.config.agent")
 
 
 def _seed_project(store: ProjectsStore, project_id: str = "proj-1") -> dict[str, Any]:
@@ -114,7 +119,8 @@ def test_assistant_run_can_reload_from_store_and_cancel(tmp_path, monkeypatch) -
             payload,
             prompt=payload.prompt,
             scope_key=scope_key,
-            context="project_id=proj-1",
+            guard_context="project_id=proj-1",
+            live_context="Findings: none",
             saved_context=saved_context,
             saved_history=saved_history,
         )
@@ -132,7 +138,8 @@ def test_assistant_run_can_reload_from_store_and_cancel(tmp_path, monkeypatch) -
             payload,
             prompt=payload.prompt,
             scope_key=scope_key,
-            context="project_id=proj-1",
+            guard_context="project_id=proj-1",
+            live_context="Findings: none",
             saved_context=saved_context,
             saved_history=saved_history,
         )
@@ -204,7 +211,8 @@ def test_assistant_stream_persists_stable_turn_ids_for_history_merge(tmp_path, m
             payload,
             prompt=payload.prompt,
             scope_key=scope_key,
-            context="project_id=proj-1",
+            guard_context="project_id=proj-1",
+            live_context="Findings: none",
             saved_context=saved_context,
             saved_history=saved_history,
         )
@@ -260,6 +268,230 @@ def test_assistant_project_vector_payload_adds_citations() -> None:
     enriched = assistant_agent_module.AssistantAgent._normalize_vector_search_payload(payload)
     assert enriched["matches"][0]["citation"] == "[project:verified_vulnerability:finding-123]"
     assert enriched["citations"] == ["[project:verified_vulnerability:finding-123]"]
+
+
+def test_architect_compacts_large_input_without_second_llm_round(monkeypatch) -> None:
+    call_count = {"value": 0}
+
+    class FakeLLMClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def chat(self, _messages: list[Any]):
+            call_count["value"] += 1
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "title": "Observed Target Surface",
+                        "hosts": [
+                            {
+                                "id": "web-frontend",
+                                "name": "Web Frontend",
+                                "role": "Edge",
+                                "ports": ["80/tcp"],
+                                "note": "HTTP surface observed.",
+                                "x": 12,
+                                "y": 30,
+                            }
+                        ],
+                        "flows": [],
+                    }
+                )
+            )
+
+    class FakeQueue:
+        async def call_with_queue(self, _agent_name: str, coro):
+            return await coro
+
+    monkeypatch.setattr(architect_agent_module, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(architect_agent_module, "get_public_agent_config", lambda _role: SimpleNamespace())
+    monkeypatch.setattr(architect_agent_module, "get_global_llm_queue", lambda: FakeQueue())
+    monkeypatch.setattr(architect_agent_module, "ARCHITECT_HISTORY_THRESHOLD", 200)
+
+    agent = architect_agent_module.ArchitectAgent()
+    result = asyncio.run(
+        agent.synthesize(
+            target="192.168.100.81",
+            target_type="linux_server",
+            scope="single host",
+            memory_block=("observed route /admin\nopen port 80/tcp\n" * 80),
+            vulnerabilities_block=("confirmed finding: telnet default creds\n" * 40),
+            previous_draft=None,
+        )
+    )
+
+    assert call_count["value"] == 1
+    assert result["hosts"][0]["name"] == "Web Frontend"
+
+
+def test_assistant_build_context_block_keeps_short_recent_turn_window_with_working_memory() -> None:
+    agent = assistant_agent_module.AssistantAgent()
+    saved_context = json.dumps(
+        {
+            "operator_mode": "Investigate",
+            "execution_lane": "investigation",
+            "response_style": "natural",
+            "verified_evidence": ["FTP reachable on port 21."],
+            "recent_checks": ["nmap -sV -p21 192.168.100.81"],
+        }
+    )
+
+    block = agent._build_context_block(
+        project_id="proj-1",
+        target="192.168.100.81",
+        target_type="linux_server",
+        prompt="summarize ftp state",
+        context="project_id=proj-1",
+        saved_context=saved_context,
+        external_research_allowed=False,
+        operator_mode="Investigate",
+        execution_lane="investigation",
+        response_style="natural",
+        history=[
+            {
+                "role": "assistant",
+                "text": "Recent live scan output that should stay out of the prompt once working memory exists.",
+                "toolLogs": [
+                    {"tool": "run_custom", "input": "nmap -p21 192.168.100.81", "status": "done"}
+                ],
+            }
+        ],
+    )
+
+    assert "- working_memory:" in block
+    assert "- recent_completed_checks:" not in block
+    assert "- recent_conversation_turns:" in block
+    assert "Recent live scan output that should stay out of the prompt once working memory exists." in block
+
+
+def test_assistant_recent_turn_recall_uses_lightweight_lane() -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    assert (
+        agent._resolve_execution_lane(
+            prompt="what i asked you about in the last three message",
+            operator_mode="Ask",
+        )
+        == "lightweight"
+    )
+
+
+def test_assistant_local_context_memory_preserves_latest_dialogue_pair() -> None:
+    payload = json.loads(
+        assistant_agent_module.AssistantAgent._build_local_context_memory(
+            operator_mode="Ask",
+            execution_lane="investigation",
+            response_style="natural",
+            prompt="What did I ask you about in the last three messages?",
+            reply="You asked me to test anonymous FTP access and summarize the result.",
+            target="192.168.100.81",
+            target_type="linux_server",
+            project_state_summary="findings: ftp anonymous denied",
+            investigation_brief="Answer from recent conversation and saved evidence.",
+            tool_summaries=["command=curl ftp://192.168.100.81/"],
+            learning_signals={},
+            tool_results=[],
+        )
+    )
+
+    assert payload["recent_dialogue"][0].startswith("user: What did I ask you about")
+    assert payload["recent_dialogue"][1].startswith("assistant: You asked me to test anonymous FTP")
+
+
+def test_architect_manual_refresh_uses_planner_memory_assistant_brain_and_confirmed_findings(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    project = store.get_project("proj-1")
+    project.update(
+        {
+            "target": "192.168.100.81",
+            "targetType": "linux_server",
+            "info": "Scope: single target",
+            "copilotContextScope": "linux_server|192.168.100.81",
+            "copilotContext": '{"verified_evidence":["ftp 21 open","telnet default creds confirmed"]}',
+            "copilotHistoryScope": "linux_server|192.168.100.81",
+            "copilotHistory": [
+                {"role": "user", "text": "check ftp"},
+                {"role": "assistant", "text": "Anonymous FTP denied; telnet creds confirmed."},
+            ],
+            "findings": [
+                {
+                    "id": "finding-1",
+                    "title": "Telnet Default Credentials",
+                    "description": "msfadmin:msfadmin works on port 23",
+                    "severity": "critical",
+                    "status": "confirmed",
+                    "target": "192.168.100.81",
+                }
+            ],
+            "payload": {},
+        }
+    )
+    store.upsert_project(project)
+    monkeypatch.setattr(ai_routes, "projects_store", store)
+    cache_root = Path(ai_routes.__file__).resolve().parents[2] / "cache" / "project_runs"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root / "proj-1-test-run").mkdir(exist_ok=True)
+    monkeypatch.setattr(ai_routes, "load_system_memory", lambda _run_dir: {"overview": "Planner observed HTTP and Telnet services."})
+    monkeypatch.setattr(
+        ai_routes,
+        "build_target_memory_prompt_block",
+        lambda memory: f"PLANNER MEMORY\n{memory.get('overview', '')}",
+    )
+
+    captured: dict[str, Any] = {}
+
+    class FakeArchitectAgent:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def synthesize(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {
+                "title": "Observed Target Surface",
+                "hosts": [
+                    {
+                        "id": "edge",
+                        "name": "Observed Edge",
+                        "role": "Edge",
+                        "ports": ["21/tcp", "23/tcp"],
+                        "note": "FTP and Telnet exposed.",
+                        "x": 20,
+                        "y": 40,
+                    }
+                ],
+                "flows": [],
+            }
+
+    monkeypatch.setattr(ai_routes, "ArchitectAgent", FakeArchitectAgent)
+
+    result = asyncio.run(
+        ai_routes.ai_architect_synthesize(
+            ai_routes.ArchitectSynthesizePayload(project_id="proj-1")
+        )
+    )
+
+    assert result["ok"] is True
+    assert "PLANNER MEMORY" in captured["memory_block"]
+    assert "ASSISTANT WORKING MEMORY" in captured["memory_block"]
+    assert "RECENT ASSISTANT DISCUSSION" in captured["memory_block"]
+    assert "Telnet Default Credentials" in captured["vulnerabilities_block"]
+    assert "severity=critical" in captured["vulnerabilities_block"]
+
+
+def test_store_copilot_context_cap_accepts_large_working_memory(tmp_path) -> None:
+    store = _make_store(tmp_path)
+    large_context = "A" * 31000
+
+    store.update_project_copilot_context("proj-1", large_context)
+    project = store.get_project("proj-1")
+
+    assert project["copilotContext"] == large_context
 
 
 def test_assistant_structured_reply_includes_sections_and_citations() -> None:
@@ -383,26 +615,6 @@ def test_assistant_lightweight_meta_prompt_omits_findings_context_when_not_reque
     assert "Working memory:" not in captured["content"]
 
 
-def test_assistant_resolves_direct_ftp_auth_attempt_from_recent_ftp_context() -> None:
-    resolved = assistant_agent_module.AssistantAgent._resolve_direct_ftp_auth_attempt(
-        "try login msfadmin and password msfadmin",
-        target="192.168.100.81",
-        history=[
-            {
-                "role": "assistant",
-                "text": "Earlier we checked FTP on port 21.",
-                "toolLogs": [
-                    {"tool": "run_custom", "input": "nmap -sV -p21 192.168.100.81", "status": "done"}
-                ],
-            }
-        ],
-    )
-
-    assert resolved is not None
-    assert resolved["command"] == "curl"
-    assert resolved["args"] == ["-u", "msfadmin:msfadmin", "ftp://192.168.100.81/"]
-
-
 def test_assistant_masks_credentials_in_run_custom_preview_and_display_payload() -> None:
     preview = assistant_agent_module.AssistantAgent._render_run_custom_preview(
         "curl",
@@ -425,34 +637,22 @@ def test_assistant_masks_credentials_in_run_custom_preview_and_display_payload()
     assert "msfadmin:****" in payload["full_command"]
 
 
-def test_assistant_stream_answer_uses_direct_ftp_auth_path_for_exact_login_prompt(monkeypatch) -> None:
+def test_assistant_stream_answer_does_not_use_static_ftp_auth_shortcut(monkeypatch) -> None:
     agent = assistant_agent_module.AssistantAgent()
+    calls = {"count": 0}
 
-    async def fail_chat(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("LLM should not run for the direct FTP auth shortcut")
-
-    async def fake_execute_run_custom(args: dict[str, Any], *, target: str, project_id: str | None = None) -> dict[str, Any]:
-        assert args["command"] == "curl"
-        assert args["args"] == ["-u", "msfadmin:msfadmin", "ftp://192.168.100.81/"]
-        raw_payload = {
-            "success": True,
-            "command": "curl",
-            "args": list(args["args"]),
-            "reason": args["reason"],
-            "full_command": "curl -u msfadmin:msfadmin ftp://192.168.100.81/",
-            "stdout": "drwxr-xr-x 2 root root 4096 Jan 01 00:00 pub\n",
-            "stderr": "",
-            "return_code": 0,
-            "execution_time": 0.42,
-            "logged": True,
-        }
-        return agent._sanitize_run_custom_result_for_display(raw_payload)
+    async def fake_chat(*_args: Any, **_kwargs: Any) -> Any:
+        calls["count"] += 1
+        return SimpleNamespace(content="I can test those credentials, but I will decide the right tool from the current context.", tool_calls=[])
 
     async def fake_build_next_context(**_kwargs: Any) -> str:
         return '{"execution_lane": "investigation"}'
 
-    monkeypatch.setattr(agent, "_chat_with_fallback", fail_chat)
-    monkeypatch.setattr(agent, "_execute_run_custom", fake_execute_run_custom)
+    async def fail_execute_run_custom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("Static prompt shortcuts should not execute run_custom before the LLM decides.")
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+    monkeypatch.setattr(agent, "_execute_run_custom", fail_execute_run_custom)
     monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
 
     async def _collect() -> list[dict[str, Any]]:
@@ -478,16 +678,230 @@ def test_assistant_stream_answer_uses_direct_ftp_auth_path_for_exact_login_promp
         ]
 
     events = asyncio.run(_collect())
-    tool_start = next(event for event in events if event["type"] == "tool_start")
-    tool_output = next(event for event in events if event["type"] == "tool_output")
     reply_event = next(event for event in events if event["type"] == "reply")
 
-    assert "curl -u 'msfadmin:****' ftp://192.168.100.81/" == tool_start["data"]["input"]
-    assert "msfadmin:msfadmin" not in str(tool_output["data"]["output"])
-    assert "msfadmin:****" in str(tool_output["data"]["output"])
-    assert "msfadmin:msfadmin" not in reply_event["data"]["text"]
-    assert "msfadmin:****" in reply_event["data"]["text"]
-    assert "pub" in reply_event["data"]["text"]
+    assert calls["count"] >= 1
+    assert all(event["type"] != "tool_start" for event in events)
+    assert "current context" in reply_event["data"]["text"]
+
+
+def test_assistant_stream_answer_does_not_use_static_followup_shortcut(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+    calls = {"count": 0}
+
+    async def fake_chat(*_args: Any, **_kwargs: Any) -> Any:
+        calls["count"] += 1
+        return SimpleNamespace(content="Please confirm which command you want me to run.", tool_calls=[])
+
+    async def fail_execute_run_custom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("Static follow-up shortcut should not execute without LLM choice.")
+
+    async def fake_build_next_context(**_kwargs: Any) -> str:
+        return '{"execution_lane": "investigation"}'
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+    monkeypatch.setattr(agent, "_execute_run_custom", fail_execute_run_custom)
+    monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
+
+    async def _collect() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in agent.stream_answer(
+                prompt="run it",
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="",
+                saved_context="",
+                history=[
+                    {
+                        "role": "assistant",
+                        "text": 'Recommended command: `nmap -sV -p23 192.168.100.81`',
+                    }
+                ],
+            )
+        ]
+
+    events = asyncio.run(_collect())
+    reply_event = next(event for event in events if event["type"] == "reply")
+
+    assert calls["count"] >= 1
+    assert all(event["type"] != "tool_start" for event in events)
+    assert "confirm" in reply_event["data"]["text"].lower()
+
+
+def test_assistant_stream_answer_blocks_near_duplicate_hydra_attempts(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+    calls = {"count": 0}
+    executions: list[dict[str, Any]] = []
+
+    async def fake_chat(*_args: Any, **_kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_custom",
+                            "arguments": json.dumps({
+                                "command": "hydra",
+                                "args": ["-l", "msfadmin", "-p", "msfadmin", "192.168.100.81", "telnet"],
+                                "reason": "Test telnet credentials.",
+                            }),
+                        },
+                    },
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {
+                            "name": "run_custom",
+                            "arguments": json.dumps({
+                                "command": "hydra",
+                                "args": ["-vV", "-l", "msfadmin", "-p", "msfadmin", "192.168.100.81", "telnet"],
+                                "reason": "Re-run the same telnet credential check with verbose output.",
+                            }),
+                        },
+                    },
+                ],
+            )
+        return SimpleNamespace(content="The credentials were confirmed with the first hydra run.", tool_calls=[])
+
+    async def fake_execute_run_custom(args: dict[str, Any], *, target: str, project_id: str | None = None) -> dict[str, Any]:
+        executions.append(args)
+        return {
+            "success": True,
+            "command": "hydra",
+            "args": list(args.get("args", [])),
+            "reason": args.get("reason", ""),
+            "full_command": "hydra -l msfadmin -p msfadmin 192.168.100.81 telnet",
+            "stdout": "[23][telnet] host: 192.168.100.81 login: msfadmin password: msfadmin",
+            "stderr": "",
+            "return_code": 0,
+            "execution_time": 1.0,
+            "logged": True,
+        }
+
+    async def fake_build_next_context(**_kwargs: Any) -> str:
+        return '{"execution_lane":"investigation"}'
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+    monkeypatch.setattr(agent, "_execute_run_custom", fake_execute_run_custom)
+    monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
+
+    async def _collect() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in agent.stream_answer(
+                prompt="now with hydra try to access to telnet with login msfadmin and password msfadmin",
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="",
+                saved_context="",
+                history=[],
+            )
+        ]
+
+    events = asyncio.run(_collect())
+    tool_outputs = [event for event in events if event["type"] == "tool_output"]
+    blocked_outputs = [
+        event for event in tool_outputs
+        if "Near-duplicate tool call blocked" in str(event["data"]["output"].get("error", ""))
+    ]
+
+    assert len(executions) == 1
+    assert len(tool_outputs) == 2
+    assert len(blocked_outputs) == 1
+
+
+def test_assistant_stream_answer_blocks_exact_duplicate_run_custom_with_different_reasons(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+    calls = {"count": 0}
+    executions: list[dict[str, Any]] = []
+
+    async def fake_chat(*_args: Any, **_kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_custom",
+                            "arguments": json.dumps({
+                                "command": "nmap",
+                                "args": ["-p-", "--open", "-T4", "-n", "192.168.100.81"],
+                                "reason": "List all open TCP ports.",
+                            }),
+                        },
+                    },
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {
+                            "name": "run_custom",
+                            "arguments": json.dumps({
+                                "command": "nmap",
+                                "args": ["-p-", "--open", "-T4", "-n", "192.168.100.81"],
+                                "reason": "Repeat the full TCP scan to confirm open ports.",
+                            }),
+                        },
+                    },
+                ],
+            )
+        return SimpleNamespace(content="The open-port scan already completed once.", tool_calls=[])
+
+    async def fake_execute_run_custom(args: dict[str, Any], *, target: str, project_id: str | None = None) -> dict[str, Any]:
+        executions.append(args)
+        return {
+            "success": True,
+            "command": "nmap",
+            "args": list(args.get("args", [])),
+            "reason": args.get("reason", ""),
+            "full_command": "nmap -p- --open -T4 -n 192.168.100.81",
+            "stdout": "21/tcp open ftp\n23/tcp open telnet\n",
+            "stderr": "",
+            "return_code": 0,
+            "execution_time": 0.9,
+            "logged": True,
+        }
+
+    async def fake_build_next_context(**_kwargs: Any) -> str:
+        return '{"execution_lane":"investigation"}'
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+    monkeypatch.setattr(agent, "_execute_run_custom", fake_execute_run_custom)
+    monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
+
+    async def _collect() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in agent.stream_answer(
+                prompt="scan all open ports",
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="",
+                saved_context="",
+                history=[],
+            )
+        ]
+
+    events = asyncio.run(_collect())
+    tool_outputs = [event for event in events if event["type"] == "tool_output"]
+    blocked_outputs = [
+        event for event in tool_outputs
+        if "Near-duplicate tool call blocked" in str(event["data"]["output"].get("error", ""))
+    ]
+
+    assert len(executions) == 1
+    assert len(tool_outputs) == 2
+    assert len(blocked_outputs) == 1
 
 
 def test_assistant_stream_answer_falls_back_to_local_tool_summary_when_llm_round_fails(monkeypatch) -> None:
@@ -584,6 +998,42 @@ def test_ai_compress_route_supports_backend_working_context(monkeypatch) -> None
     }
 
 
+def test_ai_context_metrics_route_uses_backend_effective_context_estimate(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    store.update_project_copilot_context(
+        "proj-1",
+        json.dumps(
+            {
+                "operator_mode": "Investigate",
+                "execution_lane": "investigation",
+                "response_style": "natural",
+                "verified_evidence": ["FTP reachable"],
+            }
+        ),
+        scope_key="linux_server|192.168.100.81",
+    )
+    monkeypatch.setattr(ai_routes, "projects_store", store)
+
+    result = asyncio.run(
+        ai_routes.ai_assist_context_metrics(
+            ai_routes.AIAssistContextMetricsPayload(
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                prompt="check whether ftp is still open",
+                context="Findings: [info] FTP reachable",
+            )
+        )
+    )
+
+    assert result["display_tokens"] > 0
+    assert result["effective_tokens"] > 0
+    assert result["limit_tokens"] == 8000
+    assert result["threshold_tokens"] == 7600
+    assert result["has_working_memory"] is True
+    assert result["uses_recent_history_fallback"] is False
+
+
 def test_assistant_stream_answer_precompresses_large_saved_context_before_llm(monkeypatch) -> None:
     agent = assistant_agent_module.AssistantAgent()
     huge_context = json.dumps(
@@ -620,7 +1070,22 @@ def test_assistant_stream_answer_precompresses_large_saved_context_before_llm(mo
     async def fake_build_next_context(**_kwargs: Any) -> str:
         return compressed_context
 
+    def fake_estimate_effective_context_metrics(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "display_tokens": 1200,
+            "effective_tokens": 7900,
+            "limit_tokens": 8000,
+            "threshold_tokens": 7600,
+            "should_compress_before_send": True,
+            "operator_mode": "Investigate",
+            "execution_lane": "investigation",
+            "response_style": "natural",
+            "has_working_memory": True,
+            "uses_recent_history_fallback": False,
+        }
+
     monkeypatch.setattr(agent, "compress_working_memory", fake_compress_working_memory)
+    monkeypatch.setattr(agent, "estimate_effective_context_metrics", fake_estimate_effective_context_metrics)
     monkeypatch.setattr(agent, "_build_context_block", fake_build_context_block)
     monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
     monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
@@ -648,6 +1113,80 @@ def test_assistant_stream_answer_precompresses_large_saved_context_before_llm(mo
     assert context_events[0]["data"]["next_context"] == compressed_context
     assert "working_memory: compressed" in captured["llm_user_content"]
     assert reply_event["data"]["text"] == "Grounded FTP summary."
+
+
+def test_assistant_context_metrics_saved_context_override_wins(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    store.update_project_copilot_context(
+        "proj-1",
+        json.dumps({"verified_evidence": ["tiny"]}),
+        scope_key="linux_server|192.168.100.81",
+    )
+    monkeypatch.setattr(ai_routes, "projects_store", store)
+
+    base = asyncio.run(
+        ai_routes.ai_assist_context_metrics(
+            ai_routes.AIAssistContextMetricsPayload(
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="Findings: none",
+            )
+        )
+    )
+    overridden = asyncio.run(
+        ai_routes.ai_assist_context_metrics(
+            ai_routes.AIAssistContextMetricsPayload(
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="Findings: none",
+                saved_context_override=json.dumps({"verified_evidence": ["A" * 2000]}),
+            )
+        )
+    )
+
+    assert overridden["display_tokens"] > base["display_tokens"]
+
+
+def test_url_normalizer_can_skip_reachability_probe(monkeypatch) -> None:
+    async def forbidden_probe(self, _url: str) -> bool:
+        raise AssertionError("reachability probe should not run")
+
+    monkeypatch.setattr(target_validation_module.UrlNormalizer, "_probe", forbidden_probe)
+
+    result = asyncio.run(
+        target_validation_module.UrlNormalizer(
+            "https://pentest-ground.com:9000",
+            probe_reachability=False,
+        ).normalize()
+    )
+
+    assert result["valid"] is True
+    assert result["normalized_url"] == "https://pentest-ground.com:9000"
+    assert result["reachable"] is False
+
+
+def test_lightweight_lane_returns_soft_failure_when_llm_unavailable(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    async def broken_chat(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("backup provider unavailable")
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", broken_chat)
+
+    reply = asyncio.run(
+        agent._answer_lightweight_lane_prompt(
+            prompt="hi",
+            target="https://example.com",
+            target_type="web_app",
+            project_id="proj-1",
+            saved_context="",
+            history=[],
+        )
+    )
+
+    assert "trouble reaching the model" in reply.lower()
 
 
 def test_privacy_gate_verbose_output_ignores_blocking_stdout(monkeypatch) -> None:
@@ -1270,6 +1809,34 @@ def test_gemini_queue_defaults_are_retuned(monkeypatch) -> None:
     assert max_calls == 8
 
 
+def test_gemini_queue_defaults_can_use_role_resolved_provider(monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_LLM_ASSISTANT_API_PROVIDER", raising=False)
+    monkeypatch.delenv("GLOBAL_LLM_QUEUE_MAX_CONCURRENT", raising=False)
+    monkeypatch.delenv("GLOBAL_LLM_QUEUE_MAX_CALLS_PER_MINUTE", raising=False)
+    monkeypatch.setattr(
+        config_agent_module,
+        "get_public_agent_config",
+        lambda _role: SimpleNamespace(provider="gemini"),
+    )
+
+    max_concurrent, max_calls = rate_limiter_module._default_queue_limits()
+
+    assert max_concurrent == 4
+    assert max_calls == 8
+
+
+def test_global_llm_queue_singleton_uses_dynamic_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_LLM_ASSISTANT_API_PROVIDER", "gemini")
+    monkeypatch.delenv("GLOBAL_LLM_QUEUE_MAX_CONCURRENT", raising=False)
+    monkeypatch.delenv("GLOBAL_LLM_QUEUE_MAX_CALLS_PER_MINUTE", raising=False)
+    monkeypatch.setattr(rate_limiter_module, "_global_llm_queue", None)
+
+    queue = rate_limiter_module.get_global_llm_queue()
+
+    assert queue._max_concurrent == 4
+    assert queue._max_calls_per_minute == 8
+
+
 def test_assistant_llm_config_can_target_gemini(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_LLM_ASSISTANT_API_PROVIDER", "gemini")
     monkeypatch.setenv("AGENT_LLM_ASSISTANT_MODEL", "gemini-2.5-flash")
@@ -1282,6 +1849,90 @@ def test_assistant_llm_config_can_target_gemini(monkeypatch) -> None:
     assert cfg.model == "gemini-2.5-flash"
     assert cfg.api_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
     assert cfg.api_key == "test-gemini-key"
+
+
+def test_prompt_guard_uses_assistant_role_config_when_global_public_config_lacks_key(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeLLMClient:
+        def __init__(self, config, mode="public", client_name=None):
+            captured["config"] = config
+            captured["mode"] = mode
+
+        async def chat(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                content='{"is_injection": false, "intent": "reporting", "confidence": 0.91, "reason": "ok"}'
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setenv("AGENT_LLM_MODE", "public")
+    monkeypatch.setattr(config_agent_module, "public_llm_config", SimpleNamespace(api_key=""))
+    monkeypatch.setattr(
+        config_agent_module,
+        "get_public_agent_config",
+        lambda _role: SimpleNamespace(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            api_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key="assistant-key",
+            temperature=0.0,
+            max_tokens=1024,
+        ),
+    )
+    monkeypatch.setattr(llm_module, "LLMClient", FakeLLMClient)
+
+    guard = prompt_guard_module.PromptInjectionGuard()
+    result = asyncio.run(guard._classify_with_llm("Summarize the current target status."))
+
+    assert result is not None
+    assert result.classifier == "llm"
+    assert captured["mode"] == "public"
+    assert captured["config"].provider == "gemini"
+    assert captured["config"].api_key == "assistant-key"
+
+
+def test_prompt_guard_extracts_fenced_json_response() -> None:
+    parsed = prompt_guard_module.PromptInjectionGuard._extract_llm_json(
+        "```json\n"
+        '{"is_injection": false, "intent": "reporting", "confidence": 0.93, "reason": "ok"}\n'
+        "```"
+    )
+
+    assert parsed is not None
+    assert parsed["is_injection"] is False
+    assert parsed["intent"] == "reporting"
+
+
+def test_llm_env_loader_allows_later_env_entries_to_override_earlier_ones(tmp_path) -> None:
+    root_env = tmp_path / ".env"
+    server_env = tmp_path / "server.env"
+    root_env.write_text(
+        "\n".join(
+            [
+                "AGENT_LLM_ASSISTANT_API_PROVIDER=groq",
+                "AGENT_LLM_ASSISTANT_MODEL=llama-3.3-70b-versatile",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    server_env.write_text(
+        "\n".join(
+            [
+                "AGENT_LLM_ASSISTANT_API_PROVIDER=groq",
+                "AGENT_LLM_ASSISTANT_API_PROVIDER=gemini",
+                "AGENT_LLM_ASSISTANT_MODEL=gemini-2.5-flash",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    fake_env = {"UNCHANGED": "1"}
+    llm_module._load_env_file((root_env, server_env), environ=fake_env)
+
+    assert fake_env["AGENT_LLM_ASSISTANT_API_PROVIDER"] == "gemini"
+    assert fake_env["AGENT_LLM_ASSISTANT_MODEL"] == "gemini-2.5-flash"
 
 
 def test_report_regenerate_replaces_old_content_and_status_stays_fresh(tmp_path, monkeypatch) -> None:
@@ -1519,6 +2170,38 @@ def test_observability_metrics_count_manual_false_positives_tool_records_and_res
     assert metrics["resume_attempt_count"] == 1
     assert metrics["resume_success_count"] == 1
     assert metrics["resume_success_rate"] == 1.0
+
+
+def test_scan_observability_timeline_handles_mixed_naive_and_aware_timestamps() -> None:
+    events = [
+        {
+            "project_id": "proj-1",
+            "scan_id": "assistant-contribution",
+            "timestamp": "2026-05-10T11:25:47.733042+00:00",
+            "event": "perceptor_classified",
+            "level": "info",
+            "message": "Assistant finding added",
+            "data": {},
+        }
+    ]
+    tool_audits = [
+        {
+            "id": 1,
+            "project_id": "proj-1",
+            "scan_id": "",
+            "role": "assistant",
+            "tool_name": "run_custom",
+            "status": "completed",
+            "full_command": "nmap -p- --open -T4 -n 192.168.100.81",
+            "created_at": "2026-05-10 12:14:17",
+        }
+    ]
+
+    timeline = scan_observability_module.build_debug_timeline(events, tool_audits, limit=20)
+
+    assert len(timeline) == 2
+    assert timeline[0]["kind"] == "tool_audit"
+    assert timeline[1]["kind"] == "scan_event"
 
 
 def test_scan_routes_handle_async_stop_and_async_approval_contracts(monkeypatch) -> None:

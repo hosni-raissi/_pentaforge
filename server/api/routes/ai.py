@@ -7,6 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -14,9 +15,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from server.agents.architect.agent import ArchitectAgent
 from server.agents.assistant import AssistantAgent
-from server.api.dependencies import projects_store
+from server.api.dependencies import projects_store, scan_orchestrator
 from server.layers.safety.prompt_guard import PromptInjectionGuard
+from server.nodes.system_memory import (
+    build_system_memory_prompt_block as build_target_memory_prompt_block,
+    load_system_memory,
+)
 from server.utils.target_scope import normalize_target_scope
 
 router = APIRouter(tags=["ai"])
@@ -27,6 +33,65 @@ _MAX_PROMPT_LEN = 8000
 logger = structlog.get_logger(__name__)
 _ASSISTANT_RUN_TTL_SECONDS = 60 * 60
 _KEEPALIVE_INTERVAL_SECONDS = 15.0
+
+
+def _build_architect_assistant_memory_block(project: dict[str, Any], *, scope_key: str) -> str:
+    sections: list[str] = []
+
+    if str(project.get("copilotContextScope", "")).strip() == scope_key:
+        working_memory = str(project.get("copilotContext", "") or "").strip()
+        if working_memory:
+            sections.extend(["### ASSISTANT WORKING MEMORY", working_memory[:6000]])
+
+    if str(project.get("copilotHistoryScope", "")).strip() == scope_key:
+        history = project.get("copilotHistory", [])
+        if isinstance(history, list):
+            recent_turns: list[str] = []
+            for item in history[-6:]:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role", "")).strip().lower()
+                text = str(item.get("text", "") or "").strip()
+                if role not in {"user", "assistant"} or not text:
+                    continue
+                recent_turns.append(f"{role}: {text[:220]}")
+            if recent_turns:
+                sections.extend(["### RECENT ASSISTANT DISCUSSION", *recent_turns])
+
+    return "\n".join(sections).strip()
+
+
+def _build_architect_vulnerabilities_block(project: dict[str, Any]) -> str:
+    lines: list[str] = []
+    findings = project.get("findings", [])
+    if not isinstance(findings, list):
+        return ""
+
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        status = str(finding.get("status", "")).strip().lower()
+        user_status = str(finding.get("user_contribution_status", "")).strip().lower()
+        if status not in {"confirmed", "verified"} and user_status != "done":
+            continue
+        title = str(finding.get("title", "") or "").strip()
+        description = str(finding.get("description", "") or "").strip()
+        severity = str(finding.get("severity", "") or "").strip().lower() or "unknown"
+        target = str(finding.get("target", "") or "").strip()
+        finding_id = str(finding.get("id", "") or "").strip()
+        parts = [title] if title else []
+        if severity:
+            parts.append(f"severity={severity}")
+        if target:
+            parts.append(f"target={target}")
+        if finding_id:
+            parts.append(f"id={finding_id}")
+        summary = " | ".join(parts)
+        if description:
+            summary = f"{summary}: {description[:260]}" if summary else description[:260]
+        if summary:
+            lines.append(f"- {summary}")
+    return "\n".join(lines[:24])
 
 
 @dataclass
@@ -128,6 +193,15 @@ class AIAssistPayload(BaseModel):
     target_type: str = Field(default="", max_length=120)
     context: str = Field(default="", max_length=12000)
     request_id: str | None = Field(default=None, max_length=200)
+
+
+class AIAssistContextMetricsPayload(BaseModel):
+    prompt: str = Field(default="", max_length=_MAX_PROMPT_LEN)
+    project_id: str | None = Field(default=None, max_length=200)
+    target: str = Field(default="", max_length=2048)
+    target_type: str = Field(default="", max_length=120)
+    context: str = Field(default="", max_length=12000)
+    saved_context_override: str = Field(default="", max_length=40000)
 
 
 class AIClearConversationPayload(BaseModel):
@@ -304,7 +378,8 @@ async def _execute_assistant_run(
     run: AssistantRun,
     *,
     prompt: str,
-    context: str,
+    guard_context: str,
+    live_context: str,
     saved_context: str,
     saved_history: list[dict[str, object]],
 ) -> None:
@@ -318,7 +393,7 @@ async def _execute_assistant_run(
     try:
         decision = await _prompt_guard.classify_user_prompt(
             prompt,
-            context=context,
+            context=guard_context,
             use_llm=True,
         )
 
@@ -366,7 +441,7 @@ async def _execute_assistant_run(
             project_id=run.project_id or None,
             target=run.target,
             target_type=run.target_type,
-            context=context,
+            context=live_context,
             saved_context=saved_context,
             history=saved_history,
         ):
@@ -466,7 +541,8 @@ async def _resolve_or_create_run(
     *,
     prompt: str,
     scope_key: str,
-    context: str,
+    guard_context: str,
+    live_context: str,
     saved_context: str,
     saved_history: list[dict[str, object]],
 ) -> AssistantRun:
@@ -506,7 +582,8 @@ async def _resolve_or_create_run(
             _execute_assistant_run(
                 run,
                 prompt=prompt,
-                context=context,
+                guard_context=guard_context,
+                live_context=live_context,
                 saved_context=saved_context,
                 saved_history=saved_history,
             ),
@@ -552,20 +629,22 @@ async def ai_assist_stream(payload: AIAssistPayload, request: Request) -> Stream
         scope_key=scope_key,
     )
 
-    context_parts = [
+    guard_context_parts = [
         f"project_id={payload.project_id or ''}",
         f"target={payload.target}",
         f"target_type={payload.target_type}",
         saved_context,
         payload.context,
     ]
-    context = "\n".join(part for part in context_parts if part.strip())
+    guard_context = "\n".join(part for part in guard_context_parts if part.strip())
+    live_context = str(payload.context or "").strip()
 
     run = await _resolve_or_create_run(
         payload,
         prompt=prompt,
         scope_key=scope_key,
-        context=context,
+        guard_context=guard_context,
+        live_context=live_context,
         saved_context=saved_context,
         saved_history=saved_history,
     )
@@ -578,6 +657,27 @@ async def ai_assist_stream(payload: AIAssistPayload, request: Request) -> Stream
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post("/api/ai/assist/context-metrics")
+async def ai_assist_context_metrics(payload: AIAssistContextMetricsPayload) -> dict[str, Any]:
+    scope_key = normalize_target_scope(payload.target, payload.target_type)
+    saved_context, saved_history = await _load_saved_assistant_context(
+        project_id=payload.project_id,
+        scope_key=scope_key,
+    )
+    saved_context_override = str(payload.saved_context_override or "").strip()
+    if saved_context_override:
+        saved_context = saved_context_override
+    return _assistant_agent.estimate_effective_context_metrics(
+        project_id=payload.project_id,
+        target=payload.target,
+        target_type=payload.target_type,
+        prompt=str(payload.prompt or ""),
+        context=str(payload.context or "").strip(),
+        saved_context=saved_context,
+        history=saved_history,
     )
 
 
@@ -625,11 +725,6 @@ async def ai_assist_input(request_id: str, payload: AIAssistInputPayload) -> dic
     if run is None:
         raise HTTPException(status_code=404, detail="Assistant request not found")
 
-    # Find the callback task from the running run
-    # This is a bit hacky because we don't store the callback on the run object directly
-    # but we can look it up if we modify AssistantRun or use a global registry.
-    # Let's add 'callback' to AssistantRun.
-    
     if not hasattr(run, "callback") or run.callback is None:
          raise HTTPException(status_code=400, detail="No active callback for this run")
          
@@ -644,6 +739,95 @@ async def ai_assist_input(request_id: str, payload: AIAssistInputPayload) -> dic
         waiter.set_result(payload.value)
 
     return {"ok": True}
+
+
+class ArchitectSynthesizePayload(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+
+
+@router.post("/api/ai/architect/synthesize")
+async def ai_architect_synthesize(payload: ArchitectSynthesizePayload) -> dict[str, Any]:
+    project_id = payload.project_id
+    project = projects_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    target = str(project.get("target") or "").strip()
+    target_type = str(project.get("targetType") or "web_app").strip()
+    
+    # Resolve scope from info
+    info = str(project.get("info") or "").strip()
+    scope = ""
+    for raw_line in info.splitlines():
+        if raw_line.lower().startswith("scope:"):
+            scope = raw_line.split(":", 1)[1].strip()
+            break
+
+    # Determine project cache dir (we need a way to find it without scanning, or just use a default pattern)
+    # The orchestrator builds it with project_name and started_at.
+    # For a manual refresh, we can try to find the latest run dir.
+    cache_root = (Path(__file__).resolve().parents[2] / "cache" / "project_runs").resolve()
+    latest_run_dir = None
+    if cache_root.exists():
+        # Look for directories starting with project_id
+        matching = [d for d in cache_root.iterdir() if d.is_dir() and d.name.startswith(project_id)]
+        if matching:
+            # Sort by mtime to get the latest
+            matching.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+            latest_run_dir = str(matching[0])
+
+    if not latest_run_dir:
+        # Fallback: if no cache dir, we can't load memory, so synthesis will be sparse
+        logger.warning("architect_manual_refresh_no_cache_dir", project_id=project_id)
+        target_memory = {}
+    else:
+        target_memory = load_system_memory(latest_run_dir)
+
+    # Build blocks
+    planner_memory_block = build_target_memory_prompt_block(target_memory)
+    assistant_memory_block = _build_architect_assistant_memory_block(project, scope_key=normalize_target_scope(target, target_type))
+    memory_block = "\n\n".join(part for part in (planner_memory_block, assistant_memory_block) if str(part).strip())
+    vulnerabilities_block = _build_architect_vulnerabilities_block(project)
+
+    # Define event emitter
+    def emit_architect_event(event_type: str, data: dict[str, Any]):
+        scan_orchestrator.emit_event(
+            project_id,
+            event=event_type,
+            scan_id="manual",
+            level="info",
+            message=f"Architect [working] {event_type.replace('_', ' ')}...",
+            data=data
+        )
+
+    # Run architect
+    architect = ArchitectAgent(
+        project_id=project_id,
+        project_cache_dir=latest_run_dir,
+        on_event=emit_architect_event
+    )
+    
+    previous_draft = project.get("payload", {}).get("architecture_draft")
+    
+    architecture_draft = await architect.synthesize(
+        target=target,
+        target_type=target_type,
+        scope=scope,
+        memory_block=memory_block,
+        vulnerabilities_block=vulnerabilities_block,
+        previous_draft=previous_draft
+    )
+
+    if architecture_draft and isinstance(architecture_draft, dict) and architecture_draft.get("hosts"):
+        if "payload" not in project:
+            project["payload"] = {}
+        project["payload"]["architecture_draft"] = architecture_draft
+        projects_store.upsert_project(project)
+        
+        emit_architect_event("architect_updated", {"architecture_draft": architecture_draft})
+
+    return {"ok": True, "architecture_draft": architecture_draft}
+
 
 @router.post("/api/ai/assist")
 async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
@@ -670,18 +854,19 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
                     if isinstance(item, dict)
                 ]
 
-    context_parts = [
+    guard_context_parts = [
         f"project_id={payload.project_id or ''}",
         f"target={payload.target}",
         f"target_type={payload.target_type}",
         saved_context,
         payload.context,
     ]
-    context = "\n".join(part for part in context_parts if part.strip())
+    guard_context = "\n".join(part for part in guard_context_parts if part.strip())
+    live_context = str(payload.context or "").strip()
 
     decision = await _prompt_guard.classify_user_prompt(
         prompt,
-        context=context,
+        context=guard_context,
         use_llm=True,
     )
 
@@ -731,7 +916,7 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
             project_id=payload.project_id,
             target=payload.target,
             target_type=payload.target_type,
-            context=context,
+            context=live_context,
             saved_context=saved_context,
             history=saved_history,
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import shlex
@@ -429,6 +430,8 @@ class AssistantAgent:
             return False
         if cls._is_capability_question(prompt) or cls._is_scope_question(prompt):
             return True
+        if cls._is_recent_turn_recall_question(prompt):
+            return True
         return cls._is_lightweight_greeting(prompt)
 
     @staticmethod
@@ -440,6 +443,27 @@ class AssistantAgent:
         if compact in _LIGHTWEIGHT_GREETING_PATTERNS:
             return True
         return compact in {"hi there", "hello there", "hey there"}
+
+    @staticmethod
+    def _is_recent_turn_recall_question(prompt: str) -> bool:
+        lowered = str(prompt or "").strip().lower()
+        if not lowered:
+            return False
+        recall_markers = (
+            "last three message",
+            "last 3 message",
+            "last three messages",
+            "last 3 messages",
+            "last message",
+            "previous message",
+            "previous prompt",
+            "my last prompt",
+            "what i asked you about",
+            "what did i ask",
+            "what were my last",
+            "what did i say",
+        )
+        return any(marker in lowered for marker in recall_markers)
 
     async def compress_history(self, history: list[dict[str, Any]]) -> str:
         """Compresses a long conversation history into a single summary block."""
@@ -506,6 +530,7 @@ class AssistantAgent:
         for key in (
             "target_facts",
             "operator_goals",
+            "recent_dialogue",
             "investigation_plan",
             "hypotheses",
             "verified_evidence",
@@ -560,6 +585,7 @@ class AssistantAgent:
                 "1. Verified evidence and concrete technical facts.",
                 "2. Active operator goals, open questions, and next steps.",
                 "3. Important recent checks, corrections, and lessons learned.",
+                "4. A tiny recent dialogue trace so short-term recap questions stay accurate.",
                 "",
                 "Return the refreshed working memory in the same structured JSON format.",
             ]
@@ -698,51 +724,6 @@ class AssistantAgent:
             yield {"type": "context", "data": {"next_context": next_context}}
             return
 
-        ftp_auth_direct = self._resolve_direct_ftp_auth_attempt(
-            prompt,
-            target=target,
-            history=history,
-        )
-        if ftp_auth_direct is not None:
-            yield {
-                "type": "tool_start",
-                "data": {
-                    "tool": "run_custom",
-                    "input": self._render_run_custom_preview(
-                        str(ftp_auth_direct.get("command", "")),
-                        [str(arg) for arg in ftp_auth_direct.get("args", []) if str(arg).strip()],
-                    ),
-                    "reason": ftp_auth_direct.get("reason"),
-                }
-            }
-            tool_result = await self._execute_run_custom(ftp_auth_direct, target=target, project_id=project_id)
-            yield {"type": "tool_output", "data": {"tool": "run_custom", "output": tool_result}}
-
-            reply = self._normalize_reply_for_style(
-                self._format_direct_command_reply(tool_result),
-                response_style=response_style,
-                prompt=prompt,
-                target=target,
-                tool_results=[tool_result],
-            )
-            next_context = await self._build_next_context(
-                project_id=project_id,
-                saved_context=saved_context,
-                history=history,
-                prompt=prompt,
-                reply=reply,
-                tool_results=[tool_result],
-                target=target,
-                target_type=target_type,
-                execution_lane=execution_lane,
-                response_style=response_style,
-                operator_mode=operator_mode,
-            )
-            yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
-            yield {"type": "learning", "data": learning_signals}
-            yield {"type": "context", "data": {"next_context": next_context}}
-            return
-
         report_reply = await self._handle_report_intent(
             prompt,
             project_id=project_id,
@@ -775,48 +756,8 @@ class AssistantAgent:
             yield {"type": "context", "data": {"next_context": next_context}}
             return
 
-        follow_up_direct = self._resolve_follow_up_command_from_history(
-            prompt,
-            history=history,
-        )
-        if follow_up_direct is not None:
-            yield {
-                "type": "tool_start", 
-                "data": {
-                    "tool": "run_custom", 
-                    "input": f"{follow_up_direct.get('command')} {' '.join(follow_up_direct.get('args', []))}",
-                    "reason": follow_up_direct.get("reason")
-                }
-            }
-            tool_result = await self._execute_run_custom(follow_up_direct, target=target, project_id=project_id)
-            yield {"type": "tool_output", "data": {"tool": "run_custom", "output": tool_result}}
-            
-            reply = self._normalize_reply_for_style(
-                self._format_direct_command_reply(tool_result),
-                response_style=response_style,
-                prompt=prompt,
-                target=target,
-                tool_results=[tool_result],
-            )
-            next_context = await self._build_next_context(
-                project_id=project_id,
-                saved_context=saved_context,
-                history=history,
-                prompt=prompt,
-                reply=reply,
-                tool_results=[tool_result],
-                target=target,
-                target_type=target_type,
-                execution_lane=execution_lane,
-                response_style=response_style,
-                operator_mode=operator_mode,
-            )
-            yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
-            yield {"type": "learning", "data": learning_signals}
-            yield {"type": "context", "data": {"next_context": next_context}}
-            return
-
-        # Decommissioned direct command fast-path to ensure LLM always handles intent.
+        # Prompt-driven execution shortcuts are intentionally disabled.
+        # Echo should let the LLM decide whether to call tools for operator input.
 
 
         # Working-memory management (two-storage logic)
@@ -825,13 +766,22 @@ class AssistantAgent:
         compressed_history_summary = None
         history_text = "\n".join([str(m.get('text', '')) for m in (history or [])])
         parsed_context = self._parse_saved_context_json(saved_context)
+        context_metrics = self.estimate_effective_context_metrics(
+            project_id=project_id,
+            target=target,
+            target_type=target_type,
+            prompt=prompt,
+            context=context,
+            saved_context=saved_context,
+            history=history,
+        )
 
-        if (len(str(saved_context or "").strip()) // 4) > (_HISTORY_TOKEN_LIMIT * 0.95):
+        if context_metrics.get("should_compress_before_send") and str(saved_context or "").strip():
             yield {"type": "ping", "data": {"step": "optimizing_context"}}
             saved_context = await self.compress_working_memory(saved_context)
             parsed_context = self._parse_saved_context_json(saved_context)
             yield {"type": "context", "data": {"next_context": saved_context}}
-        elif history and (len(history_text) // 4) > (_HISTORY_TOKEN_LIMIT * 0.98):
+        elif context_metrics.get("should_compress_before_send") and history:
             yield {"type": "ping", "data": {"step": "optimizing_context"}}
             
             # Generate a new summary that includes the previous one + recent history
@@ -881,6 +831,7 @@ class AssistantAgent:
         tool_results: list[dict[str, Any]] = []
         allow_external_research = self._allows_external_research(prompt)
         executed_signatures: set[str] = set()
+        executed_repeat_guard_signatures: set[str] = set()
         stalled_rounds = 0
         total_tool_calls = 0
         prior_tool_memory = self._recent_tool_memory_from_history(history)
@@ -1095,6 +1046,7 @@ class AssistantAgent:
                     parsed_args = {}
 
                 signature = self._tool_call_signature(tool_name, parsed_args)
+                repeat_guard_signature = self._tool_repeat_guard_signature(tool_name, parsed_args)
                 if signature in executed_signatures:
                     tool_payload = self._blocked_tool_payload(
                         tool_name=tool_name,
@@ -1102,6 +1054,14 @@ class AssistantAgent:
                         target=target,
                         operator_mode=operator_mode,
                         error=f"Duplicate tool call blocked to prevent loops: {tool_name}",
+                    )
+                elif repeat_guard_signature and repeat_guard_signature in executed_repeat_guard_signatures:
+                    tool_payload = self._blocked_tool_payload(
+                        tool_name=tool_name,
+                        parsed_args=parsed_args,
+                        target=target,
+                        operator_mode=operator_mode,
+                        error=f"Near-duplicate tool call blocked because this check was already completed: {tool_name}",
                     )
                 elif not allow_repeat_tools and signature in prior_tool_memory:
                     tool_payload = self._blocked_tool_payload(
@@ -1125,6 +1085,8 @@ class AssistantAgent:
                     )
                 else:
                     executed_signatures.add(signature)
+                    if repeat_guard_signature:
+                        executed_repeat_guard_signatures.add(repeat_guard_signature)
                     total_tool_calls += 1
                     if tool_name not in {
                         "run_custom",
@@ -1288,7 +1250,7 @@ class AssistantAgent:
             if working_memory:
                 prompt_lines.extend(["", "Working memory:", working_memory])
 
-        recent_turns = self._render_recent_turns_text(history)
+        recent_turns = self._render_recent_turns_text(history, limit_turns=5, max_chars=320)
         if recent_turns:
             prompt_lines.extend(["", "Recent conversation turns:", recent_turns])
 
@@ -1302,13 +1264,22 @@ class AssistantAgent:
             ]
         )
 
-        response = await self._chat_with_fallback(
-            [
-                ChatMessage(role="system", content=SYSTEM_PROMPT),
-                ChatMessage(role="user", content="\n".join(prompt_lines).strip()),
-            ],
-            allow_tools=False,
-        )
+        try:
+            response = await self._chat_with_fallback(
+                [
+                    ChatMessage(role="system", content=SYSTEM_PROMPT),
+                    ChatMessage(role="user", content="\n".join(prompt_lines).strip()),
+                ],
+                allow_tools=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "assistant_lightweight_lane_llm_failed",
+                error=repr(exc),
+                project_id=project_id,
+                target=target,
+            )
+            return "I’m having trouble reaching the model right now. Please try again in a moment."
         return self._sanitize_reply_text(str(response.content or "").strip()) or "No useful answer was produced."
 
     def _build_context_block(
@@ -1351,6 +1322,7 @@ class AssistantAgent:
             parts.append("- unified_project_state:")
             parts.append(project_state)
         rendered_memory = self._render_working_memory(saved_context)
+        has_working_memory = bool(rendered_memory.strip())
         if rendered_memory:
             parts.append("- working_memory:")
             parts.append(rendered_memory)
@@ -1363,21 +1335,95 @@ class AssistantAgent:
         if investigation_brief:
             parts.append("- investigation_brief:")
             parts.append(investigation_brief)
-        recent_checks = self._render_recent_checks_from_history(history)
-        if recent_checks:
-            parts.append("- recent_completed_checks:")
-            parts.append(recent_checks)
-            
-        # Optimization: Include the actual text of the most recent turns 
-        # to preserve conversational flow alongside the technical summary.
-        recent_turns = self._render_recent_turns_text(history)
+        recent_turns = self._render_recent_turns_text(
+            history,
+            limit_turns=4 if has_working_memory else 5,
+            max_chars=220 if has_working_memory else 800,
+        )
         if recent_turns:
             parts.append("- recent_conversation_turns:")
             parts.append(recent_turns)
+        if not has_working_memory:
+            recent_checks = self._render_recent_checks_from_history(history)
+            if recent_checks:
+                parts.append("- recent_completed_checks:")
+                parts.append(recent_checks)
             
         if context.strip():
             parts.append(f"- live_context: {context.strip()}")
         return "\n".join(parts)
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        return max(0, math.ceil(len(str(text or "")) / 4))
+
+    def estimate_effective_context_metrics(
+        self,
+        *,
+        project_id: str | None,
+        target: str,
+        target_type: str,
+        prompt: str,
+        context: str,
+        saved_context: str,
+        history: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        operator_mode = self._detect_operator_mode(prompt, history=history)
+        execution_lane = self._resolve_execution_lane(prompt=prompt, operator_mode=operator_mode)
+        response_style = self._resolve_response_style(
+            operator_mode=operator_mode,
+            execution_lane=execution_lane,
+            prompt=prompt,
+        )
+
+        context_block = self._build_context_block(
+            project_id=project_id,
+            target=target,
+            target_type=target_type,
+            prompt=prompt,
+            context=context,
+            saved_context=saved_context,
+            external_research_allowed=self._allows_external_research(prompt),
+            operator_mode=operator_mode,
+            execution_lane=execution_lane,
+            response_style=response_style,
+            history=history,
+        )
+        parsed_context = self._parse_saved_context_json(saved_context)
+        if parsed_context.get("rolling_summary"):
+            context_block = f"PRIOR CONVERSATION SUMMARY:\n{parsed_context.get('rolling_summary')}\n\n{context_block}"
+        elif history and any(m.get("isCompressionSummary") for m in history):
+            summary_msg = next((m for m in history if m.get("isCompressionSummary")), None)
+            if summary_msg:
+                context_block = f"PRIOR CONVERSATION SUMMARY:\n{summary_msg.get('text', '')}\n\n{context_block}"
+
+        user_content = f"{context_block}\n\nOperator prompt:\n{prompt.strip()}"
+        effective_tokens = self._estimate_text_tokens(SYSTEM_PROMPT) + self._estimate_text_tokens(user_content)
+        display_parts: list[str] = []
+        normalized_saved_context = str(saved_context or "").strip()
+        if normalized_saved_context:
+            display_parts.append(normalized_saved_context)
+        elif history:
+            recent_checks = self._render_recent_checks_from_history(history)
+            if recent_checks:
+                display_parts.append(recent_checks)
+            recent_turns = self._render_recent_turns_text(history)
+            if recent_turns:
+                display_parts.append(recent_turns)
+        display_tokens = self._estimate_text_tokens("\n\n".join(part for part in display_parts if part.strip()))
+        threshold_tokens = int(_HISTORY_TOKEN_LIMIT * 0.95)
+        return {
+            "display_tokens": display_tokens,
+            "effective_tokens": effective_tokens,
+            "limit_tokens": _HISTORY_TOKEN_LIMIT,
+            "threshold_tokens": threshold_tokens,
+            "should_compress_before_send": effective_tokens > threshold_tokens,
+            "operator_mode": operator_mode,
+            "execution_lane": execution_lane,
+            "response_style": response_style,
+            "has_working_memory": bool(str(saved_context or "").strip()),
+            "uses_recent_history_fallback": (not str(saved_context or "").strip()) and bool(history),
+        }
 
     @staticmethod
     def _parse_saved_context_json(saved_context: str) -> dict[str, Any]:
@@ -1753,6 +1799,7 @@ class AssistantAgent:
             ("response_style", "response style"),
             ("target_facts", "target facts"),
             ("operator_goals", "operator goals"),
+            ("recent_dialogue", "recent dialogue"),
             ("investigation_plan", "investigation plan"),
             ("hypotheses", "hypotheses"),
             ("verified_evidence", "verified evidence"),
@@ -1805,13 +1852,17 @@ class AssistantAgent:
         return "\n".join(rows[-6:])
 
     @staticmethod
-    def _render_recent_turns_text(history: list[dict[str, Any]] | None) -> str:
+    def _render_recent_turns_text(
+        history: list[dict[str, Any]] | None,
+        *,
+        limit_turns: int = 5,
+        max_chars: int = 800,
+    ) -> str:
         if not isinstance(history, list) or not history:
             return ""
-        
-        # Take the last 5 messages, excluding compression summaries
+
         turns: list[str] = []
-        for m in history[-5:]:
+        for m in history[-max(1, limit_turns):]:
             if not isinstance(m, dict):
                 continue
             if m.get("isCompressionSummary"):
@@ -1819,9 +1870,8 @@ class AssistantAgent:
             role = "User" if str(m.get("role", "")).lower() == "user" else "Assistant"
             text = str(m.get("text", "")).strip()
             if text:
-                # Truncate very long prior messages to avoid bloat
-                turns.append(f"{role}: {text[:800]}")
-        
+                turns.append(f"{role}: {text[:max(60, max_chars)]}")
+
         return "\n".join(turns)
 
     @staticmethod
@@ -2601,6 +2651,65 @@ class AssistantAgent:
         if "reason" in safe_args:
             safe_args["reason"] = str(safe_args.get("reason", "")).strip()[:120]
         return f"{safe_name}:{json.dumps(safe_args, sort_keys=True, ensure_ascii=True)}"
+
+    @classmethod
+    def _tool_repeat_guard_signature(cls, tool_name: str, args: dict[str, Any]) -> str:
+        safe_name = str(tool_name or "").strip().lower()
+        if safe_name != "run_custom":
+            return ""
+        command = str((args or {}).get("command", "")).strip().lower()
+        raw_args = (args or {}).get("args", [])
+        norm_args = raw_args if isinstance(raw_args, list) else []
+        if command == "hydra":
+            fingerprint = cls._hydra_attempt_fingerprint(norm_args)
+            if fingerprint:
+                return f"run_custom:hydra:{json.dumps(fingerprint, sort_keys=True, ensure_ascii=True)}"
+        normalized_args = [str(arg).strip() for arg in norm_args if str(arg).strip()]
+        if not command:
+            return ""
+        return f"run_custom:exact:{json.dumps({'command': command, 'args': normalized_args}, sort_keys=True, ensure_ascii=True)}"
+
+    @staticmethod
+    def _hydra_attempt_fingerprint(args: list[Any]) -> dict[str, str]:
+        tokens = [str(arg).strip() for arg in args if str(arg).strip()]
+        if not tokens:
+            return {}
+        login = ""
+        password = ""
+        host = ""
+        service = ""
+        port = ""
+        idx = 0
+        positionals: list[str] = []
+        while idx < len(tokens):
+            token = tokens[idx]
+            if token in {"-l", "-L", "-p", "-P", "-s", "-m", "-t"}:
+                value = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+                if token == "-l":
+                    login = value
+                elif token == "-p":
+                    password = value
+                elif token == "-s":
+                    port = value
+                idx += 2
+                continue
+            if token.startswith("-"):
+                idx += 1
+                continue
+            positionals.append(token)
+            idx += 1
+        if positionals:
+            host = positionals[0]
+        if len(positionals) > 1:
+            service = positionals[1].lower()
+        fingerprint = {
+            "login": login,
+            "password": password,
+            "host": host,
+            "service": service,
+            "port": port,
+        }
+        return {key: value for key, value in fingerprint.items() if value}
 
     @staticmethod
     def _tool_result_has_signal(result: dict[str, Any]) -> bool:
@@ -4102,6 +4211,14 @@ class AssistantAgent:
                 f"target_type={target_type or '(unknown)'}",
             ],
             "operator_goals": [prompt.strip()[:240]] if prompt.strip() else [],
+            "recent_dialogue": [
+                line
+                for line in (
+                    f"user: {prompt.strip()[:220]}" if prompt.strip() else "",
+                    f"assistant: {reply.strip()[:220]}" if reply.strip() else "",
+                )
+                if line
+            ][:4],
             "investigation_plan": [line.strip()[:240] for line in investigation_brief.splitlines()[:3] if line.strip()],
             "hypotheses": [],
             "verified_evidence": tool_summaries[:4],

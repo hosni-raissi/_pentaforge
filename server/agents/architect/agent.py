@@ -8,8 +8,10 @@ from typing import Any
 
 import structlog
 
-from server.core.llm import LLMClient, ChatMessage, get_public_agent_config, get_backup_llm_config
+from server.agents.rate_limiter import get_global_llm_queue
+from server.core.llm import LLMClient, ChatMessage, get_public_agent_config
 from .prompts import ARCHITECT_SYSTEM_PROMPT, ARCHITECT_USER_PROMPT_TEMPLATE
+from .config import ARCHITECT_HISTORY_THRESHOLD
 
 logger = structlog.get_logger(__name__)
 
@@ -57,20 +59,65 @@ _TITLE_REWRITE_MARKERS = (
     "rce",
     "idor",
 )
+_ARCHITECT_SIGNAL_MARKERS = (
+    "port",
+    "service",
+    "host",
+    "route",
+    "endpoint",
+    "header",
+    "tls",
+    "certificate",
+    "banner",
+    "http",
+    "https",
+    "ssh",
+    "ftp",
+    "telnet",
+    "smtp",
+    "mysql",
+    "postgres",
+    "nfs",
+    "smb",
+    "rpc",
+    "distcc",
+    "ajp",
+    "verified",
+    "confirmed",
+    "critical",
+    "high",
+    "finding",
+    "memory",
+    "tech",
+)
 
 class ArchitectAgent:
-    """Agent responsible for drawing and updating the target architecture logical map."""
+    """
+    Agent responsible for drawing and updating the target architecture logical map.
+    
+    ### MECHANISM
+    - Analyzes reconnaissance findings, service banners, and verified evidence.
+    - Synthesizes a logical topology that prioritizes "Design-First" visibility.
+    - Maps services to roles (Edge, Service, Internal, Data, etc.) and calculates UI coordinates.
+    
+    ### INFORMATION SOURCES
+    1. **Primary**: Project Records Store (`projects.db`) - contains verified findings and target state.
+    2. **Secondary**: Scan Event Cache - provides raw tool output and historical context for unverified but observed services.
+    3. **Context**: Project Memory Block - provides grounded history from the RAG layer.
+    """
 
     def __init__(
         self,
         *,
         project_id: str | None = None,
         project_cache_dir: str | None = None,
+        on_event: Any | None = None,
     ) -> None:
         self.project_id = project_id
         self.project_cache_dir = project_cache_dir
+        self.on_event = on_event
         self._config = get_public_agent_config("architect")
-        self._backup_config = get_backup_llm_config()
+        self._queue = get_global_llm_queue()
 
     async def synthesize(
         self,
@@ -83,7 +130,27 @@ class ArchitectAgent:
         previous_draft: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Synthesize architecture draft from current project state."""
-        
+        if self.on_event:
+            self.on_event("architect_synthesizing", {"project_id": self.project_id})
+
+        memory_block = self._compact_evidence_block(memory_block)
+        vulnerabilities_block = self._compact_evidence_block(vulnerabilities_block)
+
+        total_input_len = len(memory_block or "") + len(vulnerabilities_block or "")
+        if total_input_len > ARCHITECT_HISTORY_THRESHOLD:
+            logger.info(
+                "architect_history_exceeded_threshold",
+                length=total_input_len,
+                threshold=ARCHITECT_HISTORY_THRESHOLD,
+            )
+            memory_block = await self._compress_blocks(
+                target=target,
+                memory_block=memory_block,
+                vulnerabilities_block=vulnerabilities_block,
+            )
+            vulnerabilities_block = "Merged into compressed summary above."
+
+        # ── 2. Build User Prompt ──────────────────────────────────────────────
         user_message = ARCHITECT_USER_PROMPT_TEMPLATE.format(
             target=target,
             target_type=target_type,
@@ -99,25 +166,40 @@ class ArchitectAgent:
         ]
 
         try:
-            # Attempt with primary LLM
-            async with LLMClient(self._config) as llm:
-                response = await llm.chat(messages)
-                return self._sanitize_draft(self._parse_json_response(response.content))
+            response = await self._chat(messages)
+            return self._sanitize_draft(self._parse_json_response(response.content))
         except Exception as exc:
-            # Check for rate limit or other failures
-            if self._backup_config:
-                logger.warning("architect_primary_failed_trying_backup", error=str(exc))
-                try:
-                    async with LLMClient(self._backup_config) as llm:
-                        response = await llm.chat(messages)
-                        return self._sanitize_draft(self._parse_json_response(response.content))
-                except Exception as backup_exc:
-                    logger.error("architect_backup_failed", error=str(backup_exc))
-            else:
-                logger.error("architect_primary_failed_no_backup", error=str(exc))
-            
-            # Return empty/default if all fails
+            logger.error("architect_synthesis_failed", error=str(exc))
             return previous_draft or {}
+
+    async def _compress_blocks(
+        self,
+        *,
+        target: str,
+        memory_block: str,
+        vulnerabilities_block: str,
+    ) -> str:
+        """Compact large evidence blocks deterministically to avoid a second LLM round."""
+        logger.info("architect_compressing_history", target=target)
+        if self.on_event:
+            self.on_event("architect_compressing", {"project_id": self.project_id})
+        sections = [
+            f"Target: {target}",
+            "### COMPACT ARCHITECT MEMORY",
+            self._compact_evidence_block(memory_block, max_chars=max(4000, ARCHITECT_HISTORY_THRESHOLD // 2)),
+            "",
+            "### COMPACT VERIFIED VULNERABILITIES",
+            self._compact_evidence_block(vulnerabilities_block, max_chars=max(2000, ARCHITECT_HISTORY_THRESHOLD // 3)),
+        ]
+        combined = "\n".join(part for part in sections if str(part).strip()).strip()
+        return combined[:ARCHITECT_HISTORY_THRESHOLD].strip()
+
+    async def _chat(self, messages: list[ChatMessage]):
+        async with LLMClient(self._config, client_name="architect") as llm:
+            return await self._queue.call_with_queue(
+                "architect",
+                llm.chat(messages),
+            )
 
     def _parse_json_response(self, content: str | None) -> dict[str, Any]:
         """Extract and parse JSON from LLM response."""
@@ -150,6 +232,40 @@ class ArchitectAgent:
         
         logger.warning("architect_failed_to_parse_json", content=content[:200])
         return {}
+
+    @classmethod
+    def _compact_evidence_block(cls, text: str, *, max_chars: int | None = None) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        limit = max_chars or ARCHITECT_HISTORY_THRESHOLD
+        if len(raw) <= limit:
+            return raw
+
+        kept: list[str] = []
+        seen: set[str] = set()
+        for line in raw.splitlines():
+            clean = re.sub(r"\s+", " ", line).strip()
+            if not clean:
+                continue
+            lowered = clean.lower()
+            keep = (
+                clean.startswith(("###", "-", "*"))
+                or any(marker in lowered for marker in _ARCHITECT_SIGNAL_MARKERS)
+            )
+            if not keep:
+                continue
+            if clean in seen:
+                continue
+            kept.append(clean[:320])
+            seen.add(clean)
+            if sum(len(item) + 1 for item in kept) >= limit:
+                break
+
+        if not kept:
+            return raw[:limit].strip()
+        compact = "\n".join(kept)
+        return compact[:limit].strip()
 
     def _sanitize_draft(self, draft: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(draft, dict):

@@ -7,11 +7,13 @@ import {
   cancelAIAssistRunFromDesktop,
   clearAIAssistConversationFromDesktop,
   getActiveProjectRunsFromDesktop,
+  getAIAssistContextMetricsFromDesktop,
   updateProjectSavedContextFromDesktop,
   sendAIAssistInputFromDesktop,
   compressAIAssistHistory,
   compressAIAssistWorkingContext,
 } from '@/lib/projectBridge';
+import type { AIAssistContextMetrics } from '@/lib/projectBridge';
 import type { CopilotMessage } from '@/types';
 import type { AgentInfo, Finding } from '../../types';
 import { useProjects } from '../../stores/projects';
@@ -60,15 +62,21 @@ type PanelMessage = CopilotMessage & {
   isCompressionSeparator?: boolean;
 };
 
-const TokenUsageCircle = ({ savedContext }: { savedContext?: string }) => {
-  const currentTokens = estimateSavedContextTokens(savedContext);
-  const percentage = Math.min(100, (currentTokens / HISTORY_TOKEN_LIMIT) * 100);
+const TokenUsageCircle = ({
+  currentTokens,
+  limitTokens,
+}: {
+  currentTokens: number;
+  limitTokens: number;
+}) => {
+  const safeLimit = Math.max(1, limitTokens);
+  const percentage = Math.min(100, (currentTokens / safeLimit) * 100);
   const radius = 6.5;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - (percentage / 100) * circumference;
 
   return (
-    <div className="group relative flex items-center justify-center h-5 w-5" title={`Working memory usage: ${Math.round(percentage)}% (${currentTokens}/${HISTORY_TOKEN_LIMIT} tokens)`}>
+    <div className="group relative flex items-center justify-center h-5 w-5" title={`Working memory usage: ${Math.round(percentage)}% (${currentTokens}/${safeLimit} tokens)`}>
       <svg className="h-4 w-4 -rotate-90 transform">
         <circle
           cx="8"
@@ -438,6 +446,12 @@ function mergeActiveAssistantRun(
   const passwordRequests = Array.isArray(run.payload.password_requests)
     ? run.payload.password_requests as PanelMessage['passwordRequests']
     : [];
+  const isResumable = isAssistantRunResumable({
+    status: run.status,
+    reply,
+    toolLogs,
+    passwordRequests,
+  });
   const existingUser = messages.find((message) => message.id === `u-${run.run_id}`);
   const existingAssistant = messages.find((message) => message.id === `a-${run.run_id}`);
 
@@ -461,7 +475,7 @@ function mergeActiveAssistantRun(
     timestamp: run.updated_at || run.created_at,
     toolLogs,
     passwordRequests,
-    localState: run.status === 'pending' || run.status === 'running'
+    localState: isResumable
       ? 'pending'
       : run.status === 'cancelled'
         ? 'cancelled'
@@ -481,10 +495,32 @@ function mergeActiveAssistantRun(
   return next.slice(-MAX_CHAT_MESSAGES);
 }
 
+function isAssistantRunResumable(run: {
+  status: string;
+  reply?: string;
+  toolLogs?: PanelMessage['toolLogs'];
+  passwordRequests?: PanelMessage['passwordRequests'];
+}): boolean {
+  if (run.status !== 'pending' && run.status !== 'running') {
+    return false;
+  }
+  const toolLogs = Array.isArray(run.toolLogs) ? run.toolLogs : [];
+  const passwordRequests = Array.isArray(run.passwordRequests) ? run.passwordRequests : [];
+  const hasRunningTool = toolLogs.some((log) => log.status === 'running');
+  const hasPendingPassword = passwordRequests.some((request) => request.status === 'pending');
+  return !String(run.reply || '').trim() || hasRunningTool || hasPendingPassword;
+}
+
 function findPendingAssistantMessage(messages: PanelMessage[]): PanelMessage | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.role === 'assistant' && message.localState === 'pending' && message.requestId) {
+    const isResumable = isAssistantRunResumable({
+      status: message.localState === 'pending' ? 'pending' : '',
+      reply: message.text,
+      toolLogs: message.toolLogs,
+      passwordRequests: message.passwordRequests,
+    });
+    if (message.role === 'assistant' && message.localState === 'pending' && message.requestId && isResumable) {
       return message;
     }
   }
@@ -811,7 +847,6 @@ export function AIPromptPanel({
   const updateConfig = useConfig((s) => s.updateConfig);
   const projects = useProjects((s) => s.projects);
   const updateProject = useProjects((s) => s.updateProject);
-  const hydrateFromDatabase = useProjects((s) => s.hydrateFromDatabase);
   const project = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
 
   const [prompt, setPrompt] = useState('');
@@ -819,6 +854,18 @@ export function AIPromptPanel({
   const [clearing, setClearing] = useState(false);
   const [historySuppressed, setHistorySuppressed] = useState(false);
   const [loadingStep, setLoadingStep] = useState<'thinking' | 'working'>('thinking');
+  const [contextMetrics, setContextMetrics] = useState<AIAssistContextMetrics>({
+    display_tokens: 0,
+    effective_tokens: 0,
+    limit_tokens: HISTORY_TOKEN_LIMIT,
+    threshold_tokens: Math.floor(HISTORY_TOKEN_LIMIT * 0.95),
+    should_compress_before_send: false,
+    operator_mode: 'Ask',
+    execution_lane: 'lightweight',
+    response_style: 'natural',
+    has_working_memory: false,
+    uses_recent_history_fallback: false,
+  });
 
   useEffect(() => {
     let timer: any;
@@ -856,8 +903,8 @@ export function AIPromptPanel({
     // User is "at bottom" if they are within 50px of the end
     userIsAtBottomRef.current = distFromBottom < 50;
     
-    // Show button if more than 200px away from bottom
-    setShowScrollButton(distFromBottom > 200);
+    // Show button if more than 200px away from bottom AND we are actually scrollable
+    setShowScrollButton(scrollHeight > clientHeight && distFromBottom > 200);
   }, []);
 
   useEffect(() => {
@@ -870,7 +917,70 @@ export function AIPromptPanel({
     navigate('/reports');
   }, [navigate]);
 
+  const buildLiveContext = useCallback(() => {
+    const state = useProjects.getState();
+    const currentProject = state.projects.find((entry) => entry.id === projectId) ?? null;
+    const findingsSummary = (currentProject?.findings || [])
+      .filter((finding) => finding.status !== 'false_positive')
+      .slice(0, 10)
+      .map((finding) => `[${finding.severity}] ${finding.title}`)
+      .join('; ');
+
+    const contextRaw = [
+      ...agents.map((agent) => `${agent.name}:${agent.state}:${agent.currentTask ?? ''}`),
+      findingsSummary ? `Findings: ${findingsSummary}` : 'No confirmed findings yet.',
+    ].join(' | ');
+
+    return contextRaw.length > 11500
+      ? contextRaw.slice(0, 11500) + '... [truncated for length]'
+      : contextRaw;
+  }, [agents, projectId]);
+
+  const fetchContextMetrics = useCallback(async (
+    promptText = '',
+    options?: { updateState?: boolean; savedContextOverride?: string },
+  ): Promise<AIAssistContextMetrics> => {
+    const updateState = options?.updateState !== false;
+    const latestProject = useProjects.getState().projects.find((entry) => entry.id === projectId) ?? null;
+    const fallbackSavedContext = options?.savedContextOverride || latestProject?.copilotContext;
+    const fallbackDisplayTokens = estimateSavedContextTokens(fallbackSavedContext);
+    const fallbackTokens = fallbackDisplayTokens + estimateTokens(promptText);
+    const fallback: AIAssistContextMetrics = {
+      display_tokens: fallbackDisplayTokens,
+      effective_tokens: fallbackTokens,
+      limit_tokens: HISTORY_TOKEN_LIMIT,
+      threshold_tokens: Math.floor(HISTORY_TOKEN_LIMIT * 0.95),
+      should_compress_before_send: fallbackTokens > Math.floor(HISTORY_TOKEN_LIMIT * 0.95),
+      operator_mode: 'Ask',
+      execution_lane: 'lightweight',
+      response_style: 'natural',
+      has_working_memory: Boolean(String(fallbackSavedContext || '').trim()),
+      uses_recent_history_fallback: false,
+    };
+
+    try {
+      const metrics = await getAIAssistContextMetricsFromDesktop({
+        projectId,
+        target,
+        targetType,
+        context: buildLiveContext(),
+        prompt: promptText,
+        savedContextOverride: options?.savedContextOverride,
+      });
+      if (updateState) {
+        setContextMetrics(metrics);
+      }
+      return metrics;
+    } catch {
+      if (updateState) {
+        setContextMetrics(fallback);
+      }
+      return fallback;
+    }
+  }, [buildLiveContext, projectId, target, targetType]);
+
   const scrollToBottom = useCallback((instant = false) => {
+    setShowScrollButton(false);
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({
         behavior: instant ? 'auto' : 'smooth',
@@ -916,9 +1026,22 @@ export function AIPromptPanel({
         if (!matchingRun) {
           return;
         }
+        const toolLogs = Array.isArray(matchingRun.payload.toolLogs)
+          ? matchingRun.payload.toolLogs as PanelMessage['toolLogs']
+          : [];
+        const passwordRequests = Array.isArray((matchingRun.payload as { password_requests?: unknown }).password_requests)
+          ? (matchingRun.payload as { password_requests: PanelMessage['passwordRequests'] }).password_requests
+          : [];
+        if (!isAssistantRunResumable({
+          status: matchingRun.status,
+          reply: typeof matchingRun.payload.reply === 'string' ? matchingRun.payload.reply : '',
+          toolLogs,
+          passwordRequests,
+        })) {
+          return;
+        }
         setLoadingStep(
-          Array.isArray(matchingRun.payload.toolLogs)
-            && matchingRun.payload.toolLogs.some((log) => typeof log === 'object' && log !== null && (log as { status?: string }).status === 'running')
+          (toolLogs ?? []).some((log) => log.status === 'running')
             ? 'working'
             : 'thinking',
         );
@@ -970,14 +1093,17 @@ export function AIPromptPanel({
   }, [assistantDraftPrompt, updateConfig]);
 
   useEffect(() => {
-    void hydrateFromDatabase();
+    void fetchContextMetrics();
+  }, [fetchContextMetrics, projectId, target, targetType]);
+
+  useEffect(() => {
     const intervalId = window.setInterval(() => {
-      void hydrateFromDatabase();
+      void fetchContextMetrics();
     }, 60_000);
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [hydrateFromDatabase, projectId]);
+  }, [fetchContextMetrics, projectId, target, targetType]);
 
   // Persist to sessionStorage
   useEffect(() => {
@@ -995,8 +1121,11 @@ export function AIPromptPanel({
         scrollToBottom();
       }, 100);
       return () => clearTimeout(timer);
+    } else {
+      // Manually trigger scroll check to update button visibility
+      handleScroll();
     }
-  }, [messages, scrollToBottom]);
+  }, [messages, scrollToBottom, handleScroll]);
 
   // Initial scroll on mount
   useEffect(() => {
@@ -1036,23 +1165,7 @@ export function AIPromptPanel({
     activeAbortControllerRef.current = abortController;
 
     try {
-      const state = useProjects.getState();
-      const currentProject = state.projects.find((p) => p.id === projectId);
-      const findingsSummary = (currentProject?.findings || [])
-        .filter((f) => f.status !== 'false_positive')
-        .slice(0, 10)
-        .map((f) => `[${f.severity}] ${f.title}`)
-        .join('; ');
-
-      const contextRaw = [
-        ...agents.map((a) => `${a.name}:${a.state}:${a.currentTask ?? ''}`),
-        findingsSummary ? `Findings: ${findingsSummary}` : 'No confirmed findings yet.',
-      ].join(' | ');
-
-      // Truncate context to avoid 422 error (12000 character limit)
-      const context = contextRaw.length > 11500
-        ? contextRaw.slice(0, 11500) + '... [truncated for length]'
-        : contextRaw;
+      const context = buildLiveContext();
 
       await askAIAssistStreamFromDesktop(
         {
@@ -1162,7 +1275,10 @@ export function AIPromptPanel({
 
               if (event.type === 'context') {
                 updateProject(projectId, { copilotContext: event.data.next_context }, { persist: false });
-                void updateProjectSavedContextFromDesktop(projectId, event.data.next_context);
+                void (async () => {
+                  await updateProjectSavedContextFromDesktop(projectId, event.data.next_context);
+                  await fetchContextMetrics('', { savedContextOverride: event.data.next_context });
+                })();
                 return m;
               }
 
@@ -1295,7 +1411,7 @@ export function AIPromptPanel({
       );
       cancelledRequestIdsRef.current.delete(requestId);
     }
-  }, [agents, buildFallbackReply, projectId, target, targetType, updateProject]);
+  }, [buildFallbackReply, buildLiveContext, fetchContextMetrics, projectId, target, targetType, updateProject]);
 
   const handleClear = useCallback(async () => {
     activeAbortControllerRef.current?.abort();
@@ -1312,7 +1428,20 @@ export function AIPromptPanel({
       // Keep local reset behavior even if backend cleanup fails.
     } finally {
       setHistorySuppressed(true);
+      setShowScrollButton(false);
       updateProject(projectId, { copilotContext: '' }, { persist: false });
+      setContextMetrics({
+        display_tokens: 0,
+        effective_tokens: 0,
+        limit_tokens: HISTORY_TOKEN_LIMIT,
+        threshold_tokens: Math.floor(HISTORY_TOKEN_LIMIT * 0.95),
+        should_compress_before_send: false,
+        operator_mode: 'Ask',
+        execution_lane: 'lightweight',
+        response_style: 'natural',
+        has_working_memory: false,
+        uses_recent_history_fallback: false,
+      });
       writeStoredMessages(storageKey, []);
       setMessages([{ ...introMessage }]);
       setPrompt('');
@@ -1354,12 +1483,14 @@ export function AIPromptPanel({
     if (!clean || sending || clearing) return;
 
     const workingContext = String(project?.copilotContext || '').trim();
-    const workingContextTokens = estimateSavedContextTokens(workingContext);
-    const projectedContextTokens = workingContextTokens + estimateTokens(clean);
-    const needsBootstrapCompression = !workingContext && estimateMessagesTokens(messages) > (HISTORY_TOKEN_LIMIT * 0.95);
+    const metrics = await fetchContextMetrics(clean, { updateState: false });
+    const needsBootstrapCompression = (
+      !workingContext
+      && estimateMessagesTokens(messages) > (metrics.threshold_tokens || (HISTORY_TOKEN_LIMIT * 0.95))
+    );
 
     // Keep the backend working memory under budget before the next agent turn starts.
-    if (projectedContextTokens > (HISTORY_TOKEN_LIMIT * 0.95) || needsBootstrapCompression) {
+    if (metrics.should_compress_before_send || needsBootstrapCompression) {
       setSending(true);
       const optimizationId = `opt-${Date.now()}`;
       
@@ -1383,6 +1514,7 @@ export function AIPromptPanel({
 
         updateProject(projectId, { copilotContext: nextContext }, { persist: false });
         await updateProjectSavedContextFromDesktop(projectId, nextContext);
+        await fetchContextMetrics('', { savedContextOverride: nextContext });
       } catch (err) {
         console.error('History optimization failed:', err);
       }
@@ -1410,7 +1542,7 @@ export function AIPromptPanel({
     setMessages((prev) => [...prev, userMessage, assistantMessage].slice(-MAX_CHAT_MESSAGES));
     setPrompt('');
     void attachToRequest(requestId, clean);
-  }, [attachToRequest, clearing, sending, messages, project?.copilotContext, projectId, updateProject]);
+  }, [attachToRequest, clearing, sending, fetchContextMetrics, messages, project?.copilotContext, projectId, updateProject]);
 
   useEffect(() => {
     const pendingMessage = findPendingAssistantMessage(messages);
@@ -1435,6 +1567,11 @@ export function AIPromptPanel({
     );
     void attachToRequest(pendingMessage.requestId, promptText);
   }, [attachToRequest, messages]);
+
+  const displayedContextTokens = Math.min(
+    contextMetrics.limit_tokens || HISTORY_TOKEN_LIMIT,
+    contextMetrics.display_tokens,
+  );
 
   return (
     <Card className="relative flex h-full border-0 rounded-none shadow-none flex-col">
@@ -1675,7 +1812,10 @@ export function AIPromptPanel({
               <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
                 <Sparkles size={12} className="text-pf-400" />
                 <span>Echo 3.5</span>
-                <TokenUsageCircle savedContext={project?.copilotContext} />
+                <TokenUsageCircle
+                  currentTokens={displayedContextTokens}
+                  limitTokens={contextMetrics.limit_tokens || HISTORY_TOKEN_LIMIT}
+                />
               </div>
               <div className=" absolute top-4 right-14  pointer-events-none">
               <span className={`text-[9px] font-mono ${prompt.length >= MAX_PROMPT_CHARS ? 'text-red-500 font-bold' : 'text-text-muted/30'}`}>

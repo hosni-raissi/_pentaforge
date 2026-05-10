@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Bot, Clock3, Pencil, Play, Repeat2, Square, X, Maximize2, Zap, Check } from "lucide-react";
+import { Bot, Clock3, Pencil, Play, Repeat2, Square, X, Maximize2, Zap, Check, RotateCw, FileArchive } from "lucide-react";
 
 import { ObservabilityPanel } from "@/components/dashboard/ObservabilityPanel";
 import { Badge } from "@/components/ui/Badge";
@@ -388,6 +388,9 @@ interface DashboardArchitecturePanelProps {
   architectureEdges: ArchitectureEdge[];
   debugTimeline: ScanDebugTimelineEntry[];
   observabilityMetrics: ScanObservabilityMetrics | null;
+  onRefresh?: () => void;
+  isRefreshing?: boolean;
+  isCompressing?: boolean;
 }
 
 export function DashboardArchitecturePanel({
@@ -395,17 +398,44 @@ export function DashboardArchitecturePanel({
   architectureEdges,
   debugTimeline,
   observabilityMetrics,
+  onRefresh,
+  isRefreshing,
+  isCompressing,
 }: DashboardArchitecturePanelProps) {
   return (
     <>
-      <Card className="space-y-3 p-3">
+      <Card className="space-y-1 p-3">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-text-primary">
-            Target Architecture (Draft)
-          </h2>
-          <span className="rounded-md border border-border bg-surface-0/40 px-2 py-0.5 text-xs uppercase tracking-wide text-text-muted">
-            Planned View
-          </span>
+          <div className="flex items-center gap-3">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-text-primary">
+              Target Architecture (Draft)
+            </h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="xs"
+              variant="secondary"
+              onClick={onRefresh}
+              disabled={isRefreshing || isCompressing}
+              className={cn(
+                "h-7 px-2 font-bold uppercase tracking-wider text-[10px] transition-all duration-300",
+                isRefreshing && "bg-pf-500/10 border-pf-500/30",
+                isCompressing && "bg-amber-500/10 border-amber-500/30 text-amber-600"
+              )}
+            >
+              {isCompressing ? (
+                <>
+                  <FileArchive size={12} className="animate-bounce" />
+                  Compressing...
+                </>
+              ) : (
+                <>
+                  <RotateCw size={12} className={cn(isRefreshing && "animate-spin")} />
+                  {isRefreshing ? "Synthesizing..." : "Refresh"}
+                </>
+              )}
+            </Button>
+          </div>
         </div>
         <p className="text-xs text-text-muted">{architectureDraft.title}</p>
 

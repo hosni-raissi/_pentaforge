@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Loader2, Copy, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export type OrchestratorStage = 'planner' | 'executer' | 'analyzer';
@@ -88,6 +88,92 @@ export const OrchestratorPipeline: React.FC<OrchestratorPipelineProps> = ({ stag
     </div>
   );
 };
+
+const CodeCopyButton: React.FC<{ text: string }> = ({ text }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(() => {
+    void navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [text]);
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="flex items-center gap-1 text-[10px] text-pf-400 hover:text-pf-300 transition-colors"
+    >
+      {copied ? <Check size={10} /> : <Copy size={10} />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  );
+};
+
+function renderMarkdown(text: string) {
+  if (!text) return null;
+
+  const renderLineContent = (line: string) => {
+    // Handle Bold (**), Italics (*), and Inline Code (`)
+    const boldParts = line.split(/(\*\*.*?\*\*)/g);
+    return boldParts.map((bp, bpIdx) => {
+      if (bp.startsWith('**') && bp.endsWith('**')) {
+        return <strong key={bpIdx} className="font-bold text-text-primary">{bp.slice(2, -2)}</strong>;
+      }
+
+      // Sub-split for inline code (`)
+      const codeParts = bp.split(/(`.*?`)/g);
+      return codeParts.map((cp, cpIdx) => {
+        if (cp.startsWith('`') && cp.endsWith('`')) {
+          return (
+            <code key={cpIdx} className="px-1 py-0.5 rounded bg-zinc-800 text-pf-300 font-mono text-[10px] border border-white/5 mx-0.5">
+              {cp.slice(1, -1)}
+            </code>
+          );
+        }
+
+        // Sub-split for italics (*)
+        const italicParts = cp.split(/(\*.*?\*)/g);
+        return italicParts.map((ip, ipIdx) => {
+          if (ip.startsWith('*') && ip.endsWith('*')) {
+            return <em key={ipIdx} className="italic opacity-80">{ip.slice(1, -1)}</em>;
+          }
+          return ip;
+        });
+      });
+    });
+  };
+
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('```') && part.endsWith('```')) {
+      const match = part.match(/```(\w+)?\n?([\s\S]*?)```/);
+      if (match) {
+        const lang = (match[1] || '').toLowerCase();
+        const code = match[2].trim();
+        return (
+          <div key={i} className="my-3 max-w-full rounded-lg border border-pf-500/20 bg-surface-2/50 overflow-hidden shadow-lg">
+            <div className="px-3 py-1.5 flex items-center justify-between bg-surface-3/50 border-b border-pf-500/10">
+              <span className="text-[10px] uppercase font-bold text-text-muted">{lang || 'code'}</span>
+              <CodeCopyButton text={code} />
+            </div>
+            <pre className="p-3 text-[11px] overflow-x-auto font-mono scrollbar-pf text-pf-100">
+              <code>{code}</code>
+            </pre>
+          </div>
+        );
+      }
+    }
+
+    return (
+      <div key={i} className="space-y-1">
+        {part.split('\n').map((line, lineIdx) => (
+          <p key={lineIdx} className={cn("text-[11px] leading-relaxed text-text-secondary min-h-[1.2em]", line.startsWith('---') && "opacity-40 my-2")}>
+            {renderLineContent(line)}
+          </p>
+        ))}
+      </div>
+    );
+  });
+}
 
 const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ node, isCurrentActive }) => {
   const Icon = node.icon;
@@ -322,9 +408,9 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
                     ) : null}
 
                     {!shouldHideActivityFeed && visibleActivities.length === 0 && node.subtext ? (
-                      <p className="text-[11px] text-text-muted">
-                        {node.subtext}
-                      </p>
+                      <div className="mt-1">
+                        {renderMarkdown(node.subtext)}
+                      </div>
                     ) : null}
                   </div>
                 </motion.div>

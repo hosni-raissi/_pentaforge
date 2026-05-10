@@ -880,7 +880,7 @@ class ProjectsStore:
         project_id: str,
         context: str,
         *,
-        max_chars: int = 4000,
+        max_chars: int = 32000,
         scope_key: str | None = None,
     ) -> None:
         safe_project_id = str(project_id or "").strip()
