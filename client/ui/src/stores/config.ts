@@ -32,6 +32,7 @@ export const useConfig = create<ConfigStore>()(
       serverPort: 8000,
       privacyGate: true,
       isAssistantOpen: false,
+      assistantDraftPrompt: undefined,
 
       updateConfig: (updates) => set(updates),
 
@@ -78,6 +79,7 @@ export const useConfig = create<ConfigStore>()(
           serverPort: typeof state.serverPort === 'number' ? state.serverPort : current.serverPort,
           privacyGate: typeof state.privacyGate === 'boolean' ? state.privacyGate : current.privacyGate,
           isAssistantOpen: typeof state.isAssistantOpen === 'boolean' ? state.isAssistantOpen : current.isAssistantOpen,
+          assistantDraftPrompt: typeof state.assistantDraftPrompt === 'string' ? state.assistantDraftPrompt : current.assistantDraftPrompt,
         };
       },
     }

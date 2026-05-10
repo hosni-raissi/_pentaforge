@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Loader2 } from 'l
 import { cn } from '@/lib/utils';
 
 export type OrchestratorStage = 'planner' | 'executer' | 'analyzer';
-export type OrchestratorStatus = 'idle' | 'thinking' | 'running' | 'completed' | 'error';
+export type OrchestratorStatus = 'idle' | 'waiting' | 'thinking' | 'running' | 'completed' | 'error';
 
 export interface ActivityEntry {
   type: 'thinking' | 'command' | 'result' | 'info';
@@ -152,6 +152,9 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
     }
     if (effectiveStatus === 'completed') {
       return 'completed';
+    }
+    if (effectiveStatus === 'waiting') {
+      return 'waiting...';
     }
     if (effectiveStatus === 'error') {
       return 'error';
@@ -384,6 +387,9 @@ const StatusBadge: React.FC<{ status: OrchestratorStatus }> = ({ status }) => {
         <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-current"></span>
       </div>
     );
+  }
+  if (status === 'waiting') {
+    return <div className="h-3 w-3 rounded-full border-2 border-text-muted/40 bg-surface-1"></div>;
   }
   return null;
 };

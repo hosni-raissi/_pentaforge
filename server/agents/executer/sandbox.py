@@ -44,8 +44,8 @@ def get_sandbox_tmp_dir() -> Path:
 class SandboxExecutionPolicy:
     cpu_seconds: int = 120
     max_file_size_bytes: int = 16 * 1024 * 1024
-    max_processes: int = 32
-    max_open_files: int = 128
+    max_processes: int = 2048  # Increased to prevent thread creation failures per UID
+    max_open_files: int = 256
     max_memory_bytes: int = 768 * 1024 * 1024
     umask: int = 0o077
 
@@ -134,7 +134,12 @@ def build_sandbox_preexec(
         _apply_limit(resource.RLIMIT_CPU, active_policy.cpu_seconds)
         _apply_limit(resource.RLIMIT_FSIZE, active_policy.max_file_size_bytes)
         _apply_limit(resource.RLIMIT_NOFILE, active_policy.max_open_files)
-        _apply_limit(resource.RLIMIT_NPROC, active_policy.max_processes)
+        # NOTE: Do not apply RLIMIT_NPROC here when not using Docker/Namespaces.
+        # It applies to the entire user UID globally, and will block thread
+        # creation (e.g., DNS resolution in curl/dig) if the user has a desktop
+        # environment (VSCode, browser, etc.) open that already exceeds the limit.
+        # _apply_limit(resource.RLIMIT_NPROC, active_policy.max_processes)
+        
         _apply_limit(resource.RLIMIT_CORE, 0)
         _apply_limit(resource.RLIMIT_AS, active_policy.max_memory_bytes)
 

@@ -50,7 +50,7 @@ BLOCKED_COMMANDS = {
     "shutdown", "reboot", "halt", "poweroff", "init",
     # Privilege / identity modification
     "chmod", "chown", "chgrp", "usermod", "useradd", "userdel",
-    "groupadd", "groupdel", "passwd", "su", "sudo", "newgrp",
+    "groupadd", "groupdel", "passwd", "su", "newgrp",
     # Network firewall mutation
     "iptables", "ip6tables", "ufw", "nft", "firewall-cmd",
     # Disk / mount manipulation

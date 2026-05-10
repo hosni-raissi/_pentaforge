@@ -404,17 +404,38 @@ class AnalyzerAgent:
             f"Original scenario: {json.dumps(scenario, ensure_ascii=True)}\n\n"
             "Verification evidence:\n"
             f"{json.dumps(verify_data.get('evidence', {}), ensure_ascii=True)}\n\n"
-            "Requirements:\n"
-            "- reproduce the verified issue with the minimum necessary actions\n"
-            "- capture proof commands, output, and screenshots where useful\n"
-            "- return a detailed PoC summary in the final JSON field `poc`"
+            "PoC Requirements:\n"
+            "1. Types of Evidence to Capture:\n"
+            "   - Visual Evidence: Screenshots (Initial, Malicious input, Exploitation), UI State, Error Messages, URL Bar, Network Traffic, Console Output.\n"
+            "   - Programmatic Evidence: Request/Response Pairs, Payloads, System State, Timing.\n"
+            "2. Best Practices:\n"
+            "   - Capture BEFORE and AFTER exploitation.\n"
+            "   - Include precise timestamps.\n"
+            "   - Annotate screenshots with highlights or arrows.\n"
+            "3. Format:\n"
+            "   - Return a structured JSON object matching the Finding schema requirements specified in the system prompt."
         )
         poc_result = await self._poc.run(poc_message)
         data = asdict(poc_result) if hasattr(poc_result, "__dataclass_fields__") else poc_result
         if isinstance(data, dict):
+            # Ensure mandatory fields for orchestrator/memory
             data.setdefault("verdict", "real_vulnerability")
-            data.setdefault("poc", str(data.get("summary", "")).strip())
+            data.setdefault("summary", str(data.get("summary", "PoC generated")).strip())
             data.setdefault("analysis_chain", ["poc_capture"])
+            
+            # Ensure structured PoC fields are present (default to empty if LLM missed any)
+            data.setdefault("title", str(item.get("verify_summary", "Finding")).strip())
+            data.setdefault("steps_to_reproduce", data.get("steps_to_reproduce", []))
+            data.setdefault("exploit_script", data.get("exploit_script", ""))
+            data.setdefault("verification_commands", data.get("verification_commands", []))
+            data.setdefault("visual_evidence_paths", data.get("visual_evidence_paths", []))
+            data.setdefault("impact_assessment", data.get("impact_assessment", {}))
+            data.setdefault("remediation_steps", data.get("remediation_steps", []))
+            
+            # Map 'poc' for legacy compatibility if needed
+            if "poc" not in data:
+                data["poc"] = data.get("description", "")
+                
         return data
 
     def _normalize_candidate(self, candidate: Any) -> AnalyzerCandidate:

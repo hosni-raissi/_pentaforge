@@ -1339,7 +1339,7 @@ export async function listIntelUpdateStatusFromDesktop(
 }
 
 export interface AIAssistStreamEvent {
-  type: "run" | "tool_start" | "tool_output" | "password_request" | "reply" | "context" | "error" | "ping" | "keepalive";
+  type: "run" | "tool_start" | "tool_output" | "password_request" | "reply" | "context" | "error" | "ping" | "keepalive" | "history_compressed";
   data: any;
 }
 
@@ -1446,6 +1446,17 @@ export async function sendAIAssistInputFromDesktop(
       denied: payload.denied,
     }),
   });
+}
+
+export async function compressAIAssistHistory(history: CopilotMessage[]): Promise<string> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  const response = await requestJson<{ summary: string }>("/api/ai/assist/compress", {
+    method: "POST",
+    body: JSON.stringify({ history }),
+  });
+  return response.summary || "";
 }
 
 export async function askAIAssistFromDesktop(
@@ -1711,6 +1722,23 @@ export async function getReportContentFromDesktop(
   return await requestJson<ReportContentResponse>(
     `/api/projects/${encodeURIComponent(projectId)}/reports/${encodeURIComponent(format)}?ts=${Date.now()}`,
     { cache: "no-store" },
+  );
+}
+
+export async function updateReportContentFromDesktop(
+  projectId: string,
+  format: "markdown" | "html",
+  content: string,
+): Promise<ReportContentResponse> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<ReportContentResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/reports/${encodeURIComponent(format)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }
   );
 }
 

@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import uuid
 import logging
 # import spacy
@@ -346,17 +347,31 @@ def get_session_mapping(session_id: str) -> dict:
 
 def _print_verbose(clean_prompt: str, mapping: dict) -> None:
     sep = "=" * 64
-    print(f"\n{sep}")
-    print("  PrivacyGate — Anonymized Prompt")
-    print(sep)
-    print(clean_prompt)
-    print(f"\n{'-' * 64}")
-    print("  Mapping  (alias → real value)")
-    print(f"{'-' * 64}")
+    lines = [
+        "",
+        sep,
+        "  PrivacyGate — Anonymized Prompt",
+        sep,
+        clean_prompt,
+        "",
+        "-" * 64,
+        "  Mapping  (alias -> real value)",
+        "-" * 64,
+    ]
     for alias, real in mapping.items():
         display = real if len(real) <= 60 else real[:57] + "..."
-        print(f"  {alias:28s} → {display}")
-    print(f"{sep}\n")
+        lines.append(f"  {alias:28s} -> {display}")
+    lines.extend([sep, ""])
+
+    payload = "\n".join(lines)
+    try:
+        sys.stdout.write(payload)
+        sys.stdout.flush()
+    except (BlockingIOError, OSError):
+        logger.debug(
+            "PrivacyGate verbose output skipped because stdout is non-blocking or unavailable.",
+            exc_info=True,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────

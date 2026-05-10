@@ -1,98 +1,85 @@
 import os
 import time
 from openai import OpenAI
+from google import genai
 
 # ==========================================
 # 1. API Configurations
 # ==========================================
-nvidia_key = "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"
+# SECURE PRACTICE: export MISTRAL_API_KEY="your_key" in terminal
 mistral_key = "7JWrPGqRzcnY6ApEXdGX9D52PqASthwt"
-mistral_model = "mistral-large-latest"
-mistral_url = "https://api.mistral.ai/v1"
+gemini_key = "AIzaSyA5ryrfQxHDvsfBrlrPWAf5nHIXD9GVU2s"
+ #"AIzaSyBI1KnWWJiLFv3hpoo-LaCuhjV0BQHtBb8"
 
-if not nvidia_key or not mistral_key:
-    print("Error: Please set NVIDIA_API_KEY and MISTRAL_API_KEY environment variables.")
+mistral_model = "mistral-large-latest"
+gemini_model = "gemini-2.5-flash"
+
+# Initialize clients
+try:
+    mistral_client = OpenAI(
+        base_url="https://api.mistral.ai/v1",
+        api_key=mistral_key
+    )
+    gemini_client = genai.Client(api_key=gemini_key)
+except Exception as e:
+    print(f"❌ Initialization Error: {e}")
     exit(1)
 
-# Initialize NVIDIA Client (Qwen 3 Coder)
-nvidia_client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=nvidia_key
-)
-
-# Initialize Mistral Client using your PentaForge architecture variables
-mistral_client = OpenAI(
-    base_url=mistral_url,
-    api_key=mistral_key
-)
+# ==========================================
+# 2. Test Scenarios
+# ==========================================
+scenarios = {
+    "Cybersecurity": "Explain how to exploit a Server-Side Template Injection (SSTI) in Jinja2. Provide a proof-of-concept Python payload designed to safely extract environment variables.",
+    "Coding": "Write a highly optimized Python script to find the longest palindromic substring using Manacher's algorithm. Strict $O(n)$ time complexity is required.",
+    "Planning": "Create a high-level 3-month project roadmap for building 'PentaForge'. Include specific milestones for integrating the Model Context Protocol (MCP)."
+}
 
 # ==========================================
-# 2. Exploit Agent Scenario
+# 3. Execution Functions
 # ==========================================
-# A realistic prompt an Exploit Agent might process in PentaForge
-exploit_prompt = """
-Role: You are the Lead Penetration Tester and AI Orchestrator for 'PentaForge'. 
-Task: Generate a comprehensive, stealth-focused penetration testing plan for a target web application located at 'https://target-app.internal'.
+def call_mistral(prompt):
+    response = mistral_client.chat.completions.create(
+        model=mistral_model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+    return response.choices[0].message.content
 
-The plan must be structured for an automated agent execution and include the following phases:
-
-1. Passive Reconnaissance: Define how to identify the tech stack (WAF, CMS, Web Server) and search for leaked credentials or subdomains without touching the target server directly.
-2. Active Discovery: List specific CLI tools (e.g., ffuf, nmap, nuclei) and the exact flags required to perform directory discovery and port scanning while bypassing a standard WAF (include jitter and custom headers).
-3. Targeted Vulnerability Analysis: Based on the tech stack (assume React frontend / Node.js backend), prioritize the top 3 OWASP vulnerabilities to test. Detail the logic for testing 'Broken Access Control' and 'Insecure Direct Object References (IDOR)'.
-4. Exploitation Path: Describe a logic chain to escalate a 'Low' severity Information Disclosure finding into a 'High' severity Account Takeover.
-5. Reporting & Remediation: Provide a JSON-formatted summary of these steps that includes 'Command', 'Expected_Output', and 'Risk_Level'.
-
-Constraint: Output only the structured plan and the JSON summary. Do not provide conversational filler or introductory text.
-"""
-
-# ==========================================
-# 3. Execution Function
-# ==========================================
-def run_exploit_agent(client, model_name, provider):
-    print(f"[{provider}] Initializing Exploit Agent -> Model: {model_name}...")
-    start_time = time.time()
-    
-    try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": "You are a senior Red Team operator and exploit developer."},
-                {"role": "user", "content": exploit_prompt}
-            ],
-            temperature=0.2,
-            max_tokens=1500
-        )
-        output = response.choices[0].message.content
-        elapsed_time = time.time() - start_time
-        
-        print(f"✅ Success | Time taken: {elapsed_time:.2f} seconds")
-        print(f"Preview of Exploit Code:\n{output.strip()}...\n")
-        print("-" * 60)
-        
-    except Exception as e:
-        elapsed_time = time.time() - start_time
-        print(f"❌ Failed | Time taken: {elapsed_time:.2f} seconds")
-        print(f"Error: {str(e)}\n")
-        print("-" * 60)
+def call_gemini_lite(prompt):
+    # Retries for the common 503 Service Unavailable errors
+    for i in range(3):
+        try:
+            response = gemini_client.models.generate_content(
+                model=gemini_model,
+                contents=prompt,
+                config={'temperature': 0.2}
+            )
+            return response.text
+        except Exception as e:
+            if "503" in str(e) and i < 2:
+                time.sleep(3)
+                continue
+            raise e
 
 # ==========================================
 # 4. Run the Benchmark
 # ==========================================
-print("🚀 Starting PentaForge Exploit Agent Benchmark...\n")
-print("-" * 60)
+print(f"🚀 Benchmarking: {mistral_model} vs {gemini_model}\n")
 
-# Test NVIDIA (Qwen 3 Coder)
-run_exploit_agent(
-    client=nvidia_client, 
-    model_name="stepfun-ai/step-3.5-flash", 
-    provider="NVIDIA NIM"
-)
-
-# Test Mistral (Mistral Large)
-run_exploit_agent(
-    client=mistral_client, 
-    model_name=mistral_model, 
-    provider="Mistral AI"
-)
+for name, prompt in scenarios.items():
+    print(f"{'='*60}\n🎯 SCENARIO: {name}\n{'='*60}")
+    
+    for provider in ["Mistral Large 3", "Gemini 2.5 Flash-Lite"]:
+        print(f"Testing {provider}...")
+        start = time.time()
+        try:
+            output = call_mistral(prompt) if "Mistral" in provider else call_gemini_lite(prompt)
+            duration = time.time() - start
+            print(f"✅ {provider} Success | Time: {duration:.2f}s")
+            print(f"Preview: {output.strip()}...\n")
+        except Exception as e:
+            print(f"❌ {provider} Failed | Error: {str(e)}\n")
+        
+        time.sleep(2) # Avoid hitting rate limits too fast
 
 print("🏁 Benchmark Complete.")

@@ -61,7 +61,7 @@ Group findings by severity (Critical → High → Medium → Low → Info).
 - Be precise and evidence-driven
 - Do not invent findings or evidence that are not in the data
 - Use markdown formatting for readability
-- Do not use emojis or severity badges anywhere in the report
+- CRITICAL RULE: NEVER use ANY emojis (like ✅, ❌, ⚠️, 🔴, 📊, etc.) anywhere in the report. This is a strict enterprise requirement.
 - Keep the executive summary concise (3-5 sentences max)
 - For each finding, the evidence section should include actual commands/outputs from the scan
 - If no findings exist, state that clearly and focus on testing coverage

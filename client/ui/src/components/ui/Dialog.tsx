@@ -10,9 +10,10 @@ interface DialogProps {
   description?: string;
   children: ReactNode;
   width?: string;
+  className?: string;
 }
 
-export function Dialog({ open, onClose, title, description, children, width = 'max-w-lg' }: DialogProps) {
+export function Dialog({ open, onClose, title, description, children, width = 'max-w-lg', className }: DialogProps) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogPrimitive.Portal>
@@ -30,7 +31,8 @@ export function Dialog({ open, onClose, title, description, children, width = 'm
             'data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%]',
             'data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]',
             'duration-200 mx-4',
-            width
+            width,
+            className
           )}
         >
           <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">

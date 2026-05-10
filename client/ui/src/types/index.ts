@@ -29,6 +29,15 @@ export interface RealtimeVulnFinding {
   deterministicValidation?: boolean;
   remediation?: string;
   timestamp?: string; // Add timestamp as it's sometimes used interchangeably with 'at'
+  // Structured PoC fields
+  cwe_id?: string;
+  cve_id?: string;
+  steps_to_reproduce?: string[];
+  exploit_script?: string;
+  verification_commands?: string[];
+  visual_evidence_paths?: string[];
+  impact_assessment?: Record<string, string>;
+  remediation_steps?: string[];
 }
 
 export interface CopilotMessage {
@@ -38,6 +47,8 @@ export interface CopilotMessage {
   timestamp?: string;
   route?: 'assistant' | 'planner' | 'reporting' | 'blocked';
   blocked?: boolean;
+  isCompressionSeparator?: boolean;
+  isCompressionSummary?: boolean;
   toolLogs?: Array<{
     id: string;
     tool: string;
@@ -126,6 +137,15 @@ export interface Finding {
   verificationMethods?: string[];
   remediation?: string;
   timestamp: string;
+  // Structured PoC fields
+  cwe_id?: string;
+  cve_id?: string;
+  steps_to_reproduce?: string[];
+  exploit_script?: string;
+  verification_commands?: string[];
+  visual_evidence_paths?: string[];
+  impact_assessment?: Record<string, string>;
+  remediation_steps?: string[];
 }
 
 export interface FindingEvidence {
@@ -181,4 +201,5 @@ export interface AppConfig {
   serverPort: number;
   privacyGate: boolean;
   isAssistantOpen: boolean;
+  assistantDraftPrompt?: string;
 }

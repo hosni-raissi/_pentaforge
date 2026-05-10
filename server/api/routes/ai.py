@@ -371,6 +371,10 @@ async def _execute_assistant_run(
                 run.lane = str(event_data.get("lane", "lightweight") or "lightweight").strip() or "lightweight"
                 run.style = str(event_data.get("style", "natural") or "natural").strip() or "natural"
                 run.blocked = bool(event_data.get("blocked", False))
+            elif event_type == "history_compressed":
+                # We no longer overwrite the UI history with the compressed version.
+                # Instead, we keep the full history and use a rolling summary in the background context.
+                pass
             elif event_type == "context":
                 run.next_context = str(event_data.get("next_context", "") or "").strip()
             elif event_type == "learning":
@@ -768,6 +772,16 @@ async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
             "detections": decision.detections,
         },
     }
+
+
+class AICompressPayload(BaseModel):
+    history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.post("/api/ai/assist/compress")
+async def ai_compress_history(payload: AICompressPayload) -> dict[str, str]:
+    summary = await _assistant_agent.compress_history(payload.history)
+    return {"summary": summary}
 
 
 @router.post("/api/ai/clear-conversation")

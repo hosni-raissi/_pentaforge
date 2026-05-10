@@ -572,12 +572,13 @@ class LLMClient:
             _sep = "\n\n---PRIVACYGATE_MSG_SEP---\n\n"
             raw_contents = [m.content or "" for m in messages]
             combined_prompt = _sep.join(raw_contents)
+            privacygate_verbose = os.getenv("PRIVACYGATE_VERBOSE", "0").lower() in ("1", "true", "yes", "on")
             
             # Use a generic engagement_id for chat, the UUID inside anonymize prevents collisions
             anon_combined, session_id, _mapping = anonymize(
                 combined_prompt,
                 engagement_id="llm_chat",
-                verbose=True
+                verbose=privacygate_verbose,
             )
             
             anon_contents = anon_combined.split(_sep)

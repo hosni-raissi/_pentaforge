@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Bot, SendHorizontal, Sparkles, Trash2, Copy, Check, X, Clock3, Square } from 'lucide-react';
+import { Bot, SendHorizontal, Sparkles, Trash2, Copy, Check, X, Clock3, Square, FileText, ChevronDown } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 
 import {
   askAIAssistStreamFromDesktop,
@@ -8,10 +9,12 @@ import {
   getActiveProjectRunsFromDesktop,
   updateProjectSavedContextFromDesktop,
   sendAIAssistInputFromDesktop,
+  compressAIAssistHistory,
 } from '@/lib/projectBridge';
 import type { CopilotMessage } from '@/types';
 import type { AgentInfo, Finding } from '../../types';
 import { useProjects } from '../../stores/projects';
+import { useConfig } from '../../stores/config';
 import { Button } from '../ui/Button';
 import { Card, CardHeader, CardTitle } from '../ui/Card';
 
@@ -31,10 +34,68 @@ interface AIPromptPanelProps {
 
 const CHAT_STORAGE_PREFIX = 'pf-assistant-chat';
 const MAX_CHAT_MESSAGES = 80;
+const HISTORY_TOKEN_LIMIT = 8000;
+const MAX_PROMPT_CHARS = 1000;
+
+function estimateTokens(text: string): number {
+  return Math.ceil((text || '').length / 4);
+}
+
+function estimateMessagesTokens(messages: CopilotMessage[]): number {
+  return messages.reduce((acc, m) => acc + estimateTokens(m.text || ''), 0);
+}
 
 type PanelMessage = CopilotMessage & {
   localState?: 'pending' | 'error' | 'cancelled';
   requestId?: string;
+  isCompressionSeparator?: boolean;
+};
+
+const TokenUsageCircle = ({ messages, rollingSummary }: { messages: PanelMessage[], rollingSummary?: string }) => {
+  // Two-storage logic:
+  // 1. If we have a rolling summary, the LLM context is Summary + recent messages.
+  // 2. Otherwise, it's just the messages.
+  const summaryTokens = rollingSummary ? Math.ceil(rollingSummary.length / 4) : 0;
+  // Two-storage logic: The LLM context window is the Rolling Summary + last 5 messages
+  const activeMessages = rollingSummary ? messages.slice(-5) : messages;
+  const historyTokens = activeMessages.reduce((acc, m) => {
+      if (m.isCompressionSummary || m.isCompressionSeparator) return acc;
+      return acc + Math.ceil((m.text || '').length / 4);
+  }, 0);
+  
+  const currentTokens = summaryTokens + historyTokens;
+  const percentage = Math.min(100, (currentTokens / HISTORY_TOKEN_LIMIT) * 100);
+  const radius = 6.5;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference - (percentage / 100) * circumference;
+
+  return (
+    <div className="group relative flex items-center justify-center h-5 w-5" title={`Context usage: ${Math.round(percentage)}% (${currentTokens}/${HISTORY_TOKEN_LIMIT} tokens)`}>
+      <svg className="h-4 w-4 -rotate-90 transform">
+        <circle
+          cx="8"
+          cy="8"
+          r={radius}
+          fill="transparent"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          className="text-border/40"
+        />
+        <circle
+          cx="8"
+          cy="8"
+          r={radius}
+          fill="transparent"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          className={`transition-all duration-500 ${percentage > 90 ? 'text-red-500' : percentage > 70 ? 'text-orange-500' : 'text-pf-500'}`}
+        />
+      </svg>
+    </div>
+  );
 };
 
 function buildStorageKey(projectId: string, target: string, targetType: string): string {
@@ -70,11 +131,11 @@ function writeStoredMessages(storageKey: string, messages: PanelMessage[]): void
 }
 
 function messageSignature(message: Pick<CopilotMessage, 'role' | 'text' | 'route' | 'blocked'>): string {
+  // Only use role + text for dedup — route/blocked metadata may differ
+  // between the locally-streamed version and the backend-saved history.
   return [
     message.role,
-    message.text.trim(),
-    message.route ?? '',
-    message.blocked ? '1' : '0',
+    message.text.trim().slice(0, 300),
   ].join('|');
 }
 
@@ -83,7 +144,7 @@ function mergeMessages(
   localMessages: PanelMessage[],
   introMessage: CopilotMessage,
 ): PanelMessage[] {
-  const merged: PanelMessage[] = [{ ...introMessage }];
+  const merged: PanelMessage[] = [];
   const historyDupes = new Map<string, number>();
 
   if (baseHistory) {
@@ -108,7 +169,236 @@ function mergeMessages(
     merged.push({ ...item });
   }
 
-  return merged.slice(-MAX_CHAT_MESSAGES);
+  // Sort chronologically by timestamp, but always keep intro at top
+  merged.sort((a, b) => {
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    return timeA - timeB;
+  });
+
+  return [{ ...introMessage }, ...merged].slice(-MAX_CHAT_MESSAGES);
+}
+
+function CodeCopyButton({ text, isWhiteBg }: { text: string; isWhiteBg: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* ignore */ }
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-all ${isWhiteBg
+          ? 'text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700'
+          : 'text-zinc-400 hover:bg-white/10 hover:text-white'
+        }`}
+    >
+      {copied ? (
+        <>
+          <Check size={10} className="text-green-500" />
+          <span className="text-green-500 font-bold">Copied</span>
+        </>
+      ) : (
+        <>
+          <Copy size={10} />
+          <span>Copy</span>
+        </>
+      )}
+    </button>
+  );
+}
+
+function renderMarkdownMessage(text: string) {
+  if (!text) return null;
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('```') && part.endsWith('```')) {
+      const match = part.match(/```(\w+)?\n?([\s\S]*?)```/);
+      if (match) {
+        const lang = (match[1] || '').toLowerCase();
+        const code = match[2];
+        const isWhiteBg = lang === 'xml' || lang === 'html' || lang === 'soap';
+        const displayLang = lang || 'code';
+
+        return (
+          <div key={i} className={`my-2 max-w-full rounded-md border overflow-hidden shadow-lg ${isWhiteBg ? 'bg-white border-zinc-200' : 'bg-zinc-900 border-white/10'}`}>
+            <div className={`px-3 py-1 flex items-center justify-between text-[10px] uppercase font-bold border-b ${isWhiteBg ? 'bg-zinc-50 text-zinc-500 border-zinc-200' : 'bg-zinc-800 text-zinc-400 border-white/5'}`}>
+              <span>{displayLang}</span>
+              <CodeCopyButton text={code.replace(/\n$/, '')} isWhiteBg={isWhiteBg} />
+            </div>
+            <pre className={`p-3 text-[11px] overflow-x-auto font-mono scrollbar-pf ${isWhiteBg ? 'bg-white text-zinc-900' : 'bg-zinc-900 text-white'}`}>
+              <code>{code.replace(/\n$/, '')}</code>
+            </pre>
+          </div>
+        );
+      }
+    }
+
+    // Handle headings, bold, italics, and TABLES
+    const lines = part.split('\n');
+    const renderedLines: React.ReactNode[] = [];
+    let currentTable: string[] = [];
+
+    const flushTable = (key: string) => {
+      if (currentTable.length === 0) return;
+      const tableRows = currentTable;
+      currentTable = [];
+
+      // Basic table parser
+      const parseRow = (row: string) => row.split('|').filter((_, idx, arr) => idx > 0 && idx < arr.length - 1).map(c => c.trim());
+      const headerRow = tableRows[0];
+      const separatorRow = tableRows[1];
+      const dataRows = tableRows.slice(2);
+
+      const headers = parseRow(headerRow);
+      const isHeaderOnly = !separatorRow || !separatorRow.includes('---');
+
+      if (isHeaderOnly) {
+        // Not a valid table, just render as lines
+        tableRows.forEach((r, ridx) => {
+          renderedLines.push(<div key={`${key}-r-${ridx}`} className="leading-relaxed">{renderLineContent(r)}</div>);
+        });
+        return;
+      }
+
+      renderedLines.push(
+        <div key={`${key}-table`} className="my-4 overflow-x-auto rounded-md border border-pf-500/20 bg-surface-1/50 shadow-sm scrollbar-pf">
+          <table className="w-full border-collapse text-[12px]">
+            <thead>
+              <tr className="border-b border-pf-500/30 bg-pf-500/10">
+                {headers.map((h, hidx) => (
+                  <th key={hidx} className="px-3 py-2 text-left font-bold text-pf-300 uppercase tracking-wider border-r border-pf-500/10 last:border-r-0">
+                    {renderLineContent(h)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {dataRows.map((row, ridx) => {
+                const cells = parseRow(row);
+                return (
+                  <tr key={ridx} className="border-b border-pf-500/10 last:border-b-0 hover:bg-pf-500/5 transition-colors">
+                    {cells.map((c, cidx) => (
+                      <td key={cidx} className="px-3 py-2 text-text-secondary border-r border-pf-500/10 last:border-r-0 font-mono text-[11px]">
+                        {renderLineContent(c)}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      );
+    };
+
+    const renderLineContent = (line: string) => {
+      // Handle Bold (**), Italics (*), and Inline Code (`)
+      const boldParts = line.split(/(\*\*.*?\*\*)/g);
+      return boldParts.map((bp, bpIdx) => {
+        if (bp.startsWith('**') && bp.endsWith('**')) {
+          return <strong key={bpIdx} className="font-bold text-text-primary">{bp.slice(2, -2)}</strong>;
+        }
+
+        // Sub-split for inline code (`)
+        const codeParts = bp.split(/(`.*?`)/g);
+        return codeParts.map((cp, cpIdx) => {
+          if (cp.startsWith('`') && cp.endsWith('`')) {
+            return (
+              <code key={cpIdx} className="px-1.5 py-0.5 rounded bg-zinc-800 text-pf-200 font-mono text-[10.5px] border border-white/5 mx-0.5 leading-none inline-block align-baseline shadow-sm">
+                {cp.slice(1, -1)}
+              </code>
+            );
+          }
+
+          // Sub-split for italics (*)
+          const italicParts = cp.split(/(\*.*?\*)/g);
+          return italicParts.map((ip, ipIdx) => {
+            if (ip.startsWith('*') && ip.endsWith('*')) {
+              return <em key={ipIdx} className="italic opacity-85 text-text-secondary">{ip.slice(1, -1)}</em>;
+            }
+            return ip;
+          });
+        });
+      });
+    };
+
+    lines.forEach((line, lineIdx) => {
+      const trimmed = line.trim();
+
+      // Table detection
+      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+        currentTable.push(trimmed);
+        return;
+      } else if (currentTable.length > 0) {
+        flushTable(`l-${lineIdx}`);
+      }
+
+      if (!trimmed) {
+        renderedLines.push(<div key={lineIdx} className="h-2" />);
+        return;
+      }
+
+      // Handle Horizontal Rules (---)
+      if (trimmed === '---') {
+        renderedLines.push(<div key={lineIdx} className="my-3 border-t border-pf-500/20" />);
+        return;
+      }
+
+      // Handle Headings (#, ##, ###)
+      const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        const content = headingMatch[2];
+        if (level === 1) {
+          renderedLines.push(
+            <h1 key={lineIdx} className="mt-4 mb-2 text-[16px] font-extrabold text-pf-300 border-b-2 border-pf-500/20 pb-1">
+              {renderLineContent(content)}
+            </h1>
+          );
+        } else if (level === 2) {
+          renderedLines.push(
+            <h2 key={lineIdx} className="mt-3.5 mb-1.5 text-[14px] font-bold text-pf-400 border-b border-pf-500/15 pb-0.5">
+              {renderLineContent(content)}
+            </h2>
+          );
+        } else if (level === 3) {
+          renderedLines.push(
+            <h3 key={lineIdx} className="mt-3 mb-1 text-[13px] font-semibold text-pf-400/90 border-b border-pf-500/10 pb-0.5">
+              {renderLineContent(content)}
+            </h3>
+          );
+        } else {
+          renderedLines.push(
+            <h4 key={lineIdx} className="mt-2.5 mb-1 text-[12px] font-bold text-pf-500 uppercase tracking-tight">
+              {renderLineContent(content)}
+            </h4>
+          );
+        }
+        return;
+      }
+
+      renderedLines.push(
+        <div key={lineIdx} className="leading-relaxed">
+          {renderLineContent(line)}
+        </div>
+      );
+    });
+
+    if (currentTable.length > 0) {
+      flushTable('end');
+    }
+
+    return (
+      <div key={i} className="flex flex-col gap-y-0.5">
+        {renderedLines}
+      </div>
+    );
+  });
 }
 
 function mergeActiveAssistantRun(
@@ -200,6 +490,23 @@ function buildErrorReply(error: unknown, fallbackReply: string): string {
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function isSuccessfulReportReply(message: PanelMessage): boolean {
+  if (message.role !== 'assistant' || !!message.localState) {
+    return false;
+  }
+  const text = message.text.trim().toLowerCase();
+  if (!text) {
+    return false;
+  }
+  return (
+    text.includes("generated a comprehensive penetration testing report")
+    || (
+      text.includes("report is now available")
+      && text.includes("reports page")
+    )
+  );
 }
 
 function normalizeFindingReference(value: string): string {
@@ -327,6 +634,7 @@ function AutoTextarea({
   placeholder,
   disabled,
   className,
+  maxLength,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -334,6 +642,7 @@ function AutoTextarea({
   placeholder: string;
   disabled: boolean;
   className?: string;
+  maxLength?: number;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -352,6 +661,7 @@ function AutoTextarea({
       onKeyDown={onKeyDown}
       placeholder={placeholder}
       disabled={disabled}
+      maxLength={maxLength}
       rows={1}
       className={`focus-ring w-full resize-none bg-transparent px-3 py-2 text-sm text-text-primary placeholder:text-text-muted disabled:opacity-50 ${className || ''}`}
       style={{ minHeight: 40, maxHeight: 120, overflowY: 'auto' }}
@@ -482,6 +792,11 @@ export function AIPromptPanel({
     }),
     [projectName, target],
   );
+  const navigate = useNavigate();
+  const assistantDraftPrompt = useConfig((s) => s.assistantDraftPrompt);
+  const updateConfig = useConfig((s) => s.updateConfig);
+  const projects = useProjects((s) => s.projects);
+  const project = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
 
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
@@ -514,6 +829,30 @@ export function AIPromptPanel({
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const userIsAtBottomRef = useRef(true);
+
+  const handleScroll = useCallback(() => {
+    if (!scrollContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    const distFromBottom = scrollHeight - scrollTop - clientHeight;
+    
+    // User is "at bottom" if they are within 50px of the end
+    userIsAtBottomRef.current = distFromBottom < 50;
+    
+    // Show button if more than 200px away from bottom
+    setShowScrollButton(distFromBottom > 200);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, [handleScroll]);
+  const handleOpenReportsShare = useCallback(() => {
+    navigate('/reports');
+  }, [navigate]);
 
   const scrollToBottom = useCallback((instant = false) => {
     if (messagesEndRef.current) {
@@ -607,6 +946,13 @@ export function AIPromptPanel({
     setPrompt(injectedPrompt.text);
   }, [injectedPrompt]);
 
+  useEffect(() => {
+    if (assistantDraftPrompt) {
+      setPrompt(assistantDraftPrompt);
+      updateConfig({ assistantDraftPrompt: undefined });
+    }
+  }, [assistantDraftPrompt, updateConfig]);
+
   // Persist to sessionStorage
   useEffect(() => {
     writeStoredMessages(storageKey, messages);
@@ -614,11 +960,16 @@ export function AIPromptPanel({
 
   // Auto-scroll to bottom on messages change
   useEffect(() => {
-    // Small delay to ensure DOM is updated and images/content are rendered
-    const timer = setTimeout(() => {
-      scrollToBottom();
-    }, 100);
-    return () => clearTimeout(timer);
+    const lastMessage = messages[messages.length - 1];
+    const isUserMessage = lastMessage?.role === 'user';
+    
+    // Only auto-scroll if it's a user message OR if we're already at the bottom
+    if (isUserMessage || userIsAtBottomRef.current) {
+      const timer = setTimeout(() => {
+        scrollToBottom();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
   }, [messages, scrollToBottom]);
 
   // Initial scroll on mount
@@ -667,10 +1018,15 @@ export function AIPromptPanel({
         .map((f) => `[${f.severity}] ${f.title}`)
         .join('; ');
 
-      const context = [
+      const contextRaw = [
         ...agents.map((a) => `${a.name}:${a.state}:${a.currentTask ?? ''}`),
         findingsSummary ? `Findings: ${findingsSummary}` : 'No confirmed findings yet.',
       ].join(' | ');
+
+      // Truncate context to avoid 422 error (12000 character limit)
+      const context = contextRaw.length > 11500
+        ? contextRaw.slice(0, 11500) + '... [truncated for length]'
+        : contextRaw;
 
       await askAIAssistStreamFromDesktop(
         {
@@ -683,6 +1039,12 @@ export function AIPromptPanel({
         },
         (event) => {
           if (cancelledRequestIdsRef.current.has(requestId)) {
+            return;
+          }
+
+          if (event.type === 'history_compressed') {
+            // We no longer truncate UI history when the backend compresses.
+            // The background summary is handled by the 'context' event.
             return;
           }
           setMessages((prev) =>
@@ -781,6 +1143,25 @@ export function AIPromptPanel({
                 const step = event.data.step;
                 if (step === 'generating_final_reply') {
                   setLoadingStep('working');
+                } else if (step === 'compressing_history') {
+                  // Inject a transient notification for history compression
+                  setMessages((prev) => {
+                    const now = Date.now();
+                    const alreadyNotified = prev.some(m => {
+                      if (!m.isCompressionSeparator || !m.timestamp) return false;
+                      const ts = new Date(m.timestamp).getTime();
+                      return !isNaN(ts) && (now - ts < 10000);
+                    });
+                    if (alreadyNotified) return prev;
+                    const separator: PanelMessage = {
+                      id: `opt-${now}`,
+                      role: 'assistant',
+                      text: 'Optimizing conversation history for better context...',
+                      isCompressionSeparator: true,
+                      timestamp: new Date().toISOString(),
+                    };
+                    return [...prev, separator].slice(-MAX_CHAT_MESSAGES);
+                  });
                 }
                 return m;
               }
@@ -944,6 +1325,42 @@ export function AIPromptPanel({
     const clean = text.trim();
     if (!clean || sending || clearing) return;
 
+    // Check for history overflow and perform pre-prompt optimization if needed.
+    // This ensures the background context is updated BEFORE the LLM sees the new prompt.
+    const currentTokens = estimateMessagesTokens(messages);
+    if (currentTokens > (HISTORY_TOKEN_LIMIT * 0.95)) {
+      setSending(true);
+      const optimizationId = `opt-${Date.now()}`;
+      
+      // Inject optimization notification (transient, won't be truncated)
+      setMessages(prev => [...prev, {
+        id: optimizationId,
+        role: 'assistant',
+        text: '🔄 **OPTIMIZING CONVERSATION CONTEXT**\n\nHistory limit reached. I am updating my background memory to keep our conversation focused...',
+        timestamp: new Date().toISOString()
+      }]);
+
+      try {
+        // 1. Generate new rolling summary from the current full history
+        const summary = await compressAIAssistHistory(messages);
+        
+        // 2. Update the background context storage (Storage #2)
+        const nextContext = JSON.stringify({ rolling_summary: summary });
+        await updateProjectSavedContextFromDesktop(projectId, nextContext);
+        
+        // 3. Keep the UI history (Storage #1) intact, but notify the user
+        setMessages(prev => prev.map(m => m.id === optimizationId ? {
+          ...m,
+          text: '🔄 **Context Optimized**\n\nI have summarized our prior discussion into my background memory. Full history remains visible here, but my active focus is now on the most relevant points.'
+        } : m));
+        
+        // Short pause to ensure state synchronicity
+        await new Promise(r => setTimeout(r, 800));
+      } catch (err) {
+        console.error('History optimization failed:', err);
+      }
+    }
+
     const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     const userMessage: PanelMessage = {
@@ -966,7 +1383,7 @@ export function AIPromptPanel({
     setMessages((prev) => [...prev, userMessage, assistantMessage].slice(-MAX_CHAT_MESSAGES));
     setPrompt('');
     void attachToRequest(requestId, clean);
-  }, [attachToRequest, clearing, sending]);
+  }, [attachToRequest, clearing, sending, messages, introMessage]);
 
   useEffect(() => {
     const pendingMessage = findPendingAssistantMessage(messages);
@@ -977,6 +1394,13 @@ export function AIPromptPanel({
       return;
     }
     const promptText = messages.find((message) => message.id === `u-${pendingMessage.requestId}`)?.text ?? '';
+
+    if (!promptText) {
+      // If the user message was dropped during history merge, orphan this pending message
+      setMessages((prev) => prev.map(m => m.id === pendingMessage.id ? { ...m, localState: 'error', text: 'Echo disconnected and request context was lost.' } : m));
+      return;
+    }
+
     setLoadingStep(
       Array.isArray(pendingMessage.toolLogs) && pendingMessage.toolLogs.some((log) => log.status === 'running')
         ? 'working'
@@ -986,7 +1410,7 @@ export function AIPromptPanel({
   }, [attachToRequest, messages]);
 
   return (
-    <Card className="flex h-full border-0 rounded-none shadow-none flex-col">
+    <Card className="relative flex h-full border-0 rounded-none shadow-none flex-col">
       {/* ── Header ── */}
       <CardHeader className="mb-2 flex-row items-center justify-between">
         <div className="flex items-center gap-2">
@@ -1016,7 +1440,7 @@ export function AIPromptPanel({
       {/* ── Message list ── */}
       <div
         ref={scrollContainerRef}
-        className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 scrollbar-pf"
+        className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden p-4 scrollbar-pf"
       >
         {messages.length >= MAX_CHAT_MESSAGES && (
           <div className="flex items-center justify-center py-2">
@@ -1027,18 +1451,33 @@ export function AIPromptPanel({
           </div>
         )}
 
-        {messages.map((message) => (
-          <div key={message.id} className={message.role === 'user' ? 'flex justify-end' : ''}>
+        {messages.map((message) => {
+          if (message.isCompressionSummary) return null;
+          if (message.isCompressionSeparator) {
+            return (
+              <div key={message.id} className="my-6 flex items-center justify-center px-4">
+                <div className="flex w-full items-center gap-3">
+                  <div className="h-[1px] flex-1 bg-gradient-to-r from-transparent via-border/50 to-transparent" />
+                  <div className="flex items-center gap-2 rounded-full border border-pf-500/20 bg-surface-2 px-4 py-1.5 text-[10px] font-semibold text-text-muted shadow-sm backdrop-blur-sm uppercase tracking-wider">
+                    <Sparkles size={11} className="text-pf-400 animate-pulse" />
+                    <span>Optimizing conversation context</span>
+                  </div>
+                  <div className="h-[1px] flex-1 bg-gradient-to-r from-transparent via-border/50 to-transparent" />
+                </div>
+              </div>
+            );
+          }
+          return (
+            <div key={message.id} className={message.role === 'user' ? 'flex justify-end' : ''}>
             <div
               className={
                 message.role === 'assistant'
-                  ? `max-w-[92%] rounded-md border p-2 text-sm ${
-                      message.localState === 'error'
-                        ? 'border-orange-500/30 bg-orange-500/10 text-orange-900 dark:text-orange-200'
-                        : message.localState === 'cancelled'
-                          ? 'border-border bg-surface-1/70 text-text-secondary'
-                        : 'border-pf-500/20 bg-pf-500/10 text-text-primary'
-                    }`
+                  ? `max-w-[92%] rounded-md border p-2 text-sm ${message.localState === 'error'
+                    ? 'border-orange-500/30 bg-orange-500/10 text-orange-900 dark:text-orange-200'
+                    : message.localState === 'cancelled'
+                      ? 'border-border bg-surface-1/70 text-text-secondary'
+                      : 'border-pf-500/20 bg-pf-500/10 text-text-primary'
+                  }`
                   : 'max-w-[92%] rounded-md border border-border bg-surface-2 p-2 text-sm text-text-primary'
               }
             >
@@ -1068,9 +1507,9 @@ export function AIPromptPanel({
                             if (t === 'run_custom' || !t) return null;
                             return <span className="font-mono opacity-80">[{log.tool}]</span>;
                           })()}
-                          <span className={`truncate max-w-[320px] ${log.tool === 'run_custom' ? 'font-mono text-[10px] bg-surface-2 px-1 rounded border border-border/50' : 'text-[10px] italic opacity-80'}`}>
+                          <div className={`break-all min-w-0 flex-1 ${log.tool === 'run_custom' ? 'font-mono text-[11px] text-zinc-600 font-medium' : 'text-[10px] italic opacity-80'}`}>
                             {log.tool === 'run_custom' ? log.input : `"${log.input}"`}
-                          </span>
+                          </div>
                         </div>
                         {log.output && log.output.error && (
                           <div className="mt-0.5 text-red-500 opacity-90 pl-3">
@@ -1125,16 +1564,29 @@ export function AIPromptPanel({
                       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pf-400" />
                     </div>
                     <span className="text-[11px] font-medium text-text-muted italic animate-pulse">
-                      {message.toolLogs?.some(l => l.status === 'running') 
-                        ? `Echo is running ${message.toolLogs.find(l => l.status === 'running')?.tool === 'run_custom' ? 'command' : 'tool'}...` 
+                      {message.toolLogs?.some(l => l.status === 'running')
+                        ? `Echo is running ${message.toolLogs.find(l => l.status === 'running')?.tool === 'run_custom' ? 'command' : 'tool'}...`
                         : (loadingStep === 'thinking' ? 'Echo is thinking...' : 'Echo is working...')}
                     </span>
                   </div>
                 ) : (
                   <div className="space-y-1">
-                    <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-                      {message.text}
-                    </p>
+                    <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                      {renderMarkdownMessage(message.text)}
+                    </div>
+                    {isSuccessfulReportReply(message) && (
+                      <div className="pt-1">
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          onClick={handleOpenReportsShare}
+                          className="font-semibold"
+                        >
+                          <FileText size={12} />
+                          Open Reports & Share
+                        </Button>
+                      </div>
+                    )}
                     {message.localState === 'cancelled' && (
                       <p className="text-[10px] uppercase tracking-wide text-text-muted">
                         Stopped
@@ -1157,11 +1609,20 @@ export function AIPromptPanel({
               </div>
             </div>
           </div>
-        ))}
+        )})}
         <div ref={messagesEndRef} className="h-0" />
       </div>
 
-
+      {/* Floating Scroll to Bottom Button */}
+      {showScrollButton && (
+        <button
+          onClick={() => scrollToBottom()}
+          className="absolute bottom-24 right-8 z-50 flex h-10 w-10 items-center justify-center rounded-full border border-pf-500/30 bg-surface-2 text-pf-500 shadow-2xl transition-all hover:bg-surface-3 hover:scale-110 active:scale-95 animate-in fade-in slide-in-from-bottom-2 duration-300"
+          title="Scroll to bottom"
+        >
+          <ChevronDown size={22} />
+        </button>
+      )}
       {/* ── Input row ── */}
       <div className="mt-auto p-4">
         <div className="relative flex flex-col gap-2 rounded-xl border border-border bg-surface-1/80 p-2 shadow-sm transition-all focus-within:border-pf-500/50 focus-within:ring-1 focus-within:ring-pf-500/20">
@@ -1171,20 +1632,40 @@ export function AIPromptPanel({
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                void sendPrompt(prompt);
+                if (prompt.trim() && prompt.length <= MAX_PROMPT_CHARS) {
+                  void sendPrompt(prompt);
+                }
               }
             }}
             placeholder="Ask Echo for strategy, scope checks, or next step…"
             disabled={sending || clearing}
             className="!ring-0 border-0"
+            maxLength={MAX_PROMPT_CHARS}
           />
-          
-          <div className="flex items-center justify-between px-2 pb-1">
-            <div className="flex items-center gap-3">
-               <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
-                 <Sparkles size={12} className="text-pf-400" />
-                 <span>Echo 3.5</span>
-               </div>
+
+
+          <div className="flex items-center justify-between px-2 pb-1 relative">
+            <div className="flex items-center gap-3 ">
+              <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+                <Sparkles size={12} className="text-pf-400" />
+                <span>Echo 3.5</span>
+                <TokenUsageCircle 
+                  messages={messages} 
+                  rollingSummary={(() => {
+                    try {
+                      const parsed = JSON.parse(project?.copilotContext || '{}');
+                      return parsed.rolling_summary;
+                    } catch {
+                      return undefined;
+                    }
+                  })()} 
+                />
+              </div>
+              <div className=" absolute top-4 right-14  pointer-events-none">
+              <span className={`text-[9px] font-mono ${prompt.length >= MAX_PROMPT_CHARS ? 'text-red-500 font-bold' : 'text-text-muted/30'}`}>
+                {prompt.length}/{MAX_PROMPT_CHARS}
+              </span>
+            </div>
             </div>
 
             <Button

@@ -1,8 +1,10 @@
 // src/pages/Reports.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useProjects } from "../stores/projects";
+import { useConfig } from "../stores/config";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
+import { Dialog } from "../components/ui/Dialog";
 import { clsx } from "clsx";
 import {
   FileText,
@@ -17,6 +19,10 @@ import {
   Share2,
   X,
   SendHorizontal,
+  Pencil,
+  Bot,
+  Expand,
+  Shrink,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -26,6 +32,7 @@ import {
   generateReportFromDesktop,
   getReportStatusFromDesktop,
   getReportContentFromDesktop,
+  updateReportContentFromDesktop,
   downloadReportBlobFromDesktop,
   revokeShareLinksFromDesktop,
   getPentesterMessagesFromDesktop,
@@ -51,9 +58,9 @@ interface FormatCardConfig {
 const FORMAT_CARDS: FormatCardConfig[] = [
   {
     format: "html",
-    label: "HTML Report",
+    label: "Professional Report",
     icon: Globe,
-    description: "Styled web report with professional formatting",
+    description: "Styled report in HTML or PDF formats",
     color: "text-orange-400",
     gradient: "from-orange-500/10 to-orange-600/5",
   },
@@ -106,10 +113,98 @@ export default function Reports() {
   const [messageInput, setMessageInput] = useState("");
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState<ReportFormat | null>(null);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const statusPolling = useRef<ReturnType<typeof setInterval> | null>(null);
   const messagesPolling = useRef<ReturnType<typeof setInterval> | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const hasAutoSelected = useRef<string | null>(null);
+
+  const [echoTooltip, setEchoTooltip] = useState<{ visible: boolean; x: number; y: number; text: string }>({ visible: false, x: 0, y: 0, text: '' });
+  const updateConfig = useConfig((s) => s.updateConfig);
+
+  const handleSelection = useCallback(() => {
+    let selection = window.getSelection();
+    let text = selection?.toString().trim() || "";
+    let rect: DOMRect | null = null;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (selection && !selection.isCollapsed && text.length > 0) {
+      rect = selection.getRangeAt(0).getBoundingClientRect();
+    } else if (iframeRef.current?.contentWindow) {
+      const iframeWin = iframeRef.current.contentWindow;
+      selection = iframeWin.getSelection();
+      text = selection?.toString().trim() || "";
+      if (selection && !selection.isCollapsed && text.length > 0) {
+        rect = selection.getRangeAt(0).getBoundingClientRect();
+        const iframeRect = iframeRef.current.getBoundingClientRect();
+        offsetX = iframeRect.left;
+        offsetY = iframeRect.top;
+      }
+    }
+
+    if (rect && text.length > 0) {
+      setEchoTooltip({
+        visible: true,
+        x: rect.left + rect.width / 2 + offsetX,
+        y: rect.top + offsetY - 30, // Show slightly above
+        text,
+      });
+    } else {
+      setEchoTooltip(prev => prev.visible ? { ...prev, visible: false } : prev);
+    }
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener('mouseup', handleSelection);
+    document.addEventListener('keyup', handleSelection);
+    document.addEventListener('selectionchange', handleSelection);
+    
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'IFRAME_SELECTION_CHANGE') {
+        handleSelection();
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    
+    return () => {
+      document.removeEventListener('mouseup', handleSelection);
+      document.removeEventListener('keyup', handleSelection);
+      document.removeEventListener('selectionchange', handleSelection);
+      window.removeEventListener('message', handleMessage);
+    };
+  }, [handleSelection]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && isFullscreen) {
+        setIsFullscreen(false);
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    const handleMouseDown = () => {
+      // If user clicks outside the iframe, clear the iframe's internal selection so it doesn't linger
+      if (iframeRef.current?.contentWindow) {
+        iframeRef.current.contentWindow.getSelection()?.removeAllRanges();
+      }
+      setEchoTooltip(prev => prev.visible ? { ...prev, visible: false } : prev);
+    };
+    document.addEventListener('mousedown', handleMouseDown);
+    return () => document.removeEventListener('mousedown', handleMouseDown);
+  }, []);
+
+  useEffect(() => {
+    setEchoTooltip({ visible: false, x: 0, y: 0, text: '' });
+  }, [viewFormat]);
+
+
 
 
 
@@ -347,9 +442,14 @@ export default function Reports() {
     setViewFormat(format);
     setViewLoading(true);
     setViewContent("");
+    setIsEditing(false);
     try {
       const report = await getReportContentFromDesktop(project.id, format);
-      setViewContent(report.content);
+      let content = report.content;
+      if (format === "markdown") {
+        content = content.replace(/^```markdown\n?/i, '').replace(/\n?```$/i, '').trim();
+      }
+      setViewContent(content);
     } catch (err) {
       setViewContent(
         `Failed to load report: ${err instanceof Error ? err.message : "Unknown error"}`,
@@ -791,7 +891,14 @@ export default function Reports() {
                             "flex-1 h-7 text-[10px] uppercase font-bold tracking-wider transition-all duration-300",
                             downloadSuccess === card.format && "bg-emerald-500 hover:bg-emerald-600 border-emerald-500 text-white"
                           )}
-                          onClick={(e) => { e.stopPropagation(); handleDownload(card.format); }}
+                          onClick={(e) => { 
+                            e.stopPropagation(); 
+                            if (card.format === "html") {
+                              setExportDialogOpen(true);
+                            } else {
+                              handleDownload(card.format); 
+                            }
+                          }}
                           loading={isDownloading}
                         >
                           {downloadSuccess === card.format ? (
@@ -822,34 +929,54 @@ export default function Reports() {
                 <p className="mt-4 text-sm font-medium italic tracking-wide">Select a format above to review content</p>
               </div>
             ) : (
-              <div className="flex-1 flex flex-col overflow-hidden">
+              <div className={clsx("flex flex-col overflow-hidden", isFullscreen ? "fixed inset-0 z-[100] bg-surface-0 shadow-2xl" : "flex-1")}>
                 <div className="px-5 py-2.5 border-b border-border bg-surface-1 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <div className={clsx("w-2 h-2 rounded-full", viewFormat === 'html' ? "bg-orange-400" : "bg-blue-400")} />
                     <span className="text-xs font-bold text-text-primary uppercase tracking-[0.15em]">Previewing: {viewFormat}</span>
                   </div>
-                  <Button 
-                    size="xs" 
-                    variant="ghost" 
-                    onClick={() => handleDownload(viewFormat)} 
-                    className={clsx(
-                      "transition-all duration-300",
-                      downloadSuccess === viewFormat ? "text-emerald-500" : "text-text-muted hover:text-pf-400"
-                    )}
-                    loading={downloadingFormat === viewFormat}
-                  >
-                    {downloadSuccess === viewFormat ? (
-                      <>
-                        <CheckCircle2 size={12} />
-                        Saved
-                      </>
-                    ) : (
-                      <>
-                        <Download size={12} />
-                        Download {viewFormat.toUpperCase()}
-                      </>
-                    )}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button 
+                      size="xs" 
+                      variant="ghost" 
+                      onClick={() => setIsFullscreen(!isFullscreen)}
+                      className="text-text-muted hover:text-pf-400"
+                    >
+                      {isFullscreen ? <Shrink size={12} /> : <Expand size={12} />}
+                      <span className="ml-1 hidden sm:inline">{isFullscreen ? "Shrink" : "Expand"}</span>
+                    </Button>
+                    <Button 
+                      size="xs" 
+                      variant={isEditing ? "primary" : "ghost"} 
+                      onClick={async () => {
+                        if (isEditing) {
+                          setIsSavingEdit(true);
+                          try {
+                            await updateReportContentFromDesktop(project!.id, "markdown", viewContent);
+                            setIsEditing(false);
+                          } catch (err) {
+                            alert(`Failed to save edits: ${err instanceof Error ? err.message : "Unknown error"}`);
+                          } finally {
+                            setIsSavingEdit(false);
+                          }
+                        } else {
+                          if (viewFormat === "html") {
+                            handleView("markdown").then(() => setIsEditing(true));
+                          } else {
+                            setIsEditing(true);
+                          }
+                        }
+                      }} 
+                      loading={isSavingEdit}
+                      className={clsx(
+                        "transition-all duration-300",
+                        isEditing ? "text-white" : "text-text-muted hover:text-pf-400"
+                      )}
+                    >
+                      {!isSavingEdit && (isEditing ? <CheckCircle2 size={12} /> : <Pencil size={12} />)}
+                      {isEditing ? "Done Editing" : "Edit"}
+                    </Button>
+                  </div>
                 </div>
                 
                 <div className="flex-1 overflow-auto bg-surface-0/40 p-6 custom-scrollbar">
@@ -858,19 +985,42 @@ export default function Reports() {
                       <Loader2 size={32} className="text-pf-400 animate-spin opacity-50" />
                       <p className="text-xs text-text-muted uppercase tracking-widest font-bold">Loading Context</p>
                     </div>
+                  ) : isEditing ? (
+                    <div className="w-full h-full rounded-xl overflow-hidden shadow-2xl bg-surface-0 ring-4 ring-pf-500/30">
+                      <textarea 
+                        className={clsx(
+                          "w-full h-full text-text-primary whitespace-pre-wrap font-mono leading-relaxed bg-surface-1/50 p-6 border-0 focus:outline-none resize-none custom-scrollbar transition-all duration-300",
+                          isFullscreen ? "text-[15px]" : "text-[13px]"
+                        )}
+                        value={viewContent}
+                        onChange={(e) => setViewContent(e.target.value)}
+                        placeholder="Edit markdown here..."
+                        spellCheck={false}
+                      />
+                    </div>
                   ) : viewFormat === "html" ? (
                     <div className="w-full h-full rounded-xl overflow-hidden border border-border shadow-2xl bg-surface-0 ring-4 ring-surface-2/30">
                       <iframe
                         ref={iframeRef}
-                        srcDoc={viewContent}
+                        srcDoc={viewContent + `
+                          <script>
+                            const notifyParent = () => window.parent.postMessage({ type: 'IFRAME_SELECTION_CHANGE' }, '*');
+                            document.addEventListener('selectionchange', notifyParent);
+                            document.addEventListener('mouseup', notifyParent);
+                            document.addEventListener('keyup', notifyParent);
+                          </script>
+                        `}
                         title="Report Preview"
                         className="w-full h-full border-0"
-                        sandbox="allow-same-origin"
+                        sandbox="allow-same-origin allow-scripts"
                       />
                     </div>
                   ) : (
-                    <div className="max-w-3xl mx-auto">
-                      <pre className="text-[13px] text-text-secondary whitespace-pre-wrap font-mono leading-relaxed bg-surface-1/50 p-8 rounded-xl border border-border shadow-inner">
+                    <div className={clsx("mx-auto transition-all duration-300", isFullscreen ? "max-w-6xl" : "max-w-3xl")}>
+                      <pre className={clsx(
+                        "text-text-secondary whitespace-pre-wrap font-mono leading-relaxed bg-surface-1/50 p-8 rounded-xl border border-border shadow-inner transition-all duration-300",
+                        isFullscreen ? "text-[15px]" : "text-[13px]"
+                      )}>
                         {viewContent}
                       </pre>
                     </div>
@@ -882,6 +1032,78 @@ export default function Reports() {
 
         </div>
       </div>
+
+      <Dialog
+        open={exportDialogOpen}
+        onClose={() => setExportDialogOpen(false)}
+        title="Export Professional Report"
+        description="Choose how you want to download the final report"
+        width="max-w-md"
+      >
+        <div className="grid grid-cols-2 gap-4 mt-2">
+          {/* HTML Option */}
+          <button
+            onClick={() => {
+              handleDownload("html");
+              setExportDialogOpen(false);
+            }}
+            className="flex flex-col items-center gap-3 p-5 rounded-xl border border-border bg-surface-1 hover:border-orange-500/50 hover:bg-orange-500/5 transition-all text-left group"
+          >
+            <div className="w-12 h-12 rounded-full bg-orange-500/10 flex items-center justify-center text-orange-500 group-hover:scale-110 transition-transform">
+              <Globe size={24} />
+            </div>
+            <div className="text-center">
+              <h3 className="text-sm font-bold text-text-primary">HTML File</h3>
+              <p className="text-[11px] text-text-muted mt-1 leading-snug">Standalone styled web page</p>
+            </div>
+          </button>
+
+          {/* PDF Option */}
+          <button
+            onClick={async () => {
+              setExportDialogOpen(false);
+              if (!project) return;
+              try {
+                const report = await getReportContentFromDesktop(project.id, "html");
+                const printWindow = window.open("", "_blank");
+                if (printWindow) {
+                  printWindow.document.write(report.content);
+                  printWindow.document.close();
+                  printWindow.onload = () => {
+                    printWindow.print();
+                  };
+                }
+              } catch (e) {
+                console.error("Failed to generate PDF", e);
+              }
+            }}
+            className="flex flex-col items-center gap-3 p-5 rounded-xl border border-border bg-surface-1 hover:border-rose-500/50 hover:bg-rose-500/5 transition-all text-left group"
+          >
+            <div className="w-12 h-12 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 group-hover:scale-110 transition-transform">
+              <FileText size={24} />
+            </div>
+            <div className="text-center">
+              <h3 className="text-sm font-bold text-text-primary">PDF Document</h3>
+              <p className="text-[11px] text-text-muted mt-1 leading-snug">Print-ready formatted document</p>
+            </div>
+          </button>
+        </div>
+      </Dialog>
+
+      {echoTooltip.visible && (
+        <button
+          className="fixed z-50 flex items-center gap-2 px-3 py-1.5 rounded-full bg-pf-500 hover:bg-pf-400 text-white shadow-xl transform -translate-x-1/2 -translate-y-full transition-all border border-pf-400/30"
+          style={{ top: echoTooltip.y, left: echoTooltip.x }}
+          onMouseDown={(e) => {
+            e.preventDefault(); // Prevent focus loss that clears selection
+            updateConfig({ isAssistantOpen: true, assistantDraftPrompt: echoTooltip.text });
+            navigate('/dashboard?tab=assistant');
+          }}
+        >
+          <Bot size={14} className="text-white" />
+          <span className="text-[11px] font-semibold whitespace-nowrap">Ask Echo</span>
+        </button>
+      )}
     </div>
   );
 }

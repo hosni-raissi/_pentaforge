@@ -66,6 +66,11 @@ _NETWORK_TARGET_COMMANDS = {
     "wget",
     "wpscan",
     "zgrab2",
+    "nc",
+    "netcat",
+    "traceroute",
+    "mtr",
+    "dig",
 }
 _HOSTISH_RE = re.compile(
     r"^(?:localhost|"

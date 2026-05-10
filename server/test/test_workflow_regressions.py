@@ -26,6 +26,7 @@ scan_observability_module = import_module("server.db.projects.scan_observability
 assistant_agent_module = import_module("server.agents.assistant.agent")
 llm_module = import_module("server.core.llm")
 rate_limiter_module = import_module("server.agents.rate_limiter")
+privacy_gate_node_module = import_module("server.layers.PrivacyGate.node")
 
 
 def _seed_project(store: ProjectsStore, project_id: str = "proj-1") -> dict[str, Any]:
@@ -304,6 +305,134 @@ def test_assistant_lightweight_meta_prompt_omits_findings_context_when_not_reque
     assert "Working memory:" not in captured["content"]
 
 
+def test_assistant_resolves_direct_ftp_auth_attempt_from_recent_ftp_context() -> None:
+    resolved = assistant_agent_module.AssistantAgent._resolve_direct_ftp_auth_attempt(
+        "try login msfadmin and password msfadmin",
+        target="192.168.100.81",
+        history=[
+            {
+                "role": "assistant",
+                "text": "Earlier we checked FTP on port 21.",
+                "toolLogs": [
+                    {"tool": "run_custom", "input": "nmap -sV -p21 192.168.100.81", "status": "done"}
+                ],
+            }
+        ],
+    )
+
+    assert resolved is not None
+    assert resolved["command"] == "curl"
+    assert resolved["args"] == ["-u", "msfadmin:msfadmin", "ftp://192.168.100.81/"]
+
+
+def test_assistant_masks_credentials_in_run_custom_preview_and_display_payload() -> None:
+    preview = assistant_agent_module.AssistantAgent._render_run_custom_preview(
+        "curl",
+        ["-u", "msfadmin:msfadmin", "ftp://192.168.100.81/"],
+    )
+    payload = assistant_agent_module.AssistantAgent._sanitize_run_custom_result_for_display(
+        {
+            "success": True,
+            "command": "curl",
+            "args": ["-u", "msfadmin:msfadmin", "ftp://192.168.100.81/"],
+            "full_command": "curl -u msfadmin:msfadmin ftp://192.168.100.81/",
+            "stdout": "listing",
+        }
+    )
+
+    assert "msfadmin:msfadmin" not in preview
+    assert "msfadmin:****" in preview
+    assert payload["args"] == ["-u", "msfadmin:****", "ftp://192.168.100.81/"]
+    assert "msfadmin:msfadmin" not in payload["full_command"]
+    assert "msfadmin:****" in payload["full_command"]
+
+
+def test_assistant_stream_answer_falls_back_to_local_tool_summary_when_llm_round_fails(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+    calls = {"count": 0}
+
+    async def fake_chat(*_args: Any, **_kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_custom",
+                            "arguments": (
+                                '{"command":"ftp","args":["192.168.100.81"],'
+                                '"reason":"Directly connect to FTP for verification."}'
+                            ),
+                        },
+                    }
+                ],
+            )
+        raise RuntimeError("provider unavailable during follow-up synthesis")
+
+    async def fake_execute_run_custom(args: dict[str, Any], *, target: str, project_id: str | None = None) -> dict[str, Any]:
+        assert args["command"] == "ftp"
+        assert target == "192.168.100.81"
+        return {
+            "success": True,
+            "command": "ftp",
+            "args": ["192.168.100.81"],
+            "reason": args["reason"],
+            "full_command": "ftp 192.168.100.81",
+            "stdout": "Name (192.168.100.81:test): Login incorrect.\n",
+            "stderr": "Password:Login failed.\n",
+            "return_code": 0,
+            "execution_time": 1.0,
+            "logged": True,
+        }
+
+    async def fake_build_next_context(**_kwargs: Any) -> str:
+        return '{"execution_lane": "investigation"}'
+
+    monkeypatch.setattr(agent, "_chat_with_fallback", fake_chat)
+    monkeypatch.setattr(agent, "_execute_run_custom", fake_execute_run_custom)
+    monkeypatch.setattr(agent, "_build_next_context", fake_build_next_context)
+
+    async def _collect() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in agent.stream_answer(
+                prompt="connect with ftp",
+                project_id="proj-1",
+                target="192.168.100.81",
+                target_type="linux_server",
+                context="",
+                saved_context="",
+                history=[],
+            )
+        ]
+
+    events = asyncio.run(_collect())
+    reply_event = next(event for event in events if event["type"] == "reply")
+
+    assert "ftp 192.168.100.81" in reply_event["data"]["text"]
+    assert "Login incorrect" in reply_event["data"]["text"]
+    assert any(event["type"] == "context" for event in events)
+
+
+def test_privacy_gate_verbose_output_ignores_blocking_stdout(monkeypatch) -> None:
+    class BrokenStdout:
+        def write(self, _text: str) -> int:
+            raise BlockingIOError(11, "write could not complete without blocking", 0)
+
+        def flush(self) -> None:
+            raise AssertionError("flush should not be reached after write failure")
+
+    monkeypatch.setattr(privacy_gate_node_module.sys, "stdout", BrokenStdout())
+
+    privacy_gate_node_module._print_verbose(
+        "sanitized prompt",
+        {"__IP_001__": "192.168.100.81"},
+    )
+
+
 def test_assistant_connectivity_failure_forces_needs_retest_even_with_saved_matches() -> None:
     verdict = assistant_agent_module.AssistantAgent._estimate_verdict(
         [
@@ -400,6 +529,131 @@ def test_assistant_formats_command_failures_with_likely_cause() -> None:
     assert "FFUF" in reply or "ffuf" in reply
 
 
+def test_assistant_identifies_getaddrinfo_thread_failure_as_environment_issue() -> None:
+    payload = assistant_agent_module.AssistantAgent._augment_command_failure_payload(
+        "curl",
+        ["--connect-timeout", "10", "https://pentest-ground.com:9000/eval?input=test"],
+        {
+            "success": False,
+            "command": "curl",
+            "return_code": 6,
+            "error": "Exited with code 6",
+            "stderr": "* getaddrinfo() thread failed to start",
+        },
+    )
+
+    assert "resolver failure" in str(payload.get("likely_cause", "")).lower()
+
+
+def test_assistant_structured_reply_repairs_stale_prompt_mismatch() -> None:
+    repaired = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
+        """**Summary**
+The finding "missing CSP header" means the site does not send a Content Security Policy header.
+
+**Verdict**
+likely
+
+**Evidence**
+- No direct evidence was collected in this turn.
+
+**Unknowns**
+- None.
+
+**Next Step**
+Run one narrow verification step.
+
+**Confidence**
+Low
+""",
+        response_style="structured",
+        prompt="Investigate whether the exposed WSDL endpoint is actually reachable on the current target.",
+        target="https://pentest-ground.com:9000",
+        tool_results=[],
+    )
+
+    assert "missing CSP header" not in repaired
+    assert "WSDL" in repaired or "wsdl" in repaired
+
+
+def test_assistant_structured_reply_repairs_raw_web_trace_with_results() -> None:
+    repaired = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
+        """[search_web]
+"latest SOAP XXE vulnerabilities and exploitation guidance 2024"
+
+**Summary**
+Command: ``
+
+**Verdict**
+likely
+
+**Evidence**
+- No direct evidence was collected in this turn.
+
+**Unknowns**
+- No major unresolved blockers surfaced in this turn.
+
+**Next Step**
+Use the web-backed results to narrow the investigation.
+
+**Confidence**
+Low
+""",
+        response_style="structured",
+        prompt="Search the web for the latest SOAP XXE guidance.",
+        target="https://pentest-ground.com:9000",
+        tool_results=[
+            {
+                "query": "latest SOAP XXE guidance",
+                "engine": "google",
+                "results": [
+                    {
+                        "title": "OWASP XXE Prevention Cheat Sheet",
+                        "url": "https://owasp.org/www-community/vulnerabilities/XML_External_Entity_(XXE)_Processing",
+                        "snippet": "Prevention guidance for XML external entity processing flaws.",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert "[search_web]" not in repaired
+    assert "OWASP XXE Prevention Cheat Sheet" in repaired
+    assert "No direct evidence was collected in this turn." not in repaired
+
+
+def test_assistant_structured_reply_repairs_invented_live_checks_without_tool_results() -> None:
+    repaired = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
+        """Summary:
+You asked two things—first, the difference between observed and confirmed verdicts, and second, whether there are SOAP-related paths beyond /wsdl.
+
+Verdict:
+observed
+
+Evidence:
+- Live Check:
+  - /wsdl: HTTP 404
+  - /soap: HTTP 404
+
+Unknowns:
+- Are there non-standard SOAP paths?
+
+Next Step:
+Run ffuf.
+
+Confidence:
+Medium
+""",
+        response_style="structured",
+        prompt="Check whether there are SOAP-related paths beyond /wsdl on the current target.",
+        target="https://pentest-ground.com:9000",
+        tool_results=[],
+    )
+
+    assert "You asked two things" not in repaired
+    assert "HTTP 404" not in repaired
+    assert "No direct evidence was collected in this turn." in repaired
+
+
 def test_assistant_blocked_payload_recommends_safe_next_command() -> None:
     payload = assistant_agent_module.AssistantAgent._blocked_tool_payload(
         tool_name="run_custom",
@@ -458,9 +712,98 @@ def test_assistant_normalizes_curl_write_out_args() -> None:
         "-o",
         "/dev/null",
         "-w",
-        "%{http_code} %{content_type}\\n",
+        "%{http_code} %{content_type}",
         "https://pentest-ground.com:9000/?wsdl",
     ]
+
+
+def test_assistant_normalizes_curl_write_out_args_with_embedded_newline_url() -> None:
+    normalized = assistant_agent_module.AssistantAgent._normalize_run_custom_args(
+        "curl",
+        [
+            "-sk",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}\n https://pentest-ground.com:9000/eval?input=test",
+        ],
+    )
+
+    assert normalized == [
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "https://pentest-ground.com:9000/eval?input=test",
+    ]
+
+
+def test_assistant_normalizes_curl_write_out_args_with_literal_backslash_n() -> None:
+    normalized = assistant_agent_module.AssistantAgent._normalize_run_custom_args(
+        "curl",
+        [
+            "-sk",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}\\n",
+            "https://pentest-ground.com:9000/eval?input=test",
+        ],
+    )
+
+    assert normalized == [
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "https://pentest-ground.com:9000/eval?input=test",
+    ]
+
+
+def test_assistant_normalizes_curl_write_out_args_with_embedded_newline_flags_and_url() -> None:
+    normalized = assistant_agent_module.AssistantAgent._normalize_run_custom_args(
+        "curl",
+        [
+            "-sk",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}\n --connect-timeout 10 -m 30 -g https://pentest-ground.com:9000/eval?input=test",
+        ],
+    )
+
+    assert normalized == [
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "--connect-timeout",
+        "10",
+        "-m",
+        "30",
+        "-g",
+        "https://pentest-ground.com:9000/eval?input=test",
+    ]
+
+
+def test_assistant_renders_run_custom_preview_without_literal_backslash_n() -> None:
+    preview = assistant_agent_module.AssistantAgent._render_run_custom_preview(
+        "curl",
+        [
+            "-sk",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}\\n",
+            "https://pentest-ground.com:9000/eval?input=test",
+        ],
+    )
+
+    assert "\\n" not in preview
+    assert "https://pentest-ground.com:9000/eval?input=test" in preview
 
 
 def test_assistant_scope_check_blocks_external_target_even_with_safe_binary() -> None:
@@ -474,6 +817,18 @@ def test_assistant_scope_check_blocks_external_target_even_with_safe_binary() ->
 
     assert issue is not None
     assert "current target" in issue.lower()
+
+
+def test_assistant_scope_check_allows_ping_on_current_target() -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    issue = agent._assistant_scope_issue_for_command(
+        command="ping",
+        args=["-c", "1", "pentest-ground.com"],
+        target="https://pentest-ground.com:9000",
+    )
+
+    assert issue is None
 
 
 def test_assistant_learning_signals_capture_corrections_and_false_positives() -> None:

@@ -1269,7 +1269,23 @@ async def append_system_memory_updates(
             _merge_memory_string_list(memory, "blocked_routes", row.get("routes", []), limit=200)
             _merge_memory_string_list(memory, "blocked_route_prefixes", row.get("route_prefixes", []), limit=80)
     if verified_findings:
-        memory["verified_findings"] = verified_findings
+        existing_findings = memory.get("verified_findings", [])
+        if not isinstance(existing_findings, list):
+            existing_findings = []
+        
+        # Merge by ID
+        findings_map = {str(f.get("id", "")): f for f in existing_findings if f.get("id")}
+        for new_f in verified_findings:
+            f_id = str(new_f.get("id", ""))
+            if f_id and f_id in findings_map:
+                # Merge fields: new_f overwrites existing non-null fields
+                existing_f = findings_map[f_id]
+                for k, v in new_f.items():
+                    if v is not None or k not in existing_f:
+                        existing_f[k] = v
+            else:
+                existing_findings.append(new_f)
+        memory["verified_findings"] = existing_findings
     if tool_observations:
         observation_rows = memory.get("tool_observations", [])
         if not isinstance(observation_rows, list):

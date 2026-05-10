@@ -4074,7 +4074,7 @@ export default function Dashboard() {
         && missionControlState === 'running'
         && !phaseBelongsToStage(stage, latestMissionPhase)
       ) {
-        return 'idle';
+        return 'waiting';
       }
       return status;
     };
@@ -4268,6 +4268,8 @@ export default function Dashboard() {
     };
 
     const getStatus = (agent: any, phaseKey?: MissionControlPhaseKey): OrchestratorStatus => {
+      if (effectiveStatus === 'idle') return 'idle';
+
       // Check if this specific phase is active based on scan events
       if (phaseKey) {
         const lastEvent = [...scanEvents].reverse().find(e => {
@@ -4276,15 +4278,23 @@ export default function Dashboard() {
         });
         if (lastEvent) {
           if (lastEvent.event.includes('_started') || lastEvent.event.includes('_running')) return 'running';
-          if (lastEvent.event.includes('_complete')) return 'completed';
+          if (lastEvent.event.includes('_complete')) {
+            // Only show 'completed' when the scan is finished; otherwise 'waiting'
+            return (effectiveStatus === 'completed' || effectiveStatus === 'stopped') ? 'completed' : 'waiting';
+          }
           if (lastEvent.event.includes('_failed')) return 'error';
         }
       }
 
       if (agent?.state === 'running') return 'running';
       if (agent?.state === 'thinking') return 'thinking';
-      if (agent?.state === 'success') return 'completed';
+      if (agent?.state === 'success') {
+        // Only show 'completed' when the scan is finished; otherwise 'waiting'
+        return (effectiveStatus === 'completed' || effectiveStatus === 'stopped') ? 'completed' : 'waiting';
+      }
       if (agent?.state === 'error') return 'error';
+      if (effectiveStatus === 'running') return 'waiting';
+      if (effectiveStatus === 'completed' || effectiveStatus === 'stopped') return 'completed';
       return 'idle';
     };
 
@@ -4453,6 +4463,7 @@ export default function Dashboard() {
     agentInsights,
     realtimeVulnFindings,
     scanEvents,
+    effectiveStatus,
     latestMissionPhase,
     missionControlState,
     pendingPasswordRequest,
@@ -5519,6 +5530,8 @@ export default function Dashboard() {
       <DashboardFindingDialog
         selectedFinding={selectedFinding}
         onClose={() => setSelectedFinding(null)}
+        onMarkFalsePositive={handleMarkFindingFalsePositive}
+        onAddToEchoPrompt={handleAddFindingToEchoPrompt}
         normalizeDashboardSeverity={normalizeDashboardSeverity}
         severityBadgeClass={severityBadgeClass}
         normalizeEvidenceStatus={normalizeEvidenceStatus}

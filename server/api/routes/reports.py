@@ -44,6 +44,10 @@ class ReportContentResponse(BaseModel):
     created_at: str = ""
 
 
+class UpdateReportRequest(BaseModel):
+    content: str
+
+
 _HTML_REPORT_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -408,3 +412,56 @@ async def delete_report(project_id: str, report_format: str) -> dict:
 
     deleted = projects_store.delete_report(project_id, format=report_format)
     return {"ok": True, "deleted": deleted, "format": report_format}
+
+
+@router.put("/api/projects/{project_id}/reports/{report_format}")
+async def update_report(project_id: str, report_format: str, request: UpdateReportRequest) -> ReportContentResponse:
+    """Update a specific report format (markdown) and regenerate HTML."""
+    if report_format != "markdown":
+        raise HTTPException(status_code=400, detail="Only markdown reports can be manually edited.")
+
+    project = projects_store.get_project(project_id)
+    if not isinstance(project, dict):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    existing_report = projects_store.get_report(project_id, format="markdown")
+    if existing_report is None:
+        raise HTTPException(status_code=404, detail="No markdown report found to edit.")
+
+    metadata = existing_report.get("metadata", {})
+    report_id = str(existing_report.get("id", uuid.uuid4()))
+    created_at = str(existing_report.get("created_at", ""))
+
+    new_content = request.content.strip()
+
+    # Save Markdown
+    projects_store.save_report(
+        project_id,
+        report_id=report_id,
+        format="markdown",
+        content=new_content,
+        metadata=metadata,
+    )
+
+    # Regenerate HTML
+    target = str(metadata.get("target", "")) or project_id
+    html_content = _markdown_to_html(new_content, target=target, generated_at=created_at)
+    
+    existing_html = projects_store.get_report(project_id, format="html")
+    html_report_id = str(existing_html.get("id", uuid.uuid4())) if existing_html else str(uuid.uuid4())
+    
+    projects_store.save_report(
+        project_id,
+        report_id=html_report_id,
+        format="html",
+        content=html_content,
+        metadata=metadata,
+    )
+
+    return ReportContentResponse(
+        ok=True,
+        format="markdown",
+        content=new_content,
+        metadata=metadata,
+        created_at=created_at,
+    )

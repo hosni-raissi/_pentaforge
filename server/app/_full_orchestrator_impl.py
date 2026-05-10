@@ -6911,6 +6911,20 @@ class ScanOrchestratorService:
                         "status": "poc_generated",
                     }
                 ],
+                verified_findings=[
+                    {
+                        "id": f"vuln-{item['idx']}",
+                        "cwe_id": poc_data.get("cwe_id"),
+                        "cve_id": poc_data.get("cve_id"),
+                        "steps_to_reproduce": poc_data.get("steps_to_reproduce", []),
+                        "exploit_script": poc_data.get("exploit_script"),
+                        "verification_commands": poc_data.get("verification_commands", []),
+                        "visual_evidence_paths": poc_data.get("visual_evidence_paths", []),
+                        "impact_assessment": poc_data.get("impact_assessment", {}),
+                        "remediation_steps": poc_data.get("remediation_steps", []),
+                        "poc_path": poc_summary, # Still keep the text summary here
+                    }
+                ],
             )
 
         except Exception as e:
@@ -7765,9 +7779,17 @@ class ScanOrchestratorService:
             tool_observations=tool_observations,
             verified_findings=[
                 {
+                    "id": f"vuln-{item['idx']}",
                     "title": str(item.get("verify_summary", "")).strip() or str(item.get("compact_summary", "")).strip(),
                     "summary": str(item.get("scenario", {}).get("task", "")).strip(),
                     "status": "real_vulnerability",
+                    "cwe_id": None,
+                    "cve_id": None,
+                    "steps_to_reproduce": [],
+                    "exploit_script": None,
+                    "visual_evidence_paths": [],
+                    "impact_assessment": {},
+                    "remediation_steps": [],
                 }
                 for item in verify_results_organized["real_vulnerabilities"]
             ],

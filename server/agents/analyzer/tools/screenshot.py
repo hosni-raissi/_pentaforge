@@ -138,6 +138,40 @@ async def capture_screenshot(
             # Navigate
             await page.goto(url, wait_until=wait_for, timeout=SCREENSHOT_TIMEOUT)
 
+            # Inject URL and Timestamp overlay for "Best Practices" reporting
+            formatted_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+            await page.evaluate(
+                """([url, time]) => {
+                    const banner = document.createElement('div');
+                    banner.id = 'pentaforge-evidence-banner';
+                    banner.style.cssText = `
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        width: 100%;
+                        background: rgba(0, 0, 0, 0.85);
+                        color: #00ff00;
+                        font-family: 'Courier New', Courier, monospace;
+                        font-size: 13px;
+                        padding: 8px 15px;
+                        z-index: 2147483647;
+                        border-bottom: 2px solid #00ff00;
+                        display: flex;
+                        justify-content: space-between;
+                        pointer-events: none;
+                        box-sizing: border-box;
+                    `;
+                    banner.innerHTML = `
+                        <span><strong>URL:</strong> ${url}</span>
+                        <span><strong>TIMESTAMP:</strong> ${time}</span>
+                    `;
+                    document.body.prepend(banner);
+                    // Shift body down if needed, or just let it overlay
+                    document.body.style.paddingTop = '35px';
+                }""",
+                [redacted_url, formatted_time],
+            )
+
             # Capture screenshot
             screenshot_bytes = await page.screenshot(
                 path=str(filepath),
@@ -157,6 +191,7 @@ async def capture_screenshot(
             "redacted_url": redacted_url,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "viewport": f"{SCREENSHOT_VIEWPORT_WIDTH}x{SCREENSHOT_VIEWPORT_HEIGHT}",
+            "evidence_overlay": True,
         })
 
     except Exception as e:

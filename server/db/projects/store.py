@@ -33,7 +33,7 @@ _INTEL_RESOURCE_UPDATE_MODES = {
     "static",
 }
 _TASK_RUN_ACTIVE_STATUSES = {"pending", "running", "paused"}
-_TASK_RUN_ALL_STATUSES = _TASK_RUN_ACTIVE_STATUSES | {"completed", "failed", "cancelled"}
+_TASK_RUN_ALL_STATUSES = _TASK_RUN_ACTIVE_STATUSES | {"completed", "failed", "cancelled", "error"}
 
 
 def _normalize_static_plan_target_type(value: str) -> str:
@@ -829,28 +829,15 @@ class ProjectsStore:
             text = str(item.get("text", "")).strip()
             if role not in {"user", "assistant"} or not text:
                 continue
-            entry = {
-                "id": str(item.get("id", "")).strip() or str(uuid.uuid4()),
-                "role": role,
-                "text": text,
-                "timestamp": str(item.get("timestamp", "")).strip()
-                or datetime.now(timezone.utc).isoformat(),
-            }
-            mode = str(item.get("mode", "")).strip()
-            if mode:
-                entry["mode"] = mode
-            if role == "assistant":
-                route = str(item.get("route", "")).strip().lower()
-                if route:
-                    entry["route"] = route
-                if "blocked" in item:
-                    entry["blocked"] = bool(item.get("blocked"))
-                if "toolLogs" in item:
-                    entry["toolLogs"] = item.get("toolLogs")
-                if "passwordRequests" in item:
-                    entry["passwordRequests"] = item.get("passwordRequests")
-                if "learningSignals" in item:
-                    entry["learningSignals"] = item.get("learningSignals")
+            # Preserve all fields but ensure core ones are present
+            entry = dict(item)
+            if not entry.get("id"):
+                entry["id"] = str(uuid.uuid4())
+            if not entry.get("role"):
+                entry["role"] = "assistant"
+            if not entry.get("timestamp"):
+                entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+            
             normalized_new.append(entry)
 
         if not normalized_new:
@@ -860,6 +847,28 @@ class ProjectsStore:
         if len(history) > max_messages:
             history = history[-max_messages:]
 
+        project["copilotHistory"] = history
+        if active_scope:
+            project["copilotHistoryScope"] = active_scope
+        project["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        self.upsert_project(project)
+
+    def set_project_copilot_history(
+        self,
+        project_id: str,
+        history: list[dict[str, Any]],
+        *,
+        scope_key: str | None = None,
+    ) -> None:
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            return
+
+        project = self.get_project(safe_project_id)
+        if not isinstance(project, dict):
+            return
+
+        active_scope = str(scope_key or "").strip()
         project["copilotHistory"] = history
         if active_scope:
             project["copilotHistoryScope"] = active_scope

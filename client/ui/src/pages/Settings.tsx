@@ -614,11 +614,11 @@ export default function Settings() {
   }
 
   return (
-    <div className="mx-auto flex h-full min-h-0 max-w-5xl flex-col gap-4 p-4">
+    <div className="mx-auto flex h-screen max-h-screen flex-col gap-4 overflow-hidden p-4">
       <h1 className="text-lg font-bold text-text-primary">Settings</h1>
       <Tabs
         className="min-h-0 flex-1"
-        contentClassName="min-h-0 flex-1 overflow-y-auto pr-1"
+        contentClassName="min-h-0 flex-1 overflow-y-auto pr-2"
         tabs={[
           {
             id: "runtime",

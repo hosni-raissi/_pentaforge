@@ -24,6 +24,21 @@ from .grounding import (
     _validate_grounded_verified_finding_entry,
 )
 from .verification import VerificationTier, classify_evidence
+from server.nodes.information_gathering.profiles import load_target_info_profile_defaults
+from server.nodes.system_memory import (
+    Brain,
+    SystemMemoryLLM,
+    append_system_memory_updates as _append_system_memory_updates_external,
+    build_system_memory_prompt_block as _build_target_memory_prompt_block_external,
+    compute_tool_efficiency_snapshot as _compute_tool_efficiency_snapshot,
+    load_system_memory as _load_target_memory_external,
+    merge_system_memory_artifacts as _merge_target_memory_artifacts_external,
+    save_system_memory as _save_target_memory_external,
+    system_memory_dir as _system_memory_dir_external,
+    system_memory_paths as _system_memory_paths_external,
+)
+from server.tools.session.session_manager import SessionContext, SessionManager
+from server.db.projects.runtime_cache import get_project_runtime_cache
 
 WARMUP_RECON_SCENARIO_COUNT = 8
 
@@ -76,6 +91,18 @@ _TARGET_TYPE_ALIASES: dict[str, str] = {
     "red_team": "shared",
     "cve_exploit": "shared",
 }
+
+
+_TARGET_CONFIG_KEYS = (
+    "url",
+    "base_url",
+    "host",
+    "target_ip",
+    "gateway",
+    "cidr",
+    "repo_url",
+    "targets.ip_address",
+)
 
 
 _STATIC_RECON_FILE_MAP: dict[str, str] = {
@@ -1555,7 +1582,6 @@ def _build_executer_message(
 ) -> str:
     from server.agents.executer.payload_filter import get_payloads as _get_filtered_payloads_local
     from server.agents.executer.target_tool_routing import recommend_product_tooling
-    from server.nodes.system_memory import Brain
 
     history_block = _format_agent_execution_history_for_prompt(
         plan_data,
@@ -4561,13 +4587,24 @@ def _route_followup_from_assessment(assessment: dict[str, Any]) -> str:
         assessment: Perceptor assessment with finding_type and overall.ssvc fields
 
     Returns:
-        str: "verify" (gate findings), "planner" (info/recon), or "skip"
+        str: "verify" (gate findings), "planner" (info/recon), or "retest"
     """
     finding_type = assessment.get("finding_type", "").strip().lower()
+    overall = assessment.get("overall", {}) if isinstance(assessment, dict) else {}
 
     # Vulnerabilities go to verify (gate to filter false positives)
     if "vulnerability" in finding_type or finding_type in {"vuln", "vulnerability"}:
-        return "verify"
+        if not isinstance(overall, dict):
+            return "verify"
+
+        ssvc = str(overall.get("ssvc", "TRACK")).strip().upper()
+        confidence = str(overall.get("confidence", "low")).strip().lower()
+
+        if ssvc == "ACT":
+            return "verify"
+        if ssvc == "ATTEND" and confidence in {"medium", "high"}:
+            return "retest"
+        return "planner"
 
     # Info-only findings go to planner (update plan with evidence)
     if "info" in finding_type or finding_type in {"recon", "info_only", "information", "enumeration"}:
@@ -4610,17 +4647,6 @@ def _organize_findings_by_verdict(
             organized["info_only"].append(verified)
 
     return organized
-    overall = assessment.get("overall", {}) if isinstance(assessment, dict) else {}
-    if not isinstance(overall, dict):
-        return "planner"
-    ssvc = str(overall.get("ssvc", "TRACK")).strip().upper()
-    confidence = str(overall.get("confidence", "low")).strip().lower()
-
-    if ssvc == "ACT":
-        return "verify"
-    if ssvc == "ATTEND" and confidence in {"medium", "high"}:
-        return "retest"
-    return "planner"
 
 
 

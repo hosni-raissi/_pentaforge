@@ -10,6 +10,7 @@ import shlex
 import time
 from urllib.parse import urlparse
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
 
@@ -38,23 +39,21 @@ from .tools import (
     search_project_vectors as assistant_search_project_vectors,
     search_web as assistant_search_web,
 )
-
-from .prompts import CONTEXT_COMPRESSION_PROMPT, LIGHTWEIGHT_LANE_PROMPT, SYSTEM_PROMPT
-
+ 
+from .prompts import CONTEXT_COMPRESSION_PROMPT, SYSTEM_PROMPT
+from .config import (
+    _HISTORY_TOKEN_LIMIT ,
+    _MAX_TOOL_ROUNDS,
+    _MAX_TOOL_CALLS_PER_ROUND,
+    _MAX_TOTAL_TOOL_CALLS,
+    _MAX_REPLY_TOKENS,
+    _MAX_CONTEXT_CHARS,
+    _MAX_PROJECT_STATE_CHARS,
+)
 logger = structlog.get_logger(__name__)
 
-_MAX_TOOL_ROUNDS = 4
-_MAX_TOOL_CALLS_PER_ROUND = 2
-_MAX_TOTAL_TOOL_CALLS = 6
-_MAX_REPLY_TOKENS = 2200
-_MAX_CONTEXT_CHARS = 4000
-_MAX_PROJECT_STATE_CHARS = 3200
-_DIRECT_COMMAND_BINARIES = {
-    "curl", "nmap", "ffuf", "sqlmap", "nikto", "wget", "git",
-    "openssl", "whois", "dig", "nslookup", "httpx", "ftp", "hydra",
-    "whatweb", "arjun", "dalfox", "katana", "feroxbuster", "gobuster",
-    "nuclei",
-}
+
+
 _PRIVILEGE_RETRY_COMMANDS = {
     "nmap",
     "ike-scan",
@@ -88,16 +87,23 @@ _ASSISTANT_NETWORK_COMMANDS = {
     "nmap",
     "nslookup",
     "openssl",
+    "ping",
     "ps",
     "pwd",
     "sqlmap",
     "ss",
+    "sudo",
     "tail",
     "whatweb",
     "wget",
     "whois",
     "gobuster",
     "nuclei",
+    "nc",
+    "netcat",
+    "traceroute",
+    "mtr",
+    "telnet",
 }
 _ASSISTANT_CAPABILITY_QUESTION_PATTERNS = (
     "who are you",
@@ -119,37 +125,7 @@ _ASSISTANT_CAPABILITY_QUESTION_PATTERNS = (
     "security tools",
     "available tools",
 )
-_LIGHTWEIGHT_META_PROMPT_PATTERNS = (
-    "hi",
-    "hello",
-    "hey",
-    "yo",
-    "who are you",
-    "what are you",
-    "introduce yourself",
-    "what can you do",
-    "what do you do",
-    "thanks",
-    "thank you",
-    "ok",
-    "okay",
-)
-_LIGHTWEIGHT_FINDINGS_REQUEST_PATTERNS = (
-    "finding",
-    "findings",
-    "vulnerability",
-    "vulnerabilities",
-    "evidence",
-    "current status",
-    "current findings",
-    "what did you find",
-    "what have you found",
-    "what is wrong",
-    "what's wrong",
-    "exposed endpoint",
-    "security header",
-    "security headers",
-)
+
 _EXTERNAL_RESEARCH_INTENT_PATTERNS = (
     "search the web",
     "search web",
@@ -283,12 +259,26 @@ _ASSISTANT_SCOPE_QUESTION_PATTERNS = (
     "another target",
     "current target only",
 )
-_DIRECT_COMMAND_PREFIX_PATTERNS = (
-    "run ",
-    "execute ",
-    "run command ",
-    "execute command ",
+_FTP_AUTH_CONTEXT_MARKERS = (
+    "ftp",
+    "ftp://",
+    "port 21",
+    "-p21",
+    " 21",
+    "anonymous access",
+    "vsftpd",
 )
+_LIGHTWEIGHT_GREETING_PATTERNS = (
+    "hi",
+    "hello",
+    "hey",
+    "yo",
+    "sup",
+    "good morning",
+    "good afternoon",
+    "good evening",
+)
+
 _STRUCTURED_FINDING_ANALYSIS_MARKERS = (
     '"finding_id"',
     '"title"',
@@ -401,35 +391,90 @@ class AssistantAgent:
 
     @classmethod
     def _resolve_execution_lane(cls, *, prompt: str, operator_mode: str) -> str:
-        if operator_mode in {"Investigate", "Retest", "Report"}:
-            return "investigation"
-        if cls._parse_direct_command_prompt(prompt) is not None:
-            return "investigation"
-        if cls._is_capability_question(prompt) or cls._is_lightweight_meta_prompt(prompt):
+        if cls._should_use_lightweight_lane(prompt=prompt, operator_mode=operator_mode):
             return "lightweight"
-        lowered = str(prompt or "").strip().lower()
-        if any(token in lowered for token in ("check ", "scan ", "verify ", "test ", "enumerate ", "retest ", "look it up", "search the web")):
-            return "investigation"
-        return "lightweight"
+        return "investigation"
 
     @classmethod
     def _resolve_response_style(cls, *, operator_mode: str, execution_lane: str, prompt: str) -> str:
         if operator_mode == "Report":
             return "report"
-        if execution_lane == "lightweight":
-            return "natural"
         lowered = str(prompt or "").strip().lower()
         if any(token in lowered for token in _ASSISTANT_REPORT_INTENT_PATTERNS):
             return "report"
+        # Force natural style for conversational questions even if in investigation lane
+        natural_triggers = (
+            "what ", "how ", "why ", "when ", "who ", "where ", 
+            "can you ", "could you ", "are you ", "is ", "hi", "hello", "hey",
+            "explain ", "describe ", "tell me ", "summarize ", "what's ", "how's ",
+            "give ", "show ", "list ", "status ", "brief "
+        )
+        if lowered.startswith(natural_triggers):
+            return "natural"
         return "structured"
 
     @staticmethod
     def _grounding_detail_for_lane(*, execution_lane: str, operator_mode: str, response_style: str) -> str:
         if response_style == "report":
             return "report"
-        if execution_lane == "lightweight" or operator_mode == "Ask":
+        if execution_lane == "lightweight":
+            return "minimal"
+        if operator_mode == "Ask":
             return "minimal"
         return "full"
+
+    @classmethod
+    def _should_use_lightweight_lane(cls, *, prompt: str, operator_mode: str) -> bool:
+        if operator_mode != "Ask":
+            return False
+        if cls._is_capability_question(prompt) or cls._is_scope_question(prompt):
+            return True
+        return cls._is_lightweight_greeting(prompt)
+
+    @staticmethod
+    def _is_lightweight_greeting(prompt: str) -> bool:
+        lowered = str(prompt or "").strip().lower()
+        if not lowered:
+            return False
+        compact = re.sub(r"[!?.,]+", "", lowered).strip()
+        if compact in _LIGHTWEIGHT_GREETING_PATTERNS:
+            return True
+        return compact in {"hi there", "hello there", "hey there"}
+
+    async def compress_history(self, history: list[dict[str, Any]]) -> str:
+        """Compresses a long conversation history into a single summary block."""
+        if not history:
+            return ""
+
+        history_text = "\n".join([
+            f"{'User' if m.get('role') == 'user' else 'Assistant'}: {m.get('text', '')}"
+            for m in history
+            if m.get('text')
+        ])
+
+        user_content = (
+            "Please summarize our conversation so far. Focus on:\n"
+            "1. Verified vulnerabilities and evidence discovered.\n"
+            "2. Tool results and investigation findings.\n"
+            "3. Pending tasks or goals discussed.\n"
+            "4. Technical decisions made.\n\n"
+            "Conversation History:\n"
+            f"{history_text}\n\n"
+            "Summary:"
+        )
+
+        try:
+            response = await self._chat_with_fallback(
+                [
+                    ChatMessage(role="system", content="You are a professional security analyst. Summarize the following pentest conversation history into a concise, high-density bulleted report that preserves all critical technical facts and discovered evidence."),
+                    ChatMessage(role="user", content=user_content),
+                ],
+                allow_tools=False,
+            )
+            return str(response.content or "").strip()
+        except Exception as exc:
+            logger.exception("assistant_history_compression_failed")
+            return f"History compression failed. (Error: {str(exc)})"
 
     async def answer(
         self,
@@ -503,6 +548,85 @@ class AssistantAgent:
         )
         learning_signals = self._extract_learning_signals(prompt=prompt, history=history)
 
+        if execution_lane == "lightweight" and operator_mode == "Ask":
+            reply = await self._answer_lightweight_lane_prompt(
+                prompt=prompt,
+                target=target,
+                target_type=target_type,
+                project_id=project_id,
+                saved_context=saved_context,
+                history=history,
+            )
+            reply = self._normalize_reply_for_style(
+                reply,
+                response_style=response_style,
+                prompt=prompt,
+                target=target,
+                tool_results=[],
+            )
+            next_context = await self._build_next_context(
+                project_id=project_id,
+                saved_context=saved_context,
+                history=history,
+                prompt=prompt,
+                reply=reply,
+                tool_results=[],
+                target=target,
+                target_type=target_type,
+                execution_lane=execution_lane,
+                response_style=response_style,
+                operator_mode=operator_mode,
+            )
+            yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
+            yield {"type": "learning", "data": learning_signals}
+            yield {"type": "context", "data": {"next_context": next_context}}
+            return
+
+        ftp_auth_direct = self._resolve_direct_ftp_auth_attempt(
+            prompt,
+            target=target,
+            history=history,
+        )
+        if ftp_auth_direct is not None:
+            yield {
+                "type": "tool_start",
+                "data": {
+                    "tool": "run_custom",
+                    "input": self._render_run_custom_preview(
+                        str(ftp_auth_direct.get("command", "")),
+                        [str(arg) for arg in ftp_auth_direct.get("args", []) if str(arg).strip()],
+                    ),
+                    "reason": ftp_auth_direct.get("reason"),
+                }
+            }
+            tool_result = await self._execute_run_custom(ftp_auth_direct, target=target, project_id=project_id)
+            yield {"type": "tool_output", "data": {"tool": "run_custom", "output": tool_result}}
+
+            reply = self._normalize_reply_for_style(
+                self._format_direct_command_reply(tool_result),
+                response_style=response_style,
+                prompt=prompt,
+                target=target,
+                tool_results=[tool_result],
+            )
+            next_context = await self._build_next_context(
+                project_id=project_id,
+                saved_context=saved_context,
+                history=history,
+                prompt=prompt,
+                reply=reply,
+                tool_results=[tool_result],
+                target=target,
+                target_type=target_type,
+                execution_lane=execution_lane,
+                response_style=response_style,
+                operator_mode=operator_mode,
+            )
+            yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
+            yield {"type": "learning", "data": learning_signals}
+            yield {"type": "context", "data": {"next_context": next_context}}
+            return
+
         report_reply = await self._handle_report_intent(
             prompt,
             project_id=project_id,
@@ -535,33 +659,6 @@ class AssistantAgent:
             yield {"type": "context", "data": {"next_context": next_context}}
             return
 
-        if execution_lane == "lightweight":
-            lightweight_reply = await self._answer_lightweight_lane_prompt(
-                prompt=prompt,
-                target=target,
-                target_type=target_type,
-                project_id=project_id,
-                saved_context=saved_context,
-                history=history,
-            )
-            next_context = await self._build_next_context(
-                project_id=project_id,
-                saved_context=saved_context,
-                history=history,
-                prompt=prompt,
-                reply=lightweight_reply,
-                tool_results=[],
-                target=target,
-                target_type=target_type,
-                execution_lane=execution_lane,
-                response_style=response_style,
-                operator_mode=operator_mode,
-            )
-            yield {"type": "reply", "data": {"text": lightweight_reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
-            yield {"type": "learning", "data": learning_signals}
-            yield {"type": "context", "data": {"next_context": next_context}}
-            return
-
         follow_up_direct = self._resolve_follow_up_command_from_history(
             prompt,
             history=history,
@@ -575,14 +672,15 @@ class AssistantAgent:
                     "reason": follow_up_direct.get("reason")
                 }
             }
-            tool_result = await self._execute_run_custom(follow_up_direct, target=target)
+            tool_result = await self._execute_run_custom(follow_up_direct, target=target, project_id=project_id)
             yield {"type": "tool_output", "data": {"tool": "run_custom", "output": tool_result}}
             
-            reply = self._ensure_structured_reply(
+            reply = self._normalize_reply_for_style(
                 self._format_direct_command_reply(tool_result),
-                tool_results=[tool_result],
+                response_style=response_style,
                 prompt=prompt,
                 target=target,
+                tool_results=[tool_result],
             )
             next_context = await self._build_next_context(
                 project_id=project_id,
@@ -593,56 +691,40 @@ class AssistantAgent:
                 tool_results=[tool_result],
                 target=target,
                 target_type=target_type,
-                execution_lane="investigation",
-                response_style="structured",
+                execution_lane=execution_lane,
+                response_style=response_style,
                 operator_mode=operator_mode,
             )
-            yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": "investigation", "style": "structured", "blocked": False}}
+            yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
             yield {"type": "learning", "data": learning_signals}
             yield {"type": "context", "data": {"next_context": next_context}}
             return
 
-        direct = self._parse_direct_command_prompt(prompt, target=target)
-        if direct is not None:
-            cmd_payload = {
-                "command": direct["command"],
-                "args": direct["args"],
-                "reason": direct["reason"],
-            }
-            yield {
-                "type": "tool_start", 
-                "data": {
-                    "tool": "run_custom", 
-                    "input": f"{direct['command']} {' '.join(direct['args'])}",
-                    "reason": direct["reason"]
-                }
-            }
-            tool_result = await self._execute_run_custom(cmd_payload, target=target)
-            yield {"type": "tool_output", "data": {"tool": "run_custom", "output": tool_result}}
+        # Decommissioned direct command fast-path to ensure LLM always handles intent.
+
+
+        # Rolling Summary Management (Two-storage logic)
+        # 1. Full History (for UI) stays intact.
+        # 2. Compressed Context (for LLM) is updated when tokens exceed threshold.
+        compressed_history_summary = None
+        history_text = "\n".join([str(m.get('text', '')) for m in (history or [])])
+        parsed_context = self._parse_saved_context_json(saved_context)
+        
+        if history and (len(history_text) // 4) > (_HISTORY_TOKEN_LIMIT * 0.98):
+            yield {"type": "ping", "data": {"step": "optimizing_context"}}
             
-            reply = self._ensure_structured_reply(
-                self._format_direct_command_reply(tool_result),
-                tool_results=[tool_result],
-                prompt=prompt,
-                target=target,
-            )
-            next_context = await self._build_next_context(
-                project_id=project_id,
-                saved_context=saved_context,
-                history=history,
-                prompt=prompt,
-                reply=reply,
-                tool_results=[tool_result],
-                target=target,
-                target_type=target_type,
-                execution_lane="investigation",
-                response_style="structured",
-                operator_mode=operator_mode,
-            )
-            yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": "investigation", "style": "structured", "blocked": False}}
-            yield {"type": "learning", "data": learning_signals}
-            yield {"type": "context", "data": {"next_context": next_context}}
-            return
+            # Generate a new summary that includes the previous one + recent history
+            # We don't truncate history here; we just update the background context.
+            new_summary = await self.compress_history(history)
+            parsed_context["rolling_summary"] = new_summary
+            
+            # Yield event to update the background context (working memory)
+            yield {"type": "context", "data": {"next_context": json.dumps(parsed_context)}}
+            
+            # We also add a transient notification that WON'T be persisted to history 
+            # to avoid cluttering the database with compression logs, but we still 
+            # need to tell the LLM that context has changed.
+            compressed_history_summary = new_summary
 
         context_block = self._build_context_block(
             project_id=project_id,
@@ -653,10 +735,22 @@ class AssistantAgent:
             saved_context=saved_context,
             external_research_allowed=self._allows_external_research(prompt),
             operator_mode=operator_mode,
-            execution_lane="investigation",
-            response_style="structured",
+            execution_lane=execution_lane,
+            response_style=response_style,
             history=history,
         )
+        if compressed_history_summary:
+            # We just optimized in this turn
+            context_block = f"PRIOR CONVERSATION SUMMARY (JUST UPDATED):\n{compressed_history_summary}\n\n{context_block}"
+        elif parsed_context.get("rolling_summary"):
+            # Use the existing background summary
+            context_block = f"PRIOR CONVERSATION SUMMARY:\n{parsed_context.get('rolling_summary')}\n\n{context_block}"
+        elif history and any(m.get("isCompressionSummary") for m in history):
+            # Fallback for legacy compression messages
+            summary_msg = next((m for m in history if m.get("isCompressionSummary")), None)
+            if summary_msg:
+                context_block = f"PRIOR CONVERSATION SUMMARY:\n{summary_msg.get('text', '')}\n\n{context_block}"
+
         messages: list[ChatMessage] = [
             ChatMessage(role="system", content=SYSTEM_PROMPT),
             ChatMessage(role="user", content=f"{context_block}\n\nOperator prompt:\n{prompt.strip()}"),
@@ -671,10 +765,38 @@ class AssistantAgent:
         allow_repeat_tools = self._should_allow_repeat_tools(prompt=prompt, operator_mode=operator_mode)
         for round_index in range(1, _MAX_TOOL_ROUNDS + 1):
             yield {"type": "ping", "data": {"step": f"round_{round_index}_thinking"}}
-            response = await self._chat_with_fallback(
-                messages,
-                allow_external_research=allow_external_research,
-            )
+            try:
+                response = await self._chat_with_fallback(
+                    messages,
+                    allow_external_research=allow_external_research,
+                )
+            except Exception as exc:
+                if tool_results:
+                    reply = self._reply_from_tool_results_after_llm_failure(
+                        exc,
+                        tool_results=tool_results,
+                        response_style=response_style,
+                        prompt=prompt,
+                        target=target,
+                    )
+                    next_context = await self._build_next_context(
+                        project_id=project_id,
+                        saved_context=saved_context,
+                        history=history,
+                        prompt=prompt,
+                        reply=reply,
+                        tool_results=tool_results,
+                        target=target,
+                        target_type=target_type,
+                        execution_lane=execution_lane,
+                        response_style=response_style,
+                        operator_mode=operator_mode,
+                    )
+                    yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
+                    yield {"type": "learning", "data": learning_signals}
+                    yield {"type": "context", "data": {"next_context": next_context}}
+                    return
+                raise
             tool_calls = list(response.tool_calls or [])[:_MAX_TOOL_CALLS_PER_ROUND]
             if not tool_calls:
                 embedded_tool_call = self._extract_embedded_tool_call(response.content or "")
@@ -687,7 +809,7 @@ class AssistantAgent:
                     reply = "No useful answer was produced."
                 reply = self._normalize_reply_for_style(
                     reply,
-                    response_style="structured",
+                    response_style=response_style,
                     prompt=prompt,
                     target=target,
                     tool_results=tool_results,
@@ -701,11 +823,11 @@ class AssistantAgent:
                     tool_results=tool_results,
                     target=target,
                     target_type=target_type,
-                    execution_lane="investigation",
-                    response_style="structured",
+                    execution_lane=execution_lane,
+                    response_style=response_style,
                     operator_mode=operator_mode,
                 )
-                yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": "investigation", "style": "structured", "blocked": False}}
+                yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
                 yield {"type": "learning", "data": learning_signals}
                 yield {"type": "context", "data": {"next_context": next_context}}
                 return
@@ -755,7 +877,7 @@ class AssistantAgent:
                         str(cmd),
                         raw_args.get("args", []) if isinstance(raw_args.get("args", []), list) else [],
                     )
-                    tool_input = f"{cmd} {' '.join(args)}".strip()
+                    tool_input = self._render_run_custom_preview(str(cmd), args)
                     tool_reason = raw_args.get("reason", "")
                 elif tool_name == "search_project_vectors":
                     raw_args = self._parse_tool_call_args(
@@ -928,7 +1050,7 @@ class AssistantAgent:
                     elif tool_name == "search_web":
                         tool_payload = await self._execute_search_web(parsed_args)
                     else:
-                        tool_payload = await self._execute_run_custom(parsed_args, target=target)
+                        tool_payload = await self._execute_run_custom(parsed_args, target=target, project_id=project_id)
                 
                 tool_results.append(tool_payload)
                 round_made_progress = round_made_progress or self._tool_result_has_signal(tool_payload)
@@ -963,15 +1085,26 @@ class AssistantAgent:
                     break
 
         yield {"type": "ping", "data": {"step": "generating_final_reply"}}
-        final_response = await self._chat_with_fallback(
-            messages,
-            allow_tools=False,
-            allow_external_research=allow_external_research,
-        )
-        reply = self._sanitize_reply_text(final_response.content or "") or self._format_tool_only_reply(tool_results)
+        try:
+            final_response = await self._chat_with_fallback(
+                messages,
+                allow_tools=False,
+                allow_external_research=allow_external_research,
+            )
+            reply = self._sanitize_reply_text(final_response.content or "") or self._format_tool_only_reply(tool_results)
+        except Exception as exc:
+            if not tool_results:
+                raise
+            reply = self._reply_from_tool_results_after_llm_failure(
+                exc,
+                tool_results=tool_results,
+                response_style=response_style,
+                prompt=prompt,
+                target=target,
+            )
         reply = self._normalize_reply_for_style(
             reply,
-            response_style="structured",
+            response_style=response_style,
             prompt=prompt,
             target=target,
             tool_results=tool_results,
@@ -982,7 +1115,7 @@ class AssistantAgent:
             tool_results=tool_results,
             reply=reply,
         )
-        yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": "investigation", "style": "structured", "blocked": False}}
+        yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
         yield {"type": "learning", "data": learning_signals}
 
         next_context = await self._build_next_context(
@@ -994,11 +1127,67 @@ class AssistantAgent:
             tool_results=tool_results,
             target=target,
             target_type=target_type,
-            execution_lane="investigation",
-            response_style="structured",
+            execution_lane=execution_lane,
+            response_style=response_style,
             operator_mode=operator_mode,
         )
         yield {"type": "context", "data": {"next_context": next_context}}
+
+    async def _answer_lightweight_lane_prompt(
+        self,
+        *,
+        prompt: str,
+        target: str,
+        target_type: str,
+        project_id: str | None,
+        saved_context: str,
+        history: list[dict[str, Any]] | None,
+    ) -> str:
+        wants_findings_context = self._lightweight_prompt_requests_findings_context(prompt)
+        prompt_lines = [
+            "Lightweight assistant prompt.",
+            f"Project ID: {str(project_id or '').strip() or '(none)'}",
+            f"Target: {target or '(unknown)'}",
+            f"Target type: {target_type or '(unknown)'}",
+            f"Findings context requested: {'yes' if wants_findings_context else 'no'}",
+        ]
+
+        if wants_findings_context:
+            project_state = self._render_project_state_summary(
+                project_id=project_id,
+                target=target,
+                target_type=target_type,
+                detail_level="minimal",
+            )
+            if project_state:
+                prompt_lines.extend(["", "Minimal project state:", project_state])
+
+            working_memory = self._render_working_memory(saved_context)
+            if working_memory:
+                prompt_lines.extend(["", "Working memory:", working_memory])
+
+        recent_turns = self._render_recent_turns_text(history)
+        if recent_turns:
+            prompt_lines.extend(["", "Recent conversation turns:", recent_turns])
+
+        prompt_lines.extend(
+            [
+                "",
+                "Answer briefly and naturally. Do not use tools unless the operator explicitly asks for live investigation.",
+                "",
+                "Operator prompt:",
+                prompt.strip(),
+            ]
+        )
+
+        response = await self._chat_with_fallback(
+            [
+                ChatMessage(role="system", content=SYSTEM_PROMPT),
+                ChatMessage(role="user", content="\n".join(prompt_lines).strip()),
+            ],
+            allow_tools=False,
+        )
+        return self._sanitize_reply_text(str(response.content or "").strip()) or "No useful answer was produced."
 
     def _build_context_block(
         self,
@@ -1056,6 +1245,14 @@ class AssistantAgent:
         if recent_checks:
             parts.append("- recent_completed_checks:")
             parts.append(recent_checks)
+            
+        # Optimization: Include the actual text of the most recent turns 
+        # to preserve conversational flow alongside the technical summary.
+        recent_turns = self._render_recent_turns_text(history)
+        if recent_turns:
+            parts.append("- recent_conversation_turns:")
+            parts.append(recent_turns)
+            
         if context.strip():
             parts.append(f"- live_context: {context.strip()}")
         return "\n".join(parts)
@@ -1486,6 +1683,26 @@ class AssistantAgent:
         return "\n".join(rows[-6:])
 
     @staticmethod
+    def _render_recent_turns_text(history: list[dict[str, Any]] | None) -> str:
+        if not isinstance(history, list) or not history:
+            return ""
+        
+        # Take the last 5 messages, excluding compression summaries
+        turns: list[str] = []
+        for m in history[-5:]:
+            if not isinstance(m, dict):
+                continue
+            if m.get("isCompressionSummary"):
+                continue
+            role = "User" if str(m.get("role", "")).lower() == "user" else "Assistant"
+            text = str(m.get("text", "")).strip()
+            if text:
+                # Truncate very long prior messages to avoid bloat
+                turns.append(f"{role}: {text[:800]}")
+        
+        return "\n".join(turns)
+
+    @staticmethod
     def _tool_schemas_for_turn(*, allow_external_research: bool) -> list[dict[str, Any]]:
         schemas = [
             _RUN_CUSTOM_SCHEMA,
@@ -1562,20 +1779,36 @@ class AssistantAgent:
     @staticmethod
     def _normalize_run_custom_args(command: str, args: list[str]) -> list[str]:
         normalized_command = str(command or "").strip().lower()
-        normalized_args = [str(item) for item in list(args or [])]
+        normalized_args: list[str] = []
+        for item in list(args or []):
+            raw = str(item)
+            if not raw:
+                continue
+            for piece in raw.splitlines():
+                cleaned_piece = piece.strip()
+                if cleaned_piece:
+                    if " " in cleaned_piece and cleaned_piece.startswith(("-", "http://", "https://", "ftp://")):
+                        try:
+                            expanded = [part.strip() for part in shlex.split(cleaned_piece) if str(part).strip()]
+                        except ValueError:
+                            expanded = []
+                        if expanded:
+                            normalized_args.extend(expanded)
+                            continue
+                    normalized_args.append(cleaned_piece)
         if normalized_command != "curl":
             return normalized_args
 
         repaired: list[str] = []
         i = 0
         while i < len(normalized_args):
-            token = normalized_args[i]
+            token = normalized_args[i].strip()
             if token in {"-w", "--write-out"} and i + 1 < len(normalized_args):
                 repaired.append(token)
                 i += 1
                 fmt_parts: list[str] = []
                 while i < len(normalized_args):
-                    current = normalized_args[i]
+                    current = normalized_args[i].strip()
                     if fmt_parts and (
                         current.startswith(("http://", "https://", "ftp://"))
                         or (current.startswith("-") and not current.startswith("%{"))
@@ -1583,13 +1816,84 @@ class AssistantAgent:
                         break
                     fmt_parts.append(current)
                     i += 1
-                repaired.append(" ".join(part for part in fmt_parts if part).strip())
+                repaired.append(
+                    AssistantAgent._clean_curl_write_out_format(
+                        " ".join(part for part in fmt_parts if part).strip()
+                    )
+                )
                 continue
             repaired.append(token)
             i += 1
         return repaired
 
-    async def _execute_run_custom(self, args: dict[str, Any], *, target: str) -> dict[str, Any]:
+    @staticmethod
+    def _clean_curl_write_out_format(value: str) -> str:
+        cleaned = str(value or "")
+        cleaned = cleaned.replace("\\r", " ").replace("\\n", " ")
+        cleaned = cleaned.replace("\r", " ").replace("\n", " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    @staticmethod
+    def _mask_cli_secret(value: str) -> str:
+        clean = str(value or "").strip()
+        if not clean:
+            return clean
+        if ":" in clean:
+            user, secret = clean.split(":", 1)
+            if user and secret:
+                return f"{user}:****"
+        return "****"
+
+    @classmethod
+    def _redact_sensitive_run_custom_args(cls, command: str, args: list[str]) -> list[str]:
+        normalized_command = str(command or "").strip().lower()
+        redacted: list[str] = []
+        skip_redact_next = False
+        for token in [str(arg or "").strip() for arg in list(args or []) if str(arg or "").strip()]:
+            if skip_redact_next:
+                redacted.append(cls._mask_cli_secret(token))
+                skip_redact_next = False
+                continue
+            if normalized_command == "curl" and token in {"-u", "--user"}:
+                redacted.append(token)
+                skip_redact_next = True
+                continue
+            redacted.append(re.sub(r"://([^:/@\s]+):([^@/\s]+)@", r"://\1:****@", token))
+        return redacted
+
+    @classmethod
+    def _render_run_custom_preview(cls, command: str, args: list[str]) -> str:
+        normalized_command = str(command or "").strip()
+        preview_args = cls._redact_sensitive_run_custom_args(
+            normalized_command,
+            [str(arg or "").strip() for arg in list(args or []) if str(arg or "").strip()],
+        )
+        if normalized_command.lower() == "curl":
+            preview_args = list(preview_args)
+            for index, token in enumerate(preview_args[:-1]):
+                if token in {"-w", "--write-out"}:
+                    preview_args[index + 1] = cls._clean_curl_write_out_format(preview_args[index + 1])
+        if not normalized_command:
+            return shlex.join(preview_args)
+        return shlex.join([normalized_command, *preview_args])
+
+    @classmethod
+    def _sanitize_run_custom_result_for_display(cls, result: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return result
+        command = str(result.get("command", "")).strip()
+        raw_args = result.get("args", [])
+        if not isinstance(raw_args, list):
+            raw_args = []
+        redacted_args = cls._redact_sensitive_run_custom_args(command, [str(arg) for arg in raw_args])
+        payload = dict(result)
+        payload["args"] = redacted_args
+        if command:
+            payload["full_command"] = cls._render_run_custom_preview(command, redacted_args)
+        return payload
+
+    async def _execute_run_custom(self, args: dict[str, Any], *, target: str, project_id: str | None = None) -> dict[str, Any]:
         command = str(args.get("command", "")).strip()
         reason = str(args.get("reason", "")).strip() or "User-requested diagnostic command"
         raw_args = args.get("args", [])
@@ -1632,15 +1936,42 @@ class AssistantAgent:
             )
             return payload
 
-        result = await asyncio.to_thread(
-            assistant_run_custom,
-            command=command,
-            args=normalized_args,
-            reason=reason,
-            timeout=int(timeout) if str(timeout).strip() else 300,
-            env=env if isinstance(env, dict) else {},
-            cwd=str(cwd) if cwd else None,
-        )
+        from server.agents.executer.base import _executer_tool_context
+        
+        # Resolve target host/port for placeholder replacement
+        target_host, target_port = extract_target_host_port(target)
+        
+        # Replace common placeholders in arguments if they weren't caught by PrivacyGate
+        final_args: list[str] = []
+        for arg in normalized_args:
+            replaced = str(arg)
+            if target_host:
+                replaced = re.sub(r"__IP_\d+__", target_host, replaced)
+                replaced = re.sub(r"__HOST_\d+__", target_host, replaced)
+            if target_port is not None:
+                replaced = replaced.replace("__PORT__", str(target_port))
+            final_args.append(replaced)
+
+        ctx = {
+            "project_id": project_id,
+            "target_url": target,
+            "role": "assistant",
+        }
+        ctx_token = _executer_tool_context.set(ctx)
+
+        try:
+            result = await asyncio.to_thread(
+                assistant_run_custom,
+                command=command,
+                args=final_args,
+                reason=reason,
+                timeout=int(timeout) if str(timeout).strip() else 300,
+                env=env if isinstance(env, dict) else {},
+                cwd=str(cwd) if cwd else None,
+            )
+        finally:
+            _executer_tool_context.reset(ctx_token)
+
         if self._should_retry_with_sudo(command, normalized_args, result):
             sudo_args = ["-S", command, *normalized_args]
             retried = await asyncio.to_thread(
@@ -1652,8 +1983,12 @@ class AssistantAgent:
                 env=env if isinstance(env, dict) else {},
                 cwd=None,
             )
-            return self._augment_command_failure_payload("sudo", sudo_args, retried)
-        return self._augment_command_failure_payload(command, normalized_args, result)
+            return self._sanitize_run_custom_result_for_display(
+                self._augment_command_failure_payload("sudo", sudo_args, retried)
+            )
+        return self._sanitize_run_custom_result_for_display(
+            self._augment_command_failure_payload(command, normalized_args, result)
+        )
 
     @classmethod
     def _augment_command_failure_payload(
@@ -1692,6 +2027,12 @@ class AssistantAgent:
         normalized_args = [str(arg or "").strip() for arg in list(args or [])]
 
         if normalized_command == "curl":
+            if "getaddrinfo() thread failed to start" in haystack:
+                return (
+                    "The request failed inside the assistant environment while starting the hostname "
+                    "resolution thread, so this is an environment-side resolver failure rather than proof "
+                    "that the target hostname itself is wrong."
+                )
             if "could not resolve host" in haystack or return_code == 6:
                 return "The assistant environment could not resolve the target hostname, so this is a reachability problem rather than proof that the finding is false."
             if any(marker in haystack for marker in ("ssl certificate", "certificate verify failed", "peer certificate")) or return_code in {35, 51, 60}:
@@ -2449,120 +2790,9 @@ class AssistantAgent:
             return False
         return True
 
-    @staticmethod
-    def _parse_direct_command_prompt(
-        prompt: str,
-        *,
-        target: str = "",
-    ) -> dict[str, Any] | None:
-        text = str(prompt or "").strip()
-        if not text:
-            return None
+    # DECOMMISSIONED: Direct command fast-path methods removed.
+    # LLM now consistently handles intent analysis for all prompts.
 
-        lowered = text.lower()
-        normalized_target = str(target or "").strip()
-
-        if AssistantAgent._looks_like_structured_finding_analysis_request(text):
-            return None
-
-        if "nmap" in lowered and "script vuln" in lowered and normalized_target:
-            return {
-                "command": "nmap",
-                "args": ["-sV", "--script", "vuln", normalized_target],
-                "reason": "User-requested assistant vulnerability scan with Nmap against the configured target",
-            }
-
-        command_text = ""
-        for prefix in _DIRECT_COMMAND_PREFIX_PATTERNS:
-            if lowered.startswith(prefix):
-                command_text = text[len(prefix):].strip()
-                break
-        if not command_text and text.split(" ", 1)[0] in _DIRECT_COMMAND_BINARIES:
-            command_text = text
-        if not command_text:
-            command_text = AssistantAgent._extract_embedded_direct_command(text)
-
-        if not command_text:
-            return None
-
-        # Let the LLM/tool path interpret vague natural-language requests instead
-        # of sending prose fragments directly to the shell.
-        if any(lowered.startswith(prefix) for prefix in _DIRECT_COMMAND_PREFIX_PATTERNS) and not any(
-            marker in command_text for marker in ("-", "--", "/")
-        ):
-            prose_markers = (" with ", " to ", " for ", " using ", " against ", " on the target")
-            if any(marker in f" {command_text.lower()} " for marker in prose_markers):
-                return None
-
-        try:
-            parts = shlex.split(command_text)
-        except ValueError:
-            return None
-        if not parts:
-            return None
-        first = str(parts[0]).strip().lower()
-        if not first or first in _VAGUE_COMMAND_TOKENS:
-            return None
-        if any(lowered.startswith(prefix) for prefix in _DIRECT_COMMAND_PREFIX_PATTERNS):
-            if first not in _DIRECT_COMMAND_BINARIES and not any(ch in first for ch in ("-", "/", ".")):
-                return None
-
-        return {
-            "command": parts[0],
-            "args": parts[1:],
-            "reason": f"User-requested command execution from assistant chat: {parts[0]}",
-        }
-
-    @staticmethod
-    def _looks_like_structured_finding_analysis_request(text: str) -> bool:
-        raw = str(text or "").strip()
-        if not raw:
-            return False
-        lowered = raw.lower()
-        has_structure = (
-            ("{" in raw and "}" in raw)
-            or any(marker in lowered for marker in _STRUCTURED_FINDING_ANALYSIS_MARKERS)
-        )
-        if not has_structure:
-            return False
-        return any(intent in lowered for intent in _STRUCTURED_FINDING_ANALYSIS_INTENTS)
-
-    @staticmethod
-    def _extract_embedded_direct_command(text: str) -> str:
-        stripped = str(text or "").strip()
-        if not stripped:
-            return ""
-
-        for line in stripped.splitlines():
-            candidate = str(line or "").strip().strip("`").strip()
-            if not candidate:
-                continue
-            try:
-                parts = shlex.split(candidate)
-            except ValueError:
-                continue
-            if parts and str(parts[0]).strip().lower() in _DIRECT_COMMAND_BINARIES:
-                return candidate
-
-        binary_pattern = "|".join(sorted(re.escape(binary) for binary in _DIRECT_COMMAND_BINARIES))
-        match = re.search(
-            rf"(?<![\w./-])(?P<cmd>(?:{binary_pattern})\b[^\n`]*)",
-            stripped,
-            flags=re.IGNORECASE,
-        )
-        if not match:
-            return ""
-
-        candidate = str(match.group("cmd") or "").strip().strip("`").strip()
-        if not candidate:
-            return ""
-        try:
-            parts = shlex.split(candidate)
-        except ValueError:
-            return ""
-        if not parts or str(parts[0]).strip().lower() not in _DIRECT_COMMAND_BINARIES:
-            return ""
-        return candidate
 
     @staticmethod
     def _extract_embedded_tool_call(content: str) -> dict[str, Any] | None:
@@ -2630,6 +2860,15 @@ class AssistantAgent:
                 r"<function=(?P<name>[a-zA-Z0-9_]+)\s*>?\s*(?P<args>\{.+)",
                 flags=re.DOTALL,
             ),
+            # Support the [tool_name]\n"query" fallback style seen occasionally
+            re.compile(
+                r"\[(?P<name>[a-zA-Z0-9_]+)\]\s*(?:```json\s*)?(?P<args>\{.*?\})(?:\s*```)?",
+                flags=re.DOTALL,
+            ),
+            re.compile(
+                r"\[(?P<name>[a-zA-Z0-9_]+)\]\s*\"(?P<query>[^\"]+)\"",
+                flags=re.DOTALL,
+            ),
         ]
 
         for pattern in patterns:
@@ -2637,13 +2876,20 @@ class AssistantAgent:
             if not match:
                 continue
             tool_name = str(match.group("name") or "").strip()
-            raw_args = str(match.group("args") or "").strip()
-            if not tool_name or not raw_args:
-                continue
-            try:
-                parsed_args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                continue
+            
+            # Handle the specific `[tool_name] "query"` fallback regex group
+            if "query" in match.groupdict() and match.group("query"):
+                parsed_args = {"query": match.group("query")}
+                raw_args = json.dumps(parsed_args)
+            else:
+                raw_args = str(match.group("args") or "").strip()
+                if not tool_name or not raw_args:
+                    continue
+                try:
+                    parsed_args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    continue
+                
             if not isinstance(parsed_args, dict):
                 continue
             tool_calls = [
@@ -2668,7 +2914,37 @@ class AssistantAgent:
             return ""
         cleaned = re.sub(r"<function/[^>]+>\s*\{.*?\}\s*</function>", "", cleaned, flags=re.DOTALL).strip()
         cleaned = re.sub(r"<function>\s*[a-zA-Z0-9_]+\s*\{.*?\}\s*</function>", "", cleaned, flags=re.DOTALL).strip()
-        return cleaned
+        # Remove [TOOL_OUTPUT] delimiters leaked by the LLM
+        cleaned = re.sub(r"\[TOOL_OUTPUT[^\]]*\].*?\[/TOOL_OUTPUT\]", "", cleaned, flags=re.DOTALL).strip()
+        cleaned = re.sub(r"\[TOOL_OUTPUT[^\]]*\]", "", cleaned).strip()
+        
+        # Remove any lingering raw [search_web] blocks if the LLM dumped them without arguments
+        cleaned = re.sub(r"\[search_web\]\s*", "", cleaned).strip()
+
+        return cls._strip_raw_tool_trace_lines(cleaned)
+
+    @staticmethod
+    def _strip_raw_tool_trace_lines(text: str) -> str:
+        lines = str(text or "").splitlines()
+        if not lines:
+            return ""
+        tool_markers = {f"[{name}]" for name in _RAW_TOOL_TRACE_NAMES}
+        cleaned_lines: list[str] = []
+        skip_quoted_after_tool = False
+        for raw_line in lines:
+            line = raw_line.strip()
+            lowered = line.lower()
+            if lowered in tool_markers:
+                skip_quoted_after_tool = True
+                continue
+            if skip_quoted_after_tool and line and (
+                (line.startswith('"') and line.endswith('"'))
+                or (line.startswith("'") and line.endswith("'"))
+            ):
+                continue
+            skip_quoted_after_tool = False
+            cleaned_lines.append(raw_line)
+        return "\n".join(cleaned_lines).strip()
 
     @staticmethod
     def _looks_like_raw_tool_trace(text: str) -> bool:
@@ -2771,99 +3047,100 @@ class AssistantAgent:
         return heuristic_match or any(marker in lowered for marker in _ASSISTANT_CAPABILITY_QUESTION_PATTERNS)
 
     @staticmethod
-    def _is_lightweight_meta_prompt(prompt: str) -> bool:
-        lowered = " ".join(str(prompt or "").strip().lower().split())
+    def _lightweight_prompt_requests_findings_context(prompt: str) -> bool:
+        lowered = str(prompt or "").strip().lower()
         if not lowered:
             return False
-        if lowered in _LIGHTWEIGHT_META_PROMPT_PATTERNS:
-            return True
-        if len(lowered) <= 40 and any(lowered.startswith(pattern) for pattern in _LIGHTWEIGHT_META_PROMPT_PATTERNS):
-            return True
-        return False
+        findings_markers = (
+            "finding",
+            "findings",
+            "vulnerability",
+            "vulnerabilities",
+            "report",
+            "summary",
+            "status",
+            "what have you found",
+            "what did you find",
+            "current project",
+            "active target",
+        )
+        return any(marker in lowered for marker in findings_markers)
+
+    @classmethod
+    def _resolve_direct_ftp_auth_attempt(
+        cls,
+        prompt: str,
+        *,
+        target: str,
+        history: list[dict[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        username, password = cls._extract_prompt_credentials(prompt)
+        if not username or not password:
+            return None
+        if not cls._prompt_or_history_suggests_ftp(prompt, history=history):
+            return None
+        target_host, target_port = extract_target_host_port(target)
+        if not target_host:
+            return None
+        ftp_url = f"ftp://{target_host}/"
+        if target_port is not None and target_port != 21:
+            ftp_url = f"ftp://{target_host}:{target_port}/"
+        return {
+            "command": "curl",
+            "args": ["-u", f"{username}:{password}", ftp_url],
+            "reason": "Attempt authenticated FTP access with the operator-provided credentials.",
+            "timeout": 60,
+        }
 
     @staticmethod
-    def _lightweight_prompt_requests_findings(prompt: str) -> bool:
-        lowered = " ".join(str(prompt or "").strip().lower().split())
-        if not lowered:
-            return False
-        return any(pattern in lowered for pattern in _LIGHTWEIGHT_FINDINGS_REQUEST_PATTERNS)
-
-    async def _answer_lightweight_lane_prompt(
-        self,
-        *,
-        prompt: str,
-        target: str,
-        target_type: str,
-        project_id: str | None,
-        saved_context: str,
-        history: list[dict[str, Any]] | None,
-    ) -> str:
-        include_findings_context = self._lightweight_prompt_requests_findings(prompt)
-        minimal_project_state = ""
-        rendered_memory = ""
-        if include_findings_context:
-            minimal_project_state = self._render_project_state_summary(
-                project_id=project_id,
-                target=target,
-                target_type=target_type,
-                detail_level="minimal",
-            )
-            rendered_memory = self._render_working_memory(saved_context)
-        history_excerpt: list[str] = []
-        if include_findings_context and isinstance(history, list):
-            for item in history[-3:]:
-                if not isinstance(item, dict):
-                    continue
-                role = str(item.get("role", "")).strip().lower()
-                text = str(item.get("text", "")).strip()
-                if role in {"user", "assistant"} and text:
-                    history_excerpt.append(f"{role}: {text[:180]}")
-        minimal_context = "\n".join(
-            [
-                f"Active target: {target or '(unknown)'}",
-                f"Target type: {target_type or '(unknown)'}",
-                f"Scope question: {'yes' if self._is_scope_question(prompt) else 'no'}",
-                f"Capability question: {'yes' if self._is_capability_question(prompt) else 'no'}",
-                f"Findings context requested: {'yes' if include_findings_context else 'no'}",
-                f"Operator prompt: {prompt.strip()}",
-            ]
+    def _extract_prompt_credentials(prompt: str) -> tuple[str, str]:
+        text = str(prompt or "").strip()
+        if not text:
+            return "", ""
+        user_match = re.search(
+            r"\b(?:login|username|user(?:name)?)\b(?:\s+as|\s+with|\s*[:=])?\s+([^\s,;]+)",
+            text,
+            flags=re.IGNORECASE,
         )
-        if include_findings_context:
-            minimal_context = "\n".join(
-                [
-                    minimal_context,
-                    "",
-                    "Minimal project state:",
-                    minimal_project_state or "(none)",
-                    "",
-                    "Working memory:",
-                    rendered_memory or "(none)",
-                    "",
-                    "Recent history:",
-                    "\n".join(history_excerpt) or "(none)",
-                ]
-            )
-        try:
-            response = await self._chat_with_fallback(
-                [
-                    ChatMessage(role="system", content=LIGHTWEIGHT_LANE_PROMPT),
-                    ChatMessage(role="user", content=minimal_context),
-                ],
-                allow_tools=False,
-                allow_external_research=False,
-            )
-            text = self._normalize_reply_for_style(
-                self._sanitize_reply_text(response.content or ""),
-                response_style="natural",
-                prompt=prompt,
-                target=target,
-                tool_results=[],
-            )
-            if text:
-                return text
-        except Exception:
-            logger.warning("assistant_lightweight_lane_prompt_failed", exc_info=True)
-        return "I couldn't generate a lightweight assistant reply right now. Please try again."
+        pass_match = re.search(
+            r"\bpassword\b(?:\s+is|\s+as|\s+with|\s*[:=])?\s+([^\s,;]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        username = str(user_match.group(1) if user_match else "").strip().strip("'\"")
+        password = str(pass_match.group(1) if pass_match else "").strip().strip("'\"")
+        return username, password
+
+    @classmethod
+    def _prompt_or_history_suggests_ftp(
+        cls,
+        prompt: str,
+        *,
+        history: list[dict[str, Any]] | None,
+    ) -> bool:
+        lowered_prompt = str(prompt or "").strip().lower()
+        if any(marker in lowered_prompt for marker in _FTP_AUTH_CONTEXT_MARKERS):
+            return True
+        if not isinstance(history, list):
+            return False
+        for item in reversed(history[-8:]):
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text", "")).strip().lower()
+            if any(marker in text for marker in _FTP_AUTH_CONTEXT_MARKERS):
+                return True
+            tool_logs = item.get("toolLogs", [])
+            if not isinstance(tool_logs, list):
+                continue
+            for log in reversed(tool_logs[-4:]):
+                if not isinstance(log, dict):
+                    continue
+                raw_input = str(log.get("input", "")).strip().lower()
+                if any(marker in raw_input for marker in _FTP_AUTH_CONTEXT_MARKERS):
+                    return True
+        return False
+
+
 
     async def _handle_report_intent(
         self,
@@ -3128,6 +3405,77 @@ class AssistantAgent:
         cleaned = re.sub(r"^(summary|verdict|evidence|unknowns|next step|confidence)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
 
+    @staticmethod
+    def _salient_prompt_keywords(prompt: str) -> set[str]:
+        stopwords = {
+            "the", "this", "that", "with", "from", "into", "about", "what", "does", "mean",
+            "tell", "them", "they", "their", "there", "here", "have", "your", "will", "would",
+            "could", "should", "please", "current", "target", "whether", "actually", "which",
+            "when", "where", "while", "after", "before", "then", "than", "just", "more",
+            "less", "very", "also", "only", "over", "under", "again", "check", "investigate",
+            "verify", "retest", "finding", "findings", "endpoint", "report", "update",
+        }
+        keywords: set[str] = set()
+        for token in re.findall(r"[a-zA-Z0-9_/?.-]+", str(prompt or "").lower()):
+            normalized = token.strip(".,:;!?()[]{}")
+            if len(normalized) < 3 or normalized in stopwords:
+                continue
+            keywords.add(normalized)
+        return keywords
+
+    @classmethod
+    def _reply_matches_prompt_focus(cls, reply: str, prompt: str) -> bool:
+        keywords = cls._salient_prompt_keywords(prompt)
+        if not keywords:
+            return True
+        lowered_reply = str(reply or "").lower()
+        return any(keyword in lowered_reply for keyword in keywords)
+
+    @classmethod
+    def _structured_reply_needs_repair(
+        cls,
+        reply: str,
+        *,
+        prompt: str,
+        tool_results: list[dict[str, Any]],
+    ) -> bool:
+        text = str(reply or "").strip()
+        if not text:
+            return True
+        if cls._looks_like_raw_tool_trace(text):
+            return True
+        evidence_lines = cls._build_evidence_lines(tool_results)
+        lowered = text.lower()
+        if evidence_lines and "no direct evidence was collected in this turn" in lowered:
+            return True
+        if not tool_results and cls._reply_claims_live_checks_without_evidence(text):
+            return True
+        if not cls._reply_matches_prompt_focus(text, prompt):
+            return True
+        return False
+
+    @staticmethod
+    def _reply_claims_live_checks_without_evidence(reply: str) -> bool:
+        lowered = str(reply or "").lower()
+        suspicious_markers = (
+            "live check",
+            "i ran",
+            "i checked",
+            "i tested",
+            "curl check",
+            "http 200",
+            "http 401",
+            "http 403",
+            "http 404",
+            "http 500",
+            "returned 404",
+            "returned 200",
+            "response code",
+            "no evidence was observed in this initial check",
+            "you asked two things",
+        )
+        return any(marker in lowered for marker in suspicious_markers)
+
     @classmethod
     def _build_evidence_lines(cls, tool_results: list[dict[str, Any]]) -> list[str]:
         lines: list[str] = []
@@ -3191,6 +3539,38 @@ class AssistantAgent:
             seen.add(normalized)
             deduped.append(line)
         return deduped[:5]
+
+    @classmethod
+    def _reply_from_tool_results_after_llm_failure(
+        cls,
+        exc: Exception,
+        *,
+        tool_results: list[dict[str, Any]],
+        response_style: str,
+        prompt: str,
+        target: str,
+    ) -> str:
+        last_result = tool_results[-1] if tool_results else {}
+        if (
+            isinstance(last_result, dict)
+            and (str(last_result.get("full_command", "")).strip() or str(last_result.get("command", "")).strip())
+        ):
+            base_reply = cls._format_direct_command_reply(last_result)
+        else:
+            base_reply = cls._format_tool_only_reply(tool_results)
+        error_text = str(exc).strip() or type(exc).__name__
+        fallback_reply = (
+            f"{base_reply}\n\n"
+            "Note: I could not complete the follow-up LLM synthesis cleanly, so this reply is a direct summary "
+            f"of the completed tool results. Backend detail: {error_text}"
+        )
+        return cls._normalize_reply_for_style(
+            fallback_reply,
+            response_style=response_style,
+            prompt=prompt,
+            target=target,
+            tool_results=tool_results,
+        )
 
     @staticmethod
     def _build_unknown_lines(tool_results: list[dict[str, Any]], summary: str) -> list[str]:
@@ -3315,7 +3695,7 @@ class AssistantAgent:
         tool_results: list[dict[str, Any]],
     ) -> str:
         style = cls._normalize_style(response_style)
-        text = str(reply or "").strip()
+        text = cls._sanitize_reply_text(reply or "")
         if cls._looks_like_raw_tool_trace(text):
             text = ""
         if style == "structured":
@@ -3326,16 +3706,14 @@ class AssistantAgent:
                 target=target,
             )
         if style == "report":
-            text = cls._sanitize_reply_text(text)
             if not text:
                 text = "No report update was produced."
-            return text[:2200].strip()
+            return text.strip()
 
-        text = cls._sanitize_reply_text(text)
         text = re.sub(r"\*\*(summary|verdict|evidence|unknowns|next step|confidence)\*\*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"(?im)^(summary|verdict|evidence|unknowns|next step|confidence)\s*:\s*", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        return text[:1200].strip() or "No useful answer was produced."
+        return text.strip() or "No useful answer was produced."
 
     @staticmethod
     def _should_use_llm_context_compression(
@@ -3370,11 +3748,21 @@ class AssistantAgent:
     ) -> str:
         text = str(reply or "").strip() or "No useful answer was produced."
         if cls._reply_has_required_sections(text):
-            return text
+            if not cls._structured_reply_needs_repair(
+                text,
+                prompt=prompt,
+                tool_results=tool_results,
+            ):
+                return text
+            text = ""
 
         summary = cls._clean_section_text(text.splitlines()[0] if text else "")
         if not summary:
-            summary = f"Processed the request for {target or 'the active target'}, but the answer needs further validation."
+            trimmed_prompt = " ".join(str(prompt or "").strip().split())
+            if trimmed_prompt:
+                summary = f"Requested action: {trimmed_prompt[:220]}"
+            else:
+                summary = f"Processed the request for {target or 'the active target'}, but the answer needs further validation."
 
         evidence_lines = cls._build_evidence_lines(tool_results)
         unknown_lines = cls._build_unknown_lines(tool_results, summary)

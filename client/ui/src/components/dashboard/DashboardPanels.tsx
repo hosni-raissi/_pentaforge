@@ -1,10 +1,12 @@
-import { Bot, Clock3, Pencil, Play, Repeat2, Square, X } from "lucide-react";
+import { useMemo } from "react";
+import { Bot, Clock3, Pencil, Play, Repeat2, Square, X, Maximize2, Zap, Check } from "lucide-react";
 
 import { ObservabilityPanel } from "@/components/dashboard/ObservabilityPanel";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
+import { cn } from "@/lib/utils";
 import type {
   FindingEvidence,
   FindingEvidenceStatus,
@@ -72,12 +74,12 @@ export function DashboardProjectHeader({
   onCloseProject,
 }: DashboardProjectHeaderProps) {
   return (
-    <div>
+    <div className="sticky -top-4 z-20 -mx-4 mb-6 p-3 bg-background/80 backdrop-blur-3xl border-b border-border shadow-sm transition-all duration-200">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-2xl font-bold">{projectName}</h1>
-            <Badge variant={effectiveStatus} dot>
+            <h1 className="text-xl font-extrabold text-text-primary tracking-tight">{projectName}</h1>
+            <Badge variant={effectiveStatus} dot className="text-[10px] font-black uppercase">
               {effectiveStatus}
             </Badge>
           </div>
@@ -94,6 +96,7 @@ export function DashboardProjectHeader({
                   ? "Another scan is already running"
                   : "Start scan"
               }
+              className="font-bold uppercase tracking-wider"
             >
               <Play size={12} />
               Start Scan
@@ -105,6 +108,7 @@ export function DashboardProjectHeader({
                 variant="danger"
                 onClick={onStopScan}
                 title="Stop running scan"
+                className="font-bold uppercase tracking-wider"
               >
                 <Square size={12} />
                 Stop Scan
@@ -112,13 +116,13 @@ export function DashboardProjectHeader({
             </div>
           )}
           {isStarting ? (
-            <span className="text-sm text-text-muted">Starting scan...</span>
+            <span className="text-[11px] font-bold text-pf-500 uppercase animate-pulse">Starting scan...</span>
           ) : null}
-          <Button size="xs" variant="secondary" onClick={onChangeProject}>
+          <Button size="xs" variant="secondary" onClick={onChangeProject} className="font-bold uppercase tracking-wider">
             <Repeat2 size={12} />
             Change
           </Button>
-          <Button size="xs" variant="ghost" onClick={onCloseProject}>
+          <Button size="xs" variant="ghost" onClick={onCloseProject} className="hover:text-red-500 hover:bg-red-500/5">
             <X size={12} />
             Close
           </Button>
@@ -198,27 +202,24 @@ export function DashboardTargetOverviewCard({
           </p>
         </div>
         <div
-          className={`rounded-xl p-3 border shadow-sm transition-all duration-300 ${
-            effectiveStatus === "running"
+          className={`rounded-xl p-3 border shadow-sm transition-all duration-300 ${effectiveStatus === "running"
               ? "bg-pf-500/15 border-pf-500/30 ring-1 ring-pf-500/20"
               : "bg-surface-0/40 border-border/40"
-          }`}
+            }`}
         >
           <p
-            className={`text-[11px] font-bold uppercase tracking-wider ${
-              effectiveStatus === "running"
+            className={`text-[11px] font-bold uppercase tracking-wider ${effectiveStatus === "running"
                 ? "text-pf-600 dark:text-pf-400"
                 : "text-text-muted"
-            }`}
+              }`}
           >
             Status
           </p>
           <p
-            className={`mt-1.5 text-lg font-bold capitalize ${
-              effectiveStatus === "running"
+            className={`mt-1.5 text-lg font-bold capitalize ${effectiveStatus === "running"
                 ? "text-pf-700 dark:text-pf-300 animate-pulse"
                 : "text-text-primary"
-            }`}
+              }`}
           >
             {effectiveStatus}
           </p>
@@ -279,15 +280,18 @@ export function DashboardFindingsPanel({
             <div
               key={item.id}
               onClick={() => onSelectFinding(item)}
-              className="cursor-pointer rounded-md border border-border bg-surface-1/45 p-3 space-y-2 transition-colors hover:bg-surface-1/65"
+              className="group cursor-pointer rounded-xl border border-border/60 bg-surface-1/40 p-4 space-y-3 transition-all duration-200 hover:bg-surface-1/60 hover:border-pf-500/30 hover:shadow-md active:scale-[0.99]"
             >
-              <div className="flex items-start justify-between gap-2">
-                <h3 className="text-sm font-bold text-text-primary leading-snug flex-1">
+              <div className="flex items-start justify-between gap-3">
+                <h3 className="text-sm font-extrabold text-text-primary leading-tight flex-1 tracking-tight">
                   {item.title}
                 </h3>
                 <Badge
                   variant="default"
-                  className={`border text-xs uppercase tracking-wide whitespace-nowrap font-semibold ${severityBadgeClass(item.severity)}`}
+                  className={cn(
+                    "px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest border shadow-sm shrink-0",
+                    severityBadgeClass(item.severity)
+                  )}
                 >
                   {item.severity}
                 </Badge>
@@ -297,7 +301,10 @@ export function DashboardFindingsPanel({
                 {item.proofQuality ? (
                   <Badge
                     variant="default"
-                    className={`border text-[11px] uppercase tracking-wide ${proofQualityBadgeClass(item.proofQuality)}`}
+                    className={cn(
+                      "px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border",
+                      proofQualityBadgeClass(item.proofQuality)
+                    )}
                   >
                     {item.proofQuality} proof
                   </Badge>
@@ -305,77 +312,67 @@ export function DashboardFindingsPanel({
               </div>
 
               {item.cve || item.cvss ? (
-                <div className="text-xs text-text-secondary font-mono bg-surface-0/40 px-2 py-1 rounded">
+                <div className="text-[11px] text-pf-600 dark:text-pf-400 font-mono bg-pf-500/5 px-2 py-1 rounded border border-pf-500/10 inline-block">
                   {item.cve ? <span>{item.cve}</span> : null}
                   {item.cve && item.cvss ? <span> • </span> : null}
                   {item.cvss ? <span>CVSS {item.cvss}</span> : null}
                 </div>
               ) : null}
 
-              <div className="space-y-1 text-xs">
+              <div className="space-y-1.5 pt-1">
                 {item.endpoint ? (
-                  <div className="flex items-start gap-2">
-                    <span className="text-text-muted min-w-fit font-semibold">
-                      Target:
-                    </span>
-                    <span className="text-text-secondary break-all font-mono">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-text-muted uppercase tracking-widest min-w-[50px]">Target</span>
+                    <span className="text-[11px] text-text-secondary truncate font-mono bg-surface-2/50 px-2 py-0.5 rounded border border-border/30">
                       {item.endpoint}
                     </span>
                   </div>
                 ) : null}
                 {item.category ? (
-                  <div className="flex items-start gap-2">
-                    <span className="text-text-muted min-w-fit font-semibold">
-                      Type:
-                    </span>
-                    <span className="text-text-secondary">{item.category}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-text-muted uppercase tracking-widest min-w-[50px]">Class</span>
+                    <span className="text-[11px] text-text-secondary font-medium">{item.category}</span>
                   </div>
                 ) : null}
               </div>
 
-              <div className="flex items-center justify-between pt-1 border-t border-border/30">
-                <span className="text-xs text-text-muted uppercase tracking-wide">
-                  ✅ Verified
-                </span>
-                <span className="text-xs text-text-muted">
+              <div className="flex items-center justify-between pt-2 border-t border-border/30">
+                <div className="flex items-center gap-1.5">
+                  <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-widest">
+                    Verified
+                  </span>
+                </div>
+                <span className="text-[10px] font-medium text-text-muted">
                   {formatTime(item.at)}
                 </span>
               </div>
 
-              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1 opacity-60 group-hover:opacity-100 transition-opacity">
                 <Button
                   size="xs"
                   variant="secondary"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onSelectFinding(item);
-                  }}
-                >
-                  View
-                </Button>
-                <Button
-                  size="xs"
-                  variant="secondary"
-                  className="border-amber-300/60 bg-amber-50 text-amber-900 hover:bg-amber-100 dark:border-amber-500/30 dark:bg-amber-500/12 dark:text-amber-200 dark:hover:bg-amber-500/18"
+                  className="h-7 border-red-200/60 bg-red-50/50 text-red-800 hover:bg-red-100/60 dark:border-red-500/20 dark:bg-red-500/8 dark:text-red-400 dark:hover:bg-red-500/12 text-[10px] font-bold uppercase tracking-wider"
                   loading={falsePositiveLoadingId === item.id}
                   onClick={(event) => {
                     event.stopPropagation();
                     onMarkFalsePositive(item);
                   }}
                 >
-                  <X size={12} />
+                  <X size={10} />
                   False Positive
                 </Button>
                 <Button
                   size="xs"
                   variant="secondary"
+                  className="h-7 text-[10px] font-bold uppercase tracking-wider"
                   onClick={(event) => {
                     event.stopPropagation();
                     onAddToEchoPrompt(item);
                   }}
                 >
-                  <Bot size={12} />
-                  Add To Echo
+                  <Bot size={10} />
+                  Echo
                 </Button>
               </div>
             </div>
@@ -559,6 +556,8 @@ interface DashboardFindingDialogProps {
   findingOobProtocol: (finding: DashboardFindingDetail) => string | undefined;
   formatVerificationMethod: (value: string) => string;
   formatTime: (value: string) => string;
+  onMarkFalsePositive: (finding: any) => void;
+  onAddToEchoPrompt: (finding: any) => void;
 }
 
 export function DashboardFindingDialog({
@@ -574,251 +573,306 @@ export function DashboardFindingDialog({
   findingOobProtocol,
   formatVerificationMethod,
   formatTime,
+  onMarkFalsePositive,
+  onAddToEchoPrompt,
 }: DashboardFindingDialogProps) {
+  const severity = selectedFinding ? normalizeDashboardSeverity(selectedFinding.severity) : "low";
+
+  // Severity-based gradient for header
+  const headerGradient = useMemo(() => {
+    if (severity === "critical") return "from-red-600/20 via-red-600/5 to-transparent";
+    if (severity === "high") return "from-orange-600/20 via-orange-600/5 to-transparent";
+    if (severity === "medium") return "from-orange-400/20 via-orange-400/5 to-transparent";
+    if (severity === "low") return "from-emerald-500/20 via-emerald-500/5 to-transparent";
+    return "from-slate-500/20 via-slate-500/5 to-transparent";
+  }, [severity]);
+
   return (
-    <Dialog open={Boolean(selectedFinding)} onClose={onClose} title="Vulnerability Details">
+    <Dialog
+      open={Boolean(selectedFinding)}
+      onClose={onClose}
+      title="Vulnerability Report"
+      className="max-w-2xl"
+    >
       {selectedFinding ? (
-        <div className="space-y-4 max-h-[75vh] overflow-y-auto">
-          <div className="space-y-2 border-b border-border pb-3">
-            <h2 className="text-lg font-bold text-text-primary">
-              {selectedFinding.title}
-            </h2>
-            <div className="flex items-center gap-3">
-              <Badge
-                variant="default"
-                className={`border text-sm uppercase tracking-wide font-semibold ${severityBadgeClass(
-                  normalizeDashboardSeverity(selectedFinding.severity),
-                )}`}
-              >
-                {selectedFinding.severity}
-              </Badge>
-              {selectedFinding.category ? (
-                <span className="text-sm text-text-secondary bg-surface-0/50 px-2 py-1 rounded">
-                  {selectedFinding.category}
-                </span>
-              ) : null}
-              {normalizeEvidenceStatus(
-                selectedFinding.evidenceStatus ??
-                  selectedFinding.evidence?.evidence_status,
-              ) ? (
-                <Badge
-                  variant="default"
-                  className={`border text-xs uppercase tracking-wide ${evidenceBadgeClass(
-                    normalizeEvidenceStatus(
-                      selectedFinding.evidenceStatus ??
-                        selectedFinding.evidence?.evidence_status,
-                    )!,
-                  )}`}
-                >
-                  {String(
-                    normalizeEvidenceStatus(
-                      selectedFinding.evidenceStatus ??
-                        selectedFinding.evidence?.evidence_status,
-                    ),
-                  ).replace(/_/g, " ")}
-                </Badge>
-              ) : null}
-              {normalizeProofQuality(
-                selectedFinding.proofQuality ??
-                  selectedFinding.evidence?.proof_quality,
-              ) ? (
-                <Badge
-                  variant="default"
-                  className={`border text-xs uppercase tracking-wide ${proofQualityBadgeClass(
-                    normalizeProofQuality(
-                      selectedFinding.proofQuality ??
-                        selectedFinding.evidence?.proof_quality,
-                    )!,
-                  )}`}
-                >
-                  {
-                    normalizeProofQuality(
-                      selectedFinding.proofQuality ??
-                        selectedFinding.evidence?.proof_quality,
-                    )
-                  }{" "}
-                  proof
-                </Badge>
-              ) : null}
-              {findingUsesOobProof(selectedFinding) ? (
-                <Badge
-                  variant="default"
-                  className="border border-sky-500/40 bg-sky-500/15 text-sky-200 text-xs uppercase tracking-wide"
-                >
-                  {findingOobProtocol(selectedFinding)
-                    ? `OOB ${findingOobProtocol(selectedFinding)?.toUpperCase()}`
-                    : "OOB"}
-                </Badge>
-              ) : null}
-            </div>
-          </div>
+        <div className="space-y-6 px-1 pb-4">
+          {(() => {
+            const cleanCommand = (cmd: string) => {
+              // Strip run_python(code=..., reason=...)
+              const pythonMatch = cmd.match(/run_python\(code=['"]([\s\S]*?)['"](?:,\s*reason=.*)?\)/);
+              if (pythonMatch) return pythonMatch[1].replace(/\\n/g, '\n').replace(/\\'/g, "'").replace(/\\"/g, '"');
 
-          {selectedFinding.evidenceStatus ||
-          selectedFinding.proofQuality ||
-          selectedFinding.deterministicValidation !== undefined ||
-          selectedFinding.verificationMethods?.length ? (
-            <div className="space-y-1 bg-surface-0/40 p-3 rounded border border-border">
-              <p className="text-xs font-semibold text-text-muted uppercase">
-                Proof Summary
-              </p>
-              <div className="space-y-1 text-sm text-text-secondary">
-                {selectedFinding.evidenceStatus ||
-                selectedFinding.evidence?.evidence_status ? (
-                  <div>
-                    Evidence Tier:{" "}
-                    {String(
-                      selectedFinding.evidenceStatus ??
-                        selectedFinding.evidence?.evidence_status,
-                    ).replace(/_/g, " ")}
-                  </div>
-                ) : null}
-                {selectedFinding.proofQuality ||
-                selectedFinding.evidence?.proof_quality ? (
-                  <div>
-                    Proof Quality:{" "}
-                    {selectedFinding.proofQuality ??
-                      selectedFinding.evidence?.proof_quality}
-                  </div>
-                ) : null}
-                {selectedFinding.deterministicValidation !== undefined ||
-                selectedFinding.evidence?.deterministic_validation !==
-                  undefined ? (
-                  <div>
-                    Deterministic Validation:{" "}
-                    {(
-                      selectedFinding.deterministicValidation ??
-                      selectedFinding.evidence?.deterministic_validation
-                    )
-                      ? "yes"
-                      : "no"}
-                  </div>
-                ) : null}
-                {findingUsesOobProof(selectedFinding) ? (
-                  <div>
-                    OOB Confirmation:{" "}
-                    {findingOobProtocol(selectedFinding)
-                      ? `yes (${findingOobProtocol(selectedFinding)?.toUpperCase()} callback)`
-                      : "yes"}
-                  </div>
-                ) : null}
-                {Array.isArray(selectedFinding.evidence?.callbacks) &&
-                selectedFinding.evidence.callbacks.length > 0 ? (
-                  <div>
-                    OOB Callback Count:{" "}
-                    {selectedFinding.evidence.callbacks.length}
-                  </div>
-                ) : null}
-                {typeof selectedFinding.evidence?.remote_address === "string" &&
-                selectedFinding.evidence.remote_address.trim() ? (
-                  <div>
-                    OOB Remote Address:{" "}
-                    {selectedFinding.evidence.remote_address}
-                  </div>
-                ) : null}
-                {(Array.isArray(selectedFinding.verificationMethods) &&
-                  selectedFinding.verificationMethods.length > 0) ||
-                (Array.isArray(selectedFinding.evidence?.verification_methods) &&
-                  selectedFinding.evidence.verification_methods.length > 0) ? (
-                  <div>
-                    Verification Methods:{" "}
-                    {(
-                      (selectedFinding.verificationMethods ??
-                        selectedFinding.evidence
-                          ?.verification_methods) as string[]
-                    )
-                      .map((item) => formatVerificationMethod(item))
-                      .filter(Boolean)
-                      .join(", ")}
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
+              // Strip run_custom(cmd=..., reason=...)
+              const customMatch = cmd.match(/run_custom\(cmd=['"]([\s\S]*?)['"](?:,\s*reason=.*)?\)/);
+              if (customMatch) return customMatch[1].replace(/\\n/g, '\n').replace(/\\'/g, "'").replace(/\\"/g, '"');
 
-          {selectedFinding.cve || selectedFinding.cvss ? (
-            <div className="space-y-1 bg-surface-0/40 p-3 rounded border border-border">
-              <p className="text-xs font-semibold text-text-muted uppercase">
-                Identifiers
-              </p>
-              <div className="text-sm text-text-secondary font-mono">
-                {selectedFinding.cve ? <div>CVE: {selectedFinding.cve}</div> : null}
-                {selectedFinding.cvss ? (
-                  <div>CVSS Score: {selectedFinding.cvss}</div>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
+              return cmd;
+            };
 
-          {selectedFinding.target ? (
-            <div className="space-y-1">
-              <p className="text-xs font-semibold text-text-muted uppercase">
-                Target
-              </p>
-              <p className="text-sm text-text-secondary font-mono bg-surface-0/40 px-3 py-2 rounded break-all">
-                {selectedFinding.target}
-              </p>
-            </div>
-          ) : null}
+            return (
+              <>
+                {/* ── Premium Header ────────────────────────────────────────── */}
+                <div className={cn(
+                  "relative -mx-6 -mt-6 overflow-hidden border-b border-border p-6 pt-10",
+                  "bg-gradient-to-br",
+                  headerGradient
+                )}>
+                  <div className="absolute top-0 right-0 p-4 opacity-10">
+                    <Bot size={120} className="rotate-12" />
+                  </div>
 
-          {selectedFinding.description ? (
-            <div className="space-y-1">
-              <p className="text-xs font-semibold text-text-muted uppercase">
-                Description
-              </p>
-              <div className="text-sm text-text-secondary whitespace-pre-wrap break-words bg-surface-0/40 p-3 rounded border border-border">
-                {selectedFinding.description}
-              </div>
-            </div>
-          ) : null}
+                  <div className="relative space-y-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Badge
+                        variant="default"
+                        className={cn(
+                          "px-2.5 py-0.5 text-xs font-bold uppercase tracking-widest border shadow-sm",
+                          severityBadgeClass(severity)
+                        )}
+                      >
+                        {selectedFinding.severity}
+                      </Badge>
+                      {selectedFinding.cwe_id && (
+                        <span className="text-[11px] font-bold text-text-muted bg-surface-2/60 px-2 py-0.5 rounded border border-border/50 uppercase tracking-wider">
+                          {selectedFinding.cwe_id}
+                        </span>
+                      )}
+                      {selectedFinding.category && (
+                        <span className="text-[11px] font-bold text-pf-600 dark:text-pf-400 bg-pf-500/10 px-2 py-0.5 rounded border border-pf-500/20 uppercase tracking-wider">
+                          {selectedFinding.category}
+                        </span>
+                      )}
+                    </div>
 
-          {selectedFinding.evidence &&
-          Object.keys(selectedFinding.evidence).length > 0 ? (
-            <div className="space-y-1">
-              <p className="text-xs font-semibold text-text-muted uppercase">
-                Verification Evidence
-              </p>
-              <div className="text-xs text-text-secondary space-y-1 bg-surface-0/40 p-3 rounded border border-border max-h-48 overflow-y-auto">
-                {Object.entries(selectedFinding.evidence).map(([key, value]) => (
-                  <div
-                    key={key}
-                    className="border-b border-border/30 pb-2 last:border-b-0 last:pb-0"
-                  >
-                    <div className="font-semibold text-text-secondary">{key}:</div>
-                    <div className="text-text-muted break-all ml-2">
-                      {String(value).slice(0, 300)}
+                    <h2 className="text-2xl font-extrabold text-text-primary tracking-tight leading-tight">
+                      {selectedFinding.title}
+                    </h2>
+
+                    <div className="flex flex-wrap items-center gap-4 text-xs text-text-muted">
+                      <div className="flex items-center gap-1.5">
+                        <Clock3 size={14} className="text-pf-500" />
+                        <span>Verified at {formatTime(selectedFinding.timestamp || selectedFinding.at)}</span>
+                      </div>
+                      {selectedFinding.target && (
+                        <div className="flex items-center gap-1.5 font-mono bg-surface-2/40 px-2 py-0.5 rounded border border-border/30">
+                          <Maximize2 size={12} className="text-pf-500" />
+                          <span className="truncate max-w-[300px]">{selectedFinding.target}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
+                </div>
 
-          {selectedFinding.remediation ? (
-            <div className="space-y-1">
-              <p className="text-xs font-semibold text-text-muted uppercase">
-                Remediation
-              </p>
-              <div className="text-sm text-indigo-900 dark:text-indigo-100 bg-indigo-50 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/30 p-3 rounded whitespace-pre-wrap break-words shadow-inner font-medium">
-                {selectedFinding.remediation}
-              </div>
-            </div>
-          ) : null}
+                {/* ── Description ───────────────────────────────────────────── */}
+                <section className="space-y-2">
+                  <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-pf-600 dark:text-pf-400 flex items-center gap-2">
+                    <span className="h-px w-4 bg-pf-500/40" />
+                    Technical Overview
+                  </h3>
+                  <div className="rounded-xl border border-border/60 bg-surface-1/40 p-4 shadow-sm backdrop-blur-sm">
+                    <p className="text-sm text-text-secondary leading-relaxed whitespace-pre-wrap">
+                      {selectedFinding.description}
+                    </p>
+                  </div>
+                </section>
 
-          <div className="border-t border-border pt-3 space-y-1">
-            <p className="text-xs font-semibold text-text-muted uppercase">
-              Status
-            </p>
-            <p className="text-sm text-text-secondary">✅ Verified & Saved</p>
-            <p className="text-xs text-text-muted">
-              {formatTime(selectedFinding.timestamp || selectedFinding.at)}
-            </p>
-          </div>
+                {/* ── Reproduction Steps ────────────────────────────────────── */}
+                {((selectedFinding.steps_to_reproduce?.length ?? 0) > 0) && (
+                  <section className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-pf-600 dark:text-pf-400 flex items-center gap-2">
+                      <span className="h-px w-4 bg-pf-500/40" />
+                      Steps to Reproduce
+                    </h3>
+                    <div className="space-y-2 pl-4">
+                      {selectedFinding.steps_to_reproduce?.map((step, idx) => (
+                        <div key={idx} className="flex gap-4 group">
+                          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-2 border border-border text-[11px] font-bold text-pf-500 group-hover:bg-pf-500/10 transition-colors">
+                            {idx + 1}
+                          </span>
+                          <p className="text-sm text-text-secondary pt-0.5 leading-snug">
+                            {step}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
 
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="primary" size="sm" onClick={onClose}>
-              Close
-            </Button>
-          </div>
+                {/* ── Technical Verification ────────────────────────────────── */}
+                {((selectedFinding.verification_commands?.length ?? 0) > 0) && (
+                  <section className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-pf-600 dark:text-pf-400 flex items-center gap-2">
+                      <span className="h-px w-4 bg-pf-500/40" />
+                      Technical Verification
+                    </h3>
+                    <div className="space-y-2">
+                      {selectedFinding.verification_commands?.map((cmd, idx) => (
+                        <div key={idx} className="relative group/code">
+                          <pre className="p-3 rounded-lg bg-surface-2 text-text-secondary font-mono text-[11px] overflow-x-auto border border-border/50">
+                            <code>{cleanCommand(cmd)}</code>
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* ── Exploit Code ──────────────────────────────────────────── */}
+                {selectedFinding.exploit_script && (
+                  <section className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-pf-600 dark:text-pf-400 flex items-center gap-2">
+                      <span className="h-px w-4 bg-pf-500/40" />
+                      Exploit Code (PoC)
+                    </h3>
+                    <div className="relative group overflow-hidden rounded-xl border border-pf-500/30 bg-pf-950/95 shadow-lg">
+                      <div className="absolute top-3 right-3 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Button
+                          variant="secondary"
+                          size="xs"
+                          className="bg-surface-2/80 hover:bg-surface-2"
+                          onClick={() => {
+                            navigator.clipboard.writeText(selectedFinding.exploit_script || "");
+                          }}
+                        >
+                          Copy
+                        </Button>
+                      </div>
+                      <div className="p-4 font-mono text-xs text-pf-100 overflow-x-auto scrollbar-thin scrollbar-thumb-pf-500/30 scrollbar-track-transparent">
+                        <pre className="leading-relaxed">{selectedFinding.exploit_script}</pre>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+                {/* ── Visual Evidence (Screenshots) ────────────────────────── */}
+                {((selectedFinding.visual_evidence_paths?.length ?? 0) > 0) && (
+                  <section className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-pf-600 dark:text-pf-400 flex items-center gap-2">
+                      <span className="h-px w-4 bg-pf-500/40" />
+                      Visual Evidence
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {selectedFinding.visual_evidence_paths?.map((path, idx) => (
+                        <div key={idx} className="group relative aspect-video overflow-hidden rounded-xl border border-border bg-surface-2 shadow-sm">
+                          <img
+                            src={`/api/scans/artifacts?path=${encodeURIComponent(path)}`}
+                            alt={`Evidence ${idx + 1}`}
+                            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).src = "https://placehold.co/600x400/1e293b/64748b?text=Evidence+Asset+Not+Found";
+                            }}
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-pf-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
+                            <p className="text-[10px] font-bold text-pf-200 uppercase tracking-widest bg-pf-950/50 px-2 py-1 rounded backdrop-blur-sm border border-pf-500/30">
+                              Asset #{idx + 1}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* ── Impact Assessment ─────────────────────────────────────── */}
+                {selectedFinding.impact_assessment && Object.keys(selectedFinding.impact_assessment).length > 0 && (
+                  <section className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-pf-600 dark:text-pf-400 flex items-center gap-2">
+                      <span className="h-px w-4 bg-pf-500/40" />
+                      Impact Analysis
+                    </h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {Object.entries(selectedFinding.impact_assessment).map(([key, value]) => (
+                        <div key={key} className="rounded-xl border border-border/50 bg-surface-1/30 p-3 flex gap-3 shadow-sm hover:border-pf-500/30 transition-all group">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-surface-2 border border-border group-hover:bg-pf-500/10 transition-colors">
+                            <Zap size={18} className="text-pf-500" />
+                          </div>
+                          <div className="space-y-0.5">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-text-muted">{key.replace(/_/g, ' ')}</p>
+                            <p className="text-sm text-text-primary leading-tight font-medium">{value}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* ── Remediation Plan ──────────────────────────────────────── */}
+                {(selectedFinding.remediation || (selectedFinding.remediation_steps?.length ?? 0) > 0) && (
+                  <section className="space-y-3">
+                    <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-pf-600 dark:text-pf-400 flex items-center gap-2">
+                      <span className="h-px w-4 bg-pf-500/40" />
+                      Remediation Plan
+                    </h3>
+                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-3 shadow-inner">
+                      {selectedFinding.remediation && (
+                        <p className="text-sm text-emerald-900 dark:text-emerald-200 leading-relaxed font-medium">
+                          {selectedFinding.remediation}
+                        </p>
+                      )}
+                      {((selectedFinding.remediation_steps?.length ?? 0) > 0) && (
+                        <ul className="space-y-2">
+                          {selectedFinding.remediation_steps?.map((step, idx) => (
+                            <li key={idx} className="flex gap-2.5 items-start">
+                              <Check size={14} className="text-emerald-500 mt-0.5 shrink-0" />
+                              <span className="text-sm text-text-secondary leading-tight">{step}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </section>
+                )}
+
+                {/* ── Secondary Evidence & Metadata ───────────────────────── */}
+                <section className="pt-4 border-t border-border flex flex-wrap items-center justify-between gap-6">
+                  <div className="flex items-center gap-4">
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-bold text-text-muted uppercase tracking-[0.15em]">AI Confidence Score</p>
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-2 w-32 bg-surface-2 rounded-full overflow-hidden border border-border/50">
+                          <div
+                            className="h-full bg-pf-500 shadow-[0_0_12px_rgba(14,165,233,0.6)]"
+                            style={{ width: `${(selectedFinding.evidence?.verification_confidence ?? 0.9) * 100}%` }}
+                          />
+                        </div>
+                        <span className="text-xs font-extrabold text-text-primary">
+                          {Math.round((selectedFinding.evidence?.verification_confidence ?? 0.9) * 100)}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="h-9 px-4 border-red-200/60 bg-red-50/50 text-red-800 hover:bg-red-100/60 dark:border-red-500/20 dark:bg-red-500/8 dark:text-red-400 dark:hover:bg-red-500/12 text-[11px] font-bold uppercase tracking-wider"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onMarkFalsePositive(selectedFinding);
+                        onClose();
+                      }}
+                    >
+                      <X size={12} />
+                      False Positive
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="h-9 px-4 text-[11px] font-bold uppercase tracking-wider"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onAddToEchoPrompt(selectedFinding);
+                      }}
+                    >
+                      <Bot size={12} />
+                      Echo
+                    </Button>
+                  </div>
+                </section>
+              </>
+            );
+          })()}
         </div>
       ) : null}
     </Dialog>

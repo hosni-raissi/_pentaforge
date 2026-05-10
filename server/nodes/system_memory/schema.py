@@ -82,6 +82,16 @@ class Finding:
     http_request: Optional[str] = None
     http_response: Optional[str] = None
     poc_path: Optional[str] = None
+    # Structured PoC/Report fields
+    cwe_id: Optional[str] = None
+    cve_id: Optional[str] = None
+    steps_to_reproduce: list[str] = field(default_factory=list)
+    exploit_script: Optional[str] = None
+    verification_commands: list[str] = field(default_factory=list)
+    visual_evidence_paths: list[str] = field(default_factory=list)
+    impact_assessment: dict[str, str] = field(default_factory=dict)
+    remediation_steps: list[str] = field(default_factory=list)
+    
     oob_confirmed: bool = False
     confidence: float = 0.0
     claim_status: Literal["observed", "inferred", "assumed", "unsupported"] = "unsupported"
@@ -149,6 +159,14 @@ class Brain:
                     source_lineage=_clean_string_list(item.get("source_lineage", []), limit=20),
                     cited_tool_output_ids=_clean_string_list(item.get("cited_tool_output_ids", []), limit=20),
                     ssvc_decision=_normalize_ssvc(item.get("ssvc")),
+                    # New structured fields
+                    cwe_id=str(item.get("cwe_id", "")).strip() or None,
+                    cve_id=str(item.get("cve_id", "")).strip() or None,
+                    steps_to_reproduce=_clean_string_list(item.get("steps_to_reproduce", []), limit=50),
+                    exploit_script=str(item.get("exploit_script", "")).strip() or None,
+                    visual_evidence_paths=_clean_string_list(item.get("visual_evidence_paths", []), limit=20),
+                    impact_assessment=item.get("impact_assessment", {}) if isinstance(item.get("impact_assessment"), dict) else {},
+                    remediation_steps=_clean_string_list(item.get("remediation_steps", []), limit=20),
                     timestamp=str(item.get("timestamp", _utc_now_iso())).strip() or _utc_now_iso(),
                 )
             )
@@ -273,6 +291,10 @@ class Brain:
                     "severity": f.severity,
                     "ssvc": f.ssvc_decision,
                     "claim_status": f.claim_status,
+                    "cwe_id": f.cwe_id,
+                    "cve_id": f.cve_id,
+                    "steps_to_reproduce": f.steps_to_reproduce[:10],
+                    "impact": f.impact_assessment,
                     "source_lineage": f.source_lineage[:6],
                     "cited_tool_output_ids": f.cited_tool_output_ids[:6],
                 }
