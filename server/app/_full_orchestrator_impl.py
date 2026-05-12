@@ -30,6 +30,7 @@ from server.db.projects.project_rag import index_verified_finding
 from server.db.projects.runtime_cache import get_project_runtime_cache
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
 from server.agents.executer.payload_filter import get_payloads as _get_filtered_payloads
+from server.agents.executer.base import _executer_callback_context
 from server.nodes.information_gathering import load_target_info_profile_defaults
 from server.nodes.intel import IntelNode
 from server.nodes.system_memory import (
@@ -59,7 +60,6 @@ _TARGET_TYPE_ALIASES: dict[str, str] = {
     "web3": "web_app",
     "infrastructure": "infra",
     "infra": "infra",
-    "binary": "desktop",
     "identity": "linux_server",
     "supply_chain": "repository",
     "recon": "shared",
@@ -86,7 +86,6 @@ _STATIC_RECON_FILE_MAP: dict[str, str] = {
     "network": "common_network.json",
     "iot": "common_iot.json",
     "linux_server": "common_server.json",
-    "desktop": "common_desktop.json",
     "cloud": "common_cloud.json",
     "container": "common_container.json",
     "repository": "common_repository.json",
@@ -341,7 +340,6 @@ def _build_target_type_followup_hypotheses(
         "web_app": "web",
         "api": "web",
         "mobile": "web",
-        "desktop": "web",
         "linux_server": "service",
         "network": "service",
         "iot": "service",
@@ -3409,12 +3407,12 @@ def _should_refresh_target_info_profile_from_defaults(
         return False
 
     stored_names = [
-        str(item.get("name", "")).strip()
+        str(item.get("block_name") or item.get("name") or "").strip()
         for item in stored_blocks
         if isinstance(item, dict)
     ]
     built_in_names = [
-        str(item.get("name", "")).strip()
+        str(item.get("block_name") or item.get("name") or "").strip()
         for item in built_in_blocks
         if isinstance(item, dict)
     ]
@@ -3461,10 +3459,24 @@ def _format_target_info_profile_for_prompt(profile: dict[str, Any]) -> str:
     for idx, block in enumerate(blocks, start=1):
         if not isinstance(block, dict):
             continue
-        name = str(block.get("name", "")).strip()
+        name = str(block.get("block_name") or block.get("name") or "").strip()
         goal = str(block.get("goal", "")).strip()
         interaction = str(block.get("interaction", "")).strip()
-        tools = ", ".join(str(item).strip() for item in block.get("tools", []) if str(item).strip())
+        
+        tools_list = []
+        for item in block.get("tools", []):
+            if isinstance(item, dict):
+                # Format object like run_custom(binary, arg1, arg2)
+                t_name = str(item.get("name") or item.get("tool") or "custom").strip()
+                t_args = item.get("args", [])
+                if not isinstance(t_args, list):
+                    t_args = [t_args]
+                args_str = ", ".join(map(str, t_args))
+                tools_list.append(f"{t_name}({args_str})")
+            else:
+                tools_list.append(str(item).strip())
+        
+        tools = ", ".join(t for t in tools_list if t)
         if name:
             lines.append(
                 f"{idx}. {name} [{interaction or 'unspecified'}] :: {goal or '(no goal)'}"
@@ -4639,17 +4651,6 @@ def _organize_findings_by_verdict(
             organized["info_only"].append(verified)
 
     return organized
-    overall = assessment.get("overall", {}) if isinstance(assessment, dict) else {}
-    if not isinstance(overall, dict):
-        return "planner"
-    ssvc = str(overall.get("ssvc", "TRACK")).strip().upper()
-    confidence = str(overall.get("confidence", "low")).strip().lower()
-
-    if ssvc == "ACT":
-        return "verify"
-    if ssvc == "ATTEND" and confidence in {"medium", "high"}:
-        return "retest"
-    return "planner"
 
 
 def _extract_failed_execution_rows(
@@ -4870,11 +4871,13 @@ class ExecuterScanCallback:
         project_id: str,
         scan_id: str,
         enabled: bool = True,
+        stage: str = "executer",
     ) -> None:
         self._service = service
         self._project_id = project_id
         self._scan_id = scan_id
         self._enabled = enabled
+        self._stage = stage
         self._start = time.perf_counter()
 
     def _ts(self) -> str:
@@ -4888,8 +4891,8 @@ class ExecuterScanCallback:
             event="executer_step",
             scan_id=self._scan_id,
             level="info",
-            message=f"Executer [step] {message}",
-            data={"stage": "executer", "kind": "step", "raw_message": message},
+            message=f"{self._stage.replace('_', ' ').title()} [step] {message}",
+            data={"stage": self._stage, "kind": "step", "raw_message": message},
         )
 
     def on_done(self, message: str) -> None:
@@ -4900,8 +4903,8 @@ class ExecuterScanCallback:
             event="executer_done",
             scan_id=self._scan_id,
             level="success",
-            message=f"Executer [done] {message}",
-            data={"stage": "executer", "kind": "done", "raw_message": message},
+            message=f"{self._stage.replace('_', ' ').title()} [done] {message}",
+            data={"stage": self._stage, "kind": "done", "raw_message": message},
         )
 
     def on_warn(self, message: str) -> None:
@@ -4912,23 +4915,42 @@ class ExecuterScanCallback:
             event="executer_warn",
             scan_id=self._scan_id,
             level="warn",
-            message=f"Executer [warn] {message}",
-            data={"stage": "executer", "kind": "warn", "raw_message": message},
+            message=f"{self._stage.replace('_', ' ').title()} [warn] {message}",
+            data={"stage": self._stage, "kind": "warn", "raw_message": message},
         )
 
     def get_approval_mode(self) -> str:
         project = self._service._projects_store.get_project(self._project_id)  # noqa: SLF001
         return str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
 
-    async def request_tool_approval(
+    def request_tool_approval(
         self,
         *,
         role: str,
         tool_name: str,
         args: dict[str, Any],
         call_id: str,
-        ) -> bool:
-        return await self._service.request_executer_tool_approval(
+        ) -> Any:
+        # Detection: are we running in the main orchestrator loop?
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        service_loop = getattr(self._service, "_loop", None)
+        if current_loop is not None and current_loop is service_loop:
+            # We are in the main loop — return a coroutine for the async tool to await.
+            return self._service.request_executer_tool_approval(
+                project_id=self._project_id,
+                scan_id=self._scan_id,
+                role=role,
+                tool_name=tool_name,
+                args=args,
+                call_id=call_id,
+            )
+
+        # We are in a thread (or a different loop) — use the thread-safe bridge.
+        return self._service.request_tool_approval_threadsafe(
             project_id=self._project_id,
             scan_id=self._scan_id,
             role=role,
@@ -4937,13 +4959,13 @@ class ExecuterScanCallback:
             call_id=call_id,
         )
 
-    async def request_password(
+    def request_password(
         self,
         *,
         prompt: str,
         reason: str,
         call_id: str,
-    ) -> str | None:
+    ) -> Any:
         prompt_text = str(prompt or "").strip()
         reason_text = str(reason or "").strip()
         tool_name = "authentication"
@@ -4953,13 +4975,54 @@ class ExecuterScanCallback:
                 tool_name = first_token
                 break
 
-        return await self._service.request_executer_password(
+        # Detection: are we running in the main orchestrator loop?
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        service_loop = getattr(self._service, "_loop", None)
+        if current_loop is not None and current_loop is service_loop:
+            # We are in the main loop — return a coroutine for the async tool to await.
+            return self._service.request_executer_password(
+                project_id=self._project_id,
+                scan_id=self._scan_id,
+                tool_name=tool_name,
+                prompt=prompt_text,
+                reason=reason_text,
+                call_id=call_id,
+                stage=self._stage,
+            )
+
+        # We are in a thread (or a different loop) — use the thread-safe bridge.
+        return self._service.request_password_threadsafe(
             project_id=self._project_id,
             scan_id=self._scan_id,
             tool_name=tool_name,
             prompt=prompt_text,
             reason=reason_text,
             call_id=call_id,
+            stage=self._stage,
+        )
+
+
+class InformationGatheringScanCallback(ExecuterScanCallback):
+    """Information Gathering callback bridged to scan event bus."""
+
+    def __init__(
+        self,
+        *,
+        service: "ScanOrchestratorService",
+        project_id: str,
+        scan_id: str,
+        enabled: bool = True,
+    ) -> None:
+        super().__init__(
+            service=service,
+            project_id=project_id,
+            scan_id=scan_id,
+            enabled=enabled,
+            stage="information_gathering",
         )
 
 
@@ -5097,6 +5160,10 @@ class ScanOrchestratorService:
         self._password_request_events: dict[str, dict[str, _PendingPasswordRequest]] = {}
         self._event_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
     async def start_scan(
         self,
@@ -5937,6 +6004,7 @@ class ScanOrchestratorService:
         prompt: str,
         reason: str,
         call_id: str,
+        stage: str = "executer",
     ) -> str | None:
         """Request password from user for tools like SSH/sudo."""
         project_key = str(project_id or "").strip()
@@ -5956,14 +6024,15 @@ class ScanOrchestratorService:
         project_pending[password_id] = pending
 
         # Emit password request event to frontend
+        display_stage = stage.replace("_", " ").title()
         self._emit_event(
             project_key,
             event="executer_password_request",
             scan_id=pending.scan_id,
             level="info",
-            message=f"Executer [password required] {pending.tool_name} needs authentication",
+            message=f"{display_stage} [password required] {pending.tool_name} needs authentication",
             data={
-                "stage": "executer",
+                "stage": stage,
                 "kind": "password_request",
                 "tool_name": pending.tool_name,
                 "prompt": pending.prompt,
@@ -6046,6 +6115,74 @@ class ScanOrchestratorService:
             self._password_request_events.pop(project_key, None)
 
         return pending.password if pending.approved else None
+
+    def request_tool_approval_threadsafe(
+        self,
+        *,
+        project_id: str,
+        scan_id: str,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        """Thread-safe wrapper for requesting tool approval from a tool thread."""
+        if self._loop is None:
+            logger.warning("request_tool_approval_threadsafe_no_loop")
+            return True # Default to approve if loop missing? Or safe skip?
+        
+        future = asyncio.run_coroutine_threadsafe(
+            self.request_executer_tool_approval(
+                project_id=project_id,
+                scan_id=scan_id,
+                role=role,
+                tool_name=tool_name,
+                args=args,
+                call_id=call_id,
+            ),
+            self._loop
+        )
+        try:
+            return future.result()
+        except Exception:
+            logger.error("request_tool_approval_threadsafe_failed", exc_info=True)
+            return False
+
+    
+    def request_password_threadsafe(
+        self,
+        *,
+        project_id: str,
+        scan_id: str,
+        tool_name: str,
+        prompt: str,
+        reason: str,
+        call_id: str,
+        stage: str = "executer",
+    ) -> str | None:
+        """Thread-safe wrapper for requesting password from a tool thread."""
+        if self._loop is None:
+            logger.warning("request_password_threadsafe_no_loop")
+            return None
+        
+        future = asyncio.run_coroutine_threadsafe(
+            self.request_executer_password(
+                project_id=project_id,
+                scan_id=scan_id,
+                tool_name=tool_name,
+                prompt=prompt,
+                reason=reason,
+                call_id=call_id,
+                stage=stage,
+            ),
+            self._loop
+        )
+        try:
+            return future.result()
+        except Exception:
+            logger.error("request_password_threadsafe_failed", exc_info=True)
+            return None
+
 
     async def approve_executer_password(
         self,
@@ -6686,6 +6823,9 @@ class ScanOrchestratorService:
                     return self._parent.request_tool_approval(role=role, tool_name=tool_name, args=args, call_id=call_id)
                 return False
 
+        project = self._projects_store.get_project(project_id)
+        approval_mode = str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
+
         warmup_recon_agents = []
         for i in range(WARMUP_RECON_WORKERS):
             # Load-balance public LLM models: use exploit config for odd workers
@@ -6704,7 +6844,7 @@ class ScanOrchestratorService:
                     project_id=None,
                     project_cache_dir=project_cache_dir,
                     config=override_config,
-                    approval_mode=run_state.get("approval_mode", "custom"),
+                    approval_mode=approval_mode,
                 )
             )
         analyzer_agent = None
@@ -7658,13 +7798,14 @@ class ScanOrchestratorService:
                     scan_id=scan_id,
                     level="info",
                     message=(
-                        f"[worker {worker_index}] Scenario completed: {completed_task}"
+                        f"[worker {worker_index}] Analyzer closed scenario: {completed_task}"
                         if isinstance(worker_index, int)
-                        else f"Scenario completed: {completed_task}"
+                        else f"Analyzer closed scenario: {completed_task}"
                     ),
                     data={
-                        "stage": "executer",
+                        "stage": "analyzer",
                         "kind": "scenario_done",
+                        "phase": "verify",
                         "scenario_task": scenario.get("task", ""),
                         "agent": scenario.get("agent", ""),
                         "worker_index": worker_index,
@@ -8367,73 +8508,41 @@ class ScanOrchestratorService:
                     },
                 )
 
-                project = self._projects_store.get_project(project_id)
-                approval_mode = str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
-                
-                run_state = self._runs.get(project_id)
-                if isinstance(run_state, dict):
-                    # Sync run_state
-                    run_state["approval_mode"] = approval_mode
-                    
-                    if approval_mode == "auto":
-                        logger.info("target_info_gathering_auto_approved", project_id=project_id)
-                    else:
-                        run_state["awaiting_information_gathering_approval"] = True
-                        run_state["updated_at"] = _utc_now_iso()
-                        run_state["active_memory"] = memory  # Store for updates during approval
-                        self._runs[project_id] = run_state
 
-                        gate = asyncio.Event()
-                        self._info_gathering_approval_events[project_id] = gate
-
-                        self._emit_event(
-                            project_id,
-                            event="target_info_gathering_waiting_approval",
-                            scan_id=scan_id,
-                            level="warn",
-                            message=(
-                                "Information Gathering [waiting approval] Static information gathering plan is ready. "
-                                "Review the organized blocks, then click Continue Information Gathering."
-                            ),
-                            data={
-                                "stage": "information_gathering",
-                                "kind": "waiting_approval",
-                                "status": "running",
-                                "awaiting_user_approval": True,
-                                "program": target_info_gathering_result,
-                            },
-                        )
-
-                        try:
-                            await gate.wait()
-                        except asyncio.CancelledError:
-                            raise
-                        finally:
-                            self._info_gathering_approval_events.pop(project_id, None)
-
-            target_memory = await brain_builder.run(
+            # Setup callback context for tools to request passwords/approvals
+            info_gathering_cb = InformationGatheringScanCallback(
+                service=self,
                 project_id=project_id,
                 scan_id=scan_id,
-                target=target,
-                target_type=_normalize_target_type(target_type),
-                scope=scope_text,
-                info=info,
-                profile=target_info_profile,
-                project_cache_dir=project_cache_dir,
-                tool_map=tool_map,
-                tool_arg_builder=_build_target_info_tool_kwargs,
-                progress_callback=_emit_system_memory_progress,
-                pre_execution_gate=_await_information_gathering_plan_approval,
+                enabled=print_steps,
             )
-            target_memory = _apply_memory_enrichment(target_memory)
-            target_memory = await _run_authenticated_surface_enrichment(
-                project_cache_dir=project_cache_dir,
-                target_memory=target_memory,
-                target=target,
-                target_type=target_type,
-                target_config=project.get("targetConfig") if isinstance(project.get("targetConfig"), dict) else None,
-                tool_map=tool_map,
-            )
+            callback_token = _executer_callback_context.set(info_gathering_cb)
+            try:
+                target_memory = await brain_builder.run(
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    target=target,
+                    target_type=_normalize_target_type(target_type),
+                    scope=scope_text,
+                    info=info,
+                    profile=target_info_profile,
+                    project_cache_dir=project_cache_dir,
+                    tool_map=tool_map,
+                    tool_arg_builder=_build_target_info_tool_kwargs,
+                    progress_callback=_emit_system_memory_progress,
+                    pre_execution_gate=None,
+                )
+                target_memory = _apply_memory_enrichment(target_memory)
+                target_memory = await _run_authenticated_surface_enrichment(
+                    project_cache_dir=project_cache_dir,
+                    target_memory=target_memory,
+                    target=target,
+                    target_type=target_type,
+                    target_config=project.get("targetConfig") if isinstance(project.get("targetConfig"), dict) else None,
+                    tool_map=tool_map,
+                )
+            finally:
+                _executer_callback_context.reset(callback_token)
             target_memory = _apply_memory_enrichment(target_memory)
             target_memory = await _save_target_memory(
                 project_cache_dir,
@@ -9178,12 +9287,12 @@ class ScanOrchestratorService:
                         scan_id=scan_id,
                         level="success",
                         message=(
-                            f"---------------------"
-                            f"(cycle {display_cycle_count} finish)---------------------"
+                            f"Planner [loop] cycle {display_cycle_count} handoff ready."
                         ),
                         data={
-                            "stage": "executer",
+                            "stage": "planner",
                             "kind": "cycle_completed",
+                            "source_stage": "executer",
                             "cycle": display_cycle_count,
                             "warmup": False,
                             "should_continue": bool(should_continue),
@@ -9198,10 +9307,11 @@ class ScanOrchestratorService:
                             event="executer_planner_says_done",
                             scan_id=scan_id,
                             level="success",
-                            message="Executer [done signal] Planner returned completion.",
+                            message="Planner [done signal] returned completion.",
                             data={
-                                "stage": "executer",
+                                "stage": "planner",
                                 "kind": "planner_done",
+                                "source_stage": "executer",
                                 "cycle": cycle_count + WARMUP_RECON_CYCLES,
                             },
                         )

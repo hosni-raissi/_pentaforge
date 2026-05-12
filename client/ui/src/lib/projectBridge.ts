@@ -4,6 +4,7 @@ import type { CopilotMessage, Project } from "@/types";
 export interface ProjectTargetTypeOption {
   value: string;
   label: string;
+  disabled?: boolean;
 }
 
 export interface ProjectTargetField {
@@ -474,6 +475,9 @@ function normalizeProjectRow(value: unknown): Project | null {
     lastScan: (
       typeof row.lastScan === "object" && row.lastScan !== null
     ) ? (row.lastScan as Project["lastScan"]) : undefined,
+    payload: (
+      typeof row.payload === "object" && row.payload !== null
+    ) ? (row.payload as Project["payload"]) : undefined,
   };
 }
 
@@ -530,8 +534,32 @@ async function requestJson<T>(
   }
 }
 
+export interface LLMProfile {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  api_url?: string | null;
+  api_key?: string | null;
+  is_active: boolean;
+  roles: string[];
+}
+
 export interface SystemSettings {
   privacy_gate: boolean;
+  llm_profiles: LLMProfile[];
+  llm_mode: string;
+  fallback_profiles?: LLMProfile[];
+}
+
+export async function testLLMConfigFromDesktop(profile: LLMProfile): Promise<{ ok: boolean; message: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<{ ok: boolean; message: string }>("/api/settings/test-llm", {
+    method: "POST",
+    body: JSON.stringify(profile),
+  });
 }
 
 export async function fetchSystemSettingsFromDesktop(): Promise<SystemSettings> {
@@ -550,6 +578,15 @@ export async function updateSystemSettingsFromDesktop(
   return await requestJson("/api/settings", {
     method: "POST",
     body: JSON.stringify(settings),
+  });
+}
+
+export async function resetSystemSettingsToDefaultsFromDesktop(): Promise<SystemSettings> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson<SystemSettings>("/api/settings/reset", {
+    method: "POST",
   });
 }
 
@@ -595,6 +632,15 @@ export async function deleteProjectFromDesktop(projectId: string): Promise<void>
   }
   await requestJson(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
+  });
+}
+
+export async function resetProjectRuntimeStateFromDesktop(projectId: string): Promise<void> {
+  if (!supportsDesktopProjectBridge()) {
+    return;
+  }
+  await requestJson(`/api/projects/${encodeURIComponent(projectId)}/reset-runtime`, {
+    method: "POST",
   });
 }
 
@@ -1507,7 +1553,13 @@ export async function getAIAssistContextMetricsFromDesktop(request: {
   });
 }
 
-export async function synthesizeProjectArchitectureFromDesktop(projectId: string): Promise<{ ok: boolean; architecture_draft: any }> {
+export async function synthesizeProjectArchitectureFromDesktop(projectId: string): Promise<{
+  ok: boolean;
+  status?: string;
+  started?: boolean;
+  already_running?: boolean;
+  architecture_draft: any;
+}> {
   if (!supportsDesktopProjectBridge()) {
     throw new Error("desktop project bridge is disabled");
   }

@@ -464,13 +464,24 @@ def _request_password_via_callback(
 
         prompt = f"{command} password: "
         reason = f"Execute: {command}"
+        # Use thread-safe version if available, otherwise fallback to async run
+        if hasattr(callback, "request_password_threadsafe"):
+            return callback.request_password_threadsafe(
+                prompt=prompt,
+                reason=reason,
+                call_id=call_id,
+            )
+
         password = callback.request_password(
             prompt=prompt,
             reason=reason,
             call_id=call_id,
         )
         if inspect.isawaitable(password):
-            password = asyncio.run(password)
+            try:
+                password = asyncio.run(password)
+            except RuntimeError:
+                return None
         return password
     except Exception:
         return None

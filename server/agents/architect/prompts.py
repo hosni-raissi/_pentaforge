@@ -28,15 +28,55 @@ The JSON must follow this exact structure:
       "toId": "host-id-2",
       "label": "Description of traffic or dependency"
     }
-  ]
+  ],
+  "board": {
+    "theme": "mono-grid",
+    "canvas": {
+      "width": 1200,
+      "height": 680
+    },
+    "boxes": [
+      {
+        "id": "entry-box",
+        "title": "ENTRY BOX",
+        "subtitle": "Human-readable subheading",
+        "kind": "host|ports|service|backend|data|notes|auth|infra",
+        "x": 120,
+        "y": 120,
+        "w": 240,
+        "h": 160,
+        "lines": ["short line 1", "short line 2"],
+        "tags": ["80/tcp", "22/tcp"],
+        "hostIds": ["web-frontend"],
+        "emphasis": "primary|normal|muted"
+      }
+    ],
+    "links": [
+      {
+        "fromId": "entry-box",
+        "toId": "ports-box",
+        "label": "ports"
+      }
+    ]
+  }
 }
 
 ### GUIDELINES
+0. **Design As Code**:
+   - The `board` object is the primary visual design contract for the frontend.
+   - Think like a game UI / tactical board designer working in black and white.
+   - The frontend will render the boxes and links you return; do not rely on the UI to invent panels for you.
+   - Keep box titles short, uppercase-friendly, and diagram-like.
+   - Use `lines` for concise facts, not long paragraphs.
+   - Do NOT overlap boxes. Leave generous spacing between neighboring boxes.
+   - Prefer clean columns or lanes over dense packing.
 1. **Design-First Hosts**:
    - Assign 'x' and 'y' coordinates (0-100) to create a clear visual layout.
    - External/Edge hosts should be on the left (low 'x').
    - Internal/Database hosts should be on the right (high 'x').
    - Use meaningful IDs like 'web-frontend', 'auth-service', 'data-storage'.
+   - `hosts` and `flows` remain the semantic data model.
+   - `board.boxes` and `board.links` are the visual layout model.
 2. **Ports**: List all discovered open ports for each host.
 3. **Architectural Notes**: Be concise. Focus on the host's role and confirmed vulnerabilities.
 4. **Flows**: Map how data or requests move between components (e.g., 'Gateway -> App Server', 'App -> DB Cluster').
@@ -48,9 +88,10 @@ The JSON must follow this exact structure:
    - If a target exposes multiple logically distinct services (e.g., a Web Frontend and a Database Port, or an FTP Storage and a Management Telnet), you SHOULD split them into separate hosts if it improves the clarity of the "Backend" relationship.
    - Design the "Flow" between these logical components.
    - Path-level findings (e.g., `/console`, `swagger`) should still be described in the note of the primary application host.
+   - Also design matching visual boxes for those components in `board.boxes`.
 7. **When Evidence Is Thin**:
    - Prefer fewer hosts over speculative hosts.
-   - If only one externally reachable application surface is observed, return a single grounded host with a rich architectural note.
+   - If only one externally reachable application surface is observed, still return a meaningful `board` layout with multiple explanatory boxes tied to that host.
 """
 
 ARCHITECT_USER_PROMPT_TEMPLATE = """Target: {target}
@@ -85,4 +126,3 @@ Remove:
 
 Return a concise, bulleted summary that can be used to reconstruct the architecture.
 """
-

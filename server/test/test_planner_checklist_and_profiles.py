@@ -23,6 +23,7 @@ from server.agents.executer.recon.tools import ALL_RECON_TOOLS
 from server.agents.planner.agent import PlannerAgent
 from server.core.llm import LLMResponse
 from server.core.tool import tool
+from server.nodes.information_gathering.node import InformationGatheringNode
 from server.nodes.system_memory.schema import Brain
 
 
@@ -37,11 +38,63 @@ def test_target_info_profiles_only_reference_registered_recon_tools() -> None:
     missing: list[tuple[str, str, str]] = []
     for target_type, blocks in profile.items():
         for block in blocks:
-            for tool_name in block.get("tools", []):
+            for raw_tool in block.get("tools", []):
+                if isinstance(raw_tool, str):
+                    tool_name = raw_tool
+                elif isinstance(raw_tool, dict):
+                    tool_name = str(raw_tool.get("name") or raw_tool.get("tool") or "").strip()
+                    if tool_name == "run_custom":
+                        command = str(raw_tool.get("command", "")).strip()
+                        args = raw_tool.get("args", [])
+                        assert command or (
+                            isinstance(args, list)
+                            and len(args) > 0
+                            and isinstance(args[0], str)
+                            and str(args[0]).strip()
+                        ), f"Malformed run_custom target-info entry in {target_type}:{block.get('id', '')}: {raw_tool}"
+                    else:
+                        assert tool_name, f"Missing tool name in {target_type}:{block.get('id', '')}: {raw_tool}"
+                else:
+                    missing.append((target_type, str(block.get("id", "")), str(raw_tool)))
+                    continue
                 if tool_name not in known_tools:
                     missing.append((target_type, str(block.get("id", "")), tool_name))
 
     assert not missing, f"Missing target-info recon tools: {missing}"
+
+
+def test_information_gathering_executes_object_style_builtin_tools() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class FakeTool:
+        async def execute(self, **kwargs):
+            recorded.append(kwargs)
+            return "ok"
+
+    node = InformationGatheringNode()
+
+    result = asyncio.run(
+        node._execute_block(
+            prepared_block={
+                "id": "fingerprinting",
+                "status": "keep",
+                "tools": [{"name": "http_probe"}],
+            },
+            memory={},
+            target="https://example.com",
+            target_type="web_app",
+            info="",
+            tool_map={"http_probe": FakeTool()},
+            tool_arg_builder=lambda tool_name, target, target_type, info, memory: (
+                {"target": target, "args": ["-follow-redirects"], "timeout": 120},
+                None,
+            ),
+        )
+    )
+
+    assert recorded == [{"target": "https://example.com", "args": ["-follow-redirects"], "timeout": 120}]
+    assert result[0]["tool"] == "http_probe"
+    assert result[0]["status"] == "completed"
 
 
 def test_generate_checklist_can_use_tools_before_finalizing() -> None:

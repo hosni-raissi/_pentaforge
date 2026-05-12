@@ -105,6 +105,7 @@ _ASSISTANT_NETWORK_COMMANDS = {
     "traceroute",
     "mtr",
     "telnet",
+    "msfconsole",
 }
 _ASSISTANT_CAPABILITY_QUESTION_PATTERNS = (
     "who are you",
@@ -1909,22 +1910,30 @@ class AssistantAgent:
             return await self._queue.call_with_queue("assistant", _call_primary())
         except Exception as exc:
             error_text = str(exc).lower()
-            is_rate_limit = "429" in error_text or "rate limit" in error_text
-            
+            fallback_statuses = {429, 500, 502, 503, 504}
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None else None
+            is_transient_provider_failure = (
+                status_code in fallback_statuses
+                or "429" in error_text
+                or "rate limit" in error_text
+                or "503" in error_text
+                or "service unavailable" in error_text
+            )
+
             if isinstance(exc, httpx.HTTPStatusError):
                 recovered = self._recover_from_failed_generation(exc)
                 if recovered is not None:
                     logger.warning("assistant_recovered_failed_generation_tool_call")
                     return recovered
 
-            if not is_rate_limit:
+            if not is_transient_provider_failure:
                 raise
 
             backup_llm = await self._backup.get_backup_llm()
             if backup_llm is None:
                 raise
 
-            logger.info("assistant_backup_llm_fallback", error=error_text)
+            logger.info("assistant_backup_llm_fallback", error=error_text, status=status_code)
             return await backup_llm.chat(
                 messages,
                 tools=tool_payload,

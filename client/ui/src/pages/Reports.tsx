@@ -214,11 +214,18 @@ export default function Reports() {
       const activeShare = await getActiveShareLinkFromDesktop(project.id);
       if (activeShare && activeShare.ok) {
         setShareResult(activeShare);
-        // Recover password from local storage if possible
-        const savedPwd = localStorage.getItem(`pf_share_pwd_${project.id}`);
-        if (savedPwd) {
-          setGeneratedPassword(savedPwd);
-          setSecureShare(true);
+        // Recover password from local storage if the link is protected
+        if (activeShare.password_protected) {
+          const savedPwd = localStorage.getItem(`pf_share_pwd_${project.id}`);
+          if (savedPwd) {
+            setGeneratedPassword(savedPwd);
+            setSecureShare(true);
+          } else {
+            setSecureShare(true);
+          }
+        } else {
+          setSecureShare(false);
+          setGeneratedPassword("");
         }
       } else {
         setShareResult(null);
@@ -227,15 +234,6 @@ export default function Reports() {
       setShareResult(null);
     }
   }, [project?.id]);
-
-  // Persist generated password locally since backend only stores hashes
-  useEffect(() => {
-    if (project?.id && generatedPassword) {
-      localStorage.setItem(`pf_share_pwd_${project.id}`, generatedPassword);
-    } else if (project?.id && !shareResult?.ok) {
-      localStorage.removeItem(`pf_share_pwd_${project.id}`);
-    }
-  }, [generatedPassword, project?.id, shareResult?.ok]);
 
   const stopStatusPolling = useCallback(() => {
     if (statusPolling.current) {
@@ -312,14 +310,6 @@ export default function Reports() {
     if (project?.id) {
       fetchShareState();
     }
-    
-    return () => {
-      // Auto-revoke on project switch/unmount as requested for clean delivery lifecycle
-      if (project?.id) {
-        revokeShareLinksFromDesktop(project.id).catch(() => {});
-        localStorage.removeItem(`pf_share_pwd_${project.id}`);
-      }
-    };
   }, [project?.id, fetchShareState]);
 
   useEffect(() => {
@@ -488,6 +478,13 @@ export default function Reports() {
     try {
       // Auto-revoke previous link if we are regenerating
       if (shareResult?.ok) {
+        try {
+          await requestClientRefreshFromDesktop(project.id);
+          // Wait a moment for the refresh signal to hit the client's poller
+          await new Promise(r => setTimeout(r, 1500));
+        } catch {
+          // Ignore refresh errors
+        }
         await revokeShareLinksFromDesktop(project.id);
       }
 
@@ -520,11 +517,20 @@ export default function Reports() {
     setShareRevoking(true);
     setShareError("");
     try {
+      try {
+        await requestClientRefreshFromDesktop(project.id);
+        // Wait a moment for the refresh signal to hit the client's poller
+        await new Promise(r => setTimeout(r, 1500));
+      } catch {
+        // Ignore refresh errors
+      }
+
       await revokeShareLinksFromDesktop(project.id);
       setShareResult(null);
       setShareCopied(false);
       setGeneratedPassword("");
       setSecureShare(false);
+      localStorage.removeItem(`pf_share_pwd_${project.id}`);
     } catch (err) {
       setShareError(
         err instanceof Error ? err.message : "Failed to revoke share access",

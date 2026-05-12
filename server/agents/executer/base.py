@@ -1011,6 +1011,76 @@ class BaseExecuterAgent:
             lines.append("")
         return "\n".join(lines).strip()
 
+    def _stringify_tool_arg_value(
+        self,
+        value: Any,
+        *,
+        depth: int = 0,
+        string_limit: int = 80,
+    ) -> str:
+        if depth >= 2:
+            return "..."
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if string_limit > 0 and len(text) > string_limit:
+                text = text[: max(string_limit - 3, 1)] + "..."
+            return text
+        if isinstance(value, list):
+            preview = [
+                self._stringify_tool_arg_value(item, depth=depth + 1, string_limit=string_limit)
+                for item in value[:4]
+            ]
+            if len(value) > 4:
+                preview.append("...")
+            return f"[{', '.join(preview)}]"
+        if isinstance(value, dict):
+            preview_parts: list[str] = []
+            for idx, (key, item) in enumerate(value.items()):
+                if idx >= 4:
+                    preview_parts.append("...")
+                    break
+                preview_parts.append(
+                    f"{key}={self._stringify_tool_arg_value(item, depth=depth + 1, string_limit=string_limit)}"
+                )
+            return "{" + ", ".join(preview_parts) + "}"
+        text = str(value).strip()
+        if string_limit > 0 and len(text) > string_limit:
+            return text[: max(string_limit - 3, 1)] + "..."
+        return text
+
+    def _format_tool_invocation_preview(self, tool_name: str, args: dict[str, Any]) -> str:
+        clean_tool = str(tool_name or "").strip() or "unknown_tool"
+        if not isinstance(args, dict) or not args:
+            return clean_tool
+
+        if clean_tool == "run_custom":
+            base_cmd = str(args.get("command", "")).strip()
+            arg_list = args.get("args") if isinstance(args.get("args"), list) else []
+            rendered_args = " ".join(str(item).strip() for item in arg_list if str(item).strip())
+            full = f"{base_cmd} {rendered_args}".strip()
+            return full or clean_tool
+
+        rendered_parts: list[str] = []
+        for key, value in args.items():
+            if key.startswith("_"):
+                continue
+            string_limit = 0 if clean_tool == "run_python" and key == "code" else 80
+            rendered = self._stringify_tool_arg_value(value, string_limit=string_limit)
+            if rendered:
+                rendered_parts.append(f"{key}={rendered}")
+            if len(rendered_parts) >= 5:
+                break
+
+        if not rendered_parts:
+            return clean_tool
+        return f"{clean_tool}({', '.join(rendered_parts)})"
+
     def _tool_result_excerpt(self, raw_result: Any, limit: int = 220) -> str:
         text = str(raw_result or "").strip()
         if not text:
@@ -1720,21 +1790,12 @@ class BaseExecuterAgent:
                 elif result:
                     pass
                 else:
-                    cmd_preview = ""
-                    if tool_name == "run_custom":
-                        base_cmd = str(args.get("command", "")).strip()
-                        arg_list = args.get("args") or []
-                        if base_cmd:
-                            if isinstance(arg_list, list):
-                                joined_args = " ".join(str(x) for x in arg_list)
-                                cmd_preview = f"{base_cmd} {joined_args}".strip()
-                            else:
-                                cmd_preview = base_cmd
+                    cmd_preview = self._format_tool_invocation_preview(tool_name, args)
                     if cmd_preview:
                         self._cb.on_step(
                             f"[{self._role}] tool call"
                             f"{f' [{scenario_id}]' if scenario_id else ''}: "
-                            f"{tool_name} -> {cmd_preview}"
+                            f"{cmd_preview}"
                         )
                     else:
                         self._cb.on_step(

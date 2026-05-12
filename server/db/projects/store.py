@@ -366,7 +366,7 @@ class ProjectsStore:
             conn.commit()
 
     def recover_interrupted_scans(self) -> int:
-        """Mark stale `running` scans as interrupted after server restarts."""
+        """Cancel stale in-flight scans after server restarts."""
         now_iso = datetime.now(timezone.utc).isoformat()
         recovered = 0
 
@@ -392,18 +392,18 @@ class ProjectsStore:
                 changed = False
                 status = str(payload.get("status", "")).strip().lower()
                 if status == "running":
-                    payload["status"] = "paused"
+                    payload["status"] = "stopped"
                     changed = True
 
                 last_scan = payload.get("lastScan")
                 if isinstance(last_scan, dict):
                     last_status = str(last_scan.get("status", "")).strip().lower()
                     if last_status == "running":
-                        last_scan["status"] = "paused"
+                        last_scan["status"] = "cancelled"
                         if not str(last_scan.get("finishedAt", "")).strip():
                             last_scan["finishedAt"] = now_iso
                         if not str(last_scan.get("error", "")).strip():
-                            last_scan["error"] = "Scan interrupted because server restarted."
+                            last_scan["error"] = "Scan cancelled because the server stopped."
                         payload["lastScan"] = last_scan
                         changed = True
 
@@ -769,20 +769,12 @@ class ProjectsStore:
             "metrics": compute_observability_metrics(events, tool_logs),
         }
 
-    def upsert_project(self, project: dict[str, Any]) -> None:
+    def _write_project_payload(self, project: dict[str, Any]) -> None:
         project_id = str(project.get("id", "")).strip()
         if not project_id:
             raise ValueError("project.id is required")
 
-        # Load existing project if it exists to perform a merge
-        existing = self.get_project(project_id)
-        if existing:
-            merged = dict(existing)
-            merged.update(project)
-            project = merged
-
         payload = json.dumps(project, ensure_ascii=True)
-
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -796,6 +788,19 @@ class ProjectsStore:
                 (project_id, payload),
             )
             conn.commit()
+
+    def upsert_project(self, project: dict[str, Any]) -> None:
+        project_id = str(project.get("id", "")).strip()
+        if not project_id:
+            raise ValueError("project.id is required")
+
+        # Load existing project if it exists to perform a merge
+        existing = self.get_project(project_id)
+        if existing:
+            merged = dict(existing)
+            merged.update(project)
+            project = merged
+        self._write_project_payload(project)
 
     def append_project_copilot_history(
         self,
@@ -934,6 +939,95 @@ class ProjectsStore:
         project["updatedAt"] = datetime.now(timezone.utc).isoformat()
         self.upsert_project(project)
 
+    def reset_project_runtime_state(self, project_id: str) -> dict[str, Any]:
+        safe_project_id = str(project_id or "").strip()
+        if not safe_project_id:
+            raise ValueError("project_id is required")
+
+        project = self.get_project(safe_project_id)
+        if not isinstance(project, dict):
+            raise LookupError("project not found")
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        agents = project.get("agents", [])
+        phases = project.get("phases", [])
+        normalized_agents = (
+            [
+                {
+                    **agent,
+                    "state": "idle",
+                    "progress": 0,
+                    "currentTask": "",
+                    "lastUpdate": "",
+                }
+                for agent in agents
+                if isinstance(agent, dict)
+            ]
+            or [
+                {"name": "planner", "state": "idle", "progress": 0, "currentTask": "", "lastUpdate": ""},
+                {"name": "executer", "state": "idle", "progress": 0, "currentTask": "", "lastUpdate": ""},
+                {"name": "analyzer", "state": "idle", "progress": 0, "currentTask": "", "lastUpdate": ""},
+            ]
+        )
+        normalized_phases = (
+            [
+                {
+                    **phase,
+                    "status": "pending",
+                    "progress": 0,
+                    "startedAt": "",
+                    "completedAt": "",
+                }
+                for phase in phases
+                if isinstance(phase, dict)
+            ]
+            or [
+                {"name": "Reconnaissance", "status": "pending", "progress": 0, "startedAt": "", "completedAt": ""},
+                {"name": "Enumeration", "status": "pending", "progress": 0, "startedAt": "", "completedAt": ""},
+                {"name": "Exploitation", "status": "pending", "progress": 0, "startedAt": "", "completedAt": ""},
+                {"name": "Post-Exploitation", "status": "pending", "progress": 0, "startedAt": "", "completedAt": ""},
+                {"name": "Reporting", "status": "pending", "progress": 0, "startedAt": "", "completedAt": ""},
+            ]
+        )
+
+        reset_project = {
+            **project,
+            "status": "idle",
+            "scanProgress": 0,
+            "updatedAt": now_iso,
+            "findings": [],
+            "copilotHistory": [],
+            "copilotContext": "",
+            "copilotHistoryScope": "",
+            "copilotContextScope": "",
+            "lastScan": None,
+            "payload": None,
+            "agents": normalized_agents,
+            "phases": normalized_phases,
+        }
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM share_links WHERE project_id = ?;", (safe_project_id,))
+            cur.execute("DELETE FROM scan_event_cache WHERE project_id = ?;", (safe_project_id,))
+            cur.execute("DELETE FROM project_task_runs WHERE project_id = ?;", (safe_project_id,))
+            cur.execute("DELETE FROM project_tool_audit_logs WHERE project_id = ?;", (safe_project_id,))
+            cur.execute("DELETE FROM project_reports WHERE project_id = ?;", (safe_project_id,))
+            cur.execute("DELETE FROM client_messages WHERE project_id = ?;", (safe_project_id,))
+            cur.execute(
+                """
+                INSERT INTO records (id, payload, created_at, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (id) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (safe_project_id, json.dumps(reset_project, ensure_ascii=True)),
+            )
+            conn.commit()
+
+        return reset_project
+
     def delete_project(self, project_id: str) -> None:
         with self._connect() as conn:
             cur = conn.cursor()
@@ -942,6 +1036,8 @@ class ProjectsStore:
             cur.execute("DELETE FROM scan_event_cache WHERE project_id = ?;", (project_id,))
             cur.execute("DELETE FROM project_task_runs WHERE project_id = ?;", (project_id,))
             cur.execute("DELETE FROM project_tool_audit_logs WHERE project_id = ?;", (project_id,))
+            cur.execute("DELETE FROM project_reports WHERE project_id = ?;", (project_id,))
+            cur.execute("DELETE FROM client_messages WHERE project_id = ?;", (project_id,))
             conn.commit()
 
     def create_share_link(

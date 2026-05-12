@@ -4,10 +4,12 @@ import type { Project, ProjectStatus } from '../types';
 import {
   deleteProjectFromDesktop,
   listProjectsFromDesktop,
+  resetProjectRuntimeStateFromDesktop,
   saveProjectToDesktop,
   startProjectScanFromDesktop,
   stopProjectScanFromDesktop,
   supportsDesktopProjectBridge,
+  revokeShareLinksFromDesktop,
 } from '../lib/projectBridge';
 
 interface ProjectStore {
@@ -25,10 +27,14 @@ interface ProjectStore {
   updateProject: (id: string, updates: Partial<Project>, opts?: { persist?: boolean }) => void;
   getActive: () => Project | null;
   getRunning: () => Project | null;
-  hydrateFromDatabase: () => Promise<void>;
+  hydrateFromDatabase: () => Promise<boolean>;
 }
 
 type PersistedProjectStore = Pick<ProjectStore, 'activeProjectId'>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 export const useProjects = create<ProjectStore>()(
   persist(
@@ -70,7 +76,14 @@ export const useProjects = create<ProjectStore>()(
         }));
       },
 
-      setActive: (id) => set({ activeProjectId: id }),
+      setActive: (id) => {
+        const state = get();
+        if (state.activeProjectId && state.activeProjectId !== id && supportsDesktopProjectBridge()) {
+          revokeShareLinksFromDesktop(state.activeProjectId).catch(() => {});
+          localStorage.removeItem(`pf_share_pwd_${state.activeProjectId}`);
+        }
+        set({ activeProjectId: id });
+      },
 
       setRunning: (id, opts) => {
         const state = get();
@@ -299,11 +312,23 @@ export const useProjects = create<ProjectStore>()(
         }
 
         if (mode === 'cancel') {
+          if (supportsDesktopProjectBridge()) {
+            try {
+              await resetProjectRuntimeStateFromDesktop(id);
+            } catch (error) {
+              console.error('Failed to reset cancelled project runtime:', error);
+            }
+          }
+
           const resetProject: Project = {
             ...target,
             status: 'idle',
             scanProgress: 0,
+            findings: [],
+            copilotHistory: [],
+            copilotContext: '',
             lastScan: undefined,
+            payload: undefined,
             agents: target.agents.map((agent) => ({
               ...agent,
               state: 'idle',
@@ -327,9 +352,12 @@ export const useProjects = create<ProjectStore>()(
             runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
             startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
           }));
-          void saveProjectToDesktop(resetProject).catch((error) => {
-            console.error('Failed to persist cancelled project reset:', error);
-          });
+          try {
+            window.sessionStorage.removeItem(`pf-assistant-chat:${id}:${target.target}:${target.targetType}`);
+          } catch {
+            // Ignore storage cleanup failures; backend reset is still authoritative.
+          }
+          localStorage.removeItem(`pf_share_pwd_${id}`);
           return;
         }
 
@@ -413,7 +441,7 @@ export const useProjects = create<ProjectStore>()(
 
       hydrateFromDatabase: async () => {
         if (!supportsDesktopProjectBridge()) {
-          return;
+          return false;
         }
 
         try {
@@ -444,6 +472,37 @@ export const useProjects = create<ProjectStore>()(
               }
             }
 
+            for (let index = 0; index < nextProjects.length; index += 1) {
+              const remoteProject = nextProjects[index];
+              const localProject = state.projects.find((project) => project.id === remoteProject.id);
+              if (!localProject) {
+                continue;
+              }
+
+              const localPayload = isRecord(localProject.payload) ? localProject.payload : {};
+              const remotePayload = isRecord(remoteProject.payload) ? remoteProject.payload : {};
+              const localRefresh = isRecord(localPayload.architecture_refresh)
+                ? localPayload.architecture_refresh
+                : null;
+              const remoteRefresh = isRecord(remotePayload.architecture_refresh)
+                ? remotePayload.architecture_refresh
+                : null;
+              const localStatus =
+                typeof localRefresh?.status === "string" ? localRefresh.status.trim().toLowerCase() : "";
+              const remoteStatus =
+                typeof remoteRefresh?.status === "string" ? remoteRefresh.status.trim().toLowerCase() : "";
+
+              if (localStatus === "running" && remoteStatus !== "running") {
+                nextProjects[index] = {
+                  ...remoteProject,
+                  payload: {
+                    ...remotePayload,
+                    architecture_refresh: localRefresh,
+                  },
+                };
+              }
+            }
+
             const activeStillExists = state.activeProjectId
               ? nextProjects.some((p) => p.id === state.activeProjectId)
               : false;
@@ -458,8 +517,10 @@ export const useProjects = create<ProjectStore>()(
               startingProjectId: state.startingProjectId,
             };
           });
+          return true;
         } catch (error) {
           console.error('Failed to hydrate projects from desktop DB:', error);
+          return false;
         }
       },
     }),

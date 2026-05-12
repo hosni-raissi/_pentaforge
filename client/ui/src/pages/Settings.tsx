@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, Clock3, Cpu, ListTree, Palette, Pencil, Plus, RefreshCcw, Server, Trash2 } from "lucide-react";
+import { Bot, CheckCircle2, Clock3, Cpu, ListTree, Palette, Pencil, Plus, RefreshCcw, Trash2 } from "lucide-react";
+import clsx from "clsx";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -7,7 +8,6 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Tabs } from "@/components/ui/Tabs";
 import { Toggle } from "@/components/ui/Toggle";
-import { StaticReconPlanSettings } from "@/components/settings/StaticReconPlanSettings";
 import {
   addIntelResourceFromDesktop,
   cancelForceIntelUpdateFromDesktop,
@@ -20,10 +20,14 @@ import {
   updateIntelResourceFromDesktop,
   fetchSystemSettingsFromDesktop,
   updateSystemSettingsFromDesktop,
+  resetSystemSettingsToDefaultsFromDesktop,
+  testLLMConfigFromDesktop,
   type IntelForceUpdateStatus,
   type IntelResource,
   type IntelTargetTypeOption,
   type IntelUpdateStatusPayload,
+  type LLMProfile,
+  type SystemSettings,
 } from "@/lib/projectBridge";
 import { useConfig } from "@/stores/config";
 import { useTheme } from "@/stores/theme";
@@ -101,7 +105,6 @@ const RESOURCE_TARGET_SCOPE: Record<string, Set<string>> = {
   network: new Set(["network"]),
   iot: new Set(["iot"]),
   linux_server: new Set(["linux_server"]),
-  desktop: new Set(["desktop"]),
   cloud: new Set(["cloud"]),
   container: new Set(["container", "cloud"]),
   repository: new Set(["repository"]),
@@ -117,7 +120,6 @@ const EXPECTED_TARGET_FILTERS = [
   "network",
   "iot",
   "linux_server",
-  "desktop",
   "cloud",
   "container",
   "repository",
@@ -187,6 +189,19 @@ export default function Settings() {
   const [forceUpdateSuccess, setForceUpdateSuccess] = useState("");
   const [forceUpdateStatus, setForceUpdateStatus] = useState<IntelForceUpdateStatus | null>(null);
   const [showForceUpdatePanel, setShowForceUpdatePanel] = useState(false);
+  const [llmProfiles, setLlmProfiles] = useState<LLMProfile[]>([]);
+  const [fallbackProfiles, setFallbackProfiles] = useState<LLMProfile[]>([]);
+  const [llmMode, setLlmMode] = useState("public");
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [profileName, setProfileName] = useState("");
+  const [profileProvider, setProfileProvider] = useState("cerebras");
+  const [profileModel, setProfileModel] = useState("");
+  const [profileUrl, setProfileUrl] = useState("");
+  const [profileKey, setProfileKey] = useState("");
+  const [llmTestingId, setLlmTestingId] = useState<string | null>(null);
+  const [llmTestResult, setLlmTestResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
+  const [llmSaveLoading, setLlmSaveLoading] = useState(false);
+
   const forceUpdateStatusValue = String(forceUpdateStatus?.status || "").toLowerCase();
   const forceUpdateIsActive = forceUpdateStatusValue === "running" || forceUpdateStatusValue === "cancelling";
 
@@ -270,29 +285,148 @@ export default function Settings() {
     return () => window.clearInterval(timer);
   }, [showForceUpdatePanel, forceUpdateStatus, loadForceUpdateStatus]);
 
-  // Synchronize PrivacyGate settings with backend
-  useEffect(() => {
-    async function sync() {
-      try {
-        const remote = await fetchSystemSettingsFromDesktop();
-        if (remote.privacy_gate !== config.privacyGate) {
-          config.updateConfig({ privacy_gate: remote.privacy_gate } as any);
-        }
-      } catch (err) {
-        console.error("Failed to sync system settings:", err);
+  // Synchronize system settings with backend
+  const loadSystemSettings = useCallback(async () => {
+    try {
+      const remote = await fetchSystemSettingsFromDesktop();
+      setLlmProfiles(remote.llm_profiles || []);
+      setFallbackProfiles(remote.fallback_profiles || []);
+      setLlmMode(remote.llm_mode || "public");
+      if (remote.privacy_gate !== config.privacyGate) {
+        config.updateConfig({ privacyGate: remote.privacy_gate });
       }
+    } catch (err) {
+      console.error("Failed to sync system settings:", err);
     }
-    void sync();
-  }, []);
+  }, [config]);
+
+  useEffect(() => {
+    void loadSystemSettings();
+  }, [loadSystemSettings]);
 
   const handleTogglePrivacyGate = useCallback(async (next: boolean) => {
     config.updateConfig({ privacyGate: next });
     try {
-      await updateSystemSettingsFromDesktop({ privacy_gate: next });
+      await updateSystemSettingsFromDesktop({
+        privacy_gate: next,
+        llm_profiles: llmProfiles,
+        llm_mode: llmMode
+      });
     } catch (err) {
       console.error("Failed to update backend privacy gate setting:", err);
     }
-  }, [config]);
+  }, [config, llmProfiles, llmMode]);
+  
+  const redistributeLLMRoles = (profiles: LLMProfile[]): LLMProfile[] => {
+    const count = profiles.length;
+    if (count === 0) return [];
+
+    const rolesByCount: Record<number, string[][]> = {
+      1: [
+        ["architect", "assistant", "backup", "exploit", "recon", "planner", "reporting", "memory", "analyser"]
+      ],
+      2: [
+        ["architect", "memory", "recon", "analyser"],
+        ["backup", "assistant", "exploit", "planner", "reporting"]
+      ],
+      3: [
+        ["architect", "memory", "analyser"],
+        ["exploit", "planner", "reporting"],
+        ["recon", "backup", "assistant"]
+      ],
+      4: [
+        ["architect", "memory", "analyser"],
+        ["planner", "reporting"],
+        ["recon", "assistant"],
+        ["exploit", "backup"]
+      ],
+      5: [
+        ["memory", "analyser"],
+        ["planner", "reporting"],
+        ["recon"],
+        ["exploit", "backup"],
+        ["assistant", "architect"]
+      ],
+      6: [
+        ["memory", "analyser"],
+        ["planner", "reporting"],
+        ["recon"],
+        ["exploit"],
+        ["assistant", "architect"],
+        ["backup"]
+      ],
+      7: [
+        ["memory", "analyser"],
+        ["planner", "reporting"],
+        ["recon"],
+        ["exploit"],
+        ["assistant"],
+        ["backup"],
+        ["architect"]
+      ]
+    };
+
+    const map = rolesByCount[count] || rolesByCount[7];
+
+    return profiles.map((p, idx) => {
+      const roles = map[idx] || [];
+      return { ...p, roles };
+    });
+  };
+
+  const handleEditProfile = (id: string) => {
+    const p = llmProfiles.find(x => x.id === id);
+    if (!p) return;
+    setProfileName(p.name);
+    setProfileProvider(p.provider);
+    setProfileModel(p.model);
+    setProfileUrl(p.api_url || "");
+    setProfileKey(p.api_key || "");
+    setEditingProfileId(id);
+  };
+
+  const handleSaveLLMSettings = async (profiles: LLMProfile[], mode: string) => {
+    // Automatically redistribute roles before saving
+    const balanced = redistributeLLMRoles(profiles);
+    setLlmProfiles(balanced);
+    
+    try {
+      setLlmSaveLoading(true);
+      await updateSystemSettingsFromDesktop({
+        privacy_gate: config.privacyGate,
+        llm_profiles: balanced,
+        llm_mode: mode
+      });
+    } catch (err) {
+      console.error("Failed to save LLM settings:", err);
+    } finally {
+      setLlmSaveLoading(false);
+    }
+  };
+
+  const handleResetToDefaults = async () => {
+    const confirmed = window.confirm(
+      "This will wipe all custom LLM profiles and reload the defaults from server/core/config.py. Continue?"
+    );
+    if (!confirmed) return;
+
+    try {
+      setLlmSaveLoading(true);
+      const remote = await resetSystemSettingsToDefaultsFromDesktop();
+      setLlmProfiles(remote.llm_profiles || []);
+      setFallbackProfiles(remote.fallback_profiles || []);
+      setLlmMode(remote.llm_mode || "public");
+      if (remote.privacy_gate !== config.privacyGate) {
+        config.updateConfig({ privacyGate: remote.privacy_gate });
+      }
+      alert("Settings reset to defaults successfully.");
+    } catch (err) {
+      console.error("Failed to reset settings:", err);
+      alert("Failed to reset settings: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLlmSaveLoading(false);
+    }
+  };
 
   const typeFilterOptions = useMemo(() => {
     const values = new Set<string>();
@@ -621,77 +755,323 @@ export default function Settings() {
         contentClassName="min-h-0 flex-1 overflow-y-auto pr-2"
         tabs={[
           {
-            id: "runtime",
-            label: "Runtime",
-            content: (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Server size={14} />
-                    Backend Runtime
-                  </CardTitle>
-                </CardHeader>
-                <div className="space-y-3">
-                  <Input
-                    label="Server URL"
-                    value={config.serverUrl}
-                    onChange={(event) =>
-                      config.updateConfig({ serverUrl: event.target.value })
-                    }
-                  />
-                  <Input
-                    label="Server Port"
-                    type="number"
-                    value={String(config.serverPort)}
-                    onChange={(event) =>
-                      config.updateConfig({
-                        serverPort: Number(event.target.value) || 8000
-                      })
-                    }
-                  />
-                </div>
-              </Card>
-            )
-          },
-          {
             id: "llm",
-            label: "LLM",
+            label: "LLM Configuration",
             content: (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Cpu size={14} />
-                    LLM Provider
-                  </CardTitle>
-                </CardHeader>
-                <div className="space-y-3">
-                  <Select
-                    label="Active model"
-                    value={config.activeLLM}
-                    onChange={(event) => config.setActiveLLM(event.target.value)}
-                    options={config.llmConfigs.map((item) => ({
-                      value: item.id,
-                      label: item.name
-                    }))}
-                  />
-                  <Select
-                    label="Mode"
-                    value={activeLLM?.mode ?? "public"}
-                    onChange={(event) => {
-                      if (!activeLLM) {
-                        return;
-                      }
-                      config.updateLLM(activeLLM.id, {
-                        mode: event.target.value as "public" | "local"
-                      });
-                    }}
-                    options={[
-                      { value: "public", label: "Public LLM" },
-                      { value: "local", label: "Local LLM" }
-                    ]}
-                  />
+              <div className="space-y-6">
+                {/* Profiles List */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="lg:col-span-2 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-bold text-text-primary flex items-center gap-2 uppercase tracking-wider">
+                        <Cpu size={16} className="text-pf-400" />
+                        Active Profiles
+                      </h3>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={handleResetToDefaults}
+                        loading={llmSaveLoading}
+                        className="h-8 text-[10px] font-black uppercase tracking-widest px-3"
+                      >
+                        <RefreshCcw size={12} className="mr-2" />
+                        Reset to Defaults
+                      </Button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {llmProfiles.length === 0 ? (
+                        fallbackProfiles.map((profile, idx) => (
+                          <Card key="fallback" className="relative overflow-hidden border-border bg-surface-1/50 opacity-80 border-dashed">
+                            <div className="absolute top-0 right-0 px-2 py-1 bg-surface-2 text-[8px] font-bold text-text-muted rounded-bl-lg uppercase tracking-widest">Environment Fallback</div>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg bg-pf-500/10 flex items-center justify-center">
+                                  <RefreshCcw size={14} className="text-pf-400" />
+                                </div>
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <h4 className="text-sm font-bold text-text-primary">{profile.name}</h4>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-text-muted font-mono uppercase">
+                                      {profile.provider}
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-text-muted mt-0.5 font-mono">
+                                    {profile.model}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <span className="text-[9px] font-black text-text-muted uppercase tracking-widest block mb-1">Assigned Tasks</span>
+                                <div className="inline-flex items-center px-2 py-0.5 rounded-full bg-surface-2 border border-border text-[10px] font-bold text-text-muted whitespace-nowrap">
+                                  UNIVERSAL (All Roles)
+                                </div>
+                              </div>
+                            </div>
+                          </Card>
+                        ))
+                      ) : (
+                        llmProfiles.map((profile, idx) => (
+                          <Card key={profile.id} className={clsx(
+                            "relative overflow-hidden border-border hover:border-pf-500/30 transition-all p-3",
+                            !profile.is_active && "opacity-50"
+                          )}>
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="flex items-start gap-3 flex-1 min-w-0">
+                                <div className="w-10 h-10 rounded-xl bg-surface-2 flex items-center justify-center flex-shrink-0 border border-border">
+                                  <Cpu size={18} className="text-pf-400" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <h4 className="text-sm font-black text-text-primary truncate">{profile.name}</h4>
+                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-surface-2 text-text-muted font-mono uppercase border border-border">
+                                      {profile.provider}
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-text-muted mt-0.5 font-mono truncate">
+                                    {profile.model}
+                                  </p>
+                                  <div className="flex flex-wrap gap-1 mt-2">
+                                    {profile.roles?.map(r => (
+                                      <span key={r} className="text-[8px] px-2 py-0.5 rounded-full bg-pf-500/10 text-pf-400 border border-pf-500/20 font-black uppercase tracking-tighter">
+                                        {r}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-col items-end gap-2 shrink-0">
+                                 <div className="flex items-center gap-4">
+                                   <div className="text-right hidden sm:block">
+                                     <span className="text-[9px] font-black text-text-muted uppercase tracking-widest block mb-0.5">Status</span>
+                                     <div className="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-bold text-emerald-400 whitespace-nowrap">
+                                       READY
+                                     </div>
+                                   </div>
+
+                                   <div className="flex items-center gap-1 bg-surface-2 p-1 rounded-lg border border-border">
+                                     <Button
+                                       size="xs"
+                                       variant="ghost"
+                                       onClick={async () => {
+                                         setLlmTestingId(profile.id);
+                                         setLlmTestResult(null);
+                                         try {
+                                           const res = await testLLMConfigFromDesktop(profile);
+                                           setLlmTestResult({ id: profile.id, ...res });
+                                         } catch (err) {
+                                           setLlmTestResult({ id: profile.id, ok: false, message: String(err) });
+                                         } finally {
+                                           setLlmTestingId(null);
+                                         }
+                                       }}
+                                       loading={llmTestingId === profile.id}
+                                       className="h-7 w-7 p-0 text-text-muted hover:text-pf-400"
+                                     >
+                                       <RefreshCcw size={12} />
+                                     </Button>
+                                     <Button
+                                       size="xs"
+                                       variant="ghost"
+                                       onClick={() => handleEditProfile(profile.id)}
+                                       className="h-7 w-7 p-0 text-text-muted hover:text-pf-400"
+                                     >
+                                       <Pencil size={12} />
+                                     </Button>
+                                     <Button
+                                       size="xs"
+                                       variant="ghost"
+                                       onClick={() => {
+                                         const next = llmProfiles.filter(p => p.id !== profile.id);
+                                         setLlmProfiles(next);
+                                         handleSaveLLMSettings(next, llmMode);
+                                       }}
+                                       className="h-7 w-7 p-0 text-text-muted hover:text-red-400"
+                                     >
+                                       <Trash2 size={12} />
+                                     </Button>
+                                   </div>
+                                 </div>
+                              </div>
+                            </div>
+
+                            {llmTestResult?.id === profile.id && (
+                              <div className={clsx(
+                                "mt-3 px-3 py-2 rounded-lg text-[10px] font-medium flex items-center gap-2",
+                                llmTestResult.ok ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-red-500/10 text-red-400 border border-red-500/20"
+                              )}>
+                                <div className={clsx("w-1.5 h-1.5 rounded-full animate-pulse", llmTestResult.ok ? "bg-emerald-400" : "bg-red-400")} />
+                                {llmTestResult.message}
+                              </div>
+                            )}
+                          </Card>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Add/Edit Form */}
+                  <div className="space-y-4">
+                    <Card className="border-pf-500/20 bg-gradient-to-br from-pf-600/5 to-surface-1">
+                      <CardHeader>
+                        <CardTitle className="text-xs uppercase tracking-widest text-text-muted flex items-center gap-2">
+                          {editingProfileId ? <Pencil size={12} /> : <Plus size={12} />}
+                          {editingProfileId ? "Edit Profile" : "Add New Profile"}
+                        </CardTitle>
+                      </CardHeader>
+                      <div className="space-y-3">
+                        <Input
+                          label="Friendly Name"
+                          placeholder="e.g. Brain (Gemini 2.0)"
+                          value={profileName}
+                          onChange={(e) => setProfileName(e.target.value)}
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                          <Select
+                            label="Provider"
+                            value={profileProvider}
+                            onChange={(e) => setProfileProvider(e.target.value)}
+                            options={[
+                              { value: "cerebras", label: "Cerebras" },
+                              { value: "openai", label: "OpenAI" },
+                              { value: "gemini", label: "Gemini" },
+                              { value: "groq", label: "Groq" },
+                              { value: "mistral", label: "Mistral" },
+                              { value: "ollama", label: "Ollama (Local)" },
+                              { value: "custom", label: "Custom OpenAI-compatible" },
+                            ]}
+                          />
+                          <Input
+                            label="Model"
+                            placeholder="gpt-4o / gemini-2.5-flash"
+                            value={profileModel}
+                            onChange={(e) => setProfileModel(e.target.value)}
+                          />
+                        </div>
+                        <Input
+                          label="API URL (Optional)"
+                          placeholder="https://..."
+                          value={profileUrl}
+                          onChange={(e) => setProfileUrl(e.target.value)}
+                        />
+                        <Input
+                          label="API Key"
+                          type="password"
+                          placeholder="••••••••••••"
+                          value={profileKey}
+                          onChange={(e) => setProfileKey(e.target.value)}
+                        />
+                        
+
+                        <div className="flex gap-2 pt-2">
+                          <Button
+                            className="flex-1"
+                            onClick={async () => {
+                              const newProfile: LLMProfile = {
+                                id: editingProfileId || `profile_${Date.now()}`,
+                                name: profileName || `${profileProvider} - ${profileModel}`,
+                                provider: profileProvider,
+                                model: profileModel,
+                                api_url: profileUrl || null,
+                                api_key: profileKey || null,
+                                is_active: true,
+                                roles: [], // Roles will be auto-assigned on save
+                              };
+
+                              // Test before adding/saving
+                              setLlmSaveLoading(true);
+                              try {
+                                const test = await testLLMConfigFromDesktop(newProfile);
+                                if (!test.ok) {
+                                  if (!window.confirm(`Connection test failed: ${test.message}. Save anyway?`)) return;
+                                }
+
+                                const exists = llmProfiles.some(p => p.id !== newProfile.id && p.provider === newProfile.provider && p.model === newProfile.model && p.api_url === newProfile.api_url);
+                                if (exists) {
+                                  alert("A similar profile already exists.");
+                                  return;
+                                }
+
+                                const next = editingProfileId
+                                  ? llmProfiles.map(p => p.id === editingProfileId ? newProfile : p)
+                                  : [...llmProfiles, newProfile];
+
+                                setLlmProfiles(next);
+                                await handleSaveLLMSettings(next, llmMode);
+
+                                // Reset form
+                                setEditingProfileId(null);
+                                setProfileName("");
+                                setProfileModel("");
+                                setProfileUrl("");
+                                setProfileKey("");
+                                setLlmTestResult(null);
+                              } catch (err) {
+                                alert(String(err));
+                              } finally {
+                                setLlmSaveLoading(false);
+                              }
+                            }}
+                            loading={llmSaveLoading}
+                          >
+                            {editingProfileId ? "Update Profile" : "Add Profile"}
+                          </Button>
+                          {editingProfileId && (
+                            <Button variant="ghost" onClick={() => setEditingProfileId(null)}>Cancel</Button>
+                          )}
+                        </div>
+                      </div>
+                    </Card>
+
+                    <Card className="bg-surface-2/50 border-pf-500/10 p-4">
+                      <h4 className="text-[10px] font-bold text-pf-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <Bot size={12} />
+                        Dynamic Load Balancing Logic
+                      </h4>
+                      <div className="space-y-3">
+                        {llmProfiles.length === 0 && (
+                          <p className="text-[11px] text-text-muted italic">Configure profiles to enable specialized task distribution.</p>
+                        )}
+                        {llmProfiles.length === 1 && (
+                          <div className="p-2 rounded bg-pf-500/5 border border-pf-500/10">
+                            <p className="text-[11px] text-text-secondary font-medium">Single Model Mode</p>
+                            <p className="text-[10px] text-text-muted mt-1">This profile will handle planning, analysis, reporting, and all tool execution.</p>
+                          </div>
+                        )}
+                        {llmProfiles.length === 2 && (
+                          <div className="space-y-2">
+                            <div className="p-2 rounded bg-pf-500/5 border border-pf-500/10">
+                              <p className="text-[11px] text-text-secondary font-medium">1. Brain (High reasoning)</p>
+                              <p className="text-[10px] text-text-muted mt-1">Information Gathering, Planning, and Final Reporting.</p>
+                            </div>
+                            <div className="p-2 rounded bg-surface-2 border border-border">
+                              <p className="text-[11px] text-text-secondary font-medium">2. Muscle (High speed)</p>
+                              <p className="text-[10px] text-text-muted mt-1">Execution of all individual reconnaissance and security tools.</p>
+                            </div>
+                          </div>
+                        )}
+                        {llmProfiles.length >= 3 && (
+                          <div className="space-y-2">
+                            <div className="p-2 rounded bg-pf-500/5 border border-pf-500/10">
+                              <p className="text-[11px] text-text-secondary font-medium">1. Strategic Layer</p>
+                              <p className="text-[10px] text-text-muted mt-1">Scenario generation and reconnaissance planning.</p>
+                            </div>
+                            <div className="p-2 rounded bg-surface-2 border border-border">
+                              <p className="text-[11px] text-text-secondary font-medium">2. Analytical Layer</p>
+                              <p className="text-[10px] text-text-muted mt-1">Data synthesis, vulnerability analysis, and reporting.</p>
+                            </div>
+                            <div className="p-2 rounded bg-surface-2 border border-border">
+                              <p className="text-[11px] text-text-secondary font-medium">3. Execution Layer</p>
+                              <p className="text-[10px] text-text-muted mt-1">Distributed tool handling and autonomous task execution.</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </Card>
+                  </div>
                 </div>
-              </Card>
+              </div>
             )
           },
           {
@@ -820,36 +1200,36 @@ export default function Settings() {
                         />
                       </div>
                       <div className="md:col-span-2">
-                      <Select
-                        label="Filter Type"
-                        value={resourceTypeFilter}
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          setResourceTypeFilter(next);
-                          // Avoid accidental empty results when switching type
-                          // while another narrow filter remains active.
-                          if (next === "payload") {
-                            setResourceUpdateFilter("all");
-                          }
-                        }}
-                        options={typeFilterOptions}
-                      />
+                        <Select
+                          label="Filter Type"
+                          value={resourceTypeFilter}
+                          onChange={(event) => {
+                            const next = event.target.value;
+                            setResourceTypeFilter(next);
+                            // Avoid accidental empty results when switching type
+                            // while another narrow filter remains active.
+                            if (next === "payload") {
+                              setResourceUpdateFilter("all");
+                            }
+                          }}
+                          options={typeFilterOptions}
+                        />
                       </div>
                       <div className="md:col-span-2">
-                      <Select
-                        label="Filter Target"
-                        value={resourceTargetFilter}
-                        onChange={(event) => setResourceTargetFilter(event.target.value)}
-                        options={targetFilterOptions}
-                      />
+                        <Select
+                          label="Filter Target"
+                          value={resourceTargetFilter}
+                          onChange={(event) => setResourceTargetFilter(event.target.value)}
+                          options={targetFilterOptions}
+                        />
                       </div>
                       <div className="md:col-span-2">
-                      <Select
-                        label="Filter Update"
-                        value={resourceUpdateFilter}
-                        onChange={(event) => setResourceUpdateFilter(event.target.value)}
-                        options={updateFilterOptions}
-                      />
+                        <Select
+                          label="Filter Update"
+                          value={resourceUpdateFilter}
+                          onChange={(event) => setResourceUpdateFilter(event.target.value)}
+                          options={updateFilterOptions}
+                        />
                       </div>
                     </div>
                     <div className="flex justify-end">
@@ -878,55 +1258,55 @@ export default function Settings() {
                             const removeDisabled = !canModify || resourceSaveLoading;
                             const disabledTitle = "Built-in resource is managed by config and cannot be changed here.";
                             return (
-                          <div
-                            key={`${resource.source_kind}-${resource.id}`}
-                            className="rounded-md border border-border bg-surface-0/35 p-2"
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <p className="truncate text-sm font-semibold text-text-primary">{resource.name}</p>
-                                <p className="text-xs text-text-muted">
-                                  {formatTargetTypeLabel(resourceDisplayTarget(resource.target_type, resourceTargetFilter))}
-                                  {" • "}
-                                  {resource.content_type || "unknown"}
-                                  {" • "}
-                                  {formatResourceCadence(resource)}
-                                  {" • "}
-                                  Last update: {formatTimestamp(resource.intel_last_update)}
+                              <div
+                                key={`${resource.source_kind}-${resource.id}`}
+                                className="rounded-md border border-border bg-surface-0/35 p-2"
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-semibold text-text-primary">{resource.name}</p>
+                                    <p className="text-xs text-text-muted">
+                                      {formatTargetTypeLabel(resourceDisplayTarget(resource.target_type, resourceTargetFilter))}
+                                      {" • "}
+                                      {resource.content_type || "unknown"}
+                                      {" • "}
+                                      {formatResourceCadence(resource)}
+                                      {" • "}
+                                      Last update: {formatTimestamp(resource.intel_last_update)}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <span className="rounded border border-border px-1.5 py-0.5 text-xs uppercase tracking-wide text-text-secondary">
+                                      {resourceSourceLabel(resource)}
+                                    </span>
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      title={canModify ? "Edit resource" : disabledTitle}
+                                      onClick={() => startEditResource(resource)}
+                                      disabled={changeDisabled}
+                                    >
+                                      <Pencil size={12} />
+                                      Change
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      title={canModify ? "Remove resource from registry and RAG data" : disabledTitle}
+                                      onClick={() => {
+                                        void handleRemoveResource(resource);
+                                      }}
+                                      disabled={removeDisabled}
+                                    >
+                                      <Trash2 size={12} />
+                                      Remove
+                                    </Button>
+                                  </div>
+                                </div>
+                                <p className="mt-1 break-all font-mono text-xs text-text-secondary">
+                                  {resource.url || "No URL"}
                                 </p>
                               </div>
-                              <div className="flex items-center gap-1">
-                                <span className="rounded border border-border px-1.5 py-0.5 text-xs uppercase tracking-wide text-text-secondary">
-                                  {resourceSourceLabel(resource)}
-                                </span>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  title={canModify ? "Edit resource" : disabledTitle}
-                                  onClick={() => startEditResource(resource)}
-                                  disabled={changeDisabled}
-                                >
-                                  <Pencil size={12} />
-                                  Change
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  title={canModify ? "Remove resource from registry and RAG data" : disabledTitle}
-                                  onClick={() => {
-                                    void handleRemoveResource(resource);
-                                  }}
-                                  disabled={removeDisabled}
-                                >
-                                  <Trash2 size={12} />
-                                  Remove
-                                </Button>
-                              </div>
-                            </div>
-                            <p className="mt-1 break-all font-mono text-xs text-text-secondary">
-                              {resource.url || "No URL"}
-                            </p>
-                          </div>
                             );
                           })()
                         ))
@@ -1015,13 +1395,12 @@ export default function Settings() {
                       </p>
                       <div className="mt-2 h-2 w-full overflow-hidden rounded bg-surface-0">
                         <div
-                          className={`h-full transition-all ${
-                            forceUpdateStatus.status === "error"
+                          className={`h-full transition-all ${forceUpdateStatus.status === "error"
                               ? "bg-red-500/70"
                               : forceUpdateStatus.status === "completed"
                                 ? "bg-emerald-500/70"
                                 : "bg-blue-500/70"
-                          }`}
+                            }`}
                           style={{ width: `${Math.max(0, Math.min(100, forceUpdateStatus.progress))}%` }}
                         />
                       </div>
@@ -1044,30 +1423,9 @@ export default function Settings() {
                 )}
               </div>
             )
-          },
-          {
-            id: "static-recon",
-            label: "Static Recon",
-            content: (
-              <div className="space-y-4">
-                <Card>
-                  <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                      <ListTree size={14} />
-                      Information Gathering Library
-                    </CardTitle>
-                  </CardHeader>
-                  <p className="text-sm text-text-secondary">
-                    Edit the JSON-backed static Information Gathering profile for each target type. These blocks are
-                    the exact baseline sent to the Information Gathering LLM before the first static scan runs.
-                  </p>
-                </Card>
-                <StaticReconPlanSettings />
-              </div>
-            )
           }
         ]}
-        defaultTab="runtime"
+        defaultTab="llm"
       />
     </div>
   );

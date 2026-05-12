@@ -181,17 +181,6 @@ def shared_report_viewer(token: str) -> HTMLResponse:
   <title>PentaForge Client Portal</title>
   <style>
     :root {{
-      --bg: #0c1220;
-      --surface: #111827;
-      --surface-light: #1e293b;
-      --border: #1e293b;
-      --text: #e2e8f0;
-      --text-muted: #94a3b8;
-      --primary: #6366f1;
-      --primary-hover: #4f46e5;
-    }}
-    
-    [data-theme="light"] {{
       --bg: #f8fafc;
       --surface: #ffffff;
       --surface-light: #f1f5f9;
@@ -200,6 +189,17 @@ def shared_report_viewer(token: str) -> HTMLResponse:
       --text-muted: #64748b;
       --primary: #4f46e5;
       --primary-hover: #4338ca;
+    }}
+    
+    [data-theme="dark"] {{
+      --bg: #0c1220;
+      --surface: #111827;
+      --surface-light: #1e293b;
+      --border: #1e293b;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
     }}
 
     * {{ box-sizing: border-box; }}
@@ -288,6 +288,20 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     iframe {{ width: 100%; height: 100%; border: none; background: white; border-radius: 12px; display: block; }}
     .theme-toggle {{ background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; }}
     .theme-toggle:hover {{ color: var(--text); background: var(--surface-light); }}
+    
+    .modal-overlay {{ position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 2000; padding: 20px; }}
+    .modal-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; width: 100%; max-width: 440px; padding: 2rem; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); }}
+    .modal-title {{ font-size: 1.25rem; font-weight: 700; margin-bottom: 0.5rem; color: var(--text); }}
+    .modal-desc {{ color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem; }}
+    .format-option {{ display: flex; align-items: center; gap: 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 0.75rem; cursor: pointer; transition: all 0.2s; background: var(--surface-light); text-align: left; width: 100%; }}
+    .format-option:hover {{ border-color: var(--primary); background: var(--primary); color: white; }}
+    .format-option:hover .format-icon {{ color: white; }}
+    .format-option .format-icon {{ color: var(--primary); flex-shrink: 0; }}
+    .format-option .format-info {{ flex: 1; }}
+    .format-option .format-name {{ font-weight: 600; display: block; }}
+    .format-option .format-ext {{ font-size: 0.75rem; opacity: 0.7; }}
+    .modal-close {{ margin-top: 1rem; color: var(--text-muted); background: none; border: none; cursor: pointer; font-size: 0.85rem; text-decoration: underline; }}
+    .modal-close:hover {{ color: var(--text); }}
 
     @media (max-width: 960px) {{
       body {{ display: block; overflow: auto; }}
@@ -360,6 +374,35 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     </div>
   </div>
 
+  <div id="download-modal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-title">Download Report</div>
+      <p class="modal-desc">Choose your preferred format for the security report.</p>
+      
+      <button class="format-option" onclick="downloadAs('html')">
+        <div class="format-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+        </div>
+        <div class="format-info">
+          <span class="format-name">Professional Report</span>
+          <span class="format-ext">Styled HTML Document (.html)</span>
+        </div>
+      </button>
+      
+      <button class="format-option" onclick="downloadAs('pdf')">
+        <div class="format-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13a2 2 0 0 0-2-2H8v6h2a2 2 0 0 0 2-2v-2z"></path></svg>
+        </div>
+        <div class="format-info">
+          <span class="format-name">PDF Document</span>
+          <span class="format-ext">Print-ready PDF (.pdf)</span>
+        </div>
+      </button>
+      
+      <button class="modal-close" onclick="closeDownloadModal()">Cancel</button>
+    </div>
+  </div>
+
   <div class="layout" id="portal-layout" style="display: none;">
     <div class="report-pane">
       <div class="report-toolbar">
@@ -381,7 +424,7 @@ def shared_report_viewer(token: str) -> HTMLResponse:
           <span id="typing-indicator" style="display: none; font-size: 0.8rem; font-style: italic; color: var(--text-muted); margin-left: 8px;">is typing...</span>
         </div>
         <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
-          <span id="theme-icon">🌙</span>
+          <span id="theme-icon">☀️</span>
         </button>
       </div>
       <div class="chat-messages" id="messages"></div>
@@ -448,9 +491,19 @@ def shared_report_viewer(token: str) -> HTMLResponse:
       }}
     }}
 
+    function closeDownloadModal() {{
+      document.getElementById('download-modal').style.display = 'none';
+    }}
+
     // Auto-unlock or bind events
     document.addEventListener('DOMContentLoaded', () => {{
       console.log("[PORTAL] Portal loaded, isProtected:", isPasswordProtected);
+      
+      // Close modal on escape
+      document.addEventListener('keydown', (e) => {{
+        if (e.key === 'Escape') closeDownloadModal();
+      }});
+      
       if (isPasswordProtected === false) {{
         unlock();
       }}
@@ -465,7 +518,7 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     }});
       let htmlContent = null;
     let mdContent = null;
-    let currentTheme = 'dark';
+    let currentTheme = 'light';
 
     function toggleTheme() {{
       currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
@@ -510,6 +563,21 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     }}
 
     async function downloadActive() {{
+      document.getElementById('download-modal').style.display = 'flex';
+    }}
+
+    async function downloadAs(format) {{
+      closeDownloadModal();
+      
+      if (format === 'pdf') {{
+        const frame = document.getElementById('report-frame');
+        if (frame && frame.contentWindow) {{
+           frame.contentWindow.focus();
+           frame.contentWindow.print();
+        }}
+        return;
+      }}
+
       let content = htmlContent;
       if (!content) {{
         // Fetch if not available
@@ -566,6 +634,9 @@ def shared_report_viewer(token: str) -> HTMLResponse:
           container.appendChild(div);
         }});
         container.scrollTop = container.scrollHeight;
+      }} else if (res.status === 410 || res.status === 401) {{
+        // Link revoked or session expired - refresh to show appropriate overlay/error
+        location.reload();
       }}
     }}
     

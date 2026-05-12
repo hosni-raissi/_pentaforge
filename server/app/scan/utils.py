@@ -84,7 +84,6 @@ _TARGET_TYPE_ALIASES: dict[str, str] = {
     "web3": "web_app",
     "infrastructure": "infra",
     "infra": "infra",
-    "binary": "desktop",
     "identity": "linux_server",
     "supply_chain": "repository",
     "recon": "shared",
@@ -113,7 +112,6 @@ _STATIC_RECON_FILE_MAP: dict[str, str] = {
     "network": "common_network.json",
     "iot": "common_iot.json",
     "linux_server": "common_server.json",
-    "desktop": "common_desktop.json",
     "cloud": "common_cloud.json",
     "container": "common_container.json",
     "repository": "common_repository.json",
@@ -1501,7 +1499,6 @@ def _build_target_type_followup_hypotheses(
         "web_app": "web",
         "api": "web",
         "mobile": "web",
-        "desktop": "web",
         "linux_server": "service",
         "network": "service",
         "iot": "service",
@@ -4056,12 +4053,12 @@ def _should_refresh_target_info_profile_from_defaults(
         return False
 
     stored_names = [
-        str(item.get("name", "")).strip()
+        str(item.get("block_name") or item.get("name") or "").strip()
         for item in stored_blocks
         if isinstance(item, dict)
     ]
     built_in_names = [
-        str(item.get("name", "")).strip()
+        str(item.get("block_name") or item.get("name") or "").strip()
         for item in built_in_blocks
         if isinstance(item, dict)
     ]
@@ -4077,10 +4074,24 @@ def _format_target_info_profile_for_prompt(profile: dict[str, Any]) -> str:
     for idx, block in enumerate(blocks, start=1):
         if not isinstance(block, dict):
             continue
-        name = str(block.get("name", "")).strip()
+        name = str(block.get("block_name") or block.get("name") or "").strip()
         goal = str(block.get("goal", "")).strip()
         interaction = str(block.get("interaction", "")).strip()
-        tools = ", ".join(str(item).strip() for item in block.get("tools", []) if str(item).strip())
+        
+        tools_list = []
+        for item in block.get("tools", []):
+            if isinstance(item, dict):
+                # Format object like run_custom(binary, arg1, arg2)
+                t_name = str(item.get("name") or item.get("tool") or "custom").strip()
+                t_args = item.get("args", [])
+                if not isinstance(t_args, list):
+                    t_args = [t_args]
+                args_str = ", ".join(map(str, t_args))
+                tools_list.append(f"{t_name}({args_str})")
+            else:
+                tools_list.append(str(item).strip())
+        
+        tools = ", ".join(t for t in tools_list if t)
         if name:
             lines.append(
                 f"{idx}. {name} [{interaction or 'unspecified'}] :: {goal or '(no goal)'}"

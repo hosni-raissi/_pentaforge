@@ -3,7 +3,7 @@ import { clsx } from 'clsx';
 
 interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   label?: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; disabled?: boolean }[];
 }
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(
@@ -27,7 +27,8 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
           <option
             key={opt.value}
             value={opt.value}
-            style={{ backgroundColor: 'var(--surface-1)', color: 'var(--text-primary)' }}
+            disabled={opt.disabled}
+            style={{ backgroundColor: 'var(--surface-1)', color: opt.disabled ? 'var(--text-muted)' : 'var(--text-primary)' }}
           >
             {opt.label}
           </option>

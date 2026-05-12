@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from typing import Any
 from pathlib import Path
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -71,10 +73,48 @@ def _delete_project_cache_artifacts(project_id: str) -> dict[str, int]:
     }
 
 
+def _normalize_architecture_refresh_state(project: dict[str, Any]) -> bool:
+    payload = project.get("payload")
+    if not isinstance(payload, dict):
+        return False
+
+    refresh = payload.get("architecture_refresh")
+    if not isinstance(refresh, dict):
+        return False
+
+    status = str(refresh.get("status", "")).strip().lower()
+    if status != "running":
+        return False
+
+    owner_pid = refresh.get("owner_pid")
+    current_pid = os.getpid()
+    if isinstance(owner_pid, int) and owner_pid == current_pid:
+        return False
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload["architecture_refresh"] = {
+        **refresh,
+        "status": "error",
+        "phase": "server_stopped",
+        "error": "Architecture refresh stopped because the previous server process ended.",
+        "updated_at": now_iso,
+        "completed_at": now_iso,
+    }
+    return True
+
+
 @router.get("/api/projects")
 def list_projects() -> dict[str, list[dict[str, Any]]]:
     try:
-        return {"projects": projects_store.list_projects()}
+        projects = projects_store.list_projects()
+        dirty = False
+        for project in projects:
+            if isinstance(project, dict) and _normalize_architecture_refresh_state(project):
+                projects_store.upsert_project(project)
+                dirty = True
+        if dirty:
+            projects = projects_store.list_projects()
+        return {"projects": projects}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list projects: {exc}") from exc
 
@@ -99,12 +139,28 @@ def delete_project(project_id: str) -> dict[str, Any]:
     return {"ok": True, "id": project_id, **deleted_cache}
 
 
+@router.post("/api/projects/{project_id}/reset-runtime")
+def reset_project_runtime(project_id: str) -> dict[str, Any]:
+    try:
+        project = projects_store.reset_project_runtime_state(project_id)
+        deleted_cache = _delete_project_cache_artifacts(project_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to reset project runtime: {exc}") from exc
+    return {"ok": True, "project": project, "id": project_id, **deleted_cache}
+
+
 @router.get("/api/projects/{project_id}/runs/active")
 def get_active_project_runs(project_id: str) -> dict[str, Any]:
     try:
         project = projects_store.get_project(project_id)
         if not isinstance(project, dict):
             raise HTTPException(status_code=404, detail="Project not found")
+        if _normalize_architecture_refresh_state(project):
+            projects_store.upsert_project(project)
 
         runs = projects_store.list_active_task_runs(project_id)
         last_scan = project.get("lastScan", {})

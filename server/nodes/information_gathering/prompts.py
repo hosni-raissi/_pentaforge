@@ -16,17 +16,18 @@ PREPARE_INFORMATION_BLOCK_SYSTEM_PROMPT = (
     "4. Remove tools that clearly do not fit the target type, target description, scope, local/private context, or available evidence.\n"
     "5. Keep built-in tools only if they appear in the provided allowed built-in tool inventory.\n"
     "6. This first grouped static gathering stage must stay non-bruteforce: no wordlist attacks, no fuzzing, no password guessing, no spray attempts, and no broad exploit scanners.\n"
-    "7. You may add a tool only as a run_custom object if there is a very clear, scoped, non-destructive command that improves a block.\n"
+    "7. CRITICAL: Never include any actions that could cause bad effects, instability, or service disruption. Stay passive or extremely low-impact.\n"
+    "8. You may add a tool only as a run_custom object if there is a very clear, scoped, non-destructive command that improves a block.\n"
     "   For run_custom, `command` must be the binary name only (example: `curl`), and all flags/targets must go in `args`.\n"
-    "8. Never invent findings, endpoints, vulnerabilities, assets, or credentials.\n"
-    "9. Never add more than one run_custom object per block.\n"
-    "10. If a block should not run for this target, set status to skip and return tools as an empty list for that block.\n"
-    "11. Preserve execution order unless there is a strong target-specific reason to change it.\n"
-    "12. Return strict JSON only with shape:\n"
+    "9. Never invent findings, endpoints, vulnerabilities, assets, or credentials.\n"
+    "10. Never add more than one run_custom object per block.\n"
+    "11. If a block should not run for this target, set status to skip and return tools as an empty list for that block.\n"
+    "12. Preserve execution order unless there is a strong target-specific reason to change it.\n"
+    "13. Return strict JSON only with shape:\n"
     '   {"blocks":[{"status":"keep|refine|skip","name":"...","goal":"...","interaction":"...","tools":[...],"rationale":"...","skipped_tools":[...]}]}\n'
-    "13. tools may contain strings for built-in tools or an object with keys:\n"
+    "14. tools may contain strings for built-in tools or an object with keys:\n"
     "   tool, command, args, reason.\n"
-    "14. Never place a full shell command inside run_custom.command. Split it into command + args.\n"
+    "15. Never place a full shell command inside run_custom.command. Split it into command + args.\n"
 )
 
 
@@ -52,5 +53,6 @@ def build_information_block_preparation_prompt(
         "Review all blocks together first, then return the full ordered set to run one by one. "
         "Remove unauthorized or incompatible tools, skip blocks if needed, "
         "and add at most one scoped run_custom entry per block only when it clearly improves coverage. "
-        "Do not introduce any brute-force, fuzzing, or wordlist-driven actions in this static stage."
+        "Do not introduce any brute-force, fuzzing, or wordlist-driven actions in this static stage. "
+        "Stay strictly non-destructive and avoid anything that could cause bad effects or instability."
     )

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { ActivitySquare, AlertTriangle, Clock3, RotateCcw, TimerReset } from "lucide-react";
 
 import type {
@@ -45,6 +46,14 @@ function levelVariant(level: ScanDebugTimelineEntry["level"]): "default" | "runn
 }
 
 export function ObservabilityPanel({ timeline, metrics }: ObservabilityPanelProps) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, [timeline.length]);
+
   const metricCards = [
     {
       label: "Avg Cycle",
@@ -83,9 +92,6 @@ export function ObservabilityPanel({ timeline, metrics }: ObservabilityPanelProp
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-text-primary">Debug Timeline</h2>
-          <p className="text-sm text-text-muted">
-            Stable IDs, reason codes, and structured scan context for diagnosing failures quickly.
-          </p>
         </div>
         <p className="text-sm text-text-muted">{timeline.length} timeline rows</p>
       </div>
@@ -118,13 +124,16 @@ export function ObservabilityPanel({ timeline, metrics }: ObservabilityPanelProp
           <span>Reason</span>
           <span>Message</span>
         </div>
-        <div className="max-h-[360px] overflow-y-auto">
+        <div 
+          ref={scrollContainerRef}
+          className="max-h-[360px] overflow-y-auto"
+        >
           {timeline.length === 0 ? (
             <div className="px-3 py-4 text-sm text-text-muted">
               No debug timeline rows yet. Start a scan or wait for the next cached event snapshot.
             </div>
           ) : (
-            timeline.map((item) => (
+            [...timeline].reverse().map((item) => (
               <div
                 key={item.id}
                 className="grid grid-cols-[90px_100px_110px_1fr] gap-2 border-b border-border/40 px-3 py-2 text-sm last:border-b-0"

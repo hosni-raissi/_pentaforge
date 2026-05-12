@@ -60,7 +60,7 @@ export const OrchestratorPipeline: React.FC<OrchestratorPipelineProps> = ({ stag
   const currentActiveKey = activeStageIndex !== -1 ? stageOrder[stageOrder.length - 1 - activeStageIndex] : null;
 
   return (
-    <div className={cn("flex h-full min-h-0 w-full flex-col items-center mx-auto", className)}>
+    <div className={cn("flex h-full w-full flex-col items-center mx-auto", className)}>
       {stageOrder.map((stageKey, index) => {
         const node = stages[stageKey];
         const isLast = index === stageOrder.length - 1;
@@ -195,8 +195,10 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
       message: activity.message?.trim() || '',
     }))
     .filter((activity) => activity.message.length > 0)
-    .slice(0, 3);
-  const renderedActivities = [...visibleActivities].reverse();
+    .slice(-3);
+  const renderedActivities = node.stage === 'planner'
+    ? visibleActivities
+    : [...visibleActivities].reverse();
   const actionTone = node.actionPanel?.tone || 'warn';
   const [isCollapsed, setIsCollapsed] = useState(effectiveStatus === 'completed');
   const shouldHideActivityFeed = Boolean(node.actionPanel);
@@ -253,7 +255,7 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       className={cn(
-        "relative flex items-start gap-6 w-full transition-all duration-500 py-2.5",
+        "relative flex items-start gap-3 w-full transition-all duration-500 py-1.5",
         STAGE_COLORS[node.stage]
       )}
     >
@@ -278,18 +280,18 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
 
       {/* Content */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-2 h-10">
           <h3 className="font-bold text-xl tracking-tight uppercase">{node.label}</h3>
           {node.progress !== undefined && (
             <span className="font-mono text-sm font-bold opacity-60">{node.progress}%</span>
           )}
         </div>
 
-        <div className="mt-3 relative min-h-[84px] pl-4 group">
+        <div className="mt-1 relative min-h-[48px] pl-4 group">
           {/* Vertical accent line - FIXED */}
           <div className="absolute left-0 top-1 bottom-1 w-[1.5px] bg-blue-500/30 rounded-full z-10" />
 
-          <div className="space-y-2 py-1">
+          <div className="space-y-1 py-0.5">
             <div className="flex items-center gap-2">
               <div className={cn(
                 "h-2 w-2 rounded-full shrink-0",
@@ -327,7 +329,7 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
             {node.actionPanel ? (
               <div
                 className={cn(
-                  "mt-2 max-h-[120px] overflow-hidden rounded-xl border px-2.5 py-2 shadow-sm backdrop-blur-sm",
+                  "mt-2 max-h-[150px] overflow-hidden rounded-xl border px-3 py-3 shadow-sm backdrop-blur-sm",
                   actionTone === 'warn' && "border-amber-500/30 bg-amber-500/10",
                   actionTone === 'info' && "border-sky-500/30 bg-sky-500/10",
                   actionTone === 'danger' && "border-red-500/30 bg-red-500/10",
@@ -343,19 +345,19 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
                     )}
                   />
                   <div className="min-w-0 flex-1 space-y-1.5">
-                    <div className="space-y-0.5">
-                      <p className="text-xs font-semibold text-text-primary">
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-text-primary">
                         {node.actionPanel.title}
                       </p>
                       <p
                         title={node.actionPanel.detail}
-                        className="overflow-hidden text-ellipsis whitespace-nowrap text-[11px] leading-5 text-text-secondary"
+                        className="overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-5 text-text-secondary"
                       >
                         {node.actionPanel.detail}
                       </p>
                     </div>
                     {node.actionPanel.controls ? (
-                      <div className="flex flex-wrap items-center justify-end gap-2 pt-0.5">
+                      <div className="flex flex-col items-stretch gap-1.5 pt-0.5 sm:items-end">
                         {node.actionPanel.controls}
                       </div>
                     ) : null}
@@ -374,15 +376,15 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
                   transition={{ duration: 0.18, ease: 'easeInOut' }}
                   className="overflow-hidden"
                 >
-                  <div className="space-y-2 pt-2">
+                  <div className="space-y-1 pt-1">
                     {!shouldHideActivityFeed && visibleActivities.length > 0 ? (
-                      <div className="space-y-1.5">
+                      <div className="space-y-1">
                         {renderedActivities.map((activity, index) => {
                           const isCommand = activity.type === 'command';
                           return isCommand ? (
                             <code
-                              key={`${activity.type}-${activity.at || index}-${activity.message}`}
                               title={activity.message}
+                              key={`${activity.type}-${activity.at || index}-${activity.message}`}
                               className="block overflow-hidden text-ellipsis whitespace-nowrap rounded-md border border-border/40 bg-surface-2/40 px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
                             >
                               {activity.message}

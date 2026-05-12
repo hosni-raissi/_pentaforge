@@ -77,6 +77,7 @@ _load_env_file()
 # ── Debug flag ────────────────────────────────────────────────────────────────
 
 _LLM_DEBUG_LOGS = os.getenv("LLM_DEBUG_LOGS", "").strip().lower() in {"1", "true", "yes", "on"}
+_TRANSIENT_LLM_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 # ── LLM Configuration ─────────────────────────────────────────────────────────
 
@@ -144,6 +145,9 @@ def _agent_role_token(agent_role: str | None) -> str:
 
 _ROLE_ALIASES: dict[str, str] = {
     "reporting": "report",
+    "analyser": "intel",
+    "memory": "information_gathering",
+    "analyzer": "intel",
 }
 
 
@@ -205,33 +209,94 @@ class LLMConfig:
 
 # ── Singleton configs ─────────────────────────────────────────────────────────
 
+def _get_db_settings() -> dict[str, Any]:
+    """Fetch global settings from the database."""
+    try:
+        from server.api.dependencies import projects_store
+        from server.api.routes.settings import SETTINGS_ID
+        return projects_store.get_project(SETTINGS_ID) or {}
+    except Exception:
+        return {}
+
 def get_llm_mode() -> str:
     """Get the current LLM mode (public or local)."""
+    db_settings = _get_db_settings()
+    if "llm_mode" in db_settings:
+        return str(db_settings["llm_mode"]).strip().lower()
     return os.getenv("AGENT_LLM_MODE", "public").strip().lower()
 
 
 def get_config() -> LLMConfig:
     """Get the appropriate LLM config based on current mode."""
+    # Note: get_config is now mostly used for 'general' fallback.
+    # get_public_agent_config is preferred for role-aware selection.
     mode = get_llm_mode()
     if mode == "local":
         return LLMConfig.local()
+    
+    # Try to get the first active profile from DB if it exists
+    db_settings = _get_db_settings()
+    profiles = db_settings.get("llm_profiles", [])
+    active_profiles = [p for p in profiles if p.get("is_active", True)]
+    
+    if active_profiles:
+        p = active_profiles[0]
+        return LLMConfig(
+            provider=p["provider"],
+            model=p["model"],
+            api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+            api_key=p.get("api_key", ""),
+        )
+    
     return LLMConfig.from_env()
 
-
 def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
-    """Resolve public LLM config with optional role-specific overrides.
-
-    Resolution order for each field:
-    1) AGENT_LLM_<ROLE>_* override
-    2) AGENT_LLM_GROUP_<GROUP>_* override (optional shared profile)
-    3) AGENT_LLM_* global setting
-    4) Provider defaults
-
-    Provider compatibility:
-    - Accepts both NVIDIA_* and legacy misspelled NVIDEA_* variables.
-    - If provider is nvidia and role-specific API key is unset, uses NVIDIA_API_KEY/NVIDEA_API_KEY.
-    - If provider is gemini and role-specific API key is unset, uses GEMINI_API_KEY.
+    """Resolve public LLM config with explicit role-based (SCOOP) selection.
+    
+    Logic:
+    1. Check for active profiles where agent_role is in roles.
+    2. Fallback to active profiles where 'all' is in roles.
+    3. Fallback to the first active profile.
+    4. Fallback to environment variables if no DB profiles exist.
     """
+    db_settings = _get_db_settings()
+    profiles = db_settings.get("llm_profiles", [])
+    active_profiles = [p for p in profiles if p.get("is_active", True)]
+    
+    if active_profiles:
+        role_token = _agent_role_token(agent_role)
+        role_token = _ROLE_ALIASES.get(role_token, role_token)
+        
+        # 1. Exact match
+        for p in active_profiles:
+            if role_token in [r.lower() for r in p.get("roles", [])]:
+                return LLMConfig(
+                    provider=p["provider"],
+                    model=p["model"],
+                    api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+                    api_key=p.get("api_key", ""),
+                )
+        
+        # 2. 'all' match
+        for p in active_profiles:
+            if "all" in [r.lower() for r in p.get("roles", [])]:
+                return LLMConfig(
+                    provider=p["provider"],
+                    model=p["model"],
+                    api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+                    api_key=p.get("api_key", ""),
+                )
+        
+        # 3. First active fallback
+        p = active_profiles[0]
+        return LLMConfig(
+            provider=p["provider"],
+            model=p["model"],
+            api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+            api_key=p.get("api_key", ""),
+        )
+
+    # Fallback to legacy environment variables
     base = LLMConfig.from_env("AGENT_LLM_")
     role_token = _agent_role_token(agent_role)
     role_token = _ROLE_ALIASES.get(role_token, role_token)
@@ -314,9 +379,25 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
 def get_backup_llm_config() -> LLMConfig | None:
     """Get backup LLM configuration for rate limit fallback.
 
-    Returns the backup config if all required env vars are set, otherwise None.
-    This is used when the main LLM hits rate limit (429) to continue execution.
+    Logic:
+    1. Check DB profiles for 'backup' role.
+    2. Fallback to BACKUP_LLM_* env vars.
     """
+    db_settings = _get_db_settings()
+    profiles = db_settings.get("llm_profiles", [])
+    active_profiles = [p for p in profiles if p.get("is_active", True)]
+    
+    for p in active_profiles:
+        if "backup" in [r.lower() for r in p.get("roles", [])]:
+            return LLMConfig(
+                provider=p["provider"],
+                model=p["model"],
+                api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+                api_key=p.get("api_key", ""),
+                temperature=0.2,
+                max_tokens=4000,
+            )
+
     provider = os.getenv("BACKUP_LLM_API_PROVIDER", "").strip().lower()
     if not provider:
         return None
@@ -337,6 +418,10 @@ def get_backup_llm_config() -> LLMConfig | None:
         temperature=0.2,  # Lower temperature for consistency
         max_tokens=4000,
     )
+
+
+def _is_transient_llm_status(status_code: int) -> bool:
+    return int(status_code) in _TRANSIENT_LLM_STATUS_CODES
 
 
 # ── Chat message ──────────────────────────────────────────────────────────────
@@ -666,35 +751,47 @@ class LLMClient:
                     tools=len(tools) if tools else 0,
                 )
 
-            # Send request with retry logic for 429 and connection errors
+            # Retry provider-side transient failures before failing over.
             retries = 0
             resp = None
             while retries <= max_retries:
                 try:
                     resp = await self._http.post("/chat/completions", json=payload)
-                    if resp.status_code != 429:
+                    if not _is_transient_llm_status(resp.status_code):
                         break
-                    
-                    # Handle 429
+
                     wait_raw = float(resp.headers.get("retry-after", 2 ** (retries + 1)))
                     wait = min(wait_raw, 30.0)
-                    logger.warning("llm_rate_limited", retry=retries, wait=wait)
+                    logger.warning(
+                        "llm_transient_http_retry",
+                        provider=self._provider,
+                        status=resp.status_code,
+                        retry=retries,
+                        wait=wait,
+                    )
+                    if retries >= max_retries:
+                        break
                     await asyncio.sleep(wait)
-                except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+                except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout, httpx.ReadError) as exc:
                     retries += 1
                     if retries > max_retries:
-                        logger.error("llm_connection_failed_max_retries", error=repr(exc))
+                        logger.error("llm_connection_failed_max_retries", provider=self._provider, error=repr(exc))
                         raise
                     wait = 2 ** retries
-                    logger.warning("llm_connection_retry", retry=retries, wait=wait, error=repr(exc))
+                    logger.warning(
+                        "llm_connection_retry",
+                        provider=self._provider,
+                        retry=retries,
+                        wait=wait,
+                        error=repr(exc),
+                    )
                     await asyncio.sleep(wait)
-                
+
                 retries += 1
 
             if resp is None:
-                 raise RuntimeError("LLM request failed: No response received")
+                raise RuntimeError("LLM request failed: No response received")
 
-            # Log error body for non-2xx responses (except 429 which is handled above)
             if resp.status_code >= 400 and resp.status_code != 429:
                 logger.error(
                     "llm_api_error",
@@ -703,16 +800,15 @@ class LLMClient:
                     body=resp.text[:500],
                 )
 
-            if resp.status_code == 429:
-                # Try backup provider if configured
+            if _is_transient_llm_status(resp.status_code):
                 backup_config = get_backup_llm_config()
                 if backup_config and backup_config.provider != self._provider:
                     logger.warning(
-                        "llm_rate_limit_fallback",
+                        "llm_transient_fallback",
                         original_provider=self._provider,
                         backup_provider=backup_config.provider,
+                        status=resp.status_code,
                     )
-                    # Use a fresh client for the backup request
                     try:
                         async with LLMClient(backup_config, client_name=f"{self._client_name}_fallback") as fallback_llm:
                             return await fallback_llm.chat(
@@ -721,13 +817,14 @@ class LLMClient:
                                 temperature=temperature,
                                 max_tokens=max_tokens,
                                 use_config_max_tokens=use_config_max_tokens,
-                                max_retries=1,  # Avoid deep recursion
+                                max_retries=1,
                             )
                     except Exception as exc:
                         logger.error(
-                            "llm_rate_limit_fallback_failed",
+                            "llm_transient_fallback_failed",
                             original_provider=self._provider,
                             backup_provider=backup_config.provider,
+                            status=resp.status_code,
                             error=repr(exc),
                         )
 

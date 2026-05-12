@@ -2,212 +2,376 @@
   "web_app": [
     {
       "id": "passive_context",
-      "name": "Passive Context",
+      "block_name": "Passive Context",
       "interaction": "passive",
-      "goal": "Collect public-web context when the target is internet-facing.",
-      "tools": ["passive_web_recon", "dns_recon"]
+      "goal": "Collect passive hostname, DNS, and archive context before active checks.",
+      "tools": [
+        {
+          "name": "passive_web_recon"
+        },
+        {
+          "name": "dns_recon"
+        },
+        {
+          "name": "run_custom",
+          "args": ["assetfinder", "--subs-only", "target"]
+        }
+      ]
     },
     {
       "id": "fingerprinting",
-      "name": "Fingerprinting",
+      "block_name": "Fingerprinting",
       "interaction": "active_safe",
-      "goal": "Identify the live HTTP surface, framework, server, and defensive controls.",
-      "tools": ["http_probe", "detect_tech", "http_header_analysis"]
+      "goal": "Identify live web behavior, headers, and technology fingerprints with low-noise wrappers.",
+      "tools": [
+        {
+          "name": "http_probe"
+        },
+        {
+          "name": "detect_tech"
+        },
+        {
+          "name": "http_header_analysis"
+        }
+      ]
     },
     {
       "id": "known_vuln_fast_lane",
-      "name": "Known Vulnerability Fast Lane",
+      "block_name": "Known Vulnerability Fast Lane",
       "interaction": "active_safe",
-      "goal": "Immediately correlate corroborated product and version fingerprints with known-vulnerability intelligence before planner starts.",
-      "tools": ["known_vuln_lookup"]
+      "goal": "Turn corroborated fingerprints into selective vulnerability intelligence.",
+      "tools": [
+        {
+          "name": "known_vuln_lookup"
+        }
+      ]
     },
     {
       "id": "surface_mapping",
-      "name": "Surface Mapping",
+      "block_name": "Surface Mapping",
       "interaction": "active_safe",
-      "goal": "Map routes, JavaScript-exposed endpoints, and same-origin API surface.",
-      "tools": ["web_crawler", "api_passive_enum", "js_source_code_analyzer"]
+      "goal": "Map reachable routes and passive URL clues without jumping into aggressive fuzzing.",
+      "tools": [
+        {
+          "name": "web_crawler"
+        },
+        {
+          "name": "api_endpoint_discovery"
+        },
+        {
+          "name": "run_custom",
+          "args": ["gau", "target"]
+        }
+      ]
     },
     {
       "id": "trust_and_auth",
-      "name": "Trust And Auth",
+      "block_name": "Trust And Auth",
       "interaction": "active_safe",
-      "goal": "Check cross-origin trust behavior and visible session/authentication clues.",
-      "tools": ["cors_misconfig_check", "session_token_analysis"]
+      "goal": "Check for trust-boundary and session-handling exposure using safe wrappers.",
+      "tools": [
+        {
+          "name": "cors_misconfig_check"
+        },
+        {
+          "name": "session_token_analysis"
+        }
+      ]
     }
   ],
   "api": [
     {
       "id": "passive_context",
-      "name": "Passive Context",
+      "block_name": "Passive Context",
       "interaction": "passive",
-      "goal": "Collect passive DNS and archive context when the API is publicly reachable.",
-      "tools": ["passive_web_recon", "dns_recon"]
+      "goal": "Collect passive host, DNS, and API-oriented public context.",
+      "tools": [
+        {
+          "name": "api_passive_enum"
+        },
+        {
+          "name": "passive_web_recon"
+        }
+      ]
     },
     {
       "id": "transport_and_headers",
-      "name": "Transport And Headers",
+      "block_name": "Transport And Headers",
       "interaction": "active_safe",
-      "goal": "Fingerprint transport behavior, headers, and visible controls.",
-      "tools": ["http_probe", "http_header_analysis", "detect_tech"]
-    },
-    {
-      "id": "known_vuln_fast_lane",
-      "name": "Known Vulnerability Fast Lane",
-      "interaction": "active_safe",
-      "goal": "Immediately correlate corroborated product and version fingerprints with known-vulnerability intelligence before planner starts.",
-      "tools": ["known_vuln_lookup"]
+      "goal": "Fingerprint API reachability, protocol behavior, and exposed headers.",
+      "tools": [
+        {
+          "name": "http_probe"
+        },
+        {
+          "name": "http_header_analysis"
+        }
+      ]
     },
     {
       "id": "api_surface",
-      "name": "API Surface",
+      "block_name": "API Surface",
       "interaction": "active_safe",
-      "goal": "Enumerate API routes, versions, and client-exposed endpoints.",
-      "tools": ["api_passive_enum", "js_source_code_analyzer"]
+      "goal": "Enumerate API routes and adjacent docs/endpoints before deeper attack tooling.",
+      "tools": [
+        {
+          "name": "api_endpoint_discovery"
+        },
+        {
+          "name": "web_crawler"
+        }
+      ]
     },
     {
-      "id": "trust_and_session",
-      "name": "Trust And Session",
+      "id": "known_vuln_fast_lane",
+      "block_name": "Known Vulnerability Fast Lane",
       "interaction": "active_safe",
-      "goal": "Inspect CORS, token, and session clues on visible endpoints.",
-      "tools": ["cors_misconfig_check", "session_token_analysis"]
+      "goal": "Use corroborated API/product fingerprints to pull selective known-vulnerability context.",
+      "tools": [
+        {
+          "name": "known_vuln_lookup"
+        }
+      ]
+    },
+    {
+      "id": "trust_and_auth",
+      "block_name": "Trust And Auth",
+      "interaction": "active_safe",
+      "goal": "Check cross-origin policy and session token behavior for API targets.",
+      "tools": [
+        {
+          "name": "cors_misconfig_check"
+        },
+        {
+          "name": "session_token_analysis"
+        }
+      ]
     }
   ],
   "mobile": [
     {
       "id": "artifact_profile",
-      "name": "Artifact Profile",
+      "block_name": "Artifact Profile",
       "interaction": "static",
-      "goal": "Extract static metadata, permissions, and code-level mobile findings.",
-      "tools": ["mobile_static_analysis"]
+      "goal": "Analyze mobile artifacts using the built-in static-analysis wrapper.",
+      "tools": [
+        {
+          "name": "mobile_static_analysis"
+        }
+      ]
     },
     {
       "id": "storage_review",
-      "name": "Storage Review",
+      "block_name": "Storage Review",
       "interaction": "static",
-      "goal": "Check storage-related exposure in extracted mobile artifacts when available.",
-      "tools": ["mobile_storage_check"]
+      "goal": "Check common mobile local-storage exposure patterns.",
+      "tools": [
+        {
+          "name": "mobile_storage_check"
+        }
+      ]
     }
   ],
   "infra": [
     {
       "id": "service_inventory",
-      "name": "Service Inventory",
+      "block_name": "Service Inventory",
       "interaction": "active_safe",
-      "goal": "Map live hosts, ports, and reachable services.",
-      "tools": ["route_topology", "dns_recon"]
+      "goal": "Map externally reachable infra paths and exposed database/service surfaces.",
+      "tools": [
+        {
+          "name": "route_topology"
+        },
+        {
+          "name": "db_enum_and_audit"
+        }
+      ]
     },
     {
-      "id": "exposure_posture",
-      "name": "Exposure Posture",
+      "id": "known_vuln_context",
+      "block_name": "Known Vulnerability Context",
       "interaction": "active_safe",
-      "goal": "Check for reachable database and service exposure clues on the infrastructure target.",
-      "tools": ["db_enum_and_audit"]
+      "goal": "Use discovered infra fingerprints to enrich known-vulnerability context.",
+      "tools": [
+        {
+          "name": "known_vuln_lookup"
+        }
+      ]
     }
   ],
   "network": [
     {
-      "id": "service_inventory",
-      "name": "Service Inventory",
+      "id": "surface_discovery",
+      "block_name": "Surface Discovery",
       "interaction": "active_safe",
-      "goal": "Map the reachable network surface and service posture.",
-      "tools": ["route_topology", "dns_recon"]
+      "goal": "Collect network path and DNS surface signals before deeper service checks.",
+      "tools": [
+        {
+          "name": "dns_recon"
+        },
+        {
+          "name": "route_topology"
+        }
+      ]
     },
     {
-      "id": "local_discovery",
-      "name": "Local Discovery",
+      "id": "service_inventory",
+      "block_name": "Service Inventory",
       "interaction": "active_safe",
-      "goal": "Enumerate nearby hosts and broadcast-adjacent exposure when applicable.",
-      "tools": ["arp_scan"]
+      "goal": "Check common exposed services and database surfaces on the host.",
+      "tools": [
+        {
+          "name": "db_enum_and_audit"
+        },
+        {
+          "name": "known_vuln_lookup"
+        }
+      ]
     }
   ],
   "iot": [
     {
-      "id": "service_inventory",
-      "name": "Service Inventory",
+      "id": "protocol_discovery",
+      "block_name": "Protocol Discovery",
       "interaction": "active_safe",
-      "goal": "Map reachable services and IoT-relevant network behavior.",
-      "tools": ["route_topology", "iot_protocol_scan", "arp_scan"]
-    },
-    {
-      "id": "firmware_context",
-      "name": "Firmware Context",
-      "interaction": "static",
-      "goal": "Analyze firmware artifacts when a firmware image is provided.",
-      "tools": ["firmware_analysis"]
+      "goal": "Check common IoT protocols with the dedicated protocol wrapper.",
+      "tools": [
+        {
+          "name": "iot_protocol_scan"
+        },
+        {
+          "name": "db_enum_and_audit"
+        }
+      ]
     }
   ],
   "linux_server": [
     {
-      "id": "service_inventory",
-      "name": "Service Inventory",
+      "id": "network_exposure",
+      "block_name": "Network Exposure",
       "interaction": "active_safe",
-      "goal": "Map open services, routes, and transport exposure.",
-      "tools": ["route_topology", "dns_recon"]
+      "goal": "Capture path, routing, and initial exposure details for the Linux host.",
+      "tools": [
+        {
+          "name": "route_topology"
+        }
+      ]
     },
     {
-      "id": "exposure_posture",
-      "name": "Exposure Posture",
+      "id": "service_inventory",
+      "block_name": "Service Inventory",
       "interaction": "active_safe",
-      "goal": "Check for reachable database and service exposure clues on the Linux server target.",
-      "tools": ["db_enum_and_audit"]
+      "goal": "Check common service and database exposure on the Linux host.",
+      "tools": [
+        {
+          "name": "db_enum_and_audit"
+        }
+      ]
+    },
+    {
+      "id": "known_vuln_context",
+      "block_name": "Known Vulnerability Context",
+      "interaction": "active_safe",
+      "goal": "Use corroborated Linux-service fingerprints to enrich known-vulnerability context.",
+      "tools": [
+        {
+          "name": "known_vuln_lookup"
+        }
+      ]
     }
   ],
   "desktop": [
     {
       "id": "binary_profile",
-      "name": "Binary Profile",
+      "block_name": "Binary Profile",
       "interaction": "static",
-      "goal": "Inspect the desktop binary and embedded dependencies when an artifact is available.",
-      "tools": ["binary_analysis"]
+      "goal": "Run static binary analysis through the built-in desktop wrapper.",
+      "tools": [
+        {
+          "name": "binary_analysis"
+        }
+      ]
     }
   ],
   "cloud": [
     {
       "id": "storage_exposure",
-      "name": "Storage Exposure",
+      "block_name": "Storage Exposure",
       "interaction": "passive_active_safe",
-      "goal": "Enumerate public cloud storage exposure and naming patterns.",
-      "tools": ["cloud_storage_enum"]
+      "goal": "Enumerate public cloud storage exposure using the dedicated storage wrapper.",
+      "tools": [
+        {
+          "name": "cloud_storage_enum"
+        }
+      ]
     },
     {
-      "id": "provider_posture",
-      "name": "Provider Posture",
+      "id": "posture_review",
+      "block_name": "Posture Review",
       "interaction": "active_safe",
-      "goal": "Collect high-level provider misconfiguration signals when the provider is known.",
-      "tools": ["cloud_misconfig_scan"]
+      "goal": "Run cloud posture checks when the provider can be inferred from target context.",
+      "tools": [
+        {
+          "name": "cloud_misconfig_scan"
+        }
+      ]
     }
   ],
   "container": [
     {
       "id": "image_profile",
-      "name": "Image Profile",
+      "block_name": "Image Profile",
       "interaction": "static",
-      "goal": "Inventory packages, vulnerabilities, and image-layer exposure from the container artifact.",
-      "tools": ["container_image_scan", "container_layer_analysis"]
+      "goal": "Build a quick image security profile with the container scan wrapper.",
+      "tools": [
+        {
+          "name": "container_image_scan"
+        }
+      ]
     },
     {
-      "id": "runtime_posture",
-      "name": "Runtime Posture",
-      "interaction": "active_safe",
-      "goal": "Check runtime and orchestration posture when runtime access exists.",
-      "tools": ["container_runtime_audit", "container_registry_enum"]
+      "id": "layer_review",
+      "block_name": "Layer Review",
+      "interaction": "static",
+      "goal": "Inspect container layers for secrets and risky content.",
+      "tools": [
+        {
+          "name": "container_layer_analysis"
+        }
+      ]
     }
   ],
   "repository": [
     {
       "id": "secret_and_history",
-      "name": "Secret And History",
+      "block_name": "Secret And History",
       "interaction": "static",
-      "goal": "Find exposed secrets, deleted sensitive files, and risky history.",
-      "tools": ["secret_scan", "git_history_audit", "sensitive_files_scan"]
+      "goal": "Scan repository secrets and commit history with built-in repository tooling.",
+      "tools": [
+        {
+          "name": "secret_scan"
+        },
+        {
+          "name": "git_history_audit"
+        }
+      ]
     },
     {
       "id": "code_and_pipeline",
-      "name": "Code And Pipeline",
+      "block_name": "Code And Pipeline",
       "interaction": "static",
-      "goal": "Review source code, dependencies, and CI/CD configuration for security issues.",
-      "tools": ["sast_scan", "dependency_scan", "ci_cd_pipeline_audit", "iac_security_scan"]
+      "goal": "Run static analysis, dependency review, and pipeline checks with repository wrappers.",
+      "tools": [
+        {
+          "name": "sast_scan"
+        },
+        {
+          "name": "dependency_scan"
+        },
+        {
+          "name": "ci_cd_pipeline_audit"
+        }
+      ]
     }
   ]
 }

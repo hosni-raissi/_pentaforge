@@ -21,8 +21,10 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
+import inspect
 import ipaddress
 import json
 import logging
@@ -204,7 +206,42 @@ def _build_nmap_cmd(target: str, max_hops: int = 30) -> list[str]:
 # 5. EXECUTOR
 # ══════════════════════════════════════════════════════════════════════
 
-def _execute(cmd: list[str], timeout: int = 120) -> tuple[str, str, int]:
+def _request_sudo_password(commands: list[list[str]]) -> str | None:
+    """Request one sudo password for all privileged route_topology commands."""
+    try:
+        from server.agents.executer.base import _executer_callback_context
+
+        callback = _executer_callback_context.get()
+        if callback is None or not hasattr(callback, "request_password"):
+            return None
+
+        command_preview = " | ".join(" ".join(command) for command in commands if command)
+        password = callback.request_password(
+            prompt="sudo password: ",
+            reason=f"Execute privileged network reconnaissance: {command_preview}",
+            call_id="route_topology_sudo",
+        )
+        if inspect.isawaitable(password):
+            try:
+                password = asyncio.run(password)
+            except RuntimeError:
+                # Fallback: if we are in a thread but somehow asyncio.run fails,
+                # we are likely in a broken state, but we'll try to return None.
+                return None
+        if isinstance(password, str) and password and not password.endswith("\n"):
+            password = f"{password}\n"
+        return password if isinstance(password, str) and password else None
+    except Exception:
+        return None
+
+
+def _prepare_sudo_command(cmd: list[str]) -> list[str]:
+    if not cmd or cmd[0] != "sudo":
+        return cmd
+    return ["sudo", "-S", "-k", "-p", ""] + cmd[1:]
+
+
+def _execute(cmd: list[str], timeout: int = 120, password: str | None = None) -> tuple[str, str, int]:
     """
     Run command as a subprocess (shell=False — no shell injection risk).
     Returns (stdout, stderr, returncode). -1 returncode signals tool-level error.
@@ -213,6 +250,7 @@ def _execute(cmd: list[str], timeout: int = 120) -> tuple[str, str, int]:
     try:
         result = subprocess.run(
             cmd,
+            input=password if password else None,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -499,10 +537,27 @@ def route_topology(
 
     mtr_cmd  = _build_mtr_cmd(target, max_hops)
     nmap_cmd = _build_nmap_cmd(target, max_hops)
+    password: str | None = None
+    if any(command and command[0] == "sudo" for command in (mtr_cmd, nmap_cmd)):
+        password = _request_sudo_password([mtr_cmd, nmap_cmd])
+        if password:
+            mtr_cmd = _prepare_sudo_command(mtr_cmd)
+            nmap_cmd = _prepare_sudo_command(nmap_cmd)
+        else:
+            result = ReconResult(
+                target=target,
+                success=False,
+                error="Privileged reconnaissance requires a sudo password, but none was supplied.",
+                commands_executed=[" ".join(mtr_cmd), " ".join(nmap_cmd)],
+                warnings=["Privileged route topology scan was skipped because sudo credentials were not provided."],
+            )
+            out = result.model_dump()
+            out["formatted_report"] = _format_text(result)
+            return out
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        mtr_future  = pool.submit(_execute, mtr_cmd,  timeout)
-        nmap_future = pool.submit(_execute, nmap_cmd, timeout)
+        mtr_future  = pool.submit(_execute, mtr_cmd,  timeout, password)
+        nmap_future = pool.submit(_execute, nmap_cmd, timeout, password)
         mtr_stdout,  mtr_stderr,  mtr_rc  = mtr_future.result()
         nmap_stdout, nmap_stderr, nmap_rc = nmap_future.result()
 

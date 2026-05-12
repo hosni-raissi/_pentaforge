@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 from importlib import import_module
 
 from fastapi import Response
@@ -23,6 +24,7 @@ from server.nodes.system_memory import load_system_memory, save_system_memory
 ai_routes = import_module("server.api.routes.ai")
 scans_routes = import_module("server.api.routes.scans")
 reports_routes = import_module("server.api.routes.reports")
+projects_routes = import_module("server.api.routes.projects")
 mark_false_positive_module = import_module("server.agents.assistant.tools.mark_false_positive")
 scan_observability_module = import_module("server.db.projects.scan_observability")
 assistant_agent_module = import_module("server.agents.assistant.agent")
@@ -33,6 +35,8 @@ privacy_gate_node_module = import_module("server.layers.PrivacyGate.node")
 prompt_guard_module = import_module("server.layers.safety.prompt_guard")
 target_validation_module = import_module("server.layers.safety.target_validation")
 config_agent_module = import_module("server.config.agent")
+route_topology_module = import_module("server.agents.executer.recon.tools.network.route_topology")
+executer_base_module = import_module("server.agents.executer.base")
 
 
 def _seed_project(store: ProjectsStore, project_id: str = "proj-1") -> dict[str, Any]:
@@ -482,6 +486,115 @@ def test_architect_manual_refresh_uses_planner_memory_assistant_brain_and_confir
     assert "RECENT ASSISTANT DISCUSSION" in captured["memory_block"]
     assert "Telnet Default Credentials" in captured["vulnerabilities_block"]
     assert "severity=critical" in captured["vulnerabilities_block"]
+
+
+def test_architect_manual_refresh_emits_no_update_when_draft_empty(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    project = store.get_project("proj-1")
+    project.update(
+        {
+            "target": "192.168.100.81",
+            "targetType": "linux_server",
+            "payload": {},
+        }
+    )
+    store.upsert_project(project)
+    monkeypatch.setattr(ai_routes, "projects_store", store)
+    monkeypatch.setattr(ai_routes, "load_system_memory", lambda _run_dir: {})
+    monkeypatch.setattr(ai_routes, "build_target_memory_prompt_block", lambda _memory: "")
+
+    emitted: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeArchitectAgent:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def synthesize(self, **_kwargs: Any) -> dict[str, Any]:
+            return {}
+
+    class FakeOrchestrator:
+        def emit_event(self, project_id: str, *, event: str, data: dict[str, Any], **_kwargs: Any) -> None:
+            emitted.append((event, data))
+
+    monkeypatch.setattr(ai_routes, "ArchitectAgent", FakeArchitectAgent)
+    monkeypatch.setattr(ai_routes, "scan_orchestrator", FakeOrchestrator())
+
+    result = asyncio.run(
+        ai_routes.ai_architect_synthesize(
+            ai_routes.ArchitectSynthesizePayload(project_id="proj-1")
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["architecture_draft"] == {}
+    assert any(event == "architect_no_update" for event, _data in emitted)
+
+
+def test_architect_sanitize_draft_preserves_llm_board_layout() -> None:
+    agent = architect_agent_module.ArchitectAgent(project_id="proj-1")
+
+    draft = agent._sanitize_draft(
+        {
+            "title": "Observed Target Surface",
+            "hosts": [
+                {
+                    "id": "edge-node",
+                    "name": "Linux Server",
+                    "role": "Edge",
+                    "ports": ["21/tcp", "22/tcp", "23/tcp", "80/tcp"],
+                    "note": "Single externally exposed Linux server.",
+                    "x": 18,
+                    "y": 28,
+                }
+            ],
+            "flows": [],
+            "board": {
+                "theme": "mono-grid",
+                "canvas": {"width": 1280, "height": 720},
+                "boxes": [
+                    {
+                        "id": "entry-box",
+                        "title": "ENTRY BOX",
+                        "subtitle": "Linux Server",
+                        "kind": "host",
+                        "x": 120,
+                        "y": 140,
+                        "w": 240,
+                        "h": 160,
+                        "lines": ["Primary ingress node", "Telnet exposed"],
+                        "tags": ["21/tcp", "23/tcp"],
+                        "hostIds": ["edge-node"],
+                        "emphasis": "primary",
+                    },
+                    {
+                        "id": "notes-box",
+                        "title": "OBSERVED NOTES",
+                        "kind": "notes",
+                        "x": 420,
+                        "y": 320,
+                        "w": 320,
+                        "h": 180,
+                        "lines": ["Confirmed default credentials on Telnet."],
+                        "hostIds": ["edge-node"],
+                    },
+                ],
+                "links": [
+                    {
+                        "fromId": "entry-box",
+                        "toId": "notes-box",
+                        "label": "notes",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert draft["board"]["theme"] == "mono-grid"
+    assert draft["board"]["canvas"]["width"] == 1280
+    assert draft["board"]["boxes"][0]["id"] == "entry-box"
+    assert draft["board"]["boxes"][0]["hostIds"] == ["edge-node"]
+    assert draft["board"]["links"][0]["fromId"] == "entry-box"
+    assert draft["board"]["links"][0]["toId"] == "notes-box"
 
 
 def test_store_copilot_context_cap_accepts_large_working_memory(tmp_path) -> None:
@@ -1187,6 +1300,45 @@ def test_lightweight_lane_returns_soft_failure_when_llm_unavailable(monkeypatch)
     )
 
     assert "trouble reaching the model" in reply.lower()
+
+
+def test_assistant_chat_falls_back_to_backup_on_primary_503(monkeypatch) -> None:
+    agent = assistant_agent_module.AssistantAgent()
+
+    class FakeQueue:
+        async def call_with_queue(self, _agent_name: str, coro):
+            return await coro
+
+    class FakeBackupLLM:
+        async def chat(self, *_args: Any, **_kwargs: Any):
+            return llm_module.LLMResponse(
+                content="Recovered through backup provider.",
+                tool_calls=[],
+                finish_reason="stop",
+                usage={},
+            )
+
+    class FakeBackupManager:
+        async def get_backup_llm(self):
+            return FakeBackupLLM()
+
+    async def primary_503(*_args: Any, **_kwargs: Any):
+        request = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
+        response = httpx.Response(503, request=request, text="Service Unavailable")
+        raise httpx.HTTPStatusError("503 Service Unavailable", request=request, response=response)
+
+    monkeypatch.setattr(agent, "_queue", FakeQueue())
+    monkeypatch.setattr(agent, "_backup", FakeBackupManager())
+    monkeypatch.setattr(agent._llm, "chat", primary_503)
+
+    response = asyncio.run(
+        agent._chat_with_fallback(
+            [llm_module.ChatMessage(role="user", content="verify if is it correct or false positif")],
+            allow_tools=False,
+        )
+    )
+
+    assert response.content == "Recovered through backup provider."
 
 
 def test_privacy_gate_verbose_output_ignores_blocking_stdout(monkeypatch) -> None:
@@ -2064,6 +2216,121 @@ def test_orchestrator_scan_control_facade_matches_route_contracts(tmp_path) -> N
     asyncio.run(_run())
 
 
+def test_reset_project_runtime_state_clears_generated_project_artifacts(tmp_path) -> None:
+    store = _make_store(tmp_path)
+    project = store.get_project("proj-1")
+    assert project is not None
+    project.update(
+        {
+            "status": "running",
+            "scanProgress": 82,
+            "findings": [{"id": "finding-1", "title": "XSS"}],
+            "copilotHistory": [{"id": "msg-1", "role": "assistant", "text": "hello"}],
+            "copilotContext": "saved context",
+            "copilotHistoryScope": "web_app|https://example.com",
+            "copilotContextScope": "web_app|https://example.com",
+            "lastScan": {"scanId": "scan-1", "status": "running"},
+            "payload": {"architecture_draft": {"hosts": [{"id": "host-1"}]}},
+            "agents": [{"name": "planner", "state": "running", "progress": 44, "currentTask": "plan", "lastUpdate": "now"}],
+            "phases": [{"name": "Reconnaissance", "status": "active", "progress": 55, "startedAt": "now", "completedAt": ""}],
+        }
+    )
+    store.upsert_project(project)
+    store.save_report("proj-1", report_id="report-1", format="markdown", content="# Report")
+    store.append_scan_event_cache(
+        "proj-1",
+        {
+            "scan_id": "scan-1",
+            "event": "scan_started",
+            "level": "info",
+            "message": "Scan started",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "data": {},
+        },
+    )
+    store.append_tool_audit_log(
+        {
+            "project_id": "proj-1",
+            "scan_id": "scan-1",
+            "role": "executer",
+            "tool_name": "nmap",
+            "full_command": "nmap -sV example.com",
+        }
+    )
+    store.upsert_task_run(
+        run_id="run-1",
+        project_id="proj-1",
+        task_type="report",
+        scope_key="",
+        status="completed",
+        payload={"report_id": "report-1"},
+    )
+    store.add_client_message("proj-1", "client", "hello")
+    share = store.create_share_link("proj-1")
+    assert share["token"]
+
+    reset = store.reset_project_runtime_state("proj-1")
+
+    assert reset["status"] == "idle"
+    assert reset["scanProgress"] == 0
+    assert reset["findings"] == []
+    assert reset["copilotHistory"] == []
+    assert reset["copilotContext"] == ""
+    assert reset["copilotHistoryScope"] == ""
+    assert reset["copilotContextScope"] == ""
+    assert reset["lastScan"] is None
+    assert reset["payload"] is None
+    assert reset["agents"][0]["state"] == "idle"
+    assert reset["phases"][0]["status"] == "pending"
+
+    reloaded = store.get_project("proj-1")
+    assert reloaded is not None
+    assert reloaded["status"] == "idle"
+    assert reloaded["findings"] == []
+    assert reloaded["payload"] is None
+    assert store.list_report_status("proj-1") == {
+        "markdown": False,
+        "html": False,
+        "pdf": False,
+        "generated_at": None,
+    }
+    assert store.list_scan_event_cache("proj-1", limit=20) == []
+    assert store.list_tool_audit_logs("proj-1", limit=20) == []
+    assert store.list_task_runs("proj-1", limit=20) == []
+    assert store.list_client_messages("proj-1") == []
+    assert store.get_active_share_link("proj-1") is None
+
+
+def test_reset_project_runtime_route_returns_clean_project(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    project = store.get_project("proj-1")
+    assert project is not None
+    project["status"] = "running"
+    project["copilotContext"] = "saved context"
+    project["payload"] = {"architecture_draft": {"hosts": [{"id": "host-1"}]}}
+    store.upsert_project(project)
+
+    monkeypatch.setattr(projects_routes, "projects_store", store)
+    monkeypatch.setattr(
+        projects_routes,
+        "_delete_project_cache_artifacts",
+        lambda project_id: {
+            "project_runs_removed": 1 if project_id == "proj-1" else 0,
+            "project_findings_removed": 1 if project_id == "proj-1" else 0,
+        },
+    )
+
+    response = projects_routes.reset_project_runtime("proj-1")
+
+    assert response["ok"] is True
+    assert response["id"] == "proj-1"
+    assert response["project"]["status"] == "idle"
+    assert response["project"]["copilotContext"] == ""
+    assert response["project"]["payload"] is None
+    assert response["project_runs_removed"] == 1
+    assert response["project_findings_removed"] == 1
+
+
 def test_observability_metrics_count_manual_false_positives_tool_records_and_resume_terminal() -> None:
     events = [
         {
@@ -2383,10 +2650,11 @@ def test_pause_resume_timer_fields_survive_persistence_boundaries(tmp_path) -> N
 
     reloaded = store.get_project("proj-1")
     assert reloaded is not None
-    assert reloaded["status"] == "paused"
-    assert reloaded["lastScan"]["status"] == "paused"
+    assert reloaded["status"] == "stopped"
+    assert reloaded["lastScan"]["status"] == "cancelled"
     assert reloaded["lastScan"]["elapsedSeconds"] == 133
     assert reloaded["lastScan"]["finishedAt"]
+    assert reloaded["lastScan"]["error"] == "Scan cancelled because the server stopped."
 
     persistence = ScanPersistenceService(store)
     events = ScanEventService(persistence, store)
@@ -2407,3 +2675,47 @@ def test_pause_resume_timer_fields_survive_persistence_boundaries(tmp_path) -> N
     scan_started = [event for event in cached_events if event["event"] == "scan_started"]
     assert scan_started
     assert scan_started[-1]["reason_code"] == "resume_restored"
+
+
+def test_route_topology_uses_password_callback_for_sudo(monkeypatch) -> None:
+    recorded: list[tuple[list[str], str | None]] = []
+
+    class FakeCallback:
+        async def request_password(self, *, prompt: str, reason: str, call_id: str) -> str | None:
+            assert prompt == "sudo password: "
+            assert "sudo mtr" in reason
+            assert "sudo nmap" in reason
+            assert call_id == "route_topology_sudo"
+            return "secret"
+
+    monkeypatch.setattr(route_topology_module, "_validate_target", lambda target: (False, ""))
+    monkeypatch.setattr(route_topology_module, "_parse_mtr", lambda stdout: ([], []))
+    monkeypatch.setattr(route_topology_module, "_parse_nmap", lambda stdout: ([], [], [], False, []))
+    monkeypatch.setattr(
+        route_topology_module,
+        "_analyze_path",
+        lambda path_hops, boundary_threshold_ms: {
+            "avg_latency": None,
+            "max_latency": None,
+            "worst_loss": None,
+            "possible_firewalls": [],
+            "boundaries": [],
+        },
+    )
+
+    def fake_execute(cmd: list[str], timeout: int = 120, password: str | None = None) -> tuple[str, str, int]:
+        recorded.append((cmd, password))
+        return "", "permission denied", 1
+
+    monkeypatch.setattr(route_topology_module, "_execute", fake_execute)
+
+    token = executer_base_module._executer_callback_context.set(FakeCallback())
+    try:
+        route_topology_module.route_topology(target="192.168.100.81")
+    finally:
+        executer_base_module._executer_callback_context.reset(token)
+
+    assert len(recorded) == 2
+    for cmd, password in recorded:
+        assert cmd[:5] == ["sudo", "-S", "-k", "-p", ""]
+        assert password == "secret\n"

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Play, Square, FolderOpen, Share2, RefreshCcw, Pencil } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -10,6 +9,12 @@ import { Input } from '../components/ui/Input';
 import { Textarea } from '../components/ui/Textarea';
 import { Select } from '../components/ui/Select';
 import { useProjects } from '../stores/projects';
+import { clsx } from 'clsx';
+import { 
+  Plus, Trash2, Play, Square, FolderOpen, Share2, RefreshCcw, Pencil,
+  Globe, Database, Shield, Network, Cpu, Smartphone, Cloud, Box, Code, Monitor, Server,
+  AlertCircle
+} from 'lucide-react';
 import { format } from 'date-fns';
 import type { Project } from '../types';
 import {
@@ -23,15 +28,14 @@ import {
 const FALLBACK_TARGET_TYPES: ProjectTargetTypeOption[] = [
   { value: 'web_app', label: 'Web Application' },
   { value: 'api', label: 'API' },
-  { value: 'mobile', label: 'Mobile App' },
+  { value: 'mobile', label: 'Mobile App (Coming Soon)', disabled: true },
   { value: 'infra', label: 'Infrastructure' },
   { value: 'network', label: 'Network' },
-  { value: 'iot', label: 'IoT' },
+  { value: 'iot', label: 'IoT (Coming Soon)', disabled: true },
   { value: 'linux_server', label: 'Linux Server' },
-  { value: 'desktop', label: 'Desktop App' },
-  { value: 'cloud', label: 'Cloud' },
-  { value: 'container', label: 'Container' },
-  { value: 'repository', label: 'Repository' },
+  { value: 'cloud', label: 'Cloud (Coming Soon)', disabled: true },
+  { value: 'container', label: 'Container (Coming Soon)', disabled: true },
+  { value: 'repository', label: 'Repository (Coming Soon)', disabled: true },
 ];
 
 const FALLBACK_FIELD: ProjectTargetField = {
@@ -177,16 +181,21 @@ export default function Projects() {
       setTypesError('');
       try {
         const remote = await listProjectTargetTypesFromDesktop();
-        const nextTypes = remote.length > 0 ? remote : FALLBACK_TARGET_TYPES;
+        const restricted = ['mobile', 'iot', 'cloud', 'container', 'repository'];
+        const nextTypes = (remote.length > 0 ? remote : FALLBACK_TARGET_TYPES).map(type => ({
+          ...type,
+          disabled: restricted.includes(type.value) || type.disabled
+        }));
+
         if (cancelled) {
           return;
         }
         setTargetTypes(nextTypes);
         setForm((previous) => {
-          const hasCurrent = nextTypes.some((item) => item.value === previous.targetType);
+          const hasCurrent = nextTypes.some((item) => item.value === previous.targetType && !item.disabled);
           return {
             ...previous,
-            targetType: hasCurrent ? previous.targetType : (nextTypes[0]?.value ?? ''),
+            targetType: hasCurrent ? previous.targetType : (nextTypes.find(t => !t.disabled)?.value ?? ''),
           };
         });
       } catch {
@@ -738,23 +747,99 @@ export default function Projects() {
         width="max-w-3xl"
       >
         <div className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4">
             <Input
-              label="Project Name"
+              label="Project Name *"
               placeholder="ACME Corp — Web Assessment 2026"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
             />
-            <Select
-              label="Target Type"
-              options={targetTypes}
-              value={form.targetType}
-              onChange={(e) => {
-                setForm({ ...form, targetType: e.target.value });
-                setTargetInfo({});
-                setCredentialProfiles([{}]);
-              }}
-            />
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-bold text-text-muted uppercase tracking-widest">Select Target Vector</label>
+            </div>
+            <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
+              {targetTypes.map((type) => {
+                const Icon = {
+                  'web_app': Globe,
+                  'api': Database,
+                  'mobile': Smartphone,
+                  'infra': Shield,
+                  'network': Network,
+                  'iot': Cpu,
+                  'linux_server': Server,
+                  'cloud': Cloud,
+                  'container': Box,
+                  'repository': Code,
+                }[type.value] || Globe;
+
+                const isActive = form.targetType === type.value;
+
+                if (type.disabled) {
+                  return (
+                    <div
+                      key={type.value}
+                      className="group relative flex flex-col items-center justify-center p-2 rounded-xl border border-border/20 bg-surface-2/10 text-text-muted opacity-30 grayscale cursor-default gap-1.5 overflow-hidden"
+                    >
+                      <div className="p-1.5 rounded-lg bg-surface-3/30 text-text-muted/50">
+                        <Icon size={16} />
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-[9px] font-black uppercase tracking-tight text-text-muted/40">
+                          {type.label.replace(' (Coming Soon)', '')}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <motion.button
+                    key={type.value}
+                    type="button"
+                    whileHover={{ scale: 1.02, translateY: -1 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => {
+                      setForm({ ...form, targetType: type.value });
+                      setTargetInfo({});
+                      setCredentialProfiles([{}]);
+                    }}
+                    className={clsx(
+                      "group relative flex flex-col items-center justify-center p-2 rounded-xl border transition-all text-center gap-1.5 overflow-hidden",
+                      isActive
+                        ? "bg-pf-500/10 border-pf-500/60 shadow-[0_0_15px_-5px_rgba(var(--pf-500-rgb),0.3)]"
+                        : "bg-surface-2/50 border-border/60 text-text-muted hover:border-pf-500/30 hover:bg-surface-2 hover:text-text-primary"
+                    )}
+                  >
+                    {/* Background Glow for Active State */}
+                    {isActive && (
+                      <motion.div 
+                        layoutId="active-glow"
+                        className="absolute inset-0 bg-gradient-to-br from-pf-500/5 to-transparent pointer-events-none"
+                      />
+                    )}
+
+                    <div className={clsx(
+                      "p-1.5 rounded-lg transition-colors",
+                      isActive ? "bg-pf-500/20 text-pf-400" : "bg-surface-3/50 text-text-muted group-hover:text-pf-500/70"
+                    )}>
+                      <Icon size={16} />
+                    </div>
+
+                    <div className="flex flex-col">
+                      <span className={clsx(
+                        "text-[9px] font-black uppercase tracking-tight transition-colors",
+                        isActive ? "text-pf-400" : "text-text-muted group-hover:text-text-primary"
+                      )}>
+                        {type.label.replace(' (Coming Soon)', '')}
+                      </span>
+                    </div>
+                  </motion.button>
+                );
+              })}
+            </div>
           </div>
 
           {typesLoading && <p className="text-sm text-text-muted">Loading target types...</p>}

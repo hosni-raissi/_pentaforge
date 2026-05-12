@@ -167,6 +167,39 @@ class ExecuterScanCallback:
             call_id=call_id,
         )
 
+    def request_tool_approval_threadsafe(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        return self._service.request_tool_approval_threadsafe(
+            project_id=self._project_id,
+            scan_id=self._scan_id,
+            role=role,
+            tool_name=tool_name,
+            args=args,
+            call_id=call_id,
+        )
+
+    def request_password_threadsafe(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> str | None:
+        return self._service.request_password_threadsafe(
+            project_id=self._project_id,
+            scan_id=self._scan_id,
+            tool_name="authentication",  # Or better detection
+            prompt=prompt,
+            reason=reason,
+            call_id=call_id,
+        )
+
 
 class AnalyzerScanCallback(ExecuterScanCallback):
     """Analyzer callback bridged to scan event bus + approval workflow."""

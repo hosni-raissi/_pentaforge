@@ -191,7 +191,14 @@ class InformationGatheringNode:
         prepared = dict(original_block)
         payload = payload_block if isinstance(payload_block, dict) else {}
         original_tools = original_block.get("tools", [])
-        original_names = [str(item).strip() for item in original_tools if str(item).strip()]
+        original_names = []
+        for item in original_tools:
+            if isinstance(item, str):
+                original_names.append(item.strip())
+            elif isinstance(item, dict):
+                # For objects, use the tool/name or a placeholder
+                original_names.append(str(item.get("name") or item.get("tool") or "custom").strip())
+        
         allowed_tool_names = {str(item).strip() for item in available_tools if str(item).strip()}
 
         tools: list[Any] = []
@@ -211,7 +218,7 @@ class InformationGatheringNode:
                     continue
                 if not isinstance(item, dict):
                     continue
-                tool_name = str(item.get("tool", "")).strip()
+                tool_name = str(item.get("name") or item.get("tool", "")).strip()
                 if tool_name != "run_custom":
                     continue
                 if run_custom_count >= self._config.max_run_custom_additions_per_block:
@@ -235,7 +242,7 @@ class InformationGatheringNode:
                 reason = str(item.get("reason", "")).strip() or "Scoped addition from information-gathering block preparation."
                 tools.append(
                     {
-                        "tool": "run_custom",
+                        "name": "run_custom",
                         "command": command,
                         "args": args,
                         "reason": reason,
@@ -245,8 +252,8 @@ class InformationGatheringNode:
 
         if tools:
             prepared["tools"] = tools
-        if str(payload.get("name", "")).strip():
-            prepared["name"] = str(payload.get("name", "")).strip()
+        if str(payload.get("block_name") or payload.get("name", "")).strip():
+            prepared["name"] = str(payload.get("block_name") or payload.get("name", "")).strip()
         if str(payload.get("goal", "")).strip():
             prepared["goal"] = str(payload.get("goal", "")).strip()
         if str(payload.get("interaction", "")).strip():
@@ -271,9 +278,9 @@ class InformationGatheringNode:
                 filtered_tools.append(item)
                 continue
             if isinstance(item, dict):
-                tool_name = str(item.get("tool", "")).strip().lower()
+                tool_name = str(item.get("name") or item.get("tool", "")).strip().lower()
                 command_name = str(item.get("command", "")).strip().lower()
-                if tool_name in skipped_names or f"{tool_name}:{command_name}" in skipped_names:
+                if tool_name in skipped_names or (tool_name == "run_custom" and command_name in skipped_names):
                     continue
                 filtered_tools.append(item)
         prepared["tools"] = filtered_tools
@@ -288,7 +295,7 @@ class InformationGatheringNode:
                 if isinstance(item, str):
                     kept_names.add(item.strip().lower())
                 elif isinstance(item, dict):
-                    kept_names.add(str(item.get("tool", "")).strip().lower())
+                    kept_names.add(str(item.get("name") or item.get("tool", "")).strip().lower())
             prepared["skipped_tools"] = [
                 item for item in original_names if item.lower() not in kept_names
             ]
@@ -371,21 +378,34 @@ class InformationGatheringNode:
 
         for entry in prepared_block.get("tools", []):
             if isinstance(entry, dict):
-                tool_name = str(entry.get("tool", "")).strip()
-                if tool_name != "run_custom":
-                    result_rows.append({
-                        "tool": tool_name or "unknown",
-                        "status": "skipped",
-                        "summary": "skipped: unsupported custom block tool entry",
-                        "args": {},
-                    })
-                    continue
-                kwargs = {
-                    "command": str(entry.get("command", "")).strip(),
-                    "args": entry.get("args", []) if isinstance(entry.get("args"), list) else [],
-                    "reason": str(entry.get("reason", "")).strip(),
-                }
-                skip_reason = None if kwargs["command"] else "skipped: run_custom command was empty"
+                tool_name = str(entry.get("name") or entry.get("tool", "")).strip()
+                if tool_name == "run_custom":
+                    # If it's the new style from the profile, 'args' contains the full command as a list
+                    args_list = entry.get("args", [])
+                    if not isinstance(args_list, list):
+                        args_list = []
+
+                    if "command" in entry:
+                        # Old style: command + args
+                        command = str(entry.get("command", "")).strip()
+                        final_args = args_list
+                    else:
+                        # New style: args[0] is command, rest are args
+                        if args_list:
+                            command = args_list[0]
+                            final_args = args_list[1:]
+                        else:
+                            command = ""
+                            final_args = []
+
+                    kwargs = {
+                        "command": command,
+                        "args": final_args,
+                        "reason": str(entry.get("reason", "")).strip(),
+                    }
+                    skip_reason = None if kwargs["command"] else "skipped: run_custom command was empty"
+                else:
+                    kwargs, skip_reason = tool_arg_builder(tool_name, target, target_type, info, memory)
             else:
                 tool_name = str(entry).strip()
                 kwargs, skip_reason = tool_arg_builder(tool_name, target, target_type, info, memory)

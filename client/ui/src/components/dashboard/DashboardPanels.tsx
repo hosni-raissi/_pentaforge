@@ -31,14 +31,170 @@ interface ArchitectureHost {
   y: number;
 }
 
+interface ArchitectureFlow {
+  fromId: string;
+  toId: string;
+  label: string;
+}
+
+interface ArchitectureBoardBox {
+  id: string;
+  title: string;
+  subtitle?: string;
+  kind?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  lines?: string[];
+  tags?: string[];
+  hostIds?: string[];
+  emphasis?: "primary" | "normal" | "muted";
+}
+
+interface ArchitectureBoardLink {
+  fromId: string;
+  toId: string;
+  label?: string;
+}
+
+interface ArchitectureBoard {
+  theme?: string;
+  canvas?: {
+    width: number;
+    height: number;
+  };
+  boxes: ArchitectureBoardBox[];
+  links: ArchitectureBoardLink[];
+}
+
 interface TargetArchitectureDraft {
   title: string;
   hosts: ArchitectureHost[];
+  flows?: ArchitectureFlow[];
+  board?: ArchitectureBoard;
 }
 
 interface ArchitectureEdge {
   from: ArchitectureHost;
   to: ArchitectureHost;
+}
+
+function splitNoteIntoLines(note: string, maxLines = 3): string[] {
+  return note
+    .split(/(?<=[.!?])\s+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, maxLines);
+}
+
+function architectureZoneLabel(host: ArchitectureHost): string {
+  const role = host.role.trim().toLowerCase();
+  if (role.includes("edge")) return "ENTRY";
+  if (role.includes("data")) return "DATA";
+  if (role.includes("service")) return "SERVICE";
+  return "NODE";
+}
+
+function boardBoxKindLabel(kind: string | undefined): string {
+  const value = String(kind || "").trim().toLowerCase();
+  if (value === "host") return "HOST";
+  if (value === "ports") return "PORTS";
+  if (value === "service") return "SERVICE";
+  if (value === "backend") return "BACKEND";
+  if (value === "data") return "DATA";
+  if (value === "auth") return "AUTH";
+  if (value === "infra") return "INFRA";
+  if (value === "attack" || value === "vector") return "ATTACK VECTOR";
+  if (value === "vuln" || value === "vulnerability") return "VULNERABILITY";
+  return "NOTES";
+}
+
+function boardBoxTone(emphasis: string | undefined) {
+  if (emphasis === "primary") {
+    return {
+      frame: "border-zinc-300 bg-white shadow-sm",
+      chip: "border-zinc-300 bg-zinc-50 text-zinc-900",
+    };
+  }
+  if (emphasis === "muted") {
+    return {
+      frame: "border-zinc-200 bg-zinc-50 shadow-none",
+      chip: "border-zinc-200 bg-white text-zinc-500",
+    };
+  }
+  return {
+    frame: "border-zinc-200 bg-white shadow-sm",
+    chip: "border-zinc-200 bg-zinc-50 text-zinc-800",
+  };
+}
+
+function estimateBoardBoxHeight(box: ArchitectureBoardBox): number {
+  const titleHeight = 20;
+  const subtitleHeight = box.subtitle ? 34 : 0;
+  const tagsHeight = box.tags && box.tags.length > 0
+    ? 30 * Math.max(1, Math.ceil(box.tags.length / Math.max(1, Math.floor((box.w - 24) / 84))))
+    : 0;
+
+  const lineBlocks = (box.lines ?? []).reduce((total, line) => {
+    const estimatedCharsPerRow = Math.max(18, Math.floor((box.w - 56) / 7));
+    const wrappedRows = Math.max(1, Math.ceil(line.length / estimatedCharsPerRow));
+    return total + wrappedRows;
+  }, 0);
+  const linesHeight = lineBlocks > 0 ? lineBlocks * 22 + (box.lines?.length ?? 0) * 10 : 0;
+
+  return Math.max(box.h, 28 + titleHeight + subtitleHeight + tagsHeight + linesHeight + 24);
+}
+
+function boxesOverlap(
+  a: Pick<ArchitectureBoardBox, "x" | "y" | "w" | "h">,
+  b: Pick<ArchitectureBoardBox, "x" | "y" | "w" | "h">,
+  gap = 18,
+): boolean {
+  return !(
+    a.x + a.w + gap <= b.x
+    || b.x + b.w + gap <= a.x
+    || a.y + a.h + gap <= b.y
+    || b.y + b.h + gap <= a.y
+  );
+}
+
+function resolveBoardBoxLayout(
+  boxes: ArchitectureBoardBox[],
+  canvasWidth: number,
+  canvasHeight: number,
+): { boxes: ArchitectureBoardBox[]; canvasHeight: number } {
+  const margin = 24;
+  const gap = 24;
+  const placed: ArchitectureBoardBox[] = [];
+  let nextCanvasHeight = canvasHeight;
+
+  for (const source of boxes) {
+    const box: ArchitectureBoardBox = {
+      ...source,
+      x: Math.max(margin, Math.min(source.x, Math.max(margin, canvasWidth - source.w - margin))),
+      y: Math.max(margin, source.y),
+      h: estimateBoardBoxHeight(source),
+    };
+
+    let safety = 0;
+    while (safety < 200) {
+      const collision = placed.find((candidate) => boxesOverlap(box, candidate, gap));
+      if (!collision) {
+        break;
+      }
+      box.y = collision.y + collision.h + gap;
+      safety += 1;
+    }
+
+    placed.push(box);
+    nextCanvasHeight = Math.max(nextCanvasHeight, box.y + box.h + margin);
+  }
+
+  return {
+    boxes: placed,
+    canvasHeight: nextCanvasHeight,
+  };
 }
 
 interface DashboardFindingDetail extends RealtimeVulnFinding {
@@ -402,6 +558,20 @@ export function DashboardArchitecturePanel({
   isRefreshing,
   isCompressing,
 }: DashboardArchitecturePanelProps) {
+  const board = architectureDraft.board;
+  const hasBoardSpec = Boolean(board && Array.isArray(board.boxes) && board.boxes.length > 0);
+  const boardCanvasWidth = Math.max(820, Number(board?.canvas?.width || 1200));
+  const rawBoardCanvasHeight = Math.max(430, Number(board?.canvas?.height || 680));
+  const rawBoardBoxes = hasBoardSpec ? board?.boxes ?? [] : [];
+  const resolvedBoard = useMemo(
+    () => resolveBoardBoxLayout(rawBoardBoxes, boardCanvasWidth, rawBoardCanvasHeight),
+    [rawBoardBoxes, boardCanvasWidth, rawBoardCanvasHeight],
+  );
+  const boardCanvasHeight = resolvedBoard.canvasHeight;
+  const boardBoxes = resolvedBoard.boxes;
+  const boardBoxMap = new Map(boardBoxes.map((box) => [box.id, box]));
+  const boardLinks = hasBoardSpec ? board?.links ?? [] : [];
+
   return (
     <>
       <Card className="space-y-1 p-3">
@@ -440,126 +610,270 @@ export function DashboardArchitecturePanel({
         <p className="text-xs text-text-muted">{architectureDraft.title}</p>
 
         <div className="hidden md:block">
-          <div
-            className="relative h-[430px] overflow-hidden rounded-xl border border-border/70 bg-surface-0/55"
-            style={{
-              backgroundImage: [
-                "radial-gradient(circle at 22% 18%, rgba(56,189,248,0.10), transparent 36%)",
-                "radial-gradient(circle at 84% 14%, rgba(59,130,246,0.09), transparent 33%)",
-                "radial-gradient(circle at 72% 78%, rgba(14,165,233,0.08), transparent 40%)",
-                "radial-gradient(circle at 10% 88%, rgba(148,163,184,0.10), transparent 45%)",
-              ].join(", "),
-            }}
-          >
-            <div
-              className="pointer-events-none absolute inset-0 opacity-40"
-              style={{
-                backgroundImage: [
-                  "radial-gradient(circle at 12% 18%, rgba(100,116,139,0.38) 1px, transparent 2px)",
-                  "radial-gradient(circle at 42% 26%, rgba(100,116,139,0.30) 1px, transparent 2px)",
-                  "radial-gradient(circle at 64% 10%, rgba(100,116,139,0.34) 1px, transparent 2px)",
-                  "radial-gradient(circle at 77% 39%, rgba(100,116,139,0.28) 1px, transparent 2px)",
-                  "radial-gradient(circle at 21% 58%, rgba(100,116,139,0.36) 1px, transparent 2px)",
-                  "radial-gradient(circle at 56% 72%, rgba(100,116,139,0.26) 1px, transparent 2px)",
-                  "radial-gradient(circle at 89% 82%, rgba(100,116,139,0.32) 1px, transparent 2px)",
-                ].join(", "),
-              }}
-            />
+          {hasBoardSpec ? (
+            <div className="h-[430px] overflow-auto rounded-xl border border-border/80 bg-white">
+              <div
+                className="relative"
+                style={{
+                  width: `${boardCanvasWidth}px`,
+                  minHeight: `${boardCanvasHeight}px`,
+                  backgroundImage: [
+                    "linear-gradient(rgba(15,23,42,0.03) 1px, transparent 1px)",
+                    "linear-gradient(90deg, rgba(15,23,42,0.03) 1px, transparent 1px)",
+                  ].join(", "),
+                  backgroundSize: "30px 30px, 30px 30px",
+                }}
+              >
+                <div className="pointer-events-none absolute inset-0 opacity-40" />
 
-            <svg
-              className="pointer-events-none absolute inset-0 h-full w-full"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-            >
-              <defs>
-                <marker
-                  id="architecture-arrow"
-                  markerWidth="8"
-                  markerHeight="8"
-                  refX="7"
-                  refY="3.5"
-                  orient="auto"
-                  markerUnits="strokeWidth"
+                <svg
+                  className="pointer-events-none absolute inset-0 h-full w-full"
+                  viewBox={`0 0 ${boardCanvasWidth} ${boardCanvasHeight}`}
+                  preserveAspectRatio="none"
                 >
-                  <path
-                    d="M0,0 L7,3.5 L0,7 z"
-                    fill="rgba(125,211,252,0.8)"
-                  />
-                </marker>
-              </defs>
-              {architectureEdges.map((edge, index) => (
-                <g key={`${edge.from.id}-${edge.to.id}-${index}`}>
+                  <defs>
+                    <marker
+                      id="architecture-arrow"
+                      markerWidth="6"
+                      markerHeight="6"
+                      refX="5"
+                      refY="3"
+                      orient="auto"
+                      markerUnits="strokeWidth"
+                    >
+                      <path d="M0,0 L6,3 L0,6 z" fill="rgba(161,161,170,0.8)" />
+                    </marker>
+                  </defs>
+                  {boardLinks.map((link, index) => {
+                    const fromBox = boardBoxMap.get(link.fromId);
+                    const toBox = boardBoxMap.get(link.toId);
+                    if (!fromBox || !toBox) {
+                      return null;
+                    }
+                    const x1 = fromBox.x + fromBox.w;
+                    const y1 = fromBox.y + fromBox.h / 2;
+                    const x2 = toBox.x;
+                    const y2 = toBox.y + toBox.h / 2;
+                    const midX = (x1 + x2) / 2;
+                    return (
+                      <g key={`${link.fromId}-${link.toId}-${index}`}>
+                        <path
+                          d={`M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`}
+                          fill="none"
+                          stroke="rgba(161,161,170,0.5)"
+                          strokeWidth="1.5"
+                          strokeDasharray="4 4"
+                          markerEnd="url(#architecture-arrow)"
+                        />
+                        {link.label ? (
+                          <text
+                            x={midX}
+                            y={(y1 + y2) / 2 - 8}
+                            textAnchor="middle"
+                            fontSize="12"
+                            fill="rgba(15,23,42,0.82)"
+                            fontWeight="700"
+                            letterSpacing="0.14em"
+                          >
+                            {link.label}
+                          </text>
+                        ) : null}
+                      </g>
+                    );
+                  })}
+                </svg>
+
+                {boardBoxes.map((box) => {
+                  const tone = boardBoxTone(box.emphasis);
+                  return (
+                    <div
+                      key={box.id}
+                      className={cn("absolute rounded-md border-2 p-3", tone.frame)}
+                      style={{
+                        left: `${box.x}px`,
+                        top: `${box.y}px`,
+                        width: `${box.w}px`,
+                        minHeight: `${box.h}px`,
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+                            {box.title}
+                          </p>
+                          {box.subtitle ? (
+                            <p className="mt-1 text-sm font-bold text-zinc-900">{box.subtitle}</p>
+                          ) : null}
+                        </div>
+                        <span className={cn("rounded-sm border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em]", tone.chip)}>
+                          {boardBoxKindLabel(box.kind)}
+                        </span>
+                      </div>
+                      {box.tags && box.tags.length > 0 ? (
+                        <div className="mt-3 flex flex-wrap gap-1">
+                          {box.tags.map((tag) => (
+                            <span
+                              key={`${box.id}-${tag}`}
+                              className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-zinc-600"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="mt-3 space-y-2">
+                        {(box.lines ?? []).map((line, index) => (
+                          <div key={`${box.id}-line-${index}`} className="flex gap-2">
+                            <span className="mt-[6px] h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-400" />
+                            <p className="text-[11px] leading-relaxed text-zinc-600">{line}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="relative h-[430px] overflow-hidden rounded-xl border border-border/70 bg-surface-0/55">
+              <svg
+                className="pointer-events-none absolute inset-0 h-full w-full"
+                viewBox="0 0 100 100"
+                preserveAspectRatio="none"
+              >
+                <defs>
+                  <marker
+                    id="architecture-arrow-fallback"
+                    markerWidth="8"
+                    markerHeight="8"
+                    refX="7"
+                    refY="3.5"
+                    orient="auto"
+                    markerUnits="strokeWidth"
+                  >
+                    <path d="M0,0 L7,3.5 L0,7 z" fill="rgba(15,23,42,0.9)" />
+                  </marker>
+                </defs>
+                {architectureEdges.map((edge, index) => (
                   <line
+                    key={`${edge.from.id}-${edge.to.id}-${index}`}
                     x1={edge.from.x}
                     y1={edge.from.y}
                     x2={edge.to.x}
                     y2={edge.to.y}
-                    stroke="rgba(125,211,252,0.75)"
+                    stroke="rgba(15,23,42,0.85)"
                     strokeWidth="0.45"
                     strokeDasharray="1.4 0.8"
-                    markerEnd="url(#architecture-arrow)"
+                    markerEnd="url(#architecture-arrow-fallback)"
                   />
-                  <circle
-                    cx={edge.from.x}
-                    cy={edge.from.y}
-                    r="0.7"
-                    fill="rgba(167,243,208,0.9)"
-                  />
-                  <circle
-                    cx={edge.to.x}
-                    cy={edge.to.y}
-                    r="0.7"
-                    fill="rgba(191,219,254,0.9)"
-                  />
-                </g>
-              ))}
-            </svg>
-
-            {architectureDraft.hosts.map((host) => (
-              <div
-                key={host.id}
-                className="absolute w-[210px] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border/65 bg-surface-1/85 p-2 shadow-sm backdrop-blur-sm"
-                style={{
-                  left: `${host.x}%`,
-                  top: `${host.y}%`,
-                }}
-              >
-                <p className="text-xs font-semibold text-text-primary">
-                  {host.name}
-                </p>
-                <p className="mt-0.5 text-xs text-text-muted">{host.role}</p>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {host.ports.map((port) => (
-                    <span
-                      key={`${host.id}-${port}`}
-                      className="rounded border border-border/55 bg-surface-0/70 px-1.5 py-0.5 text-xs text-text-secondary"
-                    >
-                      {port}
-                    </span>
-                  ))}
+                ))}
+              </svg>
+              {architectureDraft.hosts.map((host) => (
+                <div
+                  key={host.id}
+                  className="absolute w-[230px] -translate-x-1/2 -translate-y-1/2 rounded-md border-2 border-black bg-white p-3 shadow-[8px_8px_0_0_rgba(15,23,42,0.12)]"
+                  style={{
+                    left: `${host.x}%`,
+                    top: `${host.y}%`,
+                  }}
+                >
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-text-muted">
+                    {architectureZoneLabel(host)}
+                  </p>
+                  <p className="mt-2 text-sm font-black text-black">{host.name}</p>
+                  <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.16em] text-text-secondary">{host.role}</p>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {host.ports.map((port) => (
+                      <span
+                        key={`${host.id}-${port}`}
+                        className="rounded-sm border border-black px-1.5 py-0.5 font-mono text-[11px] font-semibold text-black"
+                      >
+                        {port}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-3 space-y-1">
+                    {splitNoteIntoLines(host.note, 2).map((line, index) => (
+                      <p key={`${host.id}-line-${index}`} className="text-[12px] leading-5 text-black">
+                        {line}
+                      </p>
+                    ))}
+                  </div>
                 </div>
-                <p className="mt-1 text-xs text-text-secondary">{host.note}</p>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="space-y-2 md:hidden">
-          <p className="text-xs text-text-muted">
-            Graph view opens on larger screens. Mobile fallback:
-          </p>
-          {architectureDraft.hosts.map((host) => (
-            <div
-              key={host.id}
-              className="space-y-1 rounded-md border border-border/70 bg-surface-1/45 p-2"
-            >
-              <p className="text-xs font-semibold text-text-primary">
-                {host.name}
-              </p>
-              <p className="text-xs text-text-muted">{host.role}</p>
-              <p className="text-xs text-text-secondary">{host.note}</p>
-            </div>
-          ))}
+          {hasBoardSpec
+            ? boardBoxes.map((box) => {
+                const tone = boardBoxTone(box.emphasis);
+                return (
+                  <div
+                    key={box.id}
+                    className={cn("space-y-2 rounded-md border-2 p-3", tone.frame)}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-text-muted">
+                          {box.title}
+                        </p>
+                        {box.subtitle ? (
+                          <p className="mt-1 text-sm font-black text-black">{box.subtitle}</p>
+                        ) : null}
+                      </div>
+                      <span className={cn("rounded-sm border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em]", tone.chip)}>
+                        {boardBoxKindLabel(box.kind)}
+                      </span>
+                    </div>
+                    {box.tags && box.tags.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {box.tags.map((tag) => (
+                          <span
+                            key={`${box.id}-mobile-${tag}`}
+                            className="rounded-sm border border-black px-1.5 py-0.5 font-mono text-[11px] font-semibold text-black"
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {(box.lines ?? []).map((line, index) => (
+                      <p key={`${box.id}-mobile-line-${index}`} className="text-[12px] leading-5 text-black">
+                        {line}
+                      </p>
+                    ))}
+                  </div>
+                );
+              })
+            : architectureDraft.hosts.map((host) => (
+                <div
+                  key={host.id}
+                  className="space-y-2 rounded-md border-2 border-black bg-white p-3"
+                >
+                  <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-text-muted">
+                    {architectureZoneLabel(host)}
+                  </p>
+                  <p className="text-sm font-black text-black">{host.name}</p>
+                  <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-text-secondary">{host.role}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {host.ports.map((port) => (
+                      <span
+                        key={`${host.id}-mobile-${port}`}
+                        className="rounded-sm border border-black px-1.5 py-0.5 font-mono text-[11px] font-semibold text-black"
+                      >
+                        {port}
+                      </span>
+                    ))}
+                  </div>
+                  {splitNoteIntoLines(host.note, 2).map((line, index) => (
+                    <p key={`${host.id}-mobile-line-${index}`} className="text-[12px] leading-5 text-black">
+                      {line}
+                    </p>
+                  ))}
+                </div>
+              ))}
         </div>
       </Card>
 

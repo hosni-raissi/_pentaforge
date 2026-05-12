@@ -78,7 +78,7 @@ import type {
   DashboardSeverity,
 } from "@/types";
 
-type InsightTab = "plan" | "checklist" | "information";
+type InsightTab = "plan" | "checklist";
 type LogLevel = "info" | "success" | "warn" | "error";
 
 interface StructuredChecklistItem {
@@ -199,10 +199,42 @@ interface ArchitectureFlow {
   label: string;
 }
 
+interface ArchitectureBoardBox {
+  id: string;
+  title: string;
+  subtitle?: string;
+  kind?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  lines?: string[];
+  tags?: string[];
+  hostIds?: string[];
+  emphasis?: "primary" | "normal" | "muted";
+}
+
+interface ArchitectureBoardLink {
+  fromId: string;
+  toId: string;
+  label?: string;
+}
+
+interface ArchitectureBoard {
+  theme?: string;
+  canvas?: {
+    width: number;
+    height: number;
+  };
+  boxes: ArchitectureBoardBox[];
+  links: ArchitectureBoardLink[];
+}
+
 interface TargetArchitectureDraft {
   title: string;
   hosts: ArchitectureHost[];
   flows: ArchitectureFlow[];
+  board?: ArchitectureBoard;
 }
 
 interface DashboardLogEntry {
@@ -293,7 +325,24 @@ function isAgentRole(value: unknown): value is AgentGraphRole {
   );
 }
 
+function workflowRoleForPhase(
+  phase: MissionControlPhaseKey | null,
+): AgentGraphRole {
+  if (phase === "intel" || phase === "information_gathering" || phase === "planner") {
+    return "planner";
+  }
+  if (phase === "brain" || phase === "analyzer") {
+    return "analyzer";
+  }
+  return "executer";
+}
+
 function detectEventAgentRole(event: ScanEventPayload): AgentGraphRole | null {
+  const eventName = String(event.event || "").trim().toLowerCase();
+  if (eventName.startsWith("executer_password_")) {
+    return null;
+  }
+
   const dataAgent = isRecord(event.data) ? event.data.agent : undefined;
   if (isAgentRole(dataAgent)) {
     return dataAgent;
@@ -316,6 +365,14 @@ function detectEventAgentRole(event: ScanEventPayload): AgentGraphRole | null {
     if (isAgentRole(normalized)) {
       return normalized;
     }
+    if (
+      normalized === "intel"
+      || normalized === "information_gathering"
+      || normalized === "information gathering"
+      || normalized === "checklist"
+    ) {
+      return "planner";
+    }
     if (normalized === "recon" || normalized === "exploit" || normalized === "executer") {
       return "executer";
     }
@@ -331,7 +388,15 @@ function detectEventAgentRole(event: ScanEventPayload): AgentGraphRole | null {
   }
 
   const text = `${event.event} ${event.message}`.toLowerCase();
-  if (text.includes("planner")) return "planner";
+  if (
+    text.includes("planner")
+    || text.includes("information gathering")
+    || text.includes("information_gathering")
+    || text.includes("intel")
+    || text.includes("checklist")
+  ) {
+    return "planner";
+  }
   if (text.includes("recon") || text.includes("exploit") || text.includes("executer")) {
     return "executer";
   }
@@ -352,32 +417,38 @@ function detectMissionPhaseFromText(value: string): MissionControlPhaseKey | nul
   if (!text) {
     return null;
   }
-  if (text.includes("intel")) {
+  if (
+    text.includes("intel")
+    || text.includes("profiling")
+    || text.includes("pre-scan")
+    || text.includes("system memory")
+    || text.includes("system_memory")
+  ) {
     return "intel";
   }
   if (
-    text.includes("information gathering")
-    || text.includes("target_info_gathering")
-    || text.includes("fingerprinting")
-    || text.includes("surface mapping")
-    || text.includes("trust and auth")
-  ) {
-    return "information_gathering";
-  }
-  if (
     text.includes("brain")
-    || text.includes("system memory")
     || text.includes("target memory")
     || text.includes("memory projection")
   ) {
     return "brain";
+  }
+  if (
+    text.includes("information gathering")
+    || text.includes("information_gathering")
+    || text.includes("target_info_gathering")
+    || text.includes("fingerprinting")
+    || text.includes("surface mapping")
+    || text.includes("trust and auth")
+    || text.includes("reconnaissance")
+  ) {
+    return "information_gathering";
   }
   if (text.includes("planner") || text.includes("checklist")) {
     return "planner";
   }
   if (
     text.includes("executer")
-    || text.includes("recon")
     || text.includes("exploit")
     || text.includes("scenario")
     || text.includes("worker")
@@ -396,16 +467,53 @@ function detectMissionPhaseFromText(value: string): MissionControlPhaseKey | nul
   return null;
 }
 
+function isArchitectEvent(event: ScanEventPayload): boolean {
+  const data = isRecord(event.data) ? event.data : null;
+  const stage = typeof data?.stage === "string" ? data.stage.toLowerCase() : "";
+  const phase = typeof data?.phase === "string" ? data.phase.toLowerCase() : "";
+  const eventName = String(event.event || "").toLowerCase();
+  const message = String(event.message || "").toLowerCase();
+  return (
+    eventName.startsWith("architect_")
+    || stage.includes("architect")
+    || phase.includes("architect")
+    || message.includes("architect")
+  );
+}
+
 function detectMissionPhase(event: ScanEventPayload): MissionControlPhaseKey | null {
+  if (isArchitectEvent(event)) {
+    return null;
+  }
   const data = isRecord(event.data) ? event.data : null;
   const stage = typeof data?.stage === "string" ? data.stage : "";
   const phase = typeof data?.phase === "string" ? data.phase : "";
-  return (
-    detectMissionPhaseFromText(stage)
-    ?? detectMissionPhaseFromText(phase)
-    ?? detectMissionPhaseFromText(event.event)
-    ?? detectMissionPhaseFromText(event.message)
-  );
+  const reason = typeof data?.reason === "string" ? data.reason : "";
+  const prompt = typeof data?.prompt === "string" ? data.prompt : "";
+
+  // Check content-rich fields (message, reason, prompt) FIRST to catch specific tasks like "reconnaissance"
+  const fromContent = 
+    detectMissionPhaseFromText(event.message || "") ?? 
+    detectMissionPhaseFromText(reason) ?? 
+    detectMissionPhaseFromText(prompt);
+  
+  if (fromContent) return fromContent;
+
+  // Then check specific stage/phase metadata if provided
+  const fromMetadata = detectMissionPhaseFromText(stage) ?? detectMissionPhaseFromText(phase);
+  if (fromMetadata) return fromMetadata;
+
+  // Fallback to the generic event name (e.g., executer_password_request)
+  return detectMissionPhaseFromText(event.event);
+}
+
+function detectWorkflowPhase(event: ScanEventPayload): MissionControlPhaseKey | null {
+  const eventName = String(event.event || "").trim().toLowerCase();
+  if (eventName.startsWith("executer_password_")) {
+    return null;
+  }
+
+  return detectMissionPhase(event);
 }
 
 function toProjectStatus(value: unknown): ProjectStatus | null {
@@ -1545,7 +1653,7 @@ export default function Dashboard() {
   })();
   const shouldStreamScanEvents = Boolean(activeProjectId && activeScanId);
 
-  const [insightTab, setInsightTab] = useState<InsightTab>("information");
+  const [insightTab, setInsightTab] = useState<InsightTab>("checklist");
   const [isInsightFullscreen, setIsInsightFullscreen] = useState(false);
   const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
@@ -1570,6 +1678,20 @@ export default function Dashboard() {
       localStorage.setItem("pentaforge_approval_mode", fallbackApprovalMode);
     }
   }, [fallbackApprovalMode]);
+
+  useEffect(() => {
+    const refreshState =
+      activeProject?.payload && isRecord(activeProject.payload) && isRecord(activeProject.payload.architecture_refresh)
+        ? activeProject.payload.architecture_refresh
+        : null;
+    const status =
+      typeof refreshState?.status === "string" ? refreshState.status.trim().toLowerCase() : "";
+    const phase =
+      typeof refreshState?.phase === "string" ? refreshState.phase.trim().toLowerCase() : "";
+    const isRunning = status === "running";
+    setIsArchitectRefreshing(isRunning);
+    setIsArchitectCompressing(isRunning && phase === "compressing");
+  }, [activeProject?.id, activeProject?.payload]);
   const approvalModeMenuRef = useRef<HTMLDivElement | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<
     NotificationPermission | "unsupported"
@@ -1591,8 +1713,7 @@ export default function Dashboard() {
   const streamDegradedRef = useRef(true);
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
-  const [informationGatheringApprovalLoading, setInformationGatheringApprovalLoading] = useState(false);
-  const [editableInformationGatheringProgram, setEditableInformationGatheringProgram] = useState<any[] | null>(null);
+
   const [plannerApprovalLoading, setPlannerApprovalLoading] = useState(false);
   const [toolApprovalLoading, setToolApprovalLoading] = useState<"approve" | "skip" | null>(null);
   const [passwordResponseLoading, setPasswordResponseLoading] = useState<"approve" | "deny" | null>(null);
@@ -1632,6 +1753,48 @@ export default function Dashboard() {
   const [projectEditName, setProjectEditName] = useState("");
   const [projectEditTarget, setProjectEditTarget] = useState("");
   const [projectEditDescription, setProjectEditDescription] = useState("");
+
+  const syncArchitectureRefreshState = useCallback(
+    (
+      projectId: string,
+      status: "running" | "idle" | "error",
+      phase: string,
+      opts?: { persist?: boolean; error?: string },
+    ) => {
+      const currentProject = useProjects
+        .getState()
+        .projects.find((project) => project.id === projectId);
+      const currentPayload = isRecord(currentProject?.payload) ? currentProject.payload : {};
+      const currentRefresh = isRecord(currentPayload.architecture_refresh)
+        ? currentPayload.architecture_refresh
+        : {};
+      const nowIso = new Date().toISOString();
+      const startedAt =
+        typeof currentRefresh.started_at === "string" && currentRefresh.started_at.trim()
+          ? currentRefresh.started_at
+          : nowIso;
+
+      updateProject(
+        projectId,
+        {
+          payload: {
+            ...currentPayload,
+            architecture_refresh: {
+              status,
+              phase,
+              updated_at: nowIso,
+              ...(status === "running"
+                ? { started_at: startedAt }
+                : { started_at: startedAt, completed_at: nowIso }),
+              ...(opts?.error ? { error: opts.error } : {}),
+            },
+          },
+        } as any,
+        { persist: opts?.persist ?? false },
+      );
+    },
+    [updateProject],
+  );
   const handleApprovalModeChange = useCallback(
     (mode: ApprovalMode) => {
       setFallbackApprovalMode(mode);
@@ -1790,23 +1953,41 @@ export default function Dashboard() {
 
       // Architecture Agent States
       if (event.event === "architect_synthesizing") {
+        syncArchitectureRefreshState(activeProjectId, "running", "synthesizing");
         setIsArchitectRefreshing(true);
       }
       if (event.event === "architect_compressing") {
+        syncArchitectureRefreshState(activeProjectId, "running", "compressing");
         setIsArchitectCompressing(true);
       }
       if (event.event === "architect_updated") {
+        syncArchitectureRefreshState(activeProjectId, "idle", "idle");
         setIsArchitectRefreshing(false);
         setIsArchitectCompressing(false);
         const architecture_draft = event.data.architecture_draft;
         if (isRecord(architecture_draft)) {
+          const currentProject = useProjects
+            .getState()
+            .projects.find((project) => project.id === activeProjectId);
           updateProject(activeProjectId, {
             payload: {
-              ...(activeProject?.payload ?? {}),
+              ...(currentProject?.payload ?? {}),
               architecture_draft: architecture_draft as any,
             }
           } as any, { persist: false });
         }
+      }
+      if (event.event === "architect_no_update") {
+        syncArchitectureRefreshState(activeProjectId, "idle", "idle");
+        setIsArchitectRefreshing(false);
+        setIsArchitectCompressing(false);
+      }
+      if (event.event === "architect_failed") {
+        const errorText =
+          typeof event.data?.error === "string" ? event.data.error.slice(0, 300) : "Architect refresh failed";
+        syncArchitectureRefreshState(activeProjectId, "error", "error", { error: errorText });
+        setIsArchitectRefreshing(false);
+        setIsArchitectCompressing(false);
       }
 
       if (event.event === "verify_finding_saved" && isRecord(event.data.finding)) {
@@ -2024,7 +2205,7 @@ export default function Dashboard() {
                   ? { awaitingPlannerApproval: true, status: "awaiting_planner_approval" }
                   : {}),
                 ...(event.event === "planner_checklist_started"
-                  ? { awaitingInformationGatheringApproval: false, status: "running" }
+                  ? { status: "running" }
                   : {}),
                 ...(clearPlannerApproval
                   ? { awaitingPlannerApproval: false, status: "running" }
@@ -2133,11 +2314,11 @@ export default function Dashboard() {
               lastScan: {
                 ...lastScan,
                 ...(event.event === "target_info_gathering_waiting_approval"
-                  ? { awaitingInformationGatheringApproval: true }
+                  ? {}
                   : {}),
                 ...(event.event === "target_info_gathering_approval_received" ||
                   event.event === "target_info_gathering_complete"
-                  ? { awaitingInformationGatheringApproval: false, status: "running" }
+                  ? { status: "running" }
                   : {}),
                 result: {
                   ...result,
@@ -2284,6 +2465,65 @@ export default function Dashboard() {
   }, [activeProjectId, shouldStreamScanEvents, ingestScanEvent]);
 
   useEffect(() => {
+    if (!activeProjectId || !isArchitectRefreshing) {
+      return;
+    }
+
+    let cancelled = false;
+    let failedHydrates = 0;
+    const pollProjectState = async () => {
+      try {
+        const ok = await hydrateFromDatabase();
+        if (cancelled) {
+          return;
+        }
+        if (ok) {
+          failedHydrates = 0;
+          return;
+        }
+        failedHydrates += 1;
+        if (failedHydrates >= 2) {
+          syncArchitectureRefreshState(
+            activeProjectId,
+            "error",
+            "server_unavailable",
+            { error: "Architecture refresh stopped because the server is unavailable." },
+          );
+          setIsArchitectRefreshing(false);
+          setIsArchitectCompressing(false);
+        }
+      } catch {
+        if (cancelled) {
+          return;
+        }
+        failedHydrates += 1;
+        if (failedHydrates >= 2) {
+          syncArchitectureRefreshState(
+            activeProjectId,
+            "error",
+            "server_unavailable",
+            { error: "Architecture refresh stopped because the server is unavailable." },
+          );
+          setIsArchitectRefreshing(false);
+          setIsArchitectCompressing(false);
+        }
+      }
+    };
+
+    void pollProjectState();
+    const timer = window.setInterval(() => {
+      if (!cancelled) {
+        void pollProjectState();
+      }
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeProjectId, isArchitectRefreshing, hydrateFromDatabase]);
+
+  useEffect(() => {
     if (!activeProjectId) {
       setDebugTimeline([]);
       setObservabilityMetrics({
@@ -2415,32 +2655,7 @@ export default function Dashboard() {
       normalizeRunningStatus(project) === "running",
   );
   const canRun = !isRunning && !isStarting && !hasAnotherRunningProject;
-  const awaitingInformationGatheringApproval = (() => {
-    if (!activeProject) return false;
-    for (const event of scanEvents) {
-      if (
-        event.event === "target_info_gathering_waiting_approval" ||
-        event.event === "target_info_gathering_approval_received" ||
-        event.event === "target_info_gathering_complete" ||
-        event.event === "planner_checklist_started" ||
-        event.event === "scan_completed" ||
-        event.event === "scan_failed" ||
-        event.event === "scan_paused" ||
-        event.event === "scan_cancelled"
-      ) {
-        return event.event === "target_info_gathering_waiting_approval";
-      }
-    }
 
-    const lastScan = isRecord(activeProject?.lastScan)
-      ? activeProject?.lastScan
-      : null;
-    const waitingFlag = lastScan?.awaitingInformationGatheringApproval;
-    if (typeof waitingFlag === "boolean") {
-      return waitingFlag;
-    }
-    return lastScan?.awaiting_information_gathering_approval === true;
-  })();
   const awaitingPlannerApproval = (() => {
     if (!activeProject) return false;
     for (const event of scanEvents) {
@@ -2577,17 +2792,38 @@ export default function Dashboard() {
     if (!activeProjectId || isArchitectRefreshing || isArchitectCompressing) {
       return;
     }
+    syncArchitectureRefreshState(activeProjectId, "running", "synthesizing");
     setIsArchitectRefreshing(true);
+    setIsArchitectCompressing(false);
     try {
       const { synthesizeProjectArchitectureFromDesktop } = await import("@/lib/projectBridge");
-      await synthesizeProjectArchitectureFromDesktop(activeProjectId);
+      const result = await synthesizeProjectArchitectureFromDesktop(activeProjectId);
+      const architectureDraft = result?.architecture_draft;
+      if (
+        isRecord(architectureDraft) &&
+        Array.isArray(architectureDraft.hosts) &&
+        architectureDraft.hosts.length > 0
+      ) {
+        updateProject(activeProjectId, {
+          payload: {
+            ...(activeProject?.payload ?? {}),
+            architecture_draft: architectureDraft as any,
+          },
+        } as any, { persist: false });
+      }
     } catch (error) {
       console.error("Failed to refresh architecture:", error);
+      syncArchitectureRefreshState(
+        activeProjectId,
+        "error",
+        "error",
+        {
+          error: error instanceof Error ? error.message : "Failed to refresh architecture.",
+        },
+      );
       setIsArchitectRefreshing(false);
       setIsArchitectCompressing(false);
     }
-    // We don't reset states in finally because ingestScanEvent will handle
-    // the 'architect_updated' event which resets the loading states.
   };
 
   const handleApprovePlanner = async () => {
@@ -2838,14 +3074,7 @@ export default function Dashboard() {
     };
   }, [showApprovalModeMenu]);
 
-  useEffect(() => {
-    if (approvalMode !== "auto" || !isRunning) {
-      return;
-    }
-    if (awaitingInformationGatheringApproval && !informationGatheringApprovalLoading) {
-      void handleApproveInformationGathering();
-    }
-  }, [approvalMode, isRunning, awaitingInformationGatheringApproval, informationGatheringApprovalLoading]);
+
 
   useEffect(() => {
     if (approvalMode !== "auto" || !isRunning) {
@@ -3068,7 +3297,7 @@ export default function Dashboard() {
     && lastLiveEventAtRef.current > 0
     && elapsedClockMs - lastLiveEventAtRef.current > 7000;
   const pendingApprovalCount = [
-    awaitingInformationGatheringApproval,
+
     awaitingPlannerApproval,
     Boolean(pendingToolApproval),
     Boolean(pendingPasswordRequest),
@@ -3096,7 +3325,7 @@ export default function Dashboard() {
   })();
   const latestMissionPhase = (() => {
     for (const event of scanEvents) {
-      const phase = detectMissionPhase(event);
+      const phase = detectWorkflowPhase(event);
       if (phase) {
         return phase;
       }
@@ -3105,6 +3334,10 @@ export default function Dashboard() {
       return "analyzer" as MissionControlPhaseKey;
     }
     if (activeProject && (activeProject.scanProgress > 0 || effectiveStatus === "running")) {
+      // If we are running but have very low progress, it's likely still the Intel/Architect phase
+      if (activeProject.scanProgress <= 15) {
+        return "intel" as MissionControlPhaseKey;
+      }
       return "planner" as MissionControlPhaseKey;
     }
     return "intel" as MissionControlPhaseKey;
@@ -3258,10 +3491,12 @@ export default function Dashboard() {
         detail: pendingPasswordRequest.reason || pendingPasswordRequest.prompt || "Provide credentials or deny the prompt so the scan can continue safely.",
         tone: "warn",
         controls: (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2">
             <Input
               type="password"
               autoFocus
+              autoComplete="new-password"
+              spellCheck={false}
               value={pendingPasswordValue}
               onChange={(event) => setPendingPasswordValue(event.target.value)}
               onKeyDown={(event) => {
@@ -3270,10 +3505,12 @@ export default function Dashboard() {
                 }
               }}
               placeholder="Verification password..."
+              className="min-h-9 rounded-xl border-amber-400/50 bg-white/90 px-3 text-sm shadow-sm placeholder:text-slate-400"
             />
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <Button
                 variant="primary"
+                className="min-h-8 rounded-xl font-semibold shadow-sm"
                 onClick={() => {
                   void handlePasswordResponse(true);
                 }}
@@ -3284,6 +3521,7 @@ export default function Dashboard() {
               </Button>
               <Button
                 variant="secondary"
+                className="min-h-8 rounded-xl border-amber-200/70 bg-white/80 font-semibold text-slate-700"
                 onClick={() => {
                   void handlePasswordResponse(false);
                 }}
@@ -3358,31 +3596,7 @@ export default function Dashboard() {
           ),
       };
     }
-    if (awaitingInformationGatheringApproval) {
-      return {
-        title: approvalMode === "auto"
-          ? "Information gathering approval is being handled automatically"
-          : "Information gathering plan is waiting for approval",
-        detail: approvalMode === "auto"
-          ? "The grouped static plan is organized and auto mode is letting the scan proceed without another manual click."
-          : "Review the organized grouped blocks, then continue information gathering to let the deterministic pass start.",
-        tone: approvalMode === "auto" ? "info" : "warn",
-        controls: approvalMode === "auto"
-          ? undefined
-          : (
-            <Button
-              size="sm"
-              onClick={() => {
-                void handleApproveInformationGathering();
-              }}
-              loading={informationGatheringApprovalLoading}
-            >
-              <Check size={14} />
-              Continue Information Gathering
-            </Button>
-          ),
-      };
-    }
+
     if (missionControlState === "reconnecting_sse") {
       return {
         title: "Resyncing scan state",
@@ -3549,80 +3763,7 @@ export default function Dashboard() {
     return persisted ?? fromEvents;
   })();
 
-  useEffect(() => {
-    if (awaitingInformationGatheringApproval && !editableInformationGatheringProgram && informationGatheringView?.program?.length) {
-      setEditableInformationGatheringProgram(JSON.parse(JSON.stringify(informationGatheringView.program)));
-    } else if (!awaitingInformationGatheringApproval && editableInformationGatheringProgram) {
-      setEditableInformationGatheringProgram(null);
-    }
-  }, [awaitingInformationGatheringApproval, informationGatheringView?.program, editableInformationGatheringProgram]);
 
-  const handleApproveInformationGathering = async () => {
-    if (!activeProjectId || informationGatheringApprovalLoading || !isRunning) {
-      return;
-    }
-    setInformationGatheringApprovalLoading(true);
-    try {
-      await approveInformationGatheringForProjectScanFromDesktop(
-        activeProjectId,
-        editableInformationGatheringProgram || undefined
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Failed to approve information gathering.";
-      setStreamLogs((previous) => {
-        const nextEntry: DashboardLogEntry = {
-          id: `info-gathering-approve-error-${Math.random().toString(36).slice(2, 10)}`,
-          level: "warn",
-          message: `Information Gathering approval failed: ${message}`,
-          at: new Date().toISOString(),
-          source: "information_gathering",
-        };
-        return [...previous, nextEntry];
-      });
-    } finally {
-      setInformationGatheringApprovalLoading(false);
-    }
-  };
-
-  const removeInformationGatheringBlock = (blockId: string) => {
-    if (!editableInformationGatheringProgram) return;
-    setEditableInformationGatheringProgram(prev =>
-      prev ? prev.filter(b => b.id !== blockId) : null
-    );
-  };
-
-  const addInformationGatheringTool = (blockId: string, toolLabel: string) => {
-    if (!editableInformationGatheringProgram || !toolLabel.trim()) return;
-    setEditableInformationGatheringProgram(prev => {
-      if (!prev) return null;
-      return prev.map(b => {
-        if (b.id !== blockId) return b;
-        const exists = b.plannedTools.some((t: { label: string }) => t.label === toolLabel.trim());
-        if (exists) return b;
-        return {
-          ...b,
-          plannedTools: [...b.plannedTools, { label: toolLabel.trim(), kind: "custom" }]
-        };
-      });
-    });
-  };
-
-  const removeInformationGatheringTool = (blockId: string, toolLabel: string) => {
-    if (!editableInformationGatheringProgram) return;
-    setEditableInformationGatheringProgram(prev => {
-      if (!prev) return null;
-      return prev.map(b => {
-        if (b.id !== blockId) return b;
-        return {
-          ...b,
-          plannedTools: b.plannedTools.filter((t: { label: string }) => t.label !== toolLabel)
-        };
-      });
-    });
-  };
   const informationGatheringCompletedIds = new Set(
     (informationGatheringView?.blocks ?? []).map((block) => block.id),
   );
@@ -3646,7 +3787,7 @@ export default function Dashboard() {
   const architectureHostMap = new Map(
     architectureDraft.hosts.map((host) => [host.id, host]),
   );
-  const architectureEdges = architectureDraft.flows
+  const architectureEdges = (architectureDraft.flows ?? [])
     .map((flow) => {
       const from = architectureHostMap.get(flow.fromId);
       const to = architectureHostMap.get(flow.toId);
@@ -4056,6 +4197,13 @@ export default function Dashboard() {
         ? role
         : current;
     }, null);
+    const activeWorkflowRole =
+      missionControlState === "running"
+      || missionControlState === "paused_for_approval"
+      || missionControlState === "reconnecting_sse"
+      || missionControlState === "initializing"
+        ? workflowRoleForPhase(latestMissionPhase)
+        : null;
 
     return roleOrder.map((role): AgentInfo => {
       const baseAgent = baseAgentByRole.get(role);
@@ -4064,7 +4212,7 @@ export default function Dashboard() {
       let state: AgentInfo["state"] = baseAgent?.state ?? "idle";
       if (effectiveStatus === "error" && role === latestRole) {
         state = "error";
-      } else if (effectiveStatus === "running" && role === latestRole) {
+      } else if (effectiveStatus === "running" && role === activeWorkflowRole) {
         state = "running";
       } else if (history.some((entry) => entry.level === "error")) {
         state = "error";
@@ -4111,7 +4259,12 @@ export default function Dashboard() {
     ): OrchestratorStatus => {
       if (
         (status === 'running' || status === 'thinking')
-        && missionControlState === 'running'
+        && (
+          missionControlState === 'running'
+          || missionControlState === 'paused_for_approval'
+          || missionControlState === 'reconnecting_sse'
+          || missionControlState === 'initializing'
+        )
         && !phaseBelongsToStage(stage, latestMissionPhase)
       ) {
         return 'waiting';
@@ -4177,10 +4330,12 @@ export default function Dashboard() {
             || 'Provide credentials or deny the prompt so the scan can continue safely.',
           tone: 'warn',
           controls: (
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-2">
               <Input
                 type="password"
                 autoFocus
+                autoComplete="new-password"
+                spellCheck={false}
                 value={pendingPasswordValue}
                 onChange={(event) => setPendingPasswordValue(event.target.value)}
                 onKeyDown={(event) => {
@@ -4189,11 +4344,13 @@ export default function Dashboard() {
                   }
                 }}
                 placeholder="Verification password..."
+                className="min-h-9 rounded-xl border-amber-400/50 bg-white/90 px-3 text-sm shadow-sm placeholder:text-slate-400"
               />
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <Button
                   size="sm"
                   variant="primary"
+                  className="min-h-8 rounded-xl font-semibold shadow-sm"
                   onClick={() => {
                     void handlePasswordResponse(true);
                   }}
@@ -4205,6 +4362,7 @@ export default function Dashboard() {
                 <Button
                   size="sm"
                   variant="secondary"
+                  className="min-h-8 rounded-xl border-amber-200/70 bg-white/80 font-semibold text-slate-700"
                   onClick={() => {
                     void handlePasswordResponse(false);
                   }}
@@ -4281,28 +4439,6 @@ export default function Dashboard() {
         };
       }
 
-      if (awaitingInformationGatheringApproval && stage === 'planner') {
-        if (approvalMode === 'auto') {
-          return null;
-        }
-        return {
-          title: 'Information gathering plan is waiting for approval',
-          detail: 'Review the organized grouped blocks, then continue information gathering to start the deterministic pass.',
-          tone: 'warn',
-          controls: (
-            <Button
-              size="sm"
-              onClick={() => {
-                void handleApproveInformationGathering();
-              }}
-              loading={informationGatheringApprovalLoading}
-            >
-              <Check size={14} />
-              Continue Information Gathering
-            </Button>
-          ),
-        };
-      }
 
       return null;
     };
@@ -4349,16 +4485,7 @@ export default function Dashboard() {
           .filter(e => detectMissionPhase(e) === 'intel' && e.message)
           .slice(0, 10);
         intelEvents.forEach(e => {
-          const msg = e.message?.toLowerCase() || '';
-          let displayMsg = '';
-
-          if (msg.includes('refreshing')) displayMsg = 'checking rag update';
-          else if (msg.includes('updating')) displayMsg = 'updating';
-          else if (msg.includes('skip') || msg.includes('fresh')) displayMsg = 'skip';
-
-          if (displayMsg) {
-            activities.push({ type: 'info', message: displayMsg, at: e.timestamp });
-          }
+          activities.push({ type: 'info', message: e.message, at: e.timestamp });
         });
       }
 
@@ -4368,19 +4495,22 @@ export default function Dashboard() {
           .slice(0, 10);
         infoEvents.forEach(e => {
           const msg = e.message?.toLowerCase() || '';
-          if (msg.includes('thinking') || msg.includes('running') || msg.includes('start')) {
-            activities.push({
-              type: msg.includes('thinking') ? 'thinking' : 'info',
-              message: e.message,
-              at: e.timestamp
-            });
-          }
+          activities.push({
+            type: msg.includes('thinking') ? 'thinking' : 'info',
+            message: e.message,
+            at: e.timestamp
+          });
         });
       }
 
       // General Agent Logs (Strict Whitelist)
       const filteredLogs = [...logs].reverse()
-        .filter(l => l.message && !l.message.includes('Mission control'))
+        .filter(l => {
+          if (!l.message || l.message.includes('Mission control')) {
+            return false;
+          }
+          return !l.message.toLowerCase().includes('architect');
+        })
         .slice(0, 20);
 
       filteredLogs.forEach(l => {
@@ -4422,6 +4552,32 @@ export default function Dashboard() {
       return activities.length > 0 ? activities.slice(0, 4) : undefined;
     };
 
+    const mergeRecentActivities = (
+      ...groups: Array<Array<{ type: "thinking" | "command" | "result" | "info"; message: string; at?: string }> | undefined>
+    ) => {
+      const merged: Array<{ type: "thinking" | "command" | "result" | "info"; message: string; at?: string }> = [];
+      const seen = new Set<string>();
+      for (const group of groups) {
+        for (const activity of group ?? []) {
+          const key = `${activity.type}:${activity.message.trim()}`;
+          if (!activity.message.trim() || seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          merged.push(activity);
+        }
+      }
+      const recent = merged.sort((a, b) => {
+        if (!a.at || !b.at) return 0;
+        return new Date(b.at).getTime() - new Date(a.at).getTime();
+      }).slice(0, 4);
+
+      return recent.sort((a, b) => {
+        if (!a.at || !b.at) return 0;
+        return new Date(a.at).getTime() - new Date(b.at).getTime();
+      });
+    };
+
     const plannerStatus = getStatus(plannerAgent);
     const intelStatus = getStatus(null, 'intel');
 
@@ -4430,18 +4586,48 @@ export default function Dashboard() {
 
     const analyzerStatus = getStatus(analyzerAgent);
     const brainStatus = getStatus(null, 'brain');
+    const pipelineIsIdle = missionControlState === 'idle';
 
     const plannerDisplayPhase: MissionControlPhaseKey =
-      latestMissionPhase === 'intel' || latestMissionPhase === 'information_gathering' || latestMissionPhase === 'planner'
-        ? latestMissionPhase
-        : 'planner';
+      latestMissionPhase === 'intel' || latestMissionPhase === 'information_gathering' || latestMissionPhase === 'brain'
+        ? 'intel'
+        : latestMissionPhase === 'planner'
+          ? 'planner'
+          : 'planner';
 
     const plannerCompositeStatus =
       plannerDisplayPhase === 'intel'
-        ? intelStatus
-        : plannerDisplayPhase === 'information_gathering'
-          ? infoGatherStatus
-          : plannerStatus;
+        ? (infoGatherStatus === 'running' || infoGatherStatus === 'thinking' ? 'running' : intelStatus)
+        : plannerStatus;
+
+    const plannerIntelActivity = getRecentActivity('planner', 'intel');
+    const plannerInfoGatherActivity = getRecentActivity('executer', 'information_gathering');
+
+    // Unified activity feed for the Planner node during intel phase:
+    // Collect ALL intel + information_gathering events from scanEvents in chronological order.
+    const plannerPhaseActivity = (() => {
+      if (plannerDisplayPhase !== 'intel') return undefined;
+      const relevantPhases = new Set(['intel', 'information_gathering', 'brain']);
+      const items = scanEvents
+        .filter(e => {
+          const phase = detectMissionPhase(e);
+          return phase && relevantPhases.has(phase) && e.message;
+        })
+        .map(e => ({
+          type: 'info' as const,
+          message: e.message,
+          at: e.timestamp,
+        }))
+        .sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime());
+      // Deduplicate by message while keeping chronological phase progression.
+      const seen = new Set<string>();
+      const deduped = items.filter(item => {
+        if (seen.has(item.message)) return false;
+        seen.add(item.message);
+        return true;
+      });
+      return deduped.length > 0 ? deduped.slice(-8) : undefined;
+    })();
 
     return {
       planner: {
@@ -4451,24 +4637,22 @@ export default function Dashboard() {
           plannerCompositeStatus,
         ),
         label:
-          plannerDisplayPhase === 'intel'
+          pipelineIsIdle
+            ? 'Planner'
+            : plannerDisplayPhase === 'intel'
             ? 'Intel Phase'
-            : plannerDisplayPhase === 'information_gathering'
-              ? 'Information Gathering'
-              : 'Planner',
+            : 'Planner',
         icon: Brain,
         subtext:
-          plannerDisplayPhase === 'intel'
-            ? 'Refreshing RAG & synthesizing checklist...'
-            : plannerDisplayPhase === 'information_gathering'
-              ? 'Running information gathering blocks...'
-              : (plannerAgent?.currentTask || 'Synthesizing target checklist...'),
-        recentActivity:
-          plannerDisplayPhase === 'information_gathering'
-            ? getRecentActivity('executer', 'information_gathering')
+          pipelineIsIdle
+            ? 'Ready for a new scan...'
             : plannerDisplayPhase === 'intel'
-              ? getRecentActivity('planner', 'intel')
-              : getRecentActivity('planner', 'planner'),
+            ? (infoGatherStatus === 'running' || infoGatherStatus === 'thinking' ? 'Running automated information gathering...' : 'Refreshing RAG & synthesizing checklist...')
+            : (plannerAgent?.currentTask || 'Synthesizing target checklist...'),
+        recentActivity:
+          plannerDisplayPhase === 'intel'
+            ? plannerPhaseActivity
+            : getRecentActivity('planner', 'planner'),
         actionPanel: getStageActionPanel('planner'),
       },
       executer: {
@@ -4479,22 +4663,34 @@ export default function Dashboard() {
         ),
         label: 'Executer',
         icon: Zap,
-        subtext: executerAgent?.currentTask || 'Waiting for plan execution...',
+        subtext: pipelineIsIdle
+          ? 'Ready for a new scan...'
+          : (executerAgent?.currentTask || 'Waiting for plan execution...'),
         recentActivity: getRecentActivity('executer', 'executer'),
         actionPanel: getStageActionPanel('executer'),
       },
       analyzer: {
         stage: 'analyzer' as OrchestratorStage,
-        status: onlyActiveStageCanRun(
-          'analyzer',
-          brainStatus === 'running' || brainStatus === 'error' ? brainStatus : analyzerStatus,
-        ),
-        label: brainStatus === 'running' ? 'Brain' : 'Analyser',
+        status: pipelineIsIdle
+          ? 'idle'
+          : (plannerDisplayPhase === 'intel')
+          ? 'waiting'
+          : onlyActiveStageCanRun(
+            'analyzer',
+            (brainStatus === 'running' || brainStatus === 'error') ? brainStatus : analyzerStatus,
+          ),
+        label: (plannerDisplayPhase !== 'intel' && brainStatus === 'running') ? 'Brain' : 'Analyser',
         icon: Search,
-        subtext: brainStatus === 'running'
+        subtext: pipelineIsIdle
+          ? 'Ready for a new scan...'
+          : (plannerDisplayPhase !== 'intel' && brainStatus === 'running')
           ? 'Processing findings into system memory...'
-          : (analyzerAgent?.currentTask || 'Verifying impact and findings...'),
-        recentActivity: getRecentActivity('analyzer', 'brain') || (realtimeVulnFindings.length > 0 ? [`${realtimeVulnFindings.length} findings verified`] : undefined),
+          : plannerDisplayPhase === 'intel'
+            ? 'Waiting for execution results...'
+            : (analyzerAgent?.currentTask || 'Verifying impact and findings...'),
+        recentActivity: plannerDisplayPhase !== 'intel'
+          ? (getRecentActivity('analyzer', 'brain') || (realtimeVulnFindings.length > 0 ? [`${realtimeVulnFindings.length} findings verified`] : undefined))
+          : undefined,
         actionPanel: getStageActionPanel('analyzer'),
       }
     };
@@ -4516,10 +4712,7 @@ export default function Dashboard() {
     awaitingPlannerApproval,
     approvalMode,
     plannerApprovalLoading,
-    awaitingInformationGatheringApproval,
-    informationGatheringApprovalLoading,
     handleApprovePlanner,
-    handleApproveInformationGathering,
   ]);
 
   const handleStartScanClick = () => {
@@ -4696,7 +4889,7 @@ export default function Dashboard() {
             formatDateTime={formatDateTime}
           />
 
-          <div className="grid gap-4 xl:grid-cols-2">
+          <div className="grid gap-3 xl:grid-cols-2">
             <div className="min-w-0 flex flex-col">
               <Card className="flex h-[650px] flex-col space-y-1 p-3 overflow-hidden">
                 <div className="flex items-center justify-between">
@@ -4772,7 +4965,7 @@ export default function Dashboard() {
                 </div>
                 <div className="h-px w-full bg-border/60" />
 
-                <div className="min-h-0 flex-1 rounded-md border border-border bg-surface-0/35 p-4">
+                <div className="min-h-0 flex-1 rounded-md border border-border bg-surface-0/35 p-2">
                   <div className="flex h-full flex-col min-h-0">
                     <OrchestratorPipeline stages={pipelineStages} />
                   </div>
@@ -4838,13 +5031,6 @@ export default function Dashboard() {
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-0/40 p-1">
-                    <Button
-                      size="xs"
-                      variant={insightTab === "information" ? "secondary" : "ghost"}
-                      onClick={() => setInsightTab("information")}
-                    >
-                      Information
-                    </Button>
                     <Button
                       size="xs"
                       variant={insightTab === "checklist" ? "secondary" : "ghost"}
@@ -4959,214 +5145,6 @@ export default function Dashboard() {
                       {isRunning
                         ? "Plan is loading. We will show planner phases as soon as they are persisted."
                         : "No planner result available yet."}
-                    </p>
-                  )}
-                </div>
-              ) : insightTab === "information" ? (
-                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-surface-0/35 p-2">
-                  {informationGatheringView ? (
-                    <div className={`space-y-2 ${isInsightFullscreen ? "space-y-3" : ""}`}>
-                      {(() => {
-                        const topStatus = informationGatheringView.status === "completed"
-                          ? "complete"
-                          : awaitingInformationGatheringApproval || informationGatheringView.status === "organized"
-                            ? "not yet"
-                            : "working";
-                        return (
-                          <div className="rounded-md border border-border bg-surface-1/45 p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-sm font-semibold text-text-primary">
-                                Static Information Gathering
-                              </p>
-                              <span className="rounded border border-border bg-surface-0/55 px-2 py-0.5 text-xs capitalize text-text-muted">
-                                {topStatus}
-                              </span>
-                            </div>
-                            {awaitingInformationGatheringApproval && approvalMode !== "auto" ? (
-                              <div className="mt-3 flex items-center justify-end">
-                                <Button
-                                  size="sm"
-                                  variant="primary"
-                                  className="bg-blue-600 hover:bg-blue-700"
-                                  onClick={() => {
-                                    void handleApproveInformationGathering();
-                                  }}
-                                  loading={informationGatheringApprovalLoading}
-                                  title="Approve static information gathering plan and continue"
-                                >
-                                  <Check size={14} />
-                                  Continue Information Gathering
-                                </Button>
-                              </div>
-                            ) : null}
-                            {awaitingInformationGatheringApproval && approvalMode === "auto" ? (
-                              <div className="mt-3 flex items-center justify-end">
-                                <Badge variant="running" dot>
-                                  Auto-approving information gathering
-                                </Badge>
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })()}
-
-                      <div className="rounded-md border border-border bg-surface-1/45">
-                        <div className={`border-b border-border ${isInsightFullscreen ? "px-3 py-2" : "px-2 py-1.5"}`}>
-                          <p className="text-sm font-semibold text-text-primary">Final Static Blocks</p>
-                        </div>
-                        <div className={`${isInsightFullscreen ? "p-3 space-y-3" : "p-2 space-y-2"}`}>
-                          {(() => {
-                            const currentProgram = (awaitingInformationGatheringApproval && editableInformationGatheringProgram)
-                              ? editableInformationGatheringProgram
-                              : informationGatheringView.program;
-
-                            const renderedBlocks = currentProgram.length > 0
-                              ? currentProgram.map((programBlock) => {
-                                const executedBlock = informationGatheringView.blocks.find(
-                                  (block) => block.id === programBlock.id,
-                                );
-                                return {
-                                  id: programBlock.id,
-                                  name: programBlock.name,
-                                  goal: programBlock.goal || executedBlock?.goal || "",
-                                  decision: programBlock.status || executedBlock?.status || "keep",
-                                  rationale: programBlock.selectionRationale || executedBlock?.selectionRationale || "",
-                                  plannedTools: programBlock.plannedTools,
-                                  skippedTools: programBlock.skippedTools,
-                                  summary: executedBlock?.summary || "",
-                                  executionStatus: informationGatheringCompletedIds.has(programBlock.id)
-                                    ? "complete"
-                                    : informationGatheringView.workingBlockId === programBlock.id
-                                      ? "working"
-                                      : "not yet",
-                                };
-                              })
-                              : informationGatheringView.blocks.map((block) => ({
-                                id: block.id,
-                                name: block.name,
-                                goal: block.goal,
-                                decision: block.status || "keep",
-                                rationale: block.selectionRationale,
-                                plannedTools: block.plannedTools.map((tool) => ({ label: tool, kind: "builtin" as const })),
-                                skippedTools: block.skippedTools,
-                                summary: block.summary,
-                                executionStatus: informationGatheringCompletedIds.has(block.id)
-                                  ? "complete"
-                                  : informationGatheringView.workingBlockId === block.id
-                                    ? "working"
-                                    : "not yet",
-                              }));
-
-                            if (renderedBlocks.length === 0) {
-                              return (
-                                <p className="text-sm text-text-muted">
-                                  Information Gathering details are not available yet.
-                                </p>
-                              );
-                            }
-
-                            return renderedBlocks.map((block, blockIndex) => (
-                              <div
-                                key={`${block.id}-${blockIndex}`}
-                                className="group relative rounded-md border border-border bg-surface-0/35 p-3"
-                              >
-                                <div className="flex items-center justify-between gap-2">
-                                  <p className="text-sm font-semibold text-text-primary">
-                                    {blockIndex + 1}. {block.name}
-                                  </p>
-                                  <div className="flex items-center gap-2">
-                                    {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
-                                      <button
-                                        onClick={() => removeInformationGatheringBlock(block.id)}
-                                        className="rounded-md p-1 text-text-muted hover:bg-red-500/10 hover:text-red-400"
-                                        title="Delete this gathering block"
-                                      >
-                                        <Trash2 size={14} />
-                                      </button>
-                                    )}
-                                    <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-xs capitalize text-text-muted">
-                                      {block.executionStatus}
-                                    </span>
-                                  </div>
-                                </div>
-                                {block.goal ? (
-                                  <div className="mt-2">
-                                    <p className="text-xs font-medium text-text-primary">Scenario</p>
-                                    <p className="mt-1 text-xs text-text-secondary">{block.goal}</p>
-                                  </div>
-                                ) : null}
-                                <div className="mt-2">
-                                  <p className="text-xs font-medium text-text-primary">Full tools</p>
-                                  <div className="mt-1 flex flex-wrap gap-1.5">
-                                    {block.plannedTools.length === 0 ? (
-                                      <span className="text-xs text-text-muted">No tools selected.</span>
-                                    ) : (
-                                      block.plannedTools.map((tool: { label: string; kind: string }, toolIndex: number) => (
-                                        <div
-                                          key={`${block.id}-tool-${toolIndex}`}
-                                          className={`group/tool relative flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${tool.kind === "custom" ? "border-amber-500/50 bg-amber-500/10 text-amber-400 font-medium" : "border-border bg-surface-1/55 text-text-secondary"}`}
-                                        >
-                                          <span>{tool.label}</span>
-                                          {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
-                                            <button
-                                              onClick={() => removeInformationGatheringTool(block.id, tool.label)}
-                                              className="text-text-muted hover:text-red-400"
-                                              title="Remove tool"
-                                            >
-                                              <X size={10} />
-                                            </button>
-                                          )}
-                                        </div>
-                                      ))
-                                    )}
-                                    {awaitingInformationGatheringApproval && editableInformationGatheringProgram && (
-                                      <div className="flex items-center gap-1">
-                                        <input
-                                          type="text"
-                                          placeholder="Add tool/command..."
-                                          className="h-6 w-32 rounded border border-border bg-surface-1/55 px-2 text-[10px] text-text-primary outline-none focus:border-pf-500/50"
-                                          onKeyDown={(e) => {
-                                            if (e.key === "Enter") {
-                                              addInformationGatheringTool(block.id, e.currentTarget.value);
-                                              e.currentTarget.value = "";
-                                            }
-                                          }}
-                                        />
-                                        <div className="rounded border border-border bg-surface-1/55 p-1 text-text-muted">
-                                          <Plus size={10} />
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                                {block.skippedTools.length > 0 ? (
-                                  <div className="mt-2">
-                                    <p className="text-xs font-medium text-text-primary">Skipped tools</p>
-                                    <p className="mt-1 text-xs text-text-muted">{block.skippedTools.join(", ")}</p>
-                                  </div>
-                                ) : null}
-                                <div className="mt-2">
-                                  <p className="text-xs font-medium text-text-primary">LLM remark</p>
-                                  <p className="mt-1 text-xs text-text-muted capitalize">{block.decision || "keep"}</p>
-                                  {block.rationale ? (
-                                    <p className="mt-1 text-xs text-text-secondary">{block.rationale}</p>
-                                  ) : null}
-                                </div>
-                                {block.summary ? (
-                                  <div className="mt-2">
-                                    <p className="text-xs font-medium text-text-primary">Result</p>
-                                    <p className="mt-1 text-xs text-text-secondary">{block.summary}</p>
-                                  </div>
-                                ) : null}
-                              </div>
-                            ));
-                          })()}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="px-1 py-2 text-sm text-text-muted">
-                      Information Gathering details are not available yet.
                     </p>
                   )}
                 </div>
@@ -5459,6 +5437,9 @@ export default function Dashboard() {
               projectName={activeProject.name}
               target={activeProject.target}
               targetType={activeProject.targetType}
+              projectStatus={activeProject.status}
+              savedContext={activeProject.copilotContext}
+              hasScanState={Boolean(activeProject.lastScan)}
               agents={visibleAgents}
               history={activeProject.copilotHistory}
               injectedPrompt={copilotDraft}

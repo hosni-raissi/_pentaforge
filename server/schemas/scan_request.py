@@ -24,7 +24,6 @@ class TargetType(str, Enum):
     network          = "network"
     iot              = "iot"
     linux_server     = "linux_server"
-    desktop          = "desktop"
     cloud            = "cloud"
     container        = "container"
     repository       = "repository"

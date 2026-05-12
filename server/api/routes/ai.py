@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +34,167 @@ _MAX_PROMPT_LEN = 8000
 logger = structlog.get_logger(__name__)
 _ASSISTANT_RUN_TTL_SECONDS = 60 * 60
 _KEEPALIVE_INTERVAL_SECONDS = 15.0
+_architect_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
+_architect_refresh_lock = asyncio.Lock()
+
+
+def _ensure_project_payload(project: dict[str, Any]) -> dict[str, Any]:
+    payload = project.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+        project["payload"] = payload
+    return payload
+
+
+def _set_architect_refresh_state(
+    project: dict[str, Any],
+    *,
+    status: str,
+    phase: str | None = None,
+    error: str = "",
+) -> None:
+    payload = _ensure_project_payload(project)
+    current = payload.get("architecture_refresh")
+    current_state = current if isinstance(current, dict) else {}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    started_at = str(current_state.get("started_at") or "").strip() or now_iso
+    refresh_state: dict[str, Any] = {
+        "status": status,
+        "phase": phase or status,
+        "updated_at": now_iso,
+    }
+    if status == "running":
+        refresh_state["started_at"] = started_at
+        refresh_state["owner_pid"] = os.getpid()
+    elif started_at:
+        refresh_state["started_at"] = started_at
+        refresh_state["completed_at"] = now_iso
+    if error:
+        refresh_state["error"] = error[:400]
+    payload["architecture_refresh"] = refresh_state
+
+
+async def _run_architect_refresh(project_id: str) -> None:
+    try:
+        project = projects_store.get_project(project_id)
+        if not project:
+            return
+
+        target = str(project.get("target") or "").strip()
+        target_type = str(project.get("targetType") or "web_app").strip()
+
+        info = str(project.get("info") or "").strip()
+        scope = ""
+        for raw_line in info.splitlines():
+            if raw_line.lower().startswith("scope:"):
+                scope = raw_line.split(":", 1)[1].strip()
+                break
+
+        cache_root = (Path(__file__).resolve().parents[2] / "cache" / "project_runs").resolve()
+        latest_run_dir = None
+        if cache_root.exists():
+            matching = [d for d in cache_root.iterdir() if d.is_dir() and d.name.startswith(project_id)]
+            if matching:
+                matching.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+                latest_run_dir = str(matching[0])
+
+        if not latest_run_dir:
+            logger.warning("architect_manual_refresh_no_cache_dir", project_id=project_id)
+            target_memory = {}
+        else:
+            target_memory = load_system_memory(latest_run_dir)
+
+        planner_memory_block = build_target_memory_prompt_block(target_memory)
+        assistant_memory_block = _build_architect_assistant_memory_block(
+            project,
+            scope_key=normalize_target_scope(target, target_type),
+        )
+        memory_block = "\n\n".join(
+            part for part in (planner_memory_block, assistant_memory_block) if str(part).strip()
+        )
+        vulnerabilities_block = _build_architect_vulnerabilities_block(project)
+
+        def emit_architect_event(event_type: str, data: dict[str, Any]):
+            latest_project = projects_store.get_project(project_id)
+            if latest_project:
+                if event_type == "architect_synthesizing":
+                    _set_architect_refresh_state(latest_project, status="running", phase="synthesizing")
+                    projects_store.upsert_project(latest_project)
+                elif event_type == "architect_compressing":
+                    _set_architect_refresh_state(latest_project, status="running", phase="compressing")
+                    projects_store.upsert_project(latest_project)
+
+            scan_orchestrator.emit_event(
+                project_id,
+                event=event_type,
+                scan_id="manual",
+                level="info",
+                message=f"Architect [working] {event_type.replace('_', ' ')}...",
+                data=data,
+            )
+
+        architect = ArchitectAgent(
+            project_id=project_id,
+            project_cache_dir=latest_run_dir,
+            on_event=emit_architect_event,
+        )
+
+        previous_draft = project.get("payload", {}).get("architecture_draft")
+        architecture_draft = await architect.synthesize(
+            target=target,
+            target_type=target_type,
+            scope=scope,
+            memory_block=memory_block,
+            vulnerabilities_block=vulnerabilities_block,
+            previous_draft=previous_draft,
+        )
+
+        latest_project = projects_store.get_project(project_id) or project
+        if architecture_draft and isinstance(architecture_draft, dict) and architecture_draft.get("hosts"):
+            payload = _ensure_project_payload(latest_project)
+            payload["architecture_draft"] = architecture_draft
+            _set_architect_refresh_state(latest_project, status="idle", phase="idle")
+            projects_store.upsert_project(latest_project)
+            emit_architect_event("architect_updated", {"architecture_draft": architecture_draft})
+        else:
+            logger.warning(
+                "architect_manual_refresh_no_update",
+                project_id=project_id,
+                has_previous_draft=bool(previous_draft),
+            )
+            _set_architect_refresh_state(latest_project, status="idle", phase="idle")
+            projects_store.upsert_project(latest_project)
+            emit_architect_event(
+                "architect_no_update",
+                {
+                    "project_id": project_id,
+                    "has_previous_draft": bool(previous_draft),
+                },
+            )
+    except Exception as exc:
+        logger.exception("architect_manual_refresh_failed", project_id=project_id)
+        project = projects_store.get_project(project_id)
+        if project:
+            _set_architect_refresh_state(
+                project,
+                status="error",
+                phase="error",
+                error=str(exc),
+            )
+            projects_store.upsert_project(project)
+        scan_orchestrator.emit_event(
+            project_id,
+            event="architect_failed",
+            scan_id="manual",
+            level="error",
+            message="Architect refresh failed.",
+            data={"project_id": project_id, "error": str(exc)[:400]},
+        )
+    finally:
+        async with _architect_refresh_lock:
+            task = _architect_refresh_tasks.get(project_id)
+            if task and task.done():
+                _architect_refresh_tasks.pop(project_id, None)
 
 
 def _build_architect_assistant_memory_block(project: dict[str, Any], *, scope_key: str) -> str:
@@ -751,82 +913,30 @@ async def ai_architect_synthesize(payload: ArchitectSynthesizePayload) -> dict[s
     project = projects_store.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    async with _architect_refresh_lock:
+        existing_task = _architect_refresh_tasks.get(project_id)
+        if existing_task and not existing_task.done():
+            return {
+                "ok": True,
+                "status": "running",
+                "already_running": True,
+                "architecture_draft": project.get("payload", {}).get("architecture_draft"),
+            }
 
-    target = str(project.get("target") or "").strip()
-    target_type = str(project.get("targetType") or "web_app").strip()
-    
-    # Resolve scope from info
-    info = str(project.get("info") or "").strip()
-    scope = ""
-    for raw_line in info.splitlines():
-        if raw_line.lower().startswith("scope:"):
-            scope = raw_line.split(":", 1)[1].strip()
-            break
-
-    # Determine project cache dir (we need a way to find it without scanning, or just use a default pattern)
-    # The orchestrator builds it with project_name and started_at.
-    # For a manual refresh, we can try to find the latest run dir.
-    cache_root = (Path(__file__).resolve().parents[2] / "cache" / "project_runs").resolve()
-    latest_run_dir = None
-    if cache_root.exists():
-        # Look for directories starting with project_id
-        matching = [d for d in cache_root.iterdir() if d.is_dir() and d.name.startswith(project_id)]
-        if matching:
-            # Sort by mtime to get the latest
-            matching.sort(key=lambda d: d.stat().st_mtime, reverse=True)
-            latest_run_dir = str(matching[0])
-
-    if not latest_run_dir:
-        # Fallback: if no cache dir, we can't load memory, so synthesis will be sparse
-        logger.warning("architect_manual_refresh_no_cache_dir", project_id=project_id)
-        target_memory = {}
-    else:
-        target_memory = load_system_memory(latest_run_dir)
-
-    # Build blocks
-    planner_memory_block = build_target_memory_prompt_block(target_memory)
-    assistant_memory_block = _build_architect_assistant_memory_block(project, scope_key=normalize_target_scope(target, target_type))
-    memory_block = "\n\n".join(part for part in (planner_memory_block, assistant_memory_block) if str(part).strip())
-    vulnerabilities_block = _build_architect_vulnerabilities_block(project)
-
-    # Define event emitter
-    def emit_architect_event(event_type: str, data: dict[str, Any]):
-        scan_orchestrator.emit_event(
-            project_id,
-            event=event_type,
-            scan_id="manual",
-            level="info",
-            message=f"Architect [working] {event_type.replace('_', ' ')}...",
-            data=data
-        )
-
-    # Run architect
-    architect = ArchitectAgent(
-        project_id=project_id,
-        project_cache_dir=latest_run_dir,
-        on_event=emit_architect_event
-    )
-    
-    previous_draft = project.get("payload", {}).get("architecture_draft")
-    
-    architecture_draft = await architect.synthesize(
-        target=target,
-        target_type=target_type,
-        scope=scope,
-        memory_block=memory_block,
-        vulnerabilities_block=vulnerabilities_block,
-        previous_draft=previous_draft
-    )
-
-    if architecture_draft and isinstance(architecture_draft, dict) and architecture_draft.get("hosts"):
-        if "payload" not in project:
-            project["payload"] = {}
-        project["payload"]["architecture_draft"] = architecture_draft
+        _set_architect_refresh_state(project, status="running", phase="synthesizing")
         projects_store.upsert_project(project)
-        
-        emit_architect_event("architect_updated", {"architecture_draft": architecture_draft})
+        task = asyncio.create_task(
+            _run_architect_refresh(project_id),
+            name=f"architect_refresh_{project_id}",
+        )
+        _architect_refresh_tasks[project_id] = task
 
-    return {"ok": True, "architecture_draft": architecture_draft}
+    return {
+        "ok": True,
+        "status": "running",
+        "started": True,
+        "architecture_draft": project.get("payload", {}).get("architecture_draft"),
+    }
 
 
 @router.post("/api/ai/assist")

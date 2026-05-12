@@ -313,10 +313,156 @@ class ArchitectAgent:
         ):
             title = self._build_default_title(hosts)
 
-        return {
+        board = self._normalize_board(draft.get("board"), hosts, flows)
+
+        result = {
             "title": title,
             "hosts": hosts,
             "flows": flows,
+        }
+        if board:
+            result["board"] = board
+        return result
+
+    def _normalize_board(
+        self,
+        value: Any,
+        hosts: list[dict[str, Any]],
+        flows: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+
+        canvas_value = value.get("canvas")
+        canvas = canvas_value if isinstance(canvas_value, dict) else {}
+        try:
+            width = int(canvas.get("width", 1200))
+        except (TypeError, ValueError):
+            width = 1200
+        try:
+            height = int(canvas.get("height", 680))
+        except (TypeError, ValueError):
+            height = 680
+        width = max(800, min(2200, width))
+        height = max(420, min(1400, height))
+
+        host_ids = {str(host["id"]) for host in hosts}
+        boxes: list[dict[str, Any]] = []
+        seen_box_ids: set[str] = set()
+        for row in value.get("boxes", []) if isinstance(value.get("boxes"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            box_id = self._slug(row.get("id") or row.get("title") or f"box-{len(boxes) + 1}")
+            if not box_id or box_id in seen_box_ids:
+                continue
+            title = self._clean_text(row.get("title"), limit=48)
+            if not title:
+                continue
+            subtitle = self._clean_text(row.get("subtitle"), limit=90)
+            kind = self._clean_text(row.get("kind"), limit=24).lower() or "notes"
+            emphasis = self._clean_text(row.get("emphasis"), limit=12).lower() or "normal"
+            try:
+                x = int(float(row.get("x", 0)))
+            except (TypeError, ValueError):
+                x = 0
+            try:
+                y = int(float(row.get("y", 0)))
+            except (TypeError, ValueError):
+                y = 0
+            try:
+                w = int(float(row.get("w", 220)))
+            except (TypeError, ValueError):
+                w = 220
+            try:
+                h = int(float(row.get("h", 140)))
+            except (TypeError, ValueError):
+                h = 140
+            lines: list[str] = []
+            for item in row.get("lines", []) if isinstance(row.get("lines"), list) else []:
+                line = self._clean_text(item, limit=120)
+                if line:
+                    lines.append(line)
+            tags: list[str] = []
+            for item in row.get("tags", []) if isinstance(row.get("tags"), list) else []:
+                tag = self._clean_text(item, limit=24)
+                if tag and tag not in tags:
+                    tags.append(tag)
+            related_host_ids: list[str] = []
+            for item in row.get("hostIds", []) if isinstance(row.get("hostIds"), list) else []:
+                related = self._slug(item)
+                if related in host_ids and related not in related_host_ids:
+                    related_host_ids.append(related)
+
+            boxes.append({
+                "id": box_id,
+                "title": title,
+                "subtitle": subtitle,
+                "kind": kind,
+                "x": max(0, min(width - 120, x)),
+                "y": max(0, min(height - 80, y)),
+                "w": max(140, min(width, w)),
+                "h": max(80, min(height, h)),
+                "lines": lines[:8],
+                "tags": tags[:12],
+                "hostIds": related_host_ids,
+                "emphasis": emphasis if emphasis in {"primary", "normal", "muted"} else "normal",
+            })
+            seen_box_ids.add(box_id)
+
+        if not boxes:
+            return None
+
+        box_ids = {str(box["id"]) for box in boxes}
+        links: list[dict[str, Any]] = []
+        seen_link_keys: set[tuple[str, str, str]] = set()
+        for row in value.get("links", []) if isinstance(value.get("links"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            from_id = self._slug(row.get("fromId"))
+            to_id = self._slug(row.get("toId"))
+            label = self._clean_text(row.get("label"), limit=60)
+            if not from_id or not to_id or from_id == to_id:
+                continue
+            if from_id not in box_ids or to_id not in box_ids:
+                continue
+            key = (from_id, to_id, label.lower())
+            if key in seen_link_keys:
+                continue
+            seen_link_keys.add(key)
+            links.append({
+                "fromId": from_id,
+                "toId": to_id,
+                "label": label,
+            })
+
+        if not links and flows:
+            flow_box_ids = [box for box in boxes if box.get("hostIds")]
+            for flow in flows:
+                from_host = str(flow.get("fromId", ""))
+                to_host = str(flow.get("toId", ""))
+                label = self._clean_text(flow.get("label"), limit=60)
+                from_box = next((box for box in flow_box_ids if from_host in box.get("hostIds", [])), None)
+                to_box = next((box for box in flow_box_ids if to_host in box.get("hostIds", [])), None)
+                if not from_box or not to_box or from_box["id"] == to_box["id"]:
+                    continue
+                key = (str(from_box["id"]), str(to_box["id"]), label.lower())
+                if key in seen_link_keys:
+                    continue
+                seen_link_keys.add(key)
+                links.append({
+                    "fromId": str(from_box["id"]),
+                    "toId": str(to_box["id"]),
+                    "label": label,
+                })
+
+        return {
+            "theme": "mono-grid",
+            "canvas": {
+                "width": width,
+                "height": height,
+            },
+            "boxes": boxes,
+            "links": links,
         }
 
     def _normalize_host(self, item: dict[str, Any]) -> dict[str, Any] | None:

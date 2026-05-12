@@ -291,17 +291,17 @@ _RED_TEAM_ATTACK_TYPES: list[SourceConfig] = [
 # ═════════════════════════════════════════════════════════════════════════════
 
 _BINARY_STRATEGIES: list[SourceConfig] = [
-    SourceConfig(name="Ir0nstoneNotes", url="https://ir0nstone.gitbook.io/notes", source_type=SourceType.GITBOOK, domain="desktop", category="methodology", content_type=ContentType.STRATEGIES, max_pages=200, tags=["binary", "exploitation", "rop", "heap"], description="ir0nstone's binary exploitation notes."),
-    SourceConfig(name="CTFAllInOne", url="https://github.com/firmianay/CTF-All-In-One", source_type=SourceType.GITHUB_REPO, domain="desktop", category="methodology", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["ctf", "binary"], description="CTF All-In-One guide."),
-    SourceConfig(name="RPISEC-MBE", url="https://github.com/RPISEC/MBE", source_type=SourceType.GITHUB_REPO, domain="desktop", category="methodology", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["binary", "education"], description="RPISEC Modern Binary Exploitation."),
-    SourceConfig(name="ARMExploitation", url="https://github.com/IOActive/ARM-Exploitation", source_type=SourceType.GITHUB_REPO, domain="desktop", category="arm_embedded", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["arm", "exploitation", "embedded"], description="ARM exploitation techniques."),
-    SourceConfig(name="ReverseEngineeringBeginners", url="https://github.com/malware-unicorn/reverse-engineering-for-beginners", source_type=SourceType.GITHUB_REPO, domain="desktop", category="reverse_engineering", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["reverse-engineering", "malware"], description="Reverse engineering for beginners."),
-    SourceConfig(name="PAT-BinaryStrategies", url="https://github.com/swisskyrepo/PayloadsAllTheThings", source_type=SourceType.GITHUB_REPO, domain="desktop", category="methodology", content_type=ContentType.STRATEGIES, branch="master", clone_id="PayloadsAllTheThings", subdirectory="Binary Exploitation", include_patterns=["**/*.md"], tags=["payloadsallthethings", "binary", "exploitation"], description="Consolidated binary exploitation methodology from PayloadsAllTheThings."),
+    SourceConfig(name="Ir0nstoneNotes", url="https://ir0nstone.gitbook.io/notes", source_type=SourceType.GITBOOK, domain="linux_server", category="methodology", content_type=ContentType.STRATEGIES, max_pages=200, tags=["binary", "exploitation", "rop", "heap"], description="ir0nstone's binary exploitation notes."),
+    SourceConfig(name="CTFAllInOne", url="https://github.com/firmianay/CTF-All-In-One", source_type=SourceType.GITHUB_REPO, domain="linux_server", category="methodology", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["ctf", "binary"], description="CTF All-In-One guide."),
+    SourceConfig(name="RPISEC-MBE", url="https://github.com/RPISEC/MBE", source_type=SourceType.GITHUB_REPO, domain="linux_server", category="methodology", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["binary", "education"], description="RPISEC Modern Binary Exploitation."),
+    SourceConfig(name="ARMExploitation", url="https://github.com/IOActive/ARM-Exploitation", source_type=SourceType.GITHUB_REPO, domain="linux_server", category="arm_embedded", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["arm", "exploitation", "embedded"], description="ARM exploitation techniques."),
+    SourceConfig(name="ReverseEngineeringBeginners", url="https://github.com/malware-unicorn/reverse-engineering-for-beginners", source_type=SourceType.GITHUB_REPO, domain="linux_server", category="reverse_engineering", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["reverse-engineering", "malware"], description="Reverse engineering for beginners."),
+    SourceConfig(name="PAT-BinaryStrategies", url="https://github.com/swisskyrepo/PayloadsAllTheThings", source_type=SourceType.GITHUB_REPO, domain="linux_server", category="methodology", content_type=ContentType.STRATEGIES, branch="master", clone_id="PayloadsAllTheThings", subdirectory="Binary Exploitation", include_patterns=["**/*.md"], tags=["payloadsallthethings", "binary", "exploitation"], description="Consolidated binary exploitation methodology from PayloadsAllTheThings."),
 ]
 
 _BINARY_ATTACK_TYPES: list[SourceConfig] = [
-    SourceConfig(name="How2Heap", url="https://github.com/shellphish/how2heap", source_type=SourceType.GITHUB_REPO, domain="desktop", category="techniques", content_type=ContentType.ATTACK_TYPES, branch="master", include_patterns=["**/*.md", "**/*.c"], tags=["heap", "exploitation"], description="How2Heap — heap exploitation techniques."),
-    SourceConfig(name="CTFPwnTips", url="https://github.com/Naetw/CTF-pwn-tips", source_type=SourceType.GITHUB_REPO, domain="desktop", category="techniques", content_type=ContentType.ATTACK_TYPES, branch="master", include_patterns=["**/*.md"], tags=["ctf", "pwn"], description="CTF pwn tips."),
+    SourceConfig(name="How2Heap", url="https://github.com/shellphish/how2heap", source_type=SourceType.GITHUB_REPO, domain="linux_server", category="techniques", content_type=ContentType.ATTACK_TYPES, branch="master", include_patterns=["**/*.md", "**/*.c"], tags=["heap", "exploitation"], description="How2Heap — heap exploitation techniques."),
+    SourceConfig(name="CTFPwnTips", url="https://github.com/Naetw/CTF-pwn-tips", source_type=SourceType.GITHUB_REPO, domain="linux_server", category="techniques", content_type=ContentType.ATTACK_TYPES, branch="master", include_patterns=["**/*.md"], tags=["ctf", "pwn"], description="CTF pwn tips."),
 ]
 
 
@@ -453,7 +453,7 @@ _IDENTITY_PAYLOAD_SOURCES: list[PayloadSourceConfig] = [
 ]
 
 _BINARY_PAYLOAD_SOURCES: list[PayloadSourceConfig] = [
-    PayloadSourceConfig(name="PATPayload-BINARY-Exploitation", url="https://github.com/swisskyrepo/PayloadsAllTheThings", domain="desktop", category="binary_exploitation", branch="master", clone_id="PayloadsAllTheThings", subdirectory="Binary Exploitation", include_patterns=["**/*.md"], tags=["binary", "exploitation", "payloadsallthethings"], description="PayloadsAllTheThings — binary exploitation payload references."),
+    PayloadSourceConfig(name="PATPayload-BINARY-Exploitation", url="https://github.com/swisskyrepo/PayloadsAllTheThings", domain="linux_server", category="binary_exploitation", branch="master", clone_id="PayloadsAllTheThings", subdirectory="Binary Exploitation", include_patterns=["**/*.md"], tags=["binary", "exploitation", "payloadsallthethings"], description="PayloadsAllTheThings — binary exploitation payload references."),
 ]
 
 _SUPPLY_CHAIN_PAYLOAD_SOURCES: list[PayloadSourceConfig] = [

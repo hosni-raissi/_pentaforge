@@ -26,6 +26,9 @@ interface AIPromptPanelProps {
   projectName: string;
   target: string;
   targetType: string;
+  projectStatus?: string;
+  savedContext?: string;
+  hasScanState?: boolean;
   agents: AgentInfo[];
   history?: CopilotMessage[];
   injectedPrompt?: {
@@ -38,7 +41,7 @@ interface AIPromptPanelProps {
 const CHAT_STORAGE_PREFIX = 'pf-assistant-chat';
 const MAX_CHAT_MESSAGES = 80;
 const HISTORY_TOKEN_LIMIT = 8000;
-const MAX_PROMPT_CHARS = 1000;
+const MAX_PROMPT_CHARS = 4000;
 
 function estimateTokens(text: string): number {
   return Math.ceil((text || '').length / 4);
@@ -828,6 +831,9 @@ export function AIPromptPanel({
   projectName,
   target,
   targetType,
+  projectStatus,
+  savedContext,
+  hasScanState = false,
   agents,
   history,
   injectedPrompt,
@@ -889,11 +895,18 @@ export function AIPromptPanel({
   const activeAbortControllerRef = useRef<AbortController | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const cancelledRequestIdsRef = useRef<Set<string>>(new Set());
+  const previousProjectStatusRef = useRef<string | undefined>(projectStatus);
+  const previousHasScanStateRef = useRef<boolean>(hasScanState);
+  const agentsRef = useRef<AgentInfo[]>(agents);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const userIsAtBottomRef = useRef(true);
+
+  useEffect(() => {
+    agentsRef.current = agents;
+  }, [agents]);
 
   const handleScroll = useCallback(() => {
     if (!scrollContainerRef.current) return;
@@ -927,14 +940,14 @@ export function AIPromptPanel({
       .join('; ');
 
     const contextRaw = [
-      ...agents.map((agent) => `${agent.name}:${agent.state}:${agent.currentTask ?? ''}`),
+      ...agentsRef.current.map((agent) => `${agent.name}:${agent.state}:${agent.currentTask ?? ''}`),
       findingsSummary ? `Findings: ${findingsSummary}` : 'No confirmed findings yet.',
     ].join(' | ');
 
     return contextRaw.length > 11500
       ? contextRaw.slice(0, 11500) + '... [truncated for length]'
       : contextRaw;
-  }, [agents, projectId]);
+  }, [projectId]);
 
   const fetchContextMetrics = useCallback(async (
     promptText = '',
@@ -1062,6 +1075,38 @@ export function AIPromptPanel({
     }
     setMessages((prev) => mergeMessages(history, prev, introMessage));
   }, [history, historySuppressed, introMessage]);
+
+  useEffect(() => {
+    const previousStatus = previousProjectStatusRef.current;
+    const previousHadScanState = previousHasScanStateRef.current;
+    previousProjectStatusRef.current = projectStatus;
+    previousHasScanStateRef.current = hasScanState;
+
+    const resetDetected = (
+      (previousStatus && previousStatus !== 'idle' && projectStatus === 'idle')
+      || (previousHadScanState && !hasScanState)
+    );
+    if (!resetDetected) {
+      return;
+    }
+    if ((history?.length ?? 0) > 0) {
+      return;
+    }
+    if (String(savedContext || '').trim()) {
+      return;
+    }
+
+    activeAbortControllerRef.current?.abort();
+    activeAbortControllerRef.current = null;
+    activeRequestIdRef.current = null;
+    cancelledRequestIdsRef.current.clear();
+    setSending(false);
+    setHistorySuppressed(true);
+    setShowScrollButton(false);
+    writeStoredMessages(storageKey, []);
+    setMessages([{ ...introMessage }]);
+    setPrompt('');
+  }, [hasScanState, history, introMessage, projectStatus, savedContext, storageKey]);
 
   useEffect(() => {
     return () => {
