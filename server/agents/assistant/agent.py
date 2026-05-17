@@ -2122,6 +2122,22 @@ class AssistantAgent:
                     normalized_args.append(
                         _ASSISTANT_SANDBOX_PATH_REWRITES.get(cleaned_piece, cleaned_piece)
                     )
+        if normalized_command == "ffuf":
+            has_t = False
+            idx = 0
+            while idx < len(normalized_args):
+                if normalized_args[idx] == "-t" and idx + 1 < len(normalized_args):
+                    has_t = True
+                    try:
+                        t_val = int(normalized_args[idx + 1])
+                        if t_val > 10:
+                            normalized_args[idx + 1] = "5"
+                    except (ValueError, TypeError):
+                        normalized_args[idx + 1] = "5"
+                idx += 1
+            if not has_t:
+                normalized_args.extend(["-t", "5"])
+
         if normalized_command != "curl":
             return normalized_args
 

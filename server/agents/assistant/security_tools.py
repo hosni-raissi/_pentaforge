@@ -68,7 +68,6 @@ _ASSISTANT_SECURITY_TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "jwt_tool",
             "js-beautify",
             "kiterunner",
-            "linkfinder",
             "nosqlmap",
             "paramspider",
             "retire_js",
@@ -167,23 +166,23 @@ def _flatten(groups: Iterable[tuple[str, Iterable[str]]]) -> tuple[str, ...]:
 ASSISTANT_AVAILABLE_SECURITY_TOOLS: tuple[str, ...] = _flatten(_ASSISTANT_SECURITY_TOOL_GROUPS)
 
 # Commands the assistant may execute in chat when they exist in the sandbox.
+from server.agents.executer.run_custom_guard import _NETWORK_TARGET_COMMANDS
+
 ASSISTANT_ALLOWED_NETWORK_COMMANDS: frozenset[str] = frozenset(
-    set(ASSISTANT_AVAILABLE_SECURITY_TOOLS)
+    _NETWORK_TARGET_COMMANDS
     | {
-        "amass",
-        "curl",
-        "dig",
-        "docker",
+        "cat",
         "find",
-        "git",
         "grep",
         "head",
         "ls",
         "pwd",
         "sudo",
         "tail",
+        "whois",
     }
 )
+
 
 # Installed tools that can operate on local artifacts, code, containers, or cloud
 # resources and therefore do not need the current target host embedded in args.

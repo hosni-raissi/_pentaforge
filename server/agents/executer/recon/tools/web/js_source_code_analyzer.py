@@ -107,7 +107,7 @@ def _is_ssrf_safe(hostname: str) -> tuple[bool, str]:
 # 3. SCHEMAS
 # ══════════════════════════════════════════════════════════════════════
 
-VALID_TOOLS = frozenset({"getjs", "linkfinder", "secretfinder", "js-beautify"})
+VALID_TOOLS = frozenset({"getjs", "secretfinder", "js-beautify"})
 
 
 class JsAnalyzerRequest(BaseModel):
@@ -125,7 +125,7 @@ class JsAnalyzerRequest(BaseModel):
         tool = str(data.get("tool", "")).strip()
         target = str(data.get("target", "")).strip()
         if (
-            tool in {"getjs", "linkfinder", "secretfinder"}
+            tool in {"getjs", "secretfinder"}
             and target
             and not target.startswith(("http://", "https://"))
         ):
@@ -141,6 +141,7 @@ class JsAnalyzerRequest(BaseModel):
         if v not in VALID_TOOLS:
             raise ValueError(f"tool must be one of: {sorted(VALID_TOOLS)}")
         return v
+
 
     @field_validator("target")
     @classmethod
@@ -272,14 +273,6 @@ def _build_getjs_cmd(target: str, args: list[str]) -> list[str]:
     return ["getJS", *extra, *args]
 
 
-def _build_linkfinder_cmd(target: str, args: list[str]) -> list[str]:
-    extra: list[str] = []
-    if not _target_in_args(target, args, "-i", "--input"):
-        extra += ["-i", target]
-    if not _has_flag(args, "-o", "--output"):
-        extra += ["-o", "cli"]
-    return ["linkfinder", *extra, *args]
-
 
 def _build_secretfinder_cmd(target: str, args: list[str]) -> list[str]:
     extra: list[str] = []
@@ -339,16 +332,6 @@ def parse_getjs(stdout: str) -> list[str]:
         if _URL_RE.match(line.strip())
     )
 
-
-def parse_linkfinder(stdout: str) -> list[str]:
-    endpoints: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line or _BANNER_PATTERNS.search(line):
-            continue
-        if _ENDPOINT_RE.match(line):
-            endpoints.append(line)
-    return _deduplicate(endpoints)
 
 
 def parse_secretfinder(stdout: str) -> list[Secret]:
@@ -424,8 +407,6 @@ def js_source_code_analyzer(
 
     if req.tool == "getjs":
         cmd = _build_getjs_cmd(req.target, req.args)
-    elif req.tool == "linkfinder":
-        cmd = _build_linkfinder_cmd(req.target, req.args)
     elif req.tool == "secretfinder":
         cmd = _build_secretfinder_cmd(req.target, req.args)
     elif req.tool == "js-beautify":
@@ -467,8 +448,6 @@ def js_source_code_analyzer(
 
     if req.tool == "getjs":
         js_urls = parse_getjs(stdout)
-    elif req.tool == "linkfinder":
-        endpoints = parse_linkfinder(stdout)
     elif req.tool == "secretfinder":
         secrets = parse_secretfinder(stdout)
     elif req.tool == "js-beautify":
@@ -510,7 +489,6 @@ JS_ANALYZER_TOOL_DEFINITION: dict = {
     "description": (
         "Analyze JavaScript files from a target web application. "
         "Use 'getjs' to enumerate all JS files loaded by a webpage. "
-        "Use 'linkfinder' to extract hidden API endpoints from a JS file. "
         "Use 'secretfinder' to find API keys, tokens, and secrets embedded in JS. "
         "Use 'js-beautify' to unminify/deobfuscate a JS file for manual review."
     ),
@@ -525,7 +503,7 @@ JS_ANALYZER_TOOL_DEFINITION: dict = {
             "target": {
                 "type": "string",
                 "description": (
-                    "Target URL. For 'getjs', 'linkfinder', and 'secretfinder', "
+                    "Target URL. For 'getjs' and 'secretfinder', "
                     "provide a full URL starting with http:// or https://. "
                     "For 'js-beautify', provide either a full URL or a local file path."
                 ),
@@ -569,7 +547,6 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     demos = [
-        ("linkfinder", demo_js, []),
         ("secretfinder", demo_js, []),
         ("js-beautify", demo_js, []),
     ]
@@ -599,3 +576,4 @@ if __name__ == "__main__":
         if result["beautified_code"]:
             preview = result["beautified_code"][:300].replace("\n", " ")
             print(f"  Code preview: {preview}...")
+

@@ -54,7 +54,7 @@ _DATA_VALUE_FLAGS = {
 _NETWORK_TARGET_COMMANDS = {
     # Web & API Fuzzing
     "commix", "ffuf", "gobuster", "dirb", "dirbuster", "wfuzz", "nikto", "wpscan", "joomscan",
-    "arjun", "paramspider", "katana", "gospider", "gau", "waybackurls", "subjs", "linkfinder",
+    "arjun", "paramspider", "katana", "gospider", "gau", "waybackurls", "subjs",
     "secretfinder", "getjs", "getJS", "graphql-cop", "graphw00f", "inql", "ssrfmap", "tplmap", "xsstrike", "dalfox", "corscanner",
     "linpeas", "linpeas.sh", "lse", "pspy", "kerbrute",
     

@@ -27,8 +27,30 @@ from server.agents.tools.search_web import (
     search_web,
 )
 
-ASSISTANT_GET_PAGE_TOOL_DEFINITION = ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION
+ASSISTANT_GET_PAGE_TOOL_DEFINITION = {
+    "name": "get_page",
+    "description": (
+        "Retrieve the text content of a targeted web page. Useful to view specific "
+        "remediation advice, project files, or specific referenced resources in local scope."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The URL to fetch and read.",
+            },
+            "css_selector": {
+                "type": "string",
+                "description": "Optional CSS selector to extract a specific section from the page.",
+            },
+        },
+        "required": ["url"],
+        "additionalProperties": False,
+    },
+}
 get_page = fetch_url_content
+
 
 ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION = {
     **SHARED_RUN_CUSTOM_TOOL_DEFINITION,

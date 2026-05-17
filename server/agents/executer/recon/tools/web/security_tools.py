@@ -255,15 +255,6 @@ WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
         "note": "-json outputs structured data to stdout for jq filtering",
         "pipe_into": ["ffuf", "nuclei"]
     },
-    "linkfinder": {
-        "t": "js_endpoint_extract",
-        "c": "runtime_path_discovery",
-        "u": "python3 linkfinder.py -i TARGET -o cli 2>/dev/null | grep -v '^$'",
-        "d": ["extract endpoints and paths from JS files at runtime", "find hidden API routes embedded in JS", "deeper than subjs which only harvests JS URLs"],
-        "tgt": ["js_url", "url"],
-        "note": "-o cli outputs to stdout instead of file",
-        "pipe_into": ["ffuf", "nuclei"]
-    },
 
     # ── PHASE 5: VULNERABILITY SCANNING ───────────────────────────────────
     "nuclei": {
@@ -344,7 +335,7 @@ WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
         "u": "subjs -u TARGET 2>/dev/null | grep -v '^$'",
         "d": ["harvest all JS file URLs from a target", "feed JS files to secret scanners or retire.js"],
         "tgt": ["url"],
-        "pipe_into": ["retire_js", "trufflehog", "linkfinder"]
+        "pipe_into": ["retire_js", "trufflehog"]
     },
     "gowitness": {
         "t": "screenshot",
