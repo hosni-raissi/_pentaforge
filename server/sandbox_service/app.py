@@ -13,15 +13,16 @@ from server.agents.executer.run_custom_guard import (
     detect_recon_role_violation,
     detect_scope_violation,
 )
-from server.agents.executer.recon.tools.all.run_custom import (
+from server.agents.tools.run_custom import (
     RunCustomRequest,
     _effective_command_cwd,
     redirect_default_tool_outputs,
+    resolve_sandbox_resource_args,
     safe_execute,
     strip_output_file_flags,
     validate_command_policy,
 )
-from server.agents.executer.exploit.tools.all.run_python import run_python as local_run_python
+from server.agents.tools.run_python import run_python as local_run_python
 
 try:
     from server.agents.executer.base import _executer_tool_context
@@ -105,7 +106,7 @@ def execute_run_custom(req: RunCustomRemoteRequest) -> dict[str, Any]:
 
         cleaned_args, _stripped_flags = strip_output_file_flags(validated.command, validated.args)
         redirected_args, _redirected_flags = redirect_default_tool_outputs(validated.command, cleaned_args)
-        validated.args = redirected_args
+        validated.args = resolve_sandbox_resource_args(redirected_args)
 
         role_violation = detect_recon_role_violation(validated.command, role=req.execution_context.role)
         if role_violation:

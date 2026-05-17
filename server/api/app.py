@@ -55,6 +55,18 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
     init_api_state()
+    
+    # Ensure LinkFinder is available (auto-install if missing at runtime)
+    import shutil
+    import subprocess
+    import sys
+    if not shutil.which("linkfinder") and not shutil.which("python3 -m linkfinder"):
+        try:
+            print("[startup] LinkFinder not found, installing automatically...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "linkfinder"])
+            print("[startup] LinkFinder installed successfully.")
+        except Exception as e:
+            print(f"[startup] Failed to auto-install LinkFinder: {e}")
 
 
 app.include_router(health_router)

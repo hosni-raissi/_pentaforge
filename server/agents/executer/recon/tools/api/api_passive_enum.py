@@ -539,5 +539,5 @@ API_PASSIVE_ENUM_TOOL_DEFINITION = {
 
 
 if __name__ == "__main__":
-    out = api_passive_enum(target="http://localhost:8888/api", timeout=10, max_pages=15)
+    out = api_passive_enum(target="127.0.0.1:5000/api", timeout=10, max_pages=15)
     print(json.dumps(out, indent=2))

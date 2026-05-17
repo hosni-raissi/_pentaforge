@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
+from contextlib import contextmanager
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 from server.core.llm import ChatMessage, get_llm, get_public_agent_config
+from server.core.tool import coerce_args_from_schema
 from server.nodes.system_memory import (
     SystemMemoryNode,
     _loads_json_loose,
@@ -19,6 +23,290 @@ from .prompts import (
     PREPARE_INFORMATION_BLOCK_SYSTEM_PROMPT,
     build_information_block_preparation_prompt,
 )
+
+
+def _build_target_placeholders(target: str) -> dict[str, str]:
+    raw = str(target or "").strip()
+    if not raw:
+        return {
+            "target": "",
+            "raw_target": "",
+            "trgt": "",
+            "tgt": "",
+            "host": "",
+            "hostname": "",
+            "full_trgt": "",
+            "full_target": "",
+            "url": "",
+        }
+
+    parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        host = raw.split("/", 1)[0].split(":", 1)[0].strip().lower()
+
+    if "://" in raw:
+        full_target = raw
+    else:
+        full_target = f"https://{raw.lstrip('/')}"
+
+    return {
+        "target": raw,
+        "raw_target": raw,
+        "trgt": host,
+        "tgt": host,
+        "host": host,
+        "hostname": host,
+        "full_trgt": full_target,
+        "full_target": full_target,
+        "url": full_target,
+    }
+
+
+def _resolve_profile_value(value: Any, placeholders: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        clean = value.strip()
+        return placeholders.get(clean, value)
+    if isinstance(value, list):
+        return [_resolve_profile_value(item, placeholders) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _resolve_profile_value(item, placeholders)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _normalize_profile_key(value: Any) -> str:
+    return str(value or "").strip().lstrip("-").replace("-", "_")
+
+
+def _looks_like_profile_key(token: Any, known_keys: set[str]) -> bool:
+    if not isinstance(token, str):
+        return False
+    normalized = _normalize_profile_key(token)
+    return token.startswith("-") or normalized in known_keys
+
+
+def _build_profile_kwargs_from_args(
+    raw_args: Any,
+    *,
+    tool: Any,
+    placeholders: dict[str, str],
+) -> dict[str, Any]:
+    parameters = getattr(tool, "parameters", {}) if tool is not None else {}
+    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+    known_keys = {
+        str(key).strip()
+        for key in properties.keys()
+        if str(key).strip()
+    }
+
+    if isinstance(raw_args, dict):
+        resolved = {
+            _normalize_profile_key(key): _resolve_profile_value(value, placeholders)
+            for key, value in raw_args.items()
+            if _normalize_profile_key(key)
+        }
+    elif isinstance(raw_args, list):
+        resolved: dict[str, Any] = {}
+        index = 0
+        while index < len(raw_args):
+            key_token = raw_args[index]
+            if not isinstance(key_token, str):
+                index += 1
+                continue
+            key_name = _normalize_profile_key(key_token)
+            if not key_name:
+                index += 1
+                continue
+
+            next_value = raw_args[index + 1] if index + 1 < len(raw_args) else None
+            next_is_key = _looks_like_profile_key(next_value, known_keys)
+            if index + 1 < len(raw_args) and not next_is_key:
+                resolved[key_name] = _resolve_profile_value(next_value, placeholders)
+                index += 2
+                continue
+
+            resolved[key_name] = True
+            index += 1
+    else:
+        return {}
+
+    if known_keys:
+        resolved = {
+            key: value
+            for key, value in resolved.items()
+            if key in known_keys
+        }
+    return coerce_args_from_schema(parameters, resolved)
+
+
+def _looks_like_web_target(target: str) -> bool:
+    raw = str(target or "").strip().lower()
+    if not raw:
+        return False
+    if raw.startswith(("http://", "https://")):
+        return True
+    parsed = urlsplit(f"//{raw}")
+    return bool(parsed.hostname or parsed.netloc)
+
+
+def _normalize_run_custom_args(
+    command: str,
+    args: list[str],
+    placeholders: dict[str, str],
+) -> list[str]:
+    clean_command = str(command or "").strip().lower()
+    if not clean_command or not args:
+        return args
+
+    url_flags_by_command = {
+        "wappalyzer": {"-i"},
+    }
+    url_flags = url_flags_by_command.get(clean_command, set())
+    if not url_flags:
+        return args
+
+    bare_target = placeholders.get("trgt", "")
+    full_target = placeholders.get("full_trgt", "")
+    if not bare_target or not full_target:
+        return args
+
+    normalized = list(args)
+    index = 0
+    while index < len(normalized) - 1:
+        if normalized[index] in url_flags:
+            candidate = str(normalized[index + 1] or "").strip()
+            if candidate == bare_target or candidate == placeholders.get("host", ""):
+                normalized[index + 1] = full_target
+        index += 1
+    return normalized
+
+
+def _truncate_result_text(value: Any, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _coerce_json_result(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("{", "[")):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+
+def _clean_result_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"none", "null"}:
+        return ""
+    return text
+
+
+def _summarize_command_failure(detail: Any, *, return_code: Any = None) -> str:
+    text = _clean_result_text(detail)
+    lowered = text.lower()
+    if "sandbox executor unavailable" in lowered:
+        return (
+            "Execution environment blocked: the shared tool sandbox executor was unavailable, "
+            "so the command never reached the target."
+        )
+    if "traceback (most recent call last):" in lowered:
+        return "Process failed with a Python traceback."
+    if "pthread_create failed" in lowered and "sigabrt" in lowered:
+        return "Process crashed with pthread_create resource error and SIGABRT."
+    if "pthread_create failed" in lowered:
+        return "Process crashed with pthread_create resource error."
+    if "sigsegv" in lowered or "segmentation fault" in lowered or "status 11" in lowered:
+        return "Process crashed with a segmentation fault."
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lines:
+        return _truncate_result_text(lines[0], limit=180)
+    if return_code not in (None, ""):
+        return f"Exited with code {return_code}."
+    return ""
+
+
+def _summarize_tool_result(tool_name: str, raw_result: Any) -> str:
+    raw_result = _coerce_json_result(raw_result)
+    clean_tool_name = str(tool_name or "").strip()
+    if isinstance(raw_result, dict):
+        command = str(
+            raw_result.get("full_command")
+            or raw_result.get("command")
+            or clean_tool_name
+            or "command"
+        ).strip()
+        if "return_code" in raw_result and ("command" in raw_result or "full_command" in raw_result):
+            return_code = raw_result.get("return_code")
+            try:
+                rc_value = int(return_code)
+            except Exception:
+                rc_value = -1
+            stderr = _clean_result_text(raw_result.get("stderr", ""))
+            stdout = _clean_result_text(raw_result.get("stdout", ""))
+            error = _clean_result_text(raw_result.get("error", ""))
+            fallback_summary = _clean_result_text(raw_result.get("summary", ""))
+            if rc_value == 0 and not error:
+                return f"Custom command `{command}` completed successfully."
+            detail = _summarize_command_failure(
+                stderr or error or stdout or fallback_summary,
+                return_code=return_code,
+            )
+            if detail:
+                return f"Custom command `{command}` failed: {detail}"
+            return f"Custom command `{command}` failed."
+
+        if "success" in raw_result and "total_endpoints" in raw_result:
+            total_endpoints = int(raw_result.get("total_endpoints", 0) or 0)
+            total_vulnerable = int(raw_result.get("total_vulnerable", 0) or 0)
+            if total_vulnerable > 0:
+                return (
+                    f"CORS analysis checked {total_endpoints} endpoints and found "
+                    f"{total_vulnerable} vulnerable endpoints."
+                )
+            return f"CORS analysis checked {total_endpoints} endpoints and found no vulnerable endpoints."
+
+        if "success" in raw_result and "tokens_collected" in raw_result:
+            tokens = int(raw_result.get("tokens_collected", 0) or 0)
+            if tokens > 0:
+                return f"Session analysis collected {tokens} token samples."
+            error = str(raw_result.get("error", "")).strip()
+            if error:
+                return _truncate_result_text(error, limit=180)
+            return "Session analysis collected no session tokens."
+
+        for key in ("summary", "result", "error"):
+            value = _clean_result_text(raw_result.get(key, ""))
+            if value:
+                return _truncate_result_text(value, limit=220)
+
+        return _truncate_result_text(json.dumps(raw_result, ensure_ascii=True), limit=220)
+
+    return _truncate_result_text(str(raw_result or "").strip(), limit=220)
+
+
+def _tool_execution_status(raw_result: Any) -> str:
+    raw_result = _coerce_json_result(raw_result)
+    if isinstance(raw_result, dict):
+        if "return_code" in raw_result:
+            try:
+                rc = raw_result.get("return_code")
+                rc = 1 if rc is None else int(rc)
+                return "completed" if rc == 0 else "error"
+            except Exception:
+                return "error"
+        if "success" in raw_result:
+            return "completed" if bool(raw_result.get("success")) else "error"
+    return "completed"
 
 
 def _structured_snapshot(tool_name: str, raw_result: Any) -> dict[str, Any] | None:
@@ -138,7 +426,72 @@ def _structured_snapshot(tool_name: str, raw_result: Any) -> dict[str, Any] | No
             "nuclei_hints": payload.get("nuclei_hints", {}) if isinstance(payload.get("nuclei_hints"), dict) else {},
         }
 
+    if clean_tool_name == "passive_web_recon":
+        return {
+            "tool": clean_tool_name,
+            "normalized_domain": str(payload.get("normalized_domain", "")).strip(),
+            "subdomains": [
+                str(value).strip()
+                for value in payload.get("subdomains", [])
+                if str(value).strip()
+            ][:20]
+            if isinstance(payload.get("subdomains"), list)
+            else [],
+            "historical_urls": [
+                str(value).strip()
+                for value in payload.get("historical_urls", [])
+                if str(value).strip()
+            ][:20]
+            if isinstance(payload.get("historical_urls"), list)
+            else [],
+            "ip_history": [
+                str(value).strip()
+                for value in payload.get("ip_history", [])
+                if str(value).strip()
+            ][:10]
+            if isinstance(payload.get("ip_history"), list)
+            else [],
+            "api_candidates": [
+                str(value).strip()
+                for value in payload.get("api_candidates", [])
+                if str(value).strip()
+            ][:20]
+            if isinstance(payload.get("api_candidates"), list)
+            else [],
+        }
+
     return None
+
+
+@contextmanager
+def _information_gathering_tool_context(
+    *,
+    project_id: str,
+    scan_id: str,
+    project_cache_dir: str,
+    target: str,
+    tool_name: str,
+):
+    try:
+        from server.agents.executer.base import _executer_tool_context
+    except Exception:
+        yield
+        return
+
+    token = _executer_tool_context.set(
+        {
+            "project_id": str(project_id or "").strip(),
+            "project_cache_dir": str(project_cache_dir or "").strip(),
+            "scan_id": str(scan_id or "").strip(),
+            "role": "information_gathering",
+            "tool": str(tool_name or "").strip(),
+            "target_url": str(target or "").strip(),
+        }
+    )
+    try:
+        yield
+    finally:
+        _executer_tool_context.reset(token)
 
 
 class InformationGatheringNode:
@@ -192,27 +545,35 @@ class InformationGatheringNode:
         payload = payload_block if isinstance(payload_block, dict) else {}
         original_tools = original_block.get("tools", [])
         original_names = []
+        original_named_entries: list[tuple[str, Any]] = []
         for item in original_tools:
             if isinstance(item, str):
-                original_names.append(item.strip())
+                clean_name = item.strip()
+                original_names.append(clean_name)
+                original_named_entries.append((clean_name, item))
             elif isinstance(item, dict):
                 # For objects, use the tool/name or a placeholder
-                original_names.append(str(item.get("name") or item.get("tool") or "custom").strip())
+                clean_name = str(item.get("name") or item.get("tool") or "custom").strip()
+                original_names.append(clean_name)
+                original_named_entries.append((clean_name, item))
         
         allowed_tool_names = {str(item).strip() for item in available_tools if str(item).strip()}
 
         tools: list[Any] = []
         removed_builtins: list[str] = []
+        requested_keep_names: set[str] = set()
+        has_explicit_keep_selection = False
         raw_tools = payload.get("tools", [])
         if isinstance(raw_tools, list):
             run_custom_count = 0
             for item in raw_tools:
                 if isinstance(item, str) and item.strip():
                     tool_name = item.strip()
+                    has_explicit_keep_selection = True
                     if self._is_blocked_static_tool(tool_name):
                         removed_builtins.append(tool_name)
                     elif tool_name in allowed_tool_names:
-                        tools.append(tool_name)
+                        requested_keep_names.add(tool_name)
                     else:
                         removed_builtins.append(tool_name)
                     continue
@@ -220,6 +581,13 @@ class InformationGatheringNode:
                     continue
                 tool_name = str(item.get("name") or item.get("tool", "")).strip()
                 if tool_name != "run_custom":
+                    has_explicit_keep_selection = True
+                    if self._is_blocked_static_tool(tool_name):
+                        removed_builtins.append(tool_name)
+                    elif tool_name in allowed_tool_names:
+                        requested_keep_names.add(tool_name)
+                    else:
+                        removed_builtins.append(tool_name)
                     continue
                 if run_custom_count >= self._config.max_run_custom_additions_per_block:
                     continue
@@ -250,14 +618,20 @@ class InformationGatheringNode:
                 )
                 run_custom_count += 1
 
-        if tools:
-            prepared["tools"] = tools
-        if str(payload.get("block_name") or payload.get("name", "")).strip():
-            prepared["name"] = str(payload.get("block_name") or payload.get("name", "")).strip()
-        if str(payload.get("goal", "")).strip():
-            prepared["goal"] = str(payload.get("goal", "")).strip()
-        if str(payload.get("interaction", "")).strip():
-            prepared["interaction"] = str(payload.get("interaction", "")).strip()
+        base_tools: list[Any]
+        if has_explicit_keep_selection:
+            base_tools = [
+                entry
+                for tool_name, entry in original_named_entries
+                if tool_name in requested_keep_names
+            ]
+            for tool_name, _entry in original_named_entries:
+                if tool_name not in requested_keep_names and tool_name not in removed_builtins:
+                    removed_builtins.append(tool_name)
+        else:
+            base_tools = [entry for _tool_name, entry in original_named_entries]
+
+        prepared["tools"] = base_tools + tools
         if str(payload.get("status", "")).strip():
             prepared["status"] = str(payload.get("status", "")).strip().lower()
         prepared["selection_rationale"] = str(payload.get("rationale", "")).strip()
@@ -343,18 +717,42 @@ class InformationGatheringNode:
         prepared_blocks: list[dict[str, Any]] = []
         for index, original_block in enumerate(valid_blocks):
             payload_block = raw_blocks[index] if isinstance(raw_blocks, list) and index < len(raw_blocks) else None
-            prepared_blocks.append(
-                self._normalize_prepared_block(
-                    original_block=original_block,
-                    payload_block=payload_block,
-                    available_tools=available_tools,
-                )
+            prepared_block = self._normalize_prepared_block(
+                original_block=original_block,
+                payload_block=payload_block,
+                available_tools=available_tools,
             )
+            block_id = str(original_block.get("id", "")).strip().lower()
+            normalized_target_type = str(target_type or "").strip().lower()
+            if (
+                block_id in {"fingerprinting", "transport_and_headers"}
+                and normalized_target_type in {"web_app", "api"}
+                and _looks_like_web_target(target)
+                and str(prepared_block.get("status", "")).strip().lower() == "skip"
+            ):
+                # Low-noise fingerprinting is a core web/API static gathering step.
+                # Do not let the planner skip it on normal reachable web targets
+                # unless the profile itself is incompatible.
+                prepared_block["status"] = "keep"
+                prepared_block["tools"] = list(original_block.get("tools", []))
+                prepared_block["selection_rationale"] = (
+                    str(prepared_block.get("selection_rationale", "")).strip()
+                    or "Fingerprinting preserved as a required low-noise web/API profiling block."
+                )
+                skipped = prepared_block.get("skipped_tools", [])
+                if isinstance(skipped, list):
+                    prepared_block["skipped_tools"] = [
+                        item for item in skipped if str(item).strip().lower() not in {"run_custom", "http_probe"}
+                    ]
+            prepared_blocks.append(prepared_block)
         return prepared_blocks
 
     async def _execute_block(
         self,
         *,
+        project_id: str,
+        scan_id: str,
+        project_cache_dir: str,
         prepared_block: dict[str, Any],
         memory: dict[str, Any],
         target: str,
@@ -364,6 +762,7 @@ class InformationGatheringNode:
         tool_arg_builder: Callable[[str, str, str, str, dict[str, Any]], tuple[dict[str, Any] | None, str | None]],
     ) -> list[dict[str, Any]]:
         result_rows: list[dict[str, Any]] = []
+        target_placeholders = _build_target_placeholders(target)
         if str(prepared_block.get("status", "")).strip().lower() == "skip":
             result_rows.append({
                 "tool": "__block__",
@@ -380,32 +779,49 @@ class InformationGatheringNode:
             if isinstance(entry, dict):
                 tool_name = str(entry.get("name") or entry.get("tool", "")).strip()
                 if tool_name == "run_custom":
-                    # If it's the new style from the profile, 'args' contains the full command as a list
                     args_list = entry.get("args", [])
-                    if not isinstance(args_list, list):
-                        args_list = []
+                    resolved_args = [
+                        str(_resolve_profile_value(item, target_placeholders)).strip()
+                        for item in args_list
+                    ] if isinstance(args_list, list) else []
+                    resolved_args = [item for item in resolved_args if item]
 
-                    if "command" in entry:
-                        # Old style: command + args
-                        command = str(entry.get("command", "")).strip()
-                        final_args = args_list
-                    else:
-                        # New style: args[0] is command, rest are args
-                        if args_list:
-                            command = args_list[0]
-                            final_args = args_list[1:]
-                        else:
-                            command = ""
-                            final_args = []
+                    command = str(
+                        _resolve_profile_value(entry.get("command", ""), target_placeholders)
+                    ).strip()
+                    final_args = resolved_args
+                    if not command and resolved_args:
+                        command = resolved_args[0]
+                        final_args = resolved_args[1:]
+                    final_args = _normalize_run_custom_args(command, final_args, target_placeholders)
 
+                    default_reason = (
+                        f"Profile-defined information gathering step for {command or 'custom command'} "
+                        f"against {target_placeholders.get('trgt') or target}."
+                    )
                     kwargs = {
                         "command": command,
                         "args": final_args,
-                        "reason": str(entry.get("reason", "")).strip(),
+                        "reason": str(entry.get("reason", "")).strip() or default_reason,
                     }
+                    if "timeout" in entry:
+                        kwargs["timeout"] = entry.get("timeout")
+                    if isinstance(entry.get("env"), dict):
+                        kwargs["env"] = entry.get("env")
+                    if str(entry.get("cwd", "")).strip():
+                        kwargs["cwd"] = str(entry.get("cwd", "")).strip()
                     skip_reason = None if kwargs["command"] else "skipped: run_custom command was empty"
                 else:
-                    kwargs, skip_reason = tool_arg_builder(tool_name, target, target_type, info, memory)
+                    tool = tool_map.get(tool_name)
+                    explicit_kwargs = _build_profile_kwargs_from_args(
+                        entry.get("args"),
+                        tool=tool,
+                        placeholders=target_placeholders,
+                    )
+                    if explicit_kwargs:
+                        kwargs, skip_reason = explicit_kwargs, None
+                    else:
+                        kwargs, skip_reason = tool_arg_builder(tool_name, target, target_type, info, memory)
             else:
                 tool_name = str(entry).strip()
                 kwargs, skip_reason = tool_arg_builder(tool_name, target, target_type, info, memory)
@@ -428,14 +844,19 @@ class InformationGatheringNode:
                 })
                 continue
             try:
-                raw_result = await tool.execute(**kwargs)
-                summary = str(raw_result or "").strip()
-                if len(summary) > 600:
-                    summary = summary[:597].rstrip() + "..."
+                with _information_gathering_tool_context(
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    project_cache_dir=project_cache_dir,
+                    target=target,
+                    tool_name=tool_name,
+                ):
+                    raw_result = await tool.execute(**kwargs)
+                summary = _summarize_tool_result(tool_name, raw_result)
                 structured = _structured_snapshot(tool_name, raw_result)
                 result_rows.append({
                     "tool": tool_name,
-                    "status": "completed",
+                    "status": _tool_execution_status(raw_result),
                     "summary": summary,
                     "args": kwargs,
                     "command": self._format_tool_execution_command(tool_name, kwargs),
@@ -613,6 +1034,9 @@ class InformationGatheringNode:
                 )
 
             result_rows = await self._execute_block(
+                project_id=project_id,
+                scan_id=scan_id,
+                project_cache_dir=project_cache_dir,
                 prepared_block=prepared_block,
                 memory=memory,
                 target=target,

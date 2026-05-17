@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from server.agents.executer.base import _structured_result_excerpt
 from server.agents.executer.run_custom_guard import (
     detect_recon_role_violation,
     detect_scope_violation,
@@ -107,3 +108,20 @@ def test_tool_audit_log_persists_exact_command(tmp_path: Path) -> None:
     assert json.loads(str(row["args"])) == ["-sV", "example.com"]
     assert str(row["risk_level"]) == "high"
     assert json.loads(str(row["artifact_paths"])) == ["/sandbox/output.xml"]
+
+
+def test_executer_round_excerpt_prefers_generic_observations() -> None:
+    excerpt = _structured_result_excerpt(
+        json.dumps(
+            {
+                "command": "nmap",
+                "observations": [
+                    "Open port 80/tcp on target",
+                    "Service banner: Apache/2.4.7",
+                ],
+            }
+        )
+    )
+
+    assert "Open port 80/tcp on target" in excerpt
+    assert "Service banner: Apache/2.4.7" in excerpt

@@ -19,39 +19,19 @@ WEB_ALIAS_BACKED_TOOL_NAMES: tuple[str, ...] = (
 )
 
 WEB_SMART_PYTHON_MODULES: tuple[str, ...] = (
-    "web.burp_suite",
-    "web.cdn_origin_detect",
     "web.cors_misconfig_check",
-    "web.http_header_analysis",
     "web.js_source_code_analyzer",
-    "web.param_discovery",
     "web.passive_web_recon",
     "web.session_token_analysis",
-    "web.ssl_tls_analysis",
-    "web.tech_detection",
-    "web.waf_detection",
-    "web.web_crawler",
-    "web.web_proxy_capture",
     "web.websocket_recon",
-    "web.zap_daemon_scan",
 )
 
 WEB_SMART_PYTHON_TOOL_NAMES: tuple[str, ...] = (
-    "burp_suite",
-    "cdn_origin_detect",
     "cors_misconfig_check",
-    "detect_tech",
-    "http_capture",
-    "http_header_analysis",
     "js_source_code_analyzer",
-    "param_discovery",
     "passive_web_recon",
     "session_token_analysis",
-    "ssl_tls_analysis",
-    "waf_detection",
-    "web_crawler",
     "websocket_recon",
-    "zap_daemon_scan",
 )
 
 WEB_RECON_RUNTIME_POLICY: dict[str, object] = {
@@ -74,4 +54,3 @@ def load_web_recon_runtime_policy() -> dict[str, object]:
         "alias_backed_wrappers": list(WEB_ALIAS_BACKED_TOOL_NAMES),
         "notes": list(WEB_RECON_RUNTIME_POLICY["notes"]),
     }
-

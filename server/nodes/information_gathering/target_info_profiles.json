@@ -7,14 +7,22 @@
       "goal": "Collect passive hostname, DNS, and archive context before active checks.",
       "tools": [
         {
-          "name": "passive_web_recon"
-        },
-        {
-          "name": "dns_recon"
+          "name": "passive_web_recon",
+          "args": [
+            "target",
+            "trgt",
+            "timeout",
+            40,
+            "threads",
+            "4",
+            "--max-urls",
+            150,
+            "json-only"
+          ]
         },
         {
           "name": "run_custom",
-          "args": ["assetfinder", "--subs-only", "target"]
+          "args": ["subfinder", "-d", "trgt", "-all", "-recursive", "-t", "100"]
         }
       ]
     },
@@ -25,24 +33,22 @@
       "goal": "Identify live web behavior, headers, and technology fingerprints with low-noise wrappers.",
       "tools": [
         {
-          "name": "http_probe"
+          "name": "run_custom",
+          "args": ["wappalyzer", "-i", "trgt", "-t", "4", "--scan-type", "full"]
         },
         {
-          "name": "detect_tech"
+          "name": "run_custom",
+          "args": ["wafw00f", "-a", "full_trgt"]
         },
         {
-          "name": "http_header_analysis"
-        }
-      ]
-    },
-    {
-      "id": "known_vuln_fast_lane",
-      "block_name": "Known Vulnerability Fast Lane",
-      "interaction": "active_safe",
-      "goal": "Turn corroborated fingerprints into selective vulnerability intelligence.",
-      "tools": [
-        {
-          "name": "known_vuln_lookup"
+          "name": "run_custom",
+          "args": [
+            "curl",
+            "-s",
+            "-I",
+            "-L",
+            "full_trgt"
+          ]
         }
       ]
     },
@@ -53,14 +59,24 @@
       "goal": "Map reachable routes and passive URL clues without jumping into aggressive fuzzing.",
       "tools": [
         {
-          "name": "web_crawler"
-        },
-        {
-          "name": "api_endpoint_discovery"
+          "name": "run_custom",
+          "args": ["katana", "-u", "full_trgt", "-silent"]
         },
         {
           "name": "run_custom",
-          "args": ["gau", "target"]
+          "args": [
+            "gospider",
+            "-s",
+            "full_trgt",
+            "-d",
+            2,
+            "-c",
+            10
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": ["gau", "trgt"]
         }
       ]
     },
@@ -71,10 +87,12 @@
       "goal": "Check for trust-boundary and session-handling exposure using safe wrappers.",
       "tools": [
         {
-          "name": "cors_misconfig_check"
+          "name": "cors_misconfig_check",
+          "args": ["target", "full_trgt"]
         },
         {
-          "name": "session_token_analysis"
+          "name": "session_token_analysis",
+          "args": ["target", "full_trgt"]
         }
       ]
     }
@@ -87,10 +105,22 @@
       "goal": "Collect passive host, DNS, and API-oriented public context.",
       "tools": [
         {
-          "name": "api_passive_enum"
+          "name": "api_passive_enum",
+          "args": ["target", "full_trgt"]
         },
         {
-          "name": "passive_web_recon"
+          "name": "passive_web_recon",
+          "args": [
+            "target",
+            "trgt",
+            "timeout",
+            40,
+            "threads",
+            "4",
+            "--max-urls",
+            150,
+            "json-only"
+          ]
         }
       ]
     },
@@ -101,10 +131,22 @@
       "goal": "Fingerprint API reachability, protocol behavior, and exposed headers.",
       "tools": [
         {
-          "name": "http_probe"
+          "name": "run_custom",
+          "args": ["wappalyzer", "-i", "trgt", "-t", "4", "--scan-type", "full"]
         },
         {
-          "name": "http_header_analysis"
+          "name": "run_custom",
+          "args": ["wafw00f", "-a", "full_trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "curl",
+            "-s",
+            "-I",
+            "-L",
+            "full_trgt"
+          ]
         }
       ]
     },
@@ -115,21 +157,24 @@
       "goal": "Enumerate API routes and adjacent docs/endpoints before deeper attack tooling.",
       "tools": [
         {
-          "name": "api_endpoint_discovery"
+          "name": "run_custom",
+          "args": ["katana", "-u", "full_trgt", "-silent"]
         },
         {
-          "name": "web_crawler"
-        }
-      ]
-    },
-    {
-      "id": "known_vuln_fast_lane",
-      "block_name": "Known Vulnerability Fast Lane",
-      "interaction": "active_safe",
-      "goal": "Use corroborated API/product fingerprints to pull selective known-vulnerability context.",
-      "tools": [
+          "name": "run_custom",
+          "args": [
+            "gospider",
+            "-s",
+            "full_trgt",
+            "-d",
+            2,
+            "-c",
+            10
+          ]
+        },
         {
-          "name": "known_vuln_lookup"
+          "name": "run_custom",
+          "args": ["gau", "trgt"]
         }
       ]
     },
@@ -140,10 +185,707 @@
       "goal": "Check cross-origin policy and session token behavior for API targets.",
       "tools": [
         {
-          "name": "cors_misconfig_check"
+          "name": "cors_misconfig_check",
+          "args": ["target", "full_trgt"]
         },
         {
-          "name": "session_token_analysis"
+          "name": "session_token_analysis",
+          "args": ["target", "full_trgt"]
+        }
+      ]
+    }
+  ],
+  "infra": [
+    {
+      "id": "passive_context",
+      "block_name": "Passive Context",
+      "interaction": "passive",
+      "goal": "Collect passive domain, DNS, ownership, and certificate context before active checks.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": ["whois", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "A", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "AAAA", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "MX", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "NS", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "TXT", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["tlsx", "-u", "trgt", "-json", "-silent"]
+        }
+      ]
+    },
+    {
+      "id": "dns_surface",
+      "block_name": "DNS Surface",
+      "interaction": "active_safe",
+      "goal": "Collect DNS records, CDN hints, mail records, and cloud indicators with low-noise DNS queries.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "dnsx",
+            "-d",
+            "trgt",
+            "-a",
+            "-aaaa",
+            "-cname",
+            "-mx",
+            "-ns",
+            "-txt",
+            "-resp",
+            "-silent",
+            "-json"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "subfinder",
+            "-d",
+            "trgt",
+            "-all",
+            "-recursive",
+            "-silent"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "path_and_routing",
+      "block_name": "Path And Routing",
+      "interaction": "active_safe",
+      "goal": "Map basic network path and routing behavior with limited packet count.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "mtr",
+            "--report",
+            "--report-wide",
+            "--json",
+            "--show-ips",
+            "--tcp",
+            "-c",
+            "10",
+            "-m",
+            "30",
+            "trgt"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "traceroute",
+            "-T",
+            "-m",
+            "30",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "service_inventory",
+      "block_name": "Service Inventory",
+      "interaction": "active_safe",
+      "goal": "Identify common exposed services using conservative timing and limited ports.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "nmap",
+            "-sS",
+            "-sV",
+            "-Pn",
+            "-n",
+            "-T3",
+            "--max-retries",
+            "2",
+            "--version-intensity",
+            "2",
+            "-p",
+            "21,22,25,53,80,110,143,443,465,587,993,995,1433,1521,2049,2375,2376,3306,3389,5432,5900,5985,5986,6379,8080,8443,9200,9300,11211,27017",
+            "--reason",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "http_service_fingerprint",
+      "block_name": "HTTP Service Fingerprint",
+      "interaction": "active_safe",
+      "goal": "Fingerprint HTTP services, CDN, status code, title, redirects, and detected technologies.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "httpx",
+            "-u",
+            "trgt",
+            "-silent",
+            "-json",
+            "-ip",
+            "-cdn",
+            "-td",
+            "-sc",
+            "-title",
+            "-cl",
+            "-rt",
+            "-follow-redirects",
+            "-timeout",
+            "15"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "curl",
+            "-k",
+            "-I",
+            "-L",
+            "--max-time",
+            "15",
+            "full_trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "safe_vuln_context",
+      "block_name": "Safe Vulnerability Context",
+      "interaction": "active_safe",
+      "goal": "Run low-rate known exposure and misconfiguration checks without exploit-heavy templates.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "nuclei",
+            "-u",
+            "full_trgt",
+            "-silent",
+            "-json",
+            "-severity",
+            "low,medium,high,critical",
+            "-tags",
+            "cve,exposure,misconfig,panel",
+            "-exclude-tags",
+            "bruteforce,rce,lpe,dos,intrusive",
+            "-rate-limit",
+            "10",
+            "-retries",
+            "1",
+            "-timeout",
+            "10"
+          ]
+        }
+      ]
+    }
+  ],
+  "network": [
+    {
+      "id": "surface_discovery",
+      "block_name": "Surface Discovery",
+      "interaction": "passive_active_safe",
+      "goal": "Collect DNS, passive subdomain, and route signals before service checks.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "amass",
+            "enum",
+            "-passive",
+            "-d",
+            "trgt",
+            "-timeout",
+            "15"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "subfinder",
+            "-d",
+            "trgt",
+            "-all",
+            "-recursive",
+            "-silent"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "dnsx",
+            "-d",
+            "trgt",
+            "-a",
+            "-aaaa",
+            "-cname",
+            "-mx",
+            "-ns",
+            "-txt",
+            "-resp",
+            "-silent",
+            "-json"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "mtr",
+            "--report",
+            "--report-wide",
+            "--json",
+            "--show-ips",
+            "--tcp",
+            "-c",
+            "10",
+            "-m",
+            "30",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tcp_service_inventory",
+      "block_name": "TCP Service Inventory",
+      "interaction": "active_safe",
+      "goal": "Check common exposed TCP services with conservative scan settings.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "nmap",
+            "-sS",
+            "-sV",
+            "-Pn",
+            "-n",
+            "-T3",
+            "--max-retries",
+            "2",
+            "--version-intensity",
+            "2",
+            "-p",
+            "21,22,23,25,53,80,110,135,139,143,389,443,445,465,587,636,993,995,1433,1521,2049,3306,3389,5432,5900,5985,5986,6379,8080,8443,9200,11211,27017",
+            "--script",
+            "banner,ssl-cert",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "udp_light_check",
+      "block_name": "UDP Light Check",
+      "interaction": "active_safe",
+      "goal": "Check a very small set of common UDP services to avoid noisy scanning.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "nmap",
+            "-sU",
+            "-Pn",
+            "-n",
+            "-T2",
+            "--max-retries",
+            "1",
+            "-p",
+            "53,123,161,500,4500",
+            "--reason",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tls_and_web_network",
+      "block_name": "TLS And Web Network",
+      "interaction": "active_safe",
+      "goal": "Collect web and TLS indicators for exposed network services.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "tlsx",
+            "-u",
+            "trgt",
+            "-json",
+            "-silent"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "httpx",
+            "-u",
+            "trgt",
+            "-silent",
+            "-json",
+            "-ip",
+            "-cdn",
+            "-td",
+            "-sc",
+            "-title",
+            "-timeout",
+            "15"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "network_exposure_context",
+      "block_name": "Network Exposure Context",
+      "interaction": "active_safe",
+      "goal": "Run low-rate exposure checks only, avoiding brute force and intrusive templates.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "nuclei",
+            "-u",
+            "full_trgt",
+            "-silent",
+            "-json",
+            "-severity",
+            "low,medium,high,critical",
+            "-tags",
+            "network,exposure,misconfig",
+            "-exclude-tags",
+            "bruteforce,rce,lpe,dos,intrusive",
+            "-rate-limit",
+            "10",
+            "-retries",
+            "1",
+            "-timeout",
+            "10"
+          ]
+        }
+      ]
+    }
+  ],
+  "linux_server": [
+    {
+      "id": "host_exposure",
+      "block_name": "Host Exposure",
+      "interaction": "active_safe",
+      "goal": "Identify common Linux-hosted services and management surfaces.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "nmap",
+            "-sS",
+            "-sV",
+            "-Pn",
+            "-n",
+            "-T3",
+            "--max-retries",
+            "2",
+            "--version-intensity",
+            "2",
+            "-p",
+            "22,80,443,873,2049,2375,2376,3306,5432,5900,6379,8080,8443,9090,9100,9200,27017",
+            "--reason",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ssh_fingerprint",
+      "block_name": "SSH Fingerprint",
+      "interaction": "active_safe",
+      "goal": "Fingerprint SSH configuration without authentication attempts.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "nmap",
+            "-sV",
+            "-Pn",
+            "-n",
+            "-T3",
+            "--script",
+            "ssh-hostkey,ssh2-enum-algos",
+            "-p",
+            "22",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "database_exposure",
+      "block_name": "Database Exposure",
+      "interaction": "active_safe",
+      "goal": "Fingerprint exposed databases without brute force or login attempts.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "nmap",
+            "-sV",
+            "-Pn",
+            "-n",
+            "-T3",
+            "--max-retries",
+            "2",
+            "-p",
+            "3306,5432,6379,27017,9200,5984,11211",
+            "--script",
+            "mysql-info,redis-info,mongodb-info",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "web_admin_surface",
+      "block_name": "Web Admin Surface",
+      "interaction": "active_safe",
+      "goal": "Detect exposed Linux-hosted web consoles and admin panels without login attempts.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "httpx",
+            "-u",
+            "trgt",
+            "-silent",
+            "-json",
+            "-sc",
+            "-title",
+            "-td",
+            "-favicon",
+            "-ip",
+            "-cdn",
+            "-timeout",
+            "15"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "nuclei",
+            "-u",
+            "full_trgt",
+            "-silent",
+            "-json",
+            "-severity",
+            "low,medium,high,critical",
+            "-tags",
+            "panel,exposure,misconfig",
+            "-exclude-tags",
+            "default-login,bruteforce,rce,lpe,dos,intrusive",
+            "-rate-limit",
+            "10",
+            "-retries",
+            "1",
+            "-timeout",
+            "10"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "linux_safe_vuln_context",
+      "block_name": "Linux Safe Vulnerability Context",
+      "interaction": "active_safe",
+      "goal": "Check Linux-related exposure and CVE context without exploit-heavy templates.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "nuclei",
+            "-u",
+            "full_trgt",
+            "-silent",
+            "-json",
+            "-severity",
+            "low,medium,high,critical",
+            "-tags",
+            "linux,cve,exposure,misconfig,ssh",
+            "-exclude-tags",
+            "bruteforce,rce,lpe,dos,intrusive",
+            "-rate-limit",
+            "10",
+            "-retries",
+            "1",
+            "-timeout",
+            "10"
+          ]
+        }
+      ]
+    }
+  ],
+  "iot": [
+    {
+      "id": "passive_identity",
+      "block_name": "Passive Identity",
+      "interaction": "passive",
+      "goal": "Collect basic identity and DNS clues before IoT protocol checks.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "A", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "CNAME", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["whois", "trgt"]
+        }
+      ]
+    },
+    {
+      "id": "protocol_discovery",
+      "block_name": "Protocol Discovery",
+      "interaction": "active_safe",
+      "goal": "Check common IoT and embedded protocols with limited ports and conservative timing.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "nmap",
+            "-sS",
+            "-sV",
+            "-Pn",
+            "-n",
+            "-T2",
+            "--max-retries",
+            "1",
+            "--version-intensity",
+            "2",
+            "-p",
+            "23,80,81,443,554,1883,5000,5683,7547,8000,8080,8443,8883,9000,9100,10001",
+            "--reason",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "iot_udp_light",
+      "block_name": "IoT UDP Light",
+      "interaction": "active_safe",
+      "goal": "Check a minimal UDP IoT protocol set only.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "sudo",
+            "nmap",
+            "-sU",
+            "-Pn",
+            "-n",
+            "-T2",
+            "--max-retries",
+            "1",
+            "-p",
+            "161,1900,5353,5683",
+            "--reason",
+            "-oX",
+            "-",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "iot_web_console",
+      "block_name": "IoT Web Console",
+      "interaction": "active_safe",
+      "goal": "Fingerprint exposed IoT web consoles without login attempts.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "httpx",
+            "-u",
+            "trgt",
+            "-silent",
+            "-json",
+            "-sc",
+            "-title",
+            "-td",
+            "-favicon",
+            "-timeout",
+            "15"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "iot_exposure_context",
+      "block_name": "IoT Exposure Context",
+      "interaction": "active_safe",
+      "goal": "Run low-rate IoT exposure checks without brute force or intrusive templates.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "nuclei",
+            "-u",
+            "full_trgt",
+            "-silent",
+            "-json",
+            "-severity",
+            "low,medium,high,critical",
+            "-tags",
+            "iot,panel,exposure,misconfig",
+            "-exclude-tags",
+            "default-login,bruteforce,rce,dos,intrusive",
+            "-rate-limit",
+            "5",
+            "-retries",
+            "1",
+            "-timeout",
+            "10"
+          ]
         }
       ]
     }
@@ -153,166 +895,185 @@
       "id": "artifact_profile",
       "block_name": "Artifact Profile",
       "interaction": "static",
-      "goal": "Analyze mobile artifacts using the built-in static-analysis wrapper.",
+      "goal": "Identify mobile artifact type, hash, package metadata, and static indicators without writing output files.",
       "tools": [
         {
-          "name": "mobile_static_analysis"
+          "name": "run_custom",
+          "args": ["file", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["sha256sum", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["apkid", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["aapt", "dump", "badging", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["aapt", "dump", "permissions", "trgt"]
         }
       ]
     },
     {
-      "id": "storage_review",
-      "block_name": "Storage Review",
+      "id": "archive_and_manifest_review",
+      "block_name": "Archive And Manifest Review",
       "interaction": "static",
-      "goal": "Check common mobile local-storage exposure patterns.",
+      "goal": "List mobile archive content and manifest indicators without extracting files.",
       "tools": [
         {
-          "name": "mobile_storage_check"
-        }
-      ]
-    }
-  ],
-  "infra": [
-    {
-      "id": "service_inventory",
-      "block_name": "Service Inventory",
-      "interaction": "active_safe",
-      "goal": "Map externally reachable infra paths and exposed database/service surfaces.",
-      "tools": [
-        {
-          "name": "route_topology"
+          "name": "run_custom",
+          "args": ["unzip", "-l", "trgt"]
         },
         {
-          "name": "db_enum_and_audit"
+          "name": "run_custom",
+          "args": ["aapt", "dump", "xmltree", "trgt", "AndroidManifest.xml"]
         }
       ]
     },
     {
-      "id": "known_vuln_context",
-      "block_name": "Known Vulnerability Context",
-      "interaction": "active_safe",
-      "goal": "Use discovered infra fingerprints to enrich known-vulnerability context.",
-      "tools": [
-        {
-          "name": "known_vuln_lookup"
-        }
-      ]
-    }
-  ],
-  "network": [
-    {
-      "id": "surface_discovery",
-      "block_name": "Surface Discovery",
-      "interaction": "active_safe",
-      "goal": "Collect network path and DNS surface signals before deeper service checks.",
-      "tools": [
-        {
-          "name": "dns_recon"
-        },
-        {
-          "name": "route_topology"
-        }
-      ]
-    },
-    {
-      "id": "service_inventory",
-      "block_name": "Service Inventory",
-      "interaction": "active_safe",
-      "goal": "Check common exposed services and database surfaces on the host.",
-      "tools": [
-        {
-          "name": "db_enum_and_audit"
-        },
-        {
-          "name": "known_vuln_lookup"
-        }
-      ]
-    }
-  ],
-  "iot": [
-    {
-      "id": "protocol_discovery",
-      "block_name": "Protocol Discovery",
-      "interaction": "active_safe",
-      "goal": "Check common IoT protocols with the dedicated protocol wrapper.",
-      "tools": [
-        {
-          "name": "iot_protocol_scan"
-        },
-        {
-          "name": "db_enum_and_audit"
-        }
-      ]
-    }
-  ],
-  "linux_server": [
-    {
-      "id": "network_exposure",
-      "block_name": "Network Exposure",
-      "interaction": "active_safe",
-      "goal": "Capture path, routing, and initial exposure details for the Linux host.",
-      "tools": [
-        {
-          "name": "route_topology"
-        }
-      ]
-    },
-    {
-      "id": "service_inventory",
-      "block_name": "Service Inventory",
-      "interaction": "active_safe",
-      "goal": "Check common service and database exposure on the Linux host.",
-      "tools": [
-        {
-          "name": "db_enum_and_audit"
-        }
-      ]
-    },
-    {
-      "id": "known_vuln_context",
-      "block_name": "Known Vulnerability Context",
-      "interaction": "active_safe",
-      "goal": "Use corroborated Linux-service fingerprints to enrich known-vulnerability context.",
-      "tools": [
-        {
-          "name": "known_vuln_lookup"
-        }
-      ]
-    }
-  ],
-  "desktop": [
-    {
-      "id": "binary_profile",
-      "block_name": "Binary Profile",
+      "id": "static_security_scan",
+      "block_name": "Static Security Scan",
       "interaction": "static",
-      "goal": "Run static binary analysis through the built-in desktop wrapper.",
+      "goal": "Run mobile static security checks without dynamic execution or file output.",
       "tools": [
         {
-          "name": "binary_analysis"
+          "name": "run_custom",
+          "args": ["mobsfscan", "--json", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["apkleaks", "-f", "trgt"]
+        }
+      ]
+    },
+    {
+      "id": "secret_and_endpoint_review",
+      "block_name": "Secret And Endpoint Review",
+      "interaction": "static",
+      "goal": "Search for hardcoded secrets, URLs, tokens, keys, and backend endpoints without writing output files.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "strings",
+            "trgt",
+            "|",
+            "grep",
+            "-Ei",
+            "https?://|password|secret|api_key|apikey|token|private_key|jdbc|connection_string|firebase|s3|aws|azure|gcp|bearer"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "trufflehog",
+            "filesystem",
+            "trgt",
+            "--json",
+            "--no-update"
+          ]
         }
       ]
     }
   ],
   "cloud": [
     {
-      "id": "storage_exposure",
-      "block_name": "Storage Exposure",
+      "id": "provider_hints",
+      "block_name": "Provider Hints",
       "interaction": "passive_active_safe",
-      "goal": "Enumerate public cloud storage exposure using the dedicated storage wrapper.",
+      "goal": "Collect cloud provider, CDN, DNS, and public endpoint hints.",
       "tools": [
         {
-          "name": "cloud_storage_enum"
+          "name": "run_custom",
+          "args": ["dig", "trgt", "CNAME", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["dig", "trgt", "TXT", "+short"]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "httpx",
+            "-u",
+            "trgt",
+            "-silent",
+            "-json",
+            "-cdn",
+            "-ip",
+            "-td",
+            "-sc",
+            "-title",
+            "-timeout",
+            "15"
+          ]
         }
       ]
     },
     {
-      "id": "posture_review",
-      "block_name": "Posture Review",
-      "interaction": "active_safe",
-      "goal": "Run cloud posture checks when the provider can be inferred from target context.",
+      "id": "storage_exposure",
+      "block_name": "Storage Exposure",
+      "interaction": "passive_active_safe",
+      "goal": "Check public cloud storage exposure safely without brute force.",
       "tools": [
         {
-          "name": "cloud_misconfig_scan"
+          "name": "run_custom",
+          "args": ["cloud_enum", "-k", "trgt", "-qs"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["s3scanner", "scan", "--bucket", "trgt", "--json"]
+        }
+      ]
+    },
+    {
+      "id": "cloud_exposure_context",
+      "block_name": "Cloud Exposure Context",
+      "interaction": "active_safe",
+      "goal": "Run low-rate cloud exposure and misconfiguration checks.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "nuclei",
+            "-u",
+            "full_trgt",
+            "-silent",
+            "-json",
+            "-severity",
+            "low,medium,high,critical",
+            "-tags",
+            "aws,gcp,azure,cloud,s3,storage,exposure,misconfig",
+            "-exclude-tags",
+            "bruteforce,rce,dos,intrusive",
+            "-rate-limit",
+            "10",
+            "-retries",
+            "1",
+            "-timeout",
+            "10"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "authenticated_posture_optional",
+      "block_name": "Authenticated Posture Optional",
+      "interaction": "active_safe",
+      "goal": "Run posture checks only when authorized read-only cloud credentials are provided.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": ["prowler", "aws", "--output-formats", "json", "--only-logs"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["checkov", "-d", "trgt", "-o", "json"]
         }
       ]
     }
@@ -322,54 +1083,224 @@
       "id": "image_profile",
       "block_name": "Image Profile",
       "interaction": "static",
-      "goal": "Build a quick image security profile with the container scan wrapper.",
+      "goal": "Build a container image profile and SBOM without writing output files.",
       "tools": [
         {
-          "name": "container_image_scan"
+          "name": "run_custom",
+          "args": ["sudo", "docker", "image", "inspect", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["syft", "trgt", "-o", "json"]
         }
       ]
     },
     {
-      "id": "layer_review",
-      "block_name": "Layer Review",
+      "id": "image_security_scan",
+      "block_name": "Image Security Scan",
       "interaction": "static",
-      "goal": "Inspect container layers for secrets and risky content.",
+      "goal": "Scan image dependencies, secrets, and misconfigurations statically without writing output files.",
       "tools": [
         {
-          "name": "container_layer_analysis"
+          "name": "run_custom",
+          "args": [
+            "trivy",
+            "image",
+            "--format",
+            "json",
+            "--severity",
+            "LOW,MEDIUM,HIGH,CRITICAL",
+            "--scanners",
+            "vuln,secret,misconfig",
+            "trgt"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": ["grype", "trgt", "-o", "json"]
+        }
+      ]
+    },
+    {
+      "id": "layer_and_secret_review",
+      "block_name": "Layer And Secret Review",
+      "interaction": "static",
+      "goal": "Inspect image layers and detect embedded secrets without writing output files.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": ["sudo", "dive", "trgt", "--ci"]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "trufflehog",
+            "docker",
+            "--image",
+            "trgt",
+            "--json",
+            "--no-update"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "container_config_review",
+      "block_name": "Container Config Review",
+      "interaction": "static",
+      "goal": "Review Dockerfile, Compose, Kubernetes, and container configuration when target is a directory.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": ["trivy", "config", "--format", "json", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["checkov", "-d", "trgt", "-o", "json"]
         }
       ]
     }
   ],
   "repository": [
     {
-      "id": "secret_and_history",
-      "block_name": "Secret And History",
+      "id": "repo_identity",
+      "block_name": "Repository Identity",
       "interaction": "static",
-      "goal": "Scan repository secrets and commit history with built-in repository tooling.",
+      "goal": "Collect repository metadata, branch context, and language composition.",
       "tools": [
         {
-          "name": "secret_scan"
+          "name": "run_custom",
+          "args": ["git", "-C", "trgt", "remote", "-v"]
         },
         {
-          "name": "git_history_audit"
+          "name": "run_custom",
+          "args": ["git", "-C", "trgt", "branch", "--show-current"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["git", "-C", "trgt", "log", "--oneline", "-n", "20"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["cloc", "trgt", "--json"]
         }
       ]
     },
     {
-      "id": "code_and_pipeline",
-      "block_name": "Code And Pipeline",
+      "id": "secret_and_history",
+      "block_name": "Secret And History",
       "interaction": "static",
-      "goal": "Run static analysis, dependency review, and pipeline checks with repository wrappers.",
+      "goal": "Scan repository secrets and recent commit history without writing output files.",
       "tools": [
         {
-          "name": "sast_scan"
+          "name": "run_custom",
+          "args": [
+            "trufflehog",
+            "git",
+            "file://trgt",
+            "--json",
+            "--no-update",
+            "--since-commit",
+            "HEAD~100"
+          ]
         },
         {
-          "name": "dependency_scan"
+          "name": "run_custom",
+          "args": [
+            "gitleaks",
+            "detect",
+            "--source",
+            "trgt",
+            "--report-format",
+            "json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "code_security_review",
+      "block_name": "Code Security Review",
+      "interaction": "static",
+      "goal": "Run SAST checks safely against local source code.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "semgrep",
+            "scan",
+            "--config",
+            "auto",
+            "--json",
+            "--quiet",
+            "trgt"
+          ]
         },
         {
-          "name": "ci_cd_pipeline_audit"
+          "name": "run_custom",
+          "args": [
+            "bandit",
+            "-r",
+            "trgt",
+            "-f",
+            "json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dependency_review",
+      "block_name": "Dependency Review",
+      "interaction": "static",
+      "goal": "Review dependencies and package vulnerabilities without writing output files.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": [
+            "trivy",
+            "fs",
+            "--format",
+            "json",
+            "--severity",
+            "LOW,MEDIUM,HIGH,CRITICAL",
+            "--scanners",
+            "vuln,secret,misconfig",
+            "trgt"
+          ]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "osv-scanner",
+            "--recursive",
+            "--format",
+            "json",
+            "trgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "iac_and_pipeline_review",
+      "block_name": "IaC And Pipeline Review",
+      "interaction": "static",
+      "goal": "Review infrastructure-as-code and CI/CD configuration risks without writing output files.",
+      "tools": [
+        {
+          "name": "run_custom",
+          "args": ["checkov", "-d", "trgt", "-o", "json"]
+        },
+        {
+          "name": "run_custom",
+          "args": ["trivy", "config", "--format", "json", "trgt"]
+        },
+        {
+          "name": "run_custom",
+          "args": [
+            "actionlint",
+            "-format",
+            "{{json .}}",
+            "trgt/.github/workflows/*.yml"
+          ]
         }
       ]
     }

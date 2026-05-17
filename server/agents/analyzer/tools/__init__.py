@@ -2,13 +2,21 @@
 
 from server.core.tool import Tool
 
-from server.agents.executer.exploit.tools.all.run_custom import (
+from server.agents.tools.run_custom import (
     RUN_CUSTOM_TOOL_DEFINITION,
     run_custom,
 )
-from server.agents.executer.exploit.tools.all.run_python import (
+from server.agents.tools.run_python import (
     RUN_PYTHON_TOOL_DEFINITION,
     run_python,
+)
+from server.agents.tools.search_web import (
+    SEARCH_WEB_TOOL_DEFINITION,
+    search_web,
+)
+from server.agents.tools.fetch_url_content import (
+    FETCH_URL_CONTENT_TOOL_DEFINITION,
+    fetch_url_content,
 )
 
 from .record_verification_result import record_verification_result
@@ -38,15 +46,33 @@ run_python_tool = Tool(
     parameters=RUN_PYTHON_TOOL_DEFINITION["parameters"],
 )
 
+search_web_tool = Tool(
+    name=SEARCH_WEB_TOOL_DEFINITION["name"],
+    description=SEARCH_WEB_TOOL_DEFINITION["description"],
+    fn=search_web,
+    parameters=SEARCH_WEB_TOOL_DEFINITION["parameters"],
+)
+
+fetch_url_content_tool = Tool(
+    name=FETCH_URL_CONTENT_TOOL_DEFINITION["name"],
+    description=FETCH_URL_CONTENT_TOOL_DEFINITION["description"],
+    fn=fetch_url_content,
+    parameters=FETCH_URL_CONTENT_TOOL_DEFINITION["parameters"],
+)
+
 VERIFY_ANALYZER_TOOLS: list[Tool] = [
     run_custom_tool,
     run_python_tool,
+    search_web_tool,
+    fetch_url_content_tool,
     record_verification_result,
 ]
 
 POC_ANALYZER_TOOLS: list[Tool] = [
     run_custom_tool,
     run_python_tool,
+    search_web_tool,
+    fetch_url_content_tool,
     capture_screenshot,
     annotate_screenshot,
     capture_before_after,
@@ -70,4 +96,6 @@ __all__ = [
     "record_verification_result",
     "run_custom_tool",
     "run_python_tool",
+    "search_web_tool",
+    "fetch_url_content_tool",
 ]

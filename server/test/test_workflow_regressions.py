@@ -1469,6 +1469,8 @@ def test_assistant_identifies_getaddrinfo_thread_failure_as_environment_issue() 
     assert "resolver failure" in str(payload.get("likely_cause", "")).lower()
 
 
+
+
 def test_assistant_structured_reply_preserves_llm_text_without_backend_repair() -> None:
     preserved = assistant_agent_module.AssistantAgent._normalize_reply_for_style(
         """**Summary**

@@ -10,13 +10,21 @@ from typing import Callable
 
 
 def get_sandbox_root() -> Path:
-    root = Path(__file__).resolve().parents[2] / "sandbox"
+    configured = str(os.getenv("PENTAFORGE_SANDBOX_ROOT", "")).strip()
+    root = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[2] / "sandbox"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def get_sandbox_home_dir() -> Path:
     path = get_sandbox_root() / "home"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_sandbox_share_dir() -> Path:
+    configured = str(os.getenv("PENTAFORGE_SANDBOX_SHARE_DIR", "")).strip()
+    path = Path(configured).expanduser() if configured else get_sandbox_root() / "share"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -139,8 +147,20 @@ def build_sandbox_preexec(
         # creation (e.g., DNS resolution in curl/dig) if the user has a desktop
         # environment (VSCode, browser, etc.) open that already exceeds the limit.
         # _apply_limit(resource.RLIMIT_NPROC, active_policy.max_processes)
-        
+
         _apply_limit(resource.RLIMIT_CORE, 0)
-        _apply_limit(resource.RLIMIT_AS, active_policy.max_memory_bytes)
+        # In the dedicated Docker sandbox service, the container boundary is the
+        # primary memory isolation. Applying RLIMIT_AS here has caused Go-based
+        # tools such as ffuf to fail thread creation (`pthread_create failed`)
+        # even at very low concurrency. Keep the tighter address-space limit for
+        # non-service/local fallback execution, but let the container enforce
+        # memory inside the sandbox service itself.
+        if str(os.getenv("PENTAFORGE_SANDBOX_SERVICE", "")).strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            _apply_limit(resource.RLIMIT_AS, active_policy.max_memory_bytes)
 
     return _preexec

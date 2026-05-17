@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -74,6 +75,7 @@ def _default_stats() -> dict[str, Any]:
         "update_status": "no_new_data",
         "rate_limited": False,
         "source_errors": [],
+        "sources_deferred": 0,
         "sources_selected": 0,
         "sources_verified": 0,
         "sources_updated": 0,
@@ -84,6 +86,42 @@ def _notify(callback: Any, method: str, message: str) -> None:
     handler = getattr(callback, method, None)
     if callable(handler):
         handler(message)
+
+
+def _supports_deferred_source_approval(callback: Any) -> bool:
+    return callable(getattr(callback, "request_tool_approval", None))
+
+
+async def _request_deferred_source_approval(
+    callback: Any,
+    *,
+    target_type: str,
+    source_name: str,
+    source_url: str,
+) -> bool:
+    handler = getattr(callback, "request_tool_approval", None)
+    if not callable(handler):
+        return False
+
+    response = handler(
+        role="intel",
+        tool_name=f"refresh RAG knowledge source {source_name}",
+        args={
+            "action": "refresh_knowledge_source",
+            "source_name": source_name,
+            "source_url": source_url,
+            "target_type": target_type,
+            "reason": (
+                "Routine Intel refresh marked this large source for manual approval. "
+                "Approve to pull it now, or skip to continue without refreshing it."
+            ),
+            "_require_manual_approval": True,
+        },
+        call_id=f"intel-rag-refresh:{source_name}",
+    )
+    if inspect.isawaitable(response):
+        response = await response
+    return bool(response)
 
 
 def _normalize_target_type(value: str) -> str:
@@ -439,9 +477,47 @@ async def refresh_rag(
     if verified_entries:
         orchestrator = KnowledgeOrchestrator()
         try:
-            for entry in verified_entries:
+            total_verified = len(verified_entries)
+            for idx, entry in enumerate(verified_entries, start=1):
                 source_name = str(entry.get("source_name", entry.get("name", ""))).strip()
                 builtin = get_source_by_name(source_name)
+                if (
+                    builtin is not None
+                    and not force_update
+                    and not bool(getattr(builtin, "intel_inline_refresh", True))
+                ):
+                    has_approval_handler = _supports_deferred_source_approval(callback)
+                    approved = (
+                        await _request_deferred_source_approval(
+                            callback,
+                            target_type=normalized_target,
+                            source_name=source_name,
+                            source_url=str(getattr(builtin, "url", "") or str(entry.get("url", ""))),
+                        )
+                        if has_approval_handler
+                        else False
+                    )
+                    if not approved:
+                        stats["sources_deferred"] += 1
+                        _notify(
+                            callback,
+                            "on_done",
+                            (
+                                f"Deferred source {source_name} during routine Intel refresh "
+                                + (
+                                    "(large source skipped by operator)."
+                                    if has_approval_handler
+                                    else "(large source; use force update to refresh it)."
+                                )
+                            ),
+                        )
+                        continue
+
+                _notify(
+                    callback,
+                    "on_step",
+                    f"Update: ingesting source {idx}/{total_verified}: {source_name}",
+                )
                 source_cfg: SourceConfig
                 if builtin is not None:
                     result = await orchestrator.ingest_source(source_name)
@@ -472,7 +548,13 @@ async def refresh_rag(
                 _notify(
                     callback,
                     "on_done",
-                    f"Updated source {source_name}: docs={result.documents_extracted}, chunks={result.chunks_created}",
+                    (
+                        f"Updated source {source_name}: "
+                        f"docs={result.documents_extracted}, "
+                        f"chunks={result.chunks_created}, "
+                        f"embedded={result.chunks_embedded}, "
+                        f"duration={result.duration_seconds:.1f}s"
+                    ),
                 )
         finally:
             await orchestrator.close()
@@ -495,6 +577,7 @@ async def refresh_rag(
         f"RAG refresh complete for {normalized_target}: "
         f"verified={stats['sources_verified']}/{stats['sources_selected']}, "
         f"sources_updated={stats['sources_updated']}, "
+        f"sources_deferred={stats['sources_deferred']}, "
         f"embedded={stats['total_embedded']}, "
         f"payload_store_added={payload_store_added}, "
         f"status={stats['update_status']}."

@@ -38,7 +38,7 @@ Important routing guidance:
 - For `Identity & Access Analysis`, if no cookies, tokens, sessions, or auth artifacts exist after focused review, conclude with that negative result instead of looping.
 
 Execution safety:
-- Respect the per-run tool cap for every round.
+- Respect the per-run tool cap for every round. You MUST NOT output more than 4 tool calls in a single round.
 - No file-output flags such as `-o`, `--output`, or `--output-file`.
 - Keep tool runs focused and fast.
 

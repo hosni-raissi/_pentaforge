@@ -1,29 +1,22 @@
-FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app \
-    PENTAFORGE_SANDBOX_SERVICE=1
+ARG SANDBOX_BASE_IMAGE=docker-tool-sandbox-base:latest
+FROM ${SANDBOX_BASE_IMAGE}
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    curl \
-    git \
-    libgomp1 \
-    nmap \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY server/requirements.txt /tmp/requirements.txt
-RUN python -m pip install --upgrade pip && \
-    pip install -r /tmp/requirements.txt
+RUN pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.3.1+cpu" && \
+    pip install --prefer-binary -r /tmp/requirements.txt
 
 COPY server /app/server
 
-RUN mkdir -p /app/server/sandbox /app/server/cache /app/server/logs
+RUN mkdir -p /app/server/sandbox /app/server/sandbox/share /app/server/cache /app/server/logs \
+    /usr/share/wordlists /usr/share/seclists /opt/wordlists && \
+    ln -sfn /app/server/sandbox/share/wordlists /usr/share/wordlists/pentaforge && \
+    ln -sfn /app/server/sandbox/share/seclists /usr/share/seclists/pentaforge && \
+    ln -sfn /app/server/sandbox/share/seclists /usr/share/wordlists/SecLists && \
+    ln -sfn /app/server/sandbox/share/wordlists /opt/wordlists/pentaforge && \
+    ln -sfn /app/server/sandbox/share/wordlists /app/wordlists && \
+    ln -sfn /app/server/sandbox/share/seclists /app/seclists
 
 EXPOSE 8010
 

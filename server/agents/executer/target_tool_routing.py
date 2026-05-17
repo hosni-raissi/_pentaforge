@@ -58,14 +58,13 @@ _WEB_SCOPE_RECON_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     tool_name: {"web_app", "api"}
     for tool_name in _RECON_TOOL_SCOPE_INDEX.get("web", [])
 }
-_WEB_SCOPE_RECON_TOOL_TARGET_TYPES["ssl_tls_analysis"] = {"web_app", "api", "network"}
 
 RECON_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     "api_endpoint_discovery": {"api", "web_app"},
+    "api_service_recon": {"api", "web_app"},
     "api_passive_enum": {"api", "web_app"},
     "api_response_analyzer": {"api", "web_app"},
     "arp_scan": {"network", "infra", "iot"},
-    "binary_analysis": {"desktop"},
     "ci_cd_pipeline_audit": {"repository"},
     "cloud_misconfig_scan": {"cloud"},
     "cloud_storage_enum": {"cloud"},
@@ -73,40 +72,23 @@ RECON_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     "container_layer_analysis": {"container"},
     "container_registry_enum": {"cloud", "container"},
     "container_runtime_audit": {"container"},
-    "db_enum_and_audit": {
-        "web_app",
-        "api",
-        "network",
-        "infra",
-        "linux_server",
-        "mobile",
-        "desktop",
-        "cloud",
-        "container",
-        "repository",
-        "iot",
-    },
     "dependency_scan": {"repository"},
     "dns_recon": {"network", "infra", "web_app"},
     "firmware_analysis": {"iot"},
     "git_history_audit": {"repository"},
-    "graphql_recon": {"api", "web_app"},
     "iac_security_scan": {"repository", "infra"},
     "iot_protocol_scan": {"iot", "network"},
     "mobile_dynamic_analysis": {"mobile"},
     "mobile_static_analysis": {"mobile"},
     "mobile_storage_check": {"mobile"},
     "known_vuln_lookup": {"web_app", "api", "linux_server", "infra", "network", "cloud"},
-    "oauth_oidc_check": {"api", "web_app"},
     "run_custom": {"shared"},
     "run_python": {"shared"},
     "sast_scan": {"repository"},
     "secret_scan": {"repository", "cloud"},
     "sensitive_files_scan": {"repository"},
-    "soap_wsdl_recon": {"api", "web_app"},
     "traffic_analyze": {"network", "infra"},
     "wireless_scan": {"network", "iot"},
-    "route_topology": {"network", "infra", "linux_server"},
     **_WEB_SCOPE_RECON_TOOL_TARGET_TYPES,
 }
 

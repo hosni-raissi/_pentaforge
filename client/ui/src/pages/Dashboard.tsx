@@ -73,6 +73,7 @@ import type {
   FindingEvidence,
   FindingEvidenceStatus,
   FindingProofQuality,
+  Project,
   ProjectStatus,
   RealtimeVulnFinding,
   DashboardSeverity,
@@ -262,6 +263,58 @@ interface PendingPasswordRequestView {
   callId: string;
 }
 
+type AnalyzerAgentReportRole = "information_gathering" | "recon" | "exploit";
+
+interface AnalyzerScenarioReportItem {
+  scenario_ran?: string;
+  agent?: string;
+  status?: string;
+  tools_ran?: string[];
+  tool_results?: Array<{
+    tool?: string;
+    command?: string;
+    status?: string;
+    raw_status?: string;
+    summary?: string;
+  }>;
+  findings_summary?: string[];
+  execution_summary?: string;
+}
+
+interface AnalyzerAgentReportEntry {
+  id: string;
+  scan_id?: string;
+  agent: AnalyzerAgentReportRole;
+  phase?: string;
+  cycle_number?: number;
+  scenario_index?: number;
+  sequence_label?: string;
+  scenario_task?: string;
+  execution_status?: string;
+  verdict?: string;
+  summary?: string;
+  objective?: string;
+  confirmed_facts?: string[];
+  security_signals?: string[];
+  unknowns?: string[];
+  why_it_matters?: string;
+  next_actions?: string[];
+  raw_tool_evidence?: string[];
+  markdown: string;
+  updated_at?: string;
+  scenario_report?: AnalyzerScenarioReportItem[];
+}
+
+interface AnalyzerReportViewerState {
+  open: boolean;
+  title: string;
+  description: string;
+  markdown: string;
+}
+
+const FINDINGS_HISTORY_KEY = "findings_history";
+const LEGACY_FINDINGS_HISTORY_KEY = "analyzer_agent_reports";
+
 type ApprovalMode = "custom" | "auto";
 
 const NOTIFICATION_PREF_KEY = "pentaforge_notifications_enabled";
@@ -317,6 +370,495 @@ const MISSION_PHASE_ORDER: Array<{
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function normalizeScenarioToolResults(
+  value: unknown,
+): Array<{
+  tool?: string;
+  command?: string;
+  status?: string;
+  raw_status?: string;
+  summary?: string;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => ({
+      tool: typeof item.tool === "string" ? item.tool : undefined,
+      command: typeof item.command === "string" ? item.command : undefined,
+      status: typeof item.status === "string" ? item.status : undefined,
+      raw_status: typeof item.raw_status === "string" ? item.raw_status : undefined,
+      summary: typeof item.summary === "string" ? item.summary : undefined,
+    }))
+    .filter((item) => Boolean(item.command || item.tool));
+}
+
+function getFindingsHistoryRoot(payload: unknown): Record<string, unknown> | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+  const nextRoot = isRecord(payload[FINDINGS_HISTORY_KEY])
+    ? payload[FINDINGS_HISTORY_KEY]
+    : null;
+  if (nextRoot) {
+    return nextRoot;
+  }
+  return isRecord(payload[LEGACY_FINDINGS_HISTORY_KEY])
+    ? payload[LEGACY_FINDINGS_HISTORY_KEY]
+    : null;
+}
+
+function normalizeAnalyzerAgentReportRole(
+  role: string,
+): AnalyzerAgentReportRole | null {
+  const normalized = role
+    .replace(/\[worker\s*\d+\]\s*/gi, "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalized.includes("information_gathering")
+    || normalized.includes("information gathering")
+    || normalized.includes("target_info_gathering")
+  ) {
+    return "information_gathering";
+  }
+  if (normalized.includes("recon")) {
+    return "recon";
+  }
+  if (normalized.includes("exploit")) {
+    return "exploit";
+  }
+  return null;
+}
+
+function getLatestAnalyzerAgentReportEntry(
+  payload: unknown,
+  role: AnalyzerAgentReportRole,
+): AnalyzerAgentReportEntry | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+  const reportsRoot = getFindingsHistoryRoot(payload);
+  if (!reportsRoot) {
+    return null;
+  }
+  const bucket = isRecord(reportsRoot[role]) ? reportsRoot[role] : null;
+  if (!bucket || !Array.isArray(bucket.entries)) {
+    return null;
+  }
+
+  for (const entry of bucket.entries) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const markdown = typeof entry.markdown === "string" ? entry.markdown : "";
+    const agent = normalizeAnalyzerAgentReportRole(
+      typeof entry.agent === "string" ? entry.agent : role,
+    );
+    if (!markdown.trim() || agent !== role) {
+      continue;
+    }
+    return {
+      id: typeof entry.id === "string" ? entry.id : `${role}-${Date.now()}`,
+      scan_id: typeof entry.scan_id === "string" ? entry.scan_id : undefined,
+      agent,
+      phase: typeof entry.phase === "string" ? entry.phase : undefined,
+      cycle_number: typeof entry.cycle_number === "number" ? entry.cycle_number : undefined,
+      scenario_index: typeof entry.scenario_index === "number" ? entry.scenario_index : undefined,
+      sequence_label: typeof entry.sequence_label === "string" ? entry.sequence_label : undefined,
+      scenario_task:
+        typeof entry.scenario_task === "string" ? entry.scenario_task : undefined,
+      execution_status:
+        typeof entry.execution_status === "string" ? entry.execution_status : undefined,
+      verdict: typeof entry.verdict === "string" ? entry.verdict : undefined,
+      summary: typeof entry.summary === "string" ? entry.summary : undefined,
+      objective: typeof entry.objective === "string" ? entry.objective : undefined,
+      confirmed_facts: Array.isArray(entry.confirmed_facts)
+        ? uniqueNormalizedStrings(entry.confirmed_facts)
+        : undefined,
+      security_signals: Array.isArray(entry.security_signals)
+        ? uniqueNormalizedStrings(entry.security_signals)
+        : undefined,
+      unknowns: Array.isArray(entry.unknowns)
+        ? uniqueNormalizedStrings(entry.unknowns)
+        : undefined,
+      why_it_matters: typeof entry.why_it_matters === "string" ? entry.why_it_matters : undefined,
+      next_actions: Array.isArray(entry.next_actions)
+        ? uniqueNormalizedStrings(entry.next_actions)
+        : undefined,
+      raw_tool_evidence: Array.isArray(entry.raw_tool_evidence)
+        ? uniqueNormalizedStrings(entry.raw_tool_evidence)
+        : undefined,
+      markdown,
+      updated_at: typeof entry.updated_at === "string" ? entry.updated_at : undefined,
+      scenario_report: Array.isArray(entry.scenario_report)
+        ? entry.scenario_report
+            .filter((item): item is Record<string, unknown> => isRecord(item))
+            .map((item) => ({
+              scenario_ran: typeof item.scenario_ran === "string" ? item.scenario_ran : undefined,
+              agent: typeof item.agent === "string" ? item.agent : undefined,
+              status: typeof item.status === "string" ? item.status : undefined,
+              tools_ran: Array.isArray(item.tools_ran)
+                ? uniqueNormalizedStrings(item.tools_ran)
+                : undefined,
+              tool_results: normalizeScenarioToolResults(item.tool_results),
+              findings_summary: Array.isArray(item.findings_summary)
+                ? uniqueNormalizedStrings(item.findings_summary)
+                : undefined,
+              execution_summary: typeof item.execution_summary === "string" ? item.execution_summary : undefined,
+            }))
+        : undefined,
+    };
+  }
+
+  return null;
+}
+
+function getAnalyzerAgentReportEntries(
+  payload: unknown,
+  scanId?: string,
+): AnalyzerAgentReportEntry[] {
+  if (!isRecord(payload)) {
+    return [];
+  }
+  const reportsRoot = getFindingsHistoryRoot(payload);
+  if (!reportsRoot) {
+    return [];
+  }
+
+  const entries: AnalyzerAgentReportEntry[] = [];
+  for (const role of ["information_gathering", "recon", "exploit"] as const) {
+    const bucket = isRecord(reportsRoot[role]) ? reportsRoot[role] : null;
+    if (!bucket || !Array.isArray(bucket.entries)) {
+      continue;
+    }
+    for (const rawEntry of bucket.entries) {
+      if (!isRecord(rawEntry)) {
+        continue;
+      }
+      const entry = getLatestAnalyzerAgentReportEntry(
+        { [FINDINGS_HISTORY_KEY]: { [role]: { entries: [rawEntry] } } },
+        role,
+      );
+      if (!entry) {
+        continue;
+      }
+      if (scanId && entry.scan_id && entry.scan_id !== scanId) {
+        continue;
+      }
+      entries.push(entry);
+    }
+  }
+
+  return entries.sort((left, right) => {
+    const leftCycle = typeof left.cycle_number === "number" ? left.cycle_number : 9999;
+    const rightCycle = typeof right.cycle_number === "number" ? right.cycle_number : 9999;
+    if (leftCycle !== rightCycle) {
+      return leftCycle - rightCycle;
+    }
+    const leftScenario = typeof left.scenario_index === "number" ? left.scenario_index : 9999;
+    const rightScenario = typeof right.scenario_index === "number" ? right.scenario_index : 9999;
+    if (leftScenario !== rightScenario) {
+      return leftScenario - rightScenario;
+    }
+    return new Date(left.updated_at || 0).getTime() - new Date(right.updated_at || 0).getTime();
+  });
+}
+
+function getFallbackInformationGatheringEntries(
+  project: Project | null | undefined,
+  scanId?: string,
+): AnalyzerAgentReportEntry[] {
+  if (!project || !isRecord(project.lastScan)) {
+    return [];
+  }
+  const lastScan = project.lastScan;
+  const currentScanId = typeof lastScan.scanId === "string" ? lastScan.scanId : "";
+  if (scanId && currentScanId && currentScanId !== scanId) {
+    return [];
+  }
+  const result = isRecord(lastScan.result) ? lastScan.result : null;
+  const gathering = result && isRecord(result.targetInfoGathering)
+    ? result.targetInfoGathering
+    : null;
+  const blocks = gathering && Array.isArray(gathering.blocks) ? gathering.blocks : [];
+  const entries: AnalyzerAgentReportEntry[] = [];
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (!isRecord(block)) {
+      continue;
+    }
+    const scenarioIndex = typeof block.index === "number" ? block.index : index + 1;
+    const total = typeof block.total === "number" ? block.total : blocks.length;
+    const scenarioTask = normalizeText(block.goal) || normalizeText(block.name) || `Gathering block ${scenarioIndex}`;
+    const objective = normalizeText(block.objective) || scenarioTask;
+    const results = Array.isArray(block.results) ? block.results.filter((item): item is Record<string, unknown> => isRecord(item)) : [];
+    const confirmedFacts = Array.isArray(block.confirmed_facts)
+      ? uniqueNormalizedStrings(block.confirmed_facts)
+      : [];
+    const securitySignals = Array.isArray(block.security_signals)
+      ? uniqueNormalizedStrings(block.security_signals)
+      : [];
+    const unknowns = Array.isArray(block.unknowns)
+      ? uniqueNormalizedStrings(block.unknowns)
+      : [];
+    const toolsRan = results
+      .map((item) => normalizeText(item.command) || normalizeText(item.tool))
+      .filter(Boolean);
+    const findingsSummary = results
+      .map((item) => {
+        const toolName = normalizeText(item.tool) || "tool";
+        const summary = normalizeText(item.summary);
+        return summary ? `${toolName}: ${summary}` : "";
+      })
+      .filter(Boolean);
+    const executionSummary = `Completed information-gathering block ${scenarioIndex}/${total} with ${results.length} tool result(s). Status: ${normalizeText(block.status) || "completed"}.`;
+    entries.push({
+      id: `${currentScanId || scanId || "scan"}:information_gathering:g${scenarioIndex}:fallback`,
+      scan_id: currentScanId || scanId || undefined,
+      agent: "information_gathering",
+      phase: "classified",
+      cycle_number: 0,
+      scenario_index: scenarioIndex,
+      sequence_label: `g${scenarioIndex}`,
+      scenario_task: objective,
+      execution_status: normalizeText(block.status) || "completed",
+      verdict: "info",
+      summary: normalizeText(block.summary) || objective,
+      objective,
+      confirmed_facts: uniqueNormalizedStrings(confirmedFacts),
+      security_signals: uniqueNormalizedStrings(securitySignals),
+      unknowns: uniqueNormalizedStrings(unknowns),
+      why_it_matters: normalizeText(block.why_it_matters),
+      next_actions: Array.isArray(block.next_actions)
+        ? uniqueNormalizedStrings(block.next_actions)
+        : [],
+      raw_tool_evidence: uniqueNormalizedStrings(findingsSummary),
+      markdown: "",
+      updated_at: typeof project.updatedAt === "string" ? project.updatedAt : undefined,
+      scenario_report: [{
+        scenario_ran: objective,
+        agent: "information_gathering",
+        status: normalizeText(block.status) || "completed",
+        tools_ran: uniqueNormalizedStrings(toolsRan),
+        tool_results: results.map((item) => ({
+          tool: normalizeText(item.tool),
+          command: normalizeText(item.command) || normalizeText(item.tool),
+          status: normalizeText(item.status) === "completed"
+            ? "passed"
+            : normalizeText(item.status) === "error"
+            ? "failed"
+            : normalizeText(item.status),
+          raw_status: normalizeText(item.status),
+          summary: normalizeText(item.summary),
+        })).filter((item) => item.command),
+        findings_summary: uniqueNormalizedStrings([...confirmedFacts, ...securitySignals]),
+        execution_summary: executionSummary,
+      }],
+    });
+  }
+  return entries;
+}
+
+function buildCombinedAnalyzerMarkdown(
+  entries: AnalyzerAgentReportEntry[],
+  scanId?: string,
+): string {
+  const classifiedEntries = entries.filter((entry) => (entry.phase || "classified") === "classified");
+  if (classifiedEntries.length === 0) {
+    return [
+      "# Findings History Markdown",
+      "",
+      "No classified findings history entries are available yet for this scan.",
+    ].join("\n");
+  }
+
+  const lines: string[] = [
+    "# Findings History Markdown",
+    "",
+    scanId ? `- Scan ID: \`${scanId}\`` : "- Scan ID: `unknown`",
+    `- Scenario Count: \`${classifiedEntries.length}\``,
+  ];
+
+  for (const [index, entry] of classifiedEntries.entries()) {
+    const report = Array.isArray(entry.scenario_report) ? entry.scenario_report[0] : null;
+    const label = entry.sequence_label
+      || (
+        entry.agent === "information_gathering"
+          ? `g${entry.scenario_index ?? "?"}`
+          : `c${entry.cycle_number ?? "?"}s${entry.scenario_index ?? "?"}`
+      );
+    const scenario = typeof report?.scenario_ran === "string" && report.scenario_ran.trim()
+      ? report.scenario_ran.trim()
+      : entry.scenario_task?.trim() || "Untitled scenario";
+    const tools = Array.isArray(report?.tools_ran)
+      ? report.tools_ran.map((item: string) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const toolResults = Array.isArray(report?.tool_results)
+      ? report.tool_results
+          .map((item) => ({
+            command: String(item.command || item.tool || "").trim(),
+            status: String(item.status || "").trim(),
+            summary: String(item.summary || "").trim(),
+          }))
+          .filter((item) => item.command)
+      : [];
+    const findings = Array.isArray(report?.findings_summary)
+      ? uniqueNormalizedStrings(report.findings_summary)
+      : [];
+    const executionSummary = typeof report?.execution_summary === "string"
+      ? report.execution_summary.trim()
+      : "";
+    const nodeLabel = entry.agent === "information_gathering" ? "block" : "cycle";
+    const scenarioStatus = entry.agent === "information_gathering"
+      ? normalizeText(report?.status) || normalizeText(entry.execution_status) || "completed"
+      : (entry.verdict || "unknown");
+    const confirmedFacts = uniqueNormalizedStrings(entry.confirmed_facts ?? []);
+    const securitySignals = uniqueNormalizedStrings(entry.security_signals ?? []);
+    const unknowns = uniqueNormalizedStrings(entry.unknowns ?? []);
+    const nextActions = uniqueNormalizedStrings(entry.next_actions ?? []);
+    const whatWeFound = entry.agent === "information_gathering"
+      ? uniqueNormalizedStrings(
+          confirmedFacts.length > 0 || securitySignals.length > 0
+            ? [...confirmedFacts, ...securitySignals]
+            : findings,
+        )
+      : findings.length > 0
+      ? uniqueNormalizedStrings(findings)
+      : uniqueNormalizedStrings(entry.summary?.trim() ? [entry.summary.trim()] : []);
+
+    lines.push(
+      "",
+      `## ${label} [${entry.agent.replace(/_/g, " ").toUpperCase()}]`,
+      "",
+      `- Agent / Node: ${entry.agent}`,
+      `- ${nodeLabel === "block" ? "Block" : "Cycle"}: ${label}`,
+      `- Scenario: ${entry.objective?.trim() || scenario}`,
+      `- Status: \`${scenarioStatus}\``,
+    );
+    if (executionSummary) {
+      lines.push(`- Execution Summary: ${executionSummary}`);
+    }
+
+    lines.push("", "### Full Tool History", "");
+    if (toolResults.length > 0) {
+      for (const item of toolResults) {
+        const commandLabel = `\`${item.command}\``;
+        const statusLabel = item.status ? `\`${item.status}\`` : "`unknown`";
+        lines.push(
+          item.summary
+            ? `- ${statusLabel} ${commandLabel} -> ${item.summary}`
+            : `- ${statusLabel} ${commandLabel}`,
+        );
+      }
+    } else if (tools.length > 0) {
+      for (const item of tools) {
+        lines.push(`- \`observed\` \`${item}\``);
+      }
+    } else {
+      lines.push("- No tool history recorded.");
+    }
+
+    lines.push("", "### What We Find", "");
+    if (whatWeFound.length > 0) {
+      for (const item of whatWeFound) {
+        lines.push(`- ${item}`);
+      }
+    } else if (entry.summary?.trim()) {
+      lines.push(`- ${entry.summary.trim()}`);
+    } else {
+      lines.push("- No findings were recorded.");
+    }
+
+    lines.push("", "### What We Should Do", "");
+    if (nextActions.length > 0) {
+      for (const item of nextActions) {
+        lines.push(`- ${item}`);
+      }
+    } else {
+      lines.push("- No next action was recorded.");
+    }
+
+    lines.push("", "### Unknowns / Gaps", "");
+    if (unknowns.length > 0) {
+      for (const item of unknowns) {
+        lines.push(`- ${item}`);
+      }
+    } else {
+      lines.push("- No unresolved unknowns were recorded.");
+    }
+
+    if (index < classifiedEntries.length - 1) {
+      lines.push("", "-----------------------------------------------------------");
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function getAnalyzerPipelineActivities(
+  entries: AnalyzerAgentReportEntry[],
+): Array<{ type: "thinking" | "command" | "result" | "info"; message: string; at?: string }> | undefined {
+  const classifiedEntries = entries.filter((entry) => (entry.phase || "classified") === "classified");
+  if (!classifiedEntries.length) {
+    return undefined;
+  }
+
+  const activities: Array<{ type: "thinking" | "command" | "result" | "info"; message: string; at?: string }> = [];
+  for (const entry of classifiedEntries.slice(-2)) {
+    const report = Array.isArray(entry.scenario_report) ? entry.scenario_report[0] : null;
+    const label = entry.sequence_label
+      || (
+        entry.agent === "information_gathering"
+          ? `g${entry.scenario_index ?? "?"}`
+          : `c${entry.cycle_number ?? "?"}s${entry.scenario_index ?? "?"}`
+      );
+    const scenario = typeof report?.scenario_ran === "string" && report.scenario_ran.trim()
+      ? report.scenario_ran.trim()
+      : entry.scenario_task?.trim() || "";
+    const tools = Array.isArray(report?.tools_ran)
+      ? report.tools_ran.map((item: string) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const findings = Array.isArray(report?.findings_summary)
+      ? report.findings_summary.map((item: string) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const executionSummary = typeof report?.execution_summary === "string"
+      ? report.execution_summary.trim()
+      : "";
+
+    if (scenario) {
+      activities.push({
+        type: "info",
+        message: `${label} ${entry.agent}: ${scenario}`,
+        at: entry.updated_at,
+      });
+    }
+    if (tools.length > 0) {
+      activities.push({
+        type: "command",
+        message: `${label} tools: ${tools.join(", ")}`,
+        at: entry.updated_at,
+      });
+    }
+    if (findings.length > 0) {
+      activities.push({
+        type: "result",
+        message: findings[0],
+        at: entry.updated_at,
+      });
+    } else if (executionSummary) {
+      activities.push({
+        type: "result",
+        message: `${label} ${executionSummary}`,
+        at: entry.updated_at,
+      });
+    }
+  }
+
+  return activities.length > 0 ? activities.slice(0, 4) : undefined;
 }
 
 function isAgentRole(value: unknown): value is AgentGraphRole {
@@ -842,6 +1384,21 @@ function normalizePriority(value: unknown): number | null {
 
 function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function uniqueNormalizedStrings(values: unknown[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const text = normalizeText(value);
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(text);
+  }
+  return out;
 }
 
 function normalizeFindingReference(value: string): string {
@@ -1656,6 +2213,12 @@ export default function Dashboard() {
   const [insightTab, setInsightTab] = useState<InsightTab>("checklist");
   const [isInsightFullscreen, setIsInsightFullscreen] = useState(false);
   const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
+  const [analyzerReportViewer, setAnalyzerReportViewer] = useState<AnalyzerReportViewerState>({
+    open: false,
+    title: "",
+    description: "",
+    markdown: "",
+  });
   const [streamLogs, setStreamLogs] = useState<DashboardLogEntry[]>([]);
   const [scanEvents, setScanEvents] = useState<ScanEventPayload[]>([]);
   const [locallyAckedApprovalId, setLocallyAckedApprovalId] = useState<string | null>(null);
@@ -1988,6 +2551,49 @@ export default function Dashboard() {
         syncArchitectureRefreshState(activeProjectId, "error", "error", { error: errorText });
         setIsArchitectRefreshing(false);
         setIsArchitectCompressing(false);
+      }
+
+      if (event.event === "analyzer_report_saved" && isRecord(event.data.report)) {
+        const incomingReport = event.data.report as Record<string, unknown>;
+        const reportRole = normalizeAnalyzerAgentReportRole(
+          typeof incomingReport.agent === "string" ? incomingReport.agent : "",
+        );
+        if (reportRole) {
+          const currentProject = useProjects
+            .getState()
+            .projects.find((project) => project.id === activeProjectId);
+          const currentPayload = isRecord(currentProject?.payload) ? currentProject.payload : {};
+          const currentRoot = getFindingsHistoryRoot(currentPayload) || {};
+          const currentBucket = isRecord(currentRoot[reportRole]) ? currentRoot[reportRole] : {};
+          const currentEntries = Array.isArray(currentBucket.entries)
+            ? currentBucket.entries.filter((item): item is Record<string, unknown> => isRecord(item))
+            : [];
+          const nextEntries = [
+            incomingReport,
+            ...currentEntries.filter((item) => String(item.id || "") !== String(incomingReport.id || "")),
+          ];
+
+          updateProject(
+            activeProjectId,
+            {
+              updatedAt: event.timestamp,
+              payload: {
+                ...currentPayload,
+                [FINDINGS_HISTORY_KEY]: {
+                  ...currentRoot,
+                  [reportRole]: {
+                    ...currentBucket,
+                    updated_at: typeof incomingReport.updated_at === "string"
+                      ? incomingReport.updated_at
+                      : event.timestamp,
+                    entries: nextEntries,
+                  },
+                },
+              },
+            } as any,
+            { persist: false },
+          );
+        }
       }
 
       if (event.event === "verify_finding_saved" && isRecord(event.data.finding)) {
@@ -2625,6 +3231,162 @@ export default function Dashboard() {
   const activeLastScan = isRecord(activeProject?.lastScan)
     ? activeProject?.lastScan
     : null;
+  const analyzerReportEntries = useMemo(() => {
+    const savedEntries = getAnalyzerAgentReportEntries(activeProject?.payload, activeScanId || undefined);
+    const hasSavedInfoGathering = savedEntries.some((entry) => entry.agent === "information_gathering");
+    if (hasSavedInfoGathering) {
+      return savedEntries;
+    }
+    const fallbackEntries = getFallbackInformationGatheringEntries(activeProject ?? null, activeScanId || undefined);
+    return [...fallbackEntries, ...savedEntries];
+  }, [activeProject, activeScanId]);
+  const pendingToolApproval: PendingToolApprovalView | null = (() => {
+    if (!activeProject) return null;
+    for (const event of scanEvents) {
+      if (event.event === "executer_tool_waiting_approval") {
+        const data = event.data;
+        const candidate = {
+          approvalId: typeof data.approval_id === "string" ? data.approval_id : "",
+          role: typeof data.role === "string" ? data.role : "",
+          toolName: typeof data.tool_name === "string" ? data.tool_name : "",
+          callId: typeof data.call_id === "string" ? data.call_id : "",
+          args: isRecord(data.args) ? data.args : {},
+        };
+        if (
+          candidate.approvalId &&
+          locallyAckedApprovalId &&
+          candidate.approvalId === locallyAckedApprovalId
+        ) {
+          return null;
+        }
+        return candidate;
+      }
+      if (
+        event.event === "executer_tool_approval_decision" ||
+        event.event === "executer_tool_approval_cleared" ||
+        event.event === "scan_completed" ||
+        event.event === "scan_failed" ||
+        event.event === "scan_paused" ||
+        event.event === "scan_cancelled"
+      ) {
+        return null;
+      }
+    }
+
+    const lastScan = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
+      : null;
+    const waitingFlag = lastScan?.awaitingToolApproval;
+    const pending = isRecord(lastScan?.pendingToolApproval)
+      ? lastScan.pendingToolApproval
+      : null;
+    if (waitingFlag === true && pending) {
+      const candidate = {
+        approvalId: typeof pending.approval_id === "string" ? pending.approval_id : "",
+        role: typeof pending.role === "string" ? pending.role : "",
+        toolName: typeof pending.tool_name === "string" ? pending.tool_name : "",
+        callId: typeof pending.call_id === "string" ? pending.call_id : "",
+        args: isRecord(pending.args) ? pending.args : {},
+      };
+      if (
+        candidate.approvalId &&
+        locallyAckedApprovalId &&
+        candidate.approvalId === locallyAckedApprovalId
+      ) {
+        return null;
+      }
+      return candidate;
+    }
+    return null;
+  })();
+  const openAnalyzerAgentReport = useCallback(
+    () => {
+      const markdown = analyzerReportEntries.length > 0
+        ? buildCombinedAnalyzerMarkdown(analyzerReportEntries, activeScanId || undefined)
+        : [
+            "# Findings History Markdown",
+            "",
+            "No saved findings history markdown is available yet for this pipeline.",
+            "",
+            `- Project: ${activeProject?.name || "Unknown Project"}`,
+            `- Status: ${effectiveStatus}`,
+            `- Pending Tool Approval: ${pendingToolApproval?.toolName || "none"}`,
+            `- Current Scan ID: ${activeScanId || "none"}`,
+            `- Classified Analyzer Entries Saved: ${analyzerReportEntries.length}`,
+            "",
+            "Findings history is saved after information gathering, recon, or exploit results are returned and organized.",
+          ].join("\n");
+      const latestEntry = analyzerReportEntries[analyzerReportEntries.length - 1] ?? null;
+      const summaryLine = latestEntry?.sequence_label?.trim()
+        || latestEntry?.summary?.trim()
+        || latestEntry?.scenario_task?.trim()
+        || pendingToolApproval?.toolName?.trim()
+        || "Combined findings history markdown for this scan";
+      setAnalyzerReportViewer({
+        open: true,
+        title: "Findings History Markdown",
+        description: summaryLine,
+        markdown,
+      });
+    },
+    [
+      activeScanId,
+      activeProject?.name,
+      analyzerReportEntries,
+      effectiveStatus,
+      pendingToolApproval?.toolName,
+      setAnalyzerReportViewer,
+    ],
+  );
+
+  useEffect(() => {
+    if (!analyzerReportViewer.open) {
+      return;
+    }
+    const markdown = analyzerReportEntries.length > 0
+      ? buildCombinedAnalyzerMarkdown(analyzerReportEntries, activeScanId || undefined)
+      : [
+          "# Findings History Markdown",
+          "",
+          "No saved findings history markdown is available yet for this pipeline.",
+          "",
+          `- Project: ${activeProject?.name || "Unknown Project"}`,
+          `- Status: ${effectiveStatus}`,
+          `- Pending Tool Approval: ${pendingToolApproval?.toolName || "none"}`,
+          `- Current Scan ID: ${activeScanId || "none"}`,
+          `- Classified Findings History Entries Saved: ${analyzerReportEntries.length}`,
+          "",
+          "Findings history is saved after information gathering, recon, or exploit results are returned and organized.",
+        ].join("\n");
+    const latestEntry = analyzerReportEntries[analyzerReportEntries.length - 1] ?? null;
+    const description = latestEntry?.sequence_label?.trim()
+      || latestEntry?.summary?.trim()
+      || latestEntry?.scenario_task?.trim()
+      || pendingToolApproval?.toolName?.trim()
+      || "Combined findings history markdown for this scan";
+    setAnalyzerReportViewer((current) => {
+      if (
+        current.title === "Findings History Markdown"
+        && current.description === description
+        && current.markdown === markdown
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        title: "Findings History Markdown",
+        description,
+        markdown,
+      };
+    });
+  }, [
+    activeProject?.name,
+    activeScanId,
+    analyzerReportEntries,
+    analyzerReportViewer.open,
+    effectiveStatus,
+    pendingToolApproval?.toolName,
+  ]);
 
   const persistedElapsedSeconds =
     typeof activeLastScan?.elapsedSeconds === "number" &&
@@ -2685,65 +3447,6 @@ export default function Dashboard() {
     return lastScan?.status === "awaiting_planner_approval";
   })();
 
-  const pendingToolApproval: PendingToolApprovalView | null = (() => {
-    if (!activeProject) return null;
-    for (const event of scanEvents) {
-      if (event.event === "executer_tool_waiting_approval") {
-        const data = event.data;
-        const candidate = {
-          approvalId: typeof data.approval_id === "string" ? data.approval_id : "",
-          role: typeof data.role === "string" ? data.role : "",
-          toolName: typeof data.tool_name === "string" ? data.tool_name : "",
-          callId: typeof data.call_id === "string" ? data.call_id : "",
-          args: isRecord(data.args) ? data.args : {},
-        };
-        if (
-          candidate.approvalId &&
-          locallyAckedApprovalId &&
-          candidate.approvalId === locallyAckedApprovalId
-        ) {
-          return null;
-        }
-        return candidate;
-      }
-      if (
-        event.event === "executer_tool_approval_decision" ||
-        event.event === "executer_tool_approval_cleared" ||
-        event.event === "scan_completed" ||
-        event.event === "scan_failed" ||
-        event.event === "scan_paused" ||
-        event.event === "scan_cancelled"
-      ) {
-        return null;
-      }
-    }
-
-    const lastScan = isRecord(activeProject?.lastScan)
-      ? activeProject?.lastScan
-      : null;
-    const waitingFlag = lastScan?.awaitingToolApproval;
-    const pending = isRecord(lastScan?.pendingToolApproval)
-      ? lastScan.pendingToolApproval
-      : null;
-    if (waitingFlag === true && pending) {
-      const candidate = {
-        approvalId: typeof pending.approval_id === "string" ? pending.approval_id : "",
-        role: typeof pending.role === "string" ? pending.role : "",
-        toolName: typeof pending.tool_name === "string" ? pending.tool_name : "",
-        callId: typeof pending.call_id === "string" ? pending.call_id : "",
-        args: isRecord(pending.args) ? pending.args : {},
-      };
-      if (
-        candidate.approvalId &&
-        locallyAckedApprovalId &&
-        candidate.approvalId === locallyAckedApprovalId
-      ) {
-        return null;
-      }
-      return candidate;
-    }
-    return null;
-  })();
   const pendingToolCommandPreview = buildPendingApprovalCommand(pendingToolApproval);
   const autoApprovingPendingTool = Boolean(
     isRunning
@@ -2751,6 +3454,11 @@ export default function Dashboard() {
     && shouldAutoApproveForRole(String(pendingToolApproval.role || ""))
     && !autoApprovalFailedIdsRef.current.has(pendingToolApproval.approvalId)
     && !toolApprovalLoading,
+  );
+  const orchestratorPipelineHeaderReport = analyzerReportEntries[analyzerReportEntries.length - 1] ?? null;
+  const analyzerPipelineActivities = useMemo(
+    () => getAnalyzerPipelineActivities(analyzerReportEntries),
+    [analyzerReportEntries],
   );
   const pendingPasswordRequest: PendingPasswordRequestView | null = (() => {
     if (!activeProject) return null;
@@ -4587,6 +5295,15 @@ export default function Dashboard() {
     const analyzerStatus = getStatus(analyzerAgent);
     const brainStatus = getStatus(null, 'brain');
     const pipelineIsIdle = missionControlState === 'idle';
+    const analyzerFeedVisible = !(
+      (
+        missionControlState === 'running'
+        || missionControlState === 'paused_for_approval'
+        || missionControlState === 'reconnecting_sse'
+        || missionControlState === 'initializing'
+      )
+      && !phaseBelongsToStage('analyzer', latestMissionPhase)
+    );
 
     const plannerDisplayPhase: MissionControlPhaseKey =
       latestMissionPhase === 'intel' || latestMissionPhase === 'information_gathering' || latestMissionPhase === 'brain'
@@ -4688,8 +5405,13 @@ export default function Dashboard() {
           : plannerDisplayPhase === 'intel'
             ? 'Waiting for execution results...'
             : (analyzerAgent?.currentTask || 'Verifying impact and findings...'),
-        recentActivity: plannerDisplayPhase !== 'intel'
-          ? (getRecentActivity('analyzer', 'brain') || (realtimeVulnFindings.length > 0 ? [`${realtimeVulnFindings.length} findings verified`] : undefined))
+        recentActivity: plannerDisplayPhase !== 'intel' && analyzerFeedVisible
+          ? (
+            mergeRecentActivities(
+              getRecentActivity('analyzer', 'brain'),
+              analyzerPipelineActivities,
+            ) || (realtimeVulnFindings.length > 0 ? [{ type: 'result', message: `${realtimeVulnFindings.length} findings verified` }] : undefined)
+          )
           : undefined,
         actionPanel: getStageActionPanel('analyzer'),
       }
@@ -4708,6 +5430,7 @@ export default function Dashboard() {
     pendingToolApproval,
     autoApprovingPendingTool,
     pendingToolCommandPreview,
+    analyzerPipelineActivities,
     toolApprovalLoading,
     awaitingPlannerApproval,
     approvalMode,
@@ -4941,6 +5664,27 @@ export default function Dashboard() {
                           </div>
                         ) : null}
                       </div>
+
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 text-text-muted hover:text-text-primary"
+                        onClick={() => {
+                          openAnalyzerAgentReport();
+                        }}
+                        title={
+                          orchestratorPipelineHeaderReport
+                            ? "Open combined findings history markdown"
+                            : "Open findings history status"
+                        }
+                        aria-label={
+                          orchestratorPipelineHeaderReport
+                            ? "Open combined findings history markdown"
+                            : "Open findings history status"
+                        }
+                      >
+                        <FolderOpen size={16} />
+                      </Button>
 
                       <Button
                         size="icon"
@@ -5567,6 +6311,42 @@ export default function Dashboard() {
         formatVerificationMethod={formatVerificationMethod}
         formatTime={formatTime}
       />
+
+      <Dialog
+        open={analyzerReportViewer.open}
+        onClose={() => {
+          setAnalyzerReportViewer((current) => ({
+            ...current,
+            open: false,
+          }));
+        }}
+        title={analyzerReportViewer.title || "Findings History Markdown"}
+        description={analyzerReportViewer.description || "Saved findings history report"}
+        width="max-w-4xl"
+      >
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-text-muted">
+              Markdown generated from analyzer output for recon or exploit activity.
+            </p>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                if (typeof navigator !== "undefined" && navigator.clipboard) {
+                  void navigator.clipboard.writeText(analyzerReportViewer.markdown || "");
+                }
+              }}
+            >
+              <Check size={14} />
+              Copy Markdown
+            </Button>
+          </div>
+          <pre className="max-h-[70vh] overflow-auto rounded-xl border border-border bg-surface-0/60 p-4 font-mono text-xs leading-6 text-text-secondary whitespace-pre-wrap break-words">
+            {analyzerReportViewer.markdown || "No findings history markdown available."}
+          </pre>
+        </div>
+      </Dialog>
     </>
   );
 }

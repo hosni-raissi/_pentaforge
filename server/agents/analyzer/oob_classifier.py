@@ -115,6 +115,30 @@ def build_oob_assessment(tool_name: str, raw_result: dict[str, Any], scenario: d
         f"priority={int(safe_scenario.get('priority', 3) or 3)} "
         f"{summary_name}"
     )[:500]
+    scenario_report = {
+        "scenario_ran": str(safe_scenario.get("task", "")).strip() or "Untitled scenario",
+        "agent": str(safe_scenario.get("agent", "")).strip().lower() or "unknown",
+        "tools_ran": [tool_name],
+        "findings_summary": [
+            f"{tool_name}: Confirmed out-of-band callback over {protocol} with {len(raw_result.get('callbacks', []) if isinstance(raw_result.get('callbacks', []), list) else [])} callback event(s)."
+        ],
+        "execution_summary": summary_name,
+    }
+    agent_markdown = "\n".join(
+        [
+            f"# {str(safe_scenario.get('agent', '')).strip().upper() or 'UNKNOWN'} Analyzer Report",
+            "",
+            "## Scenario Run",
+            "",
+            f"- Scenario Ran: {scenario_report['scenario_ran']}",
+            f"- Tools Run: `{tool_name}`",
+            f"- Execution Summary: {summary_name}",
+            "",
+            "## What The Tools Found",
+            "",
+            f"- {scenario_report['findings_summary'][0]}",
+        ]
+    )
     return {
         "scenario": {
             "task": str(safe_scenario.get("task", "")),
@@ -127,6 +151,8 @@ def build_oob_assessment(tool_name: str, raw_result: dict[str, Any], scenario: d
         "normalized_outputs": [normalized],
         "normalized_summary": normalized_summary,
         "compact_summary": compact_summary,
+        "scenario_reports": [scenario_report],
+        "agent_markdown": agent_markdown,
     }
 
 
@@ -139,6 +165,32 @@ def build_oob_verification_payload(candidate: Any, raw_result: dict[str, Any]) -
     normalized = _normalized_output(tool_name, raw_result)
     normalized_summary = summarize_normalized_outputs([normalized])
     callbacks = raw_result.get("callbacks", []) if isinstance(raw_result.get("callbacks"), list) else []
+    scenario_report = [
+        {
+            "scenario_ran": str(scenario.get("task", "")).strip() or "Untitled scenario",
+            "agent": str(scenario.get("agent", "")).strip().lower() or "unknown",
+            "tools_ran": [tool_name],
+            "findings_summary": [
+                f"{tool_name}: Confirmed out-of-band callback over {protocol} with {len(callbacks)} callback event(s)."
+            ],
+            "execution_summary": summary_name,
+        }
+    ]
+    analysis_markdown = "\n".join(
+        [
+            f"# {str(scenario.get('agent', '')).strip().upper() or 'UNKNOWN'} Analyzer Report",
+            "",
+            "## Scenario Run",
+            "",
+            f"- Scenario Ran: {scenario_report[0]['scenario_ran']}",
+            f"- Tools Run: `{tool_name}`",
+            f"- Execution Summary: {summary_name}",
+            "",
+            "## What The Tools Found",
+            "",
+            f"- {scenario_report[0]['findings_summary'][0]}",
+        ]
+    )
     return {
         "verdict": "real_vulnerability",
         "status": "real_vulnerability",
@@ -177,6 +229,8 @@ def build_oob_verification_payload(candidate: Any, raw_result: dict[str, Any]) -
         },
         "normalized_outputs": [normalized],
         "normalized_summary": normalized_summary,
+        "scenario_report": scenario_report,
+        "analysis_markdown": analysis_markdown,
         "ssvc": "ACT" if _severity(protocol) in {"critical", "high"} else "ATTEND",
         "ssvc_action": "ACT" if _severity(protocol) in {"critical", "high"} else "ATTEND",
         "hitl_required": False,

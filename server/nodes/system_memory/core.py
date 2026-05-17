@@ -86,6 +86,10 @@ def _truncate_text(value: Any, limit: int = 240) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _normalized_result_identity(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
 def _apply_memory_confidence_guards(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -112,6 +116,20 @@ def _apply_memory_confidence_guards(value: Any) -> str:
                 flags=re.IGNORECASE,
             ),
             "No session tokens were observed during this block, so token security impact remains unassessed.",
+        ),
+        (
+            re.compile(
+                r"no session tokens collected in sampled responses",
+                flags=re.IGNORECASE,
+            ),
+            "No session tokens were observed in sampled responses.",
+        ),
+        (
+            re.compile(
+                r"(No session tokens were observed during this block, so token security impact remains unassessed\.)\s*(?:or analyzed during (?:the )?assessment\.?)",
+                flags=re.IGNORECASE,
+            ),
+            r"\1",
         ),
         (
             re.compile(
@@ -268,6 +286,203 @@ def _sanitize_memory_list(value: Any, *, limit: int, text_limit: int) -> list[st
     for item in value:
         text = _sanitize_memory_text(item, limit=text_limit)
         if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(text)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _sanitize_next_action_list(value: Any, *, limit: int) -> list[str]:
+    raw_items = _sanitize_memory_list(value, limit=limit * 3, text_limit=220)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    replacements = [
+        (
+            re.compile(
+                r"^verify if ([a-z0-9.-]+) resolves to \1(?: before deeper testing)?\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Confirm A/AAAA resolution and reachable hosts before deeper testing.",
+        ),
+        (
+            re.compile(
+                r"^test for csrf or session fixation if auth flow is later confirmed\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Capture an authenticated flow before testing CSRF or session handling.",
+        ),
+        (
+            re.compile(
+                r"^proceed with manual or tool-based version detection if automated fingerprinting fails\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Use manual version detection if automated fingerprinting stays inconclusive.",
+        ),
+        (
+            re.compile(
+                r"^re-run fingerprinting after confirming the 502 is resolved or bypassed\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Test alternate paths, ports, or hostnames to find a reachable surface behind the 502 gateway.",
+        ),
+        (
+            re.compile(
+                r"^prioritize fingerprinting to enable known-vulnerability checks\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Confirm product and version from reachable responses before CVE lookup.",
+        ),
+        (
+            re.compile(
+                r"^probe for session tokens after authentication or in non-get requests\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Capture an authenticated or POST flow to observe session tokens.",
+        ),
+        (
+            re.compile(
+                r"^retry passive web recon with alternate sources or manual checks\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Cross-check subdomains with certificate transparency and DNS enumeration.",
+        ),
+        (
+            re.compile(
+                r"^re-run passive_web_recon with fallback sources or switch to active subdomain enumeration\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Cross-check subdomains with certificate transparency and DNS enumeration.",
+        ),
+        (
+            re.compile(
+                r"^verify mail\.([a-z0-9.-]+) reachability and services\.?$",
+                flags=re.IGNORECASE,
+            ),
+            r"Check SMTP, IMAP, POP3, and webmail exposure on mail.\1.",
+        ),
+        (
+            re.compile(
+                r"^check mail\.([a-z0-9.-]+):\d+ for open web services or misconfigurations\.?$",
+                flags=re.IGNORECASE,
+            ),
+            r"Check SMTP, IMAP, POP3, and webmail exposure on mail.\1.",
+        ),
+        (
+            re.compile(
+                r"^probe mail\.([a-z0-9.-]+) for smtp or webmail services\.?$",
+                flags=re.IGNORECASE,
+            ),
+            r"Check SMTP, IMAP, POP3, and webmail exposure on mail.\1.",
+        ),
+        (
+            re.compile(
+                r"^verify ([a-z0-9.-]+) reachability and services\.?$",
+                flags=re.IGNORECASE,
+            ),
+            r"Check exposed services and banners on \1.",
+        ),
+        (
+            re.compile(
+                r"^check if the 502 clears on repeated requests or alternate paths\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Request alternate paths such as /openapi.json and /swagger-ui to find a reachable upstream behind the 502.",
+        ),
+        (
+            re.compile(
+                r"^run fingerprinting block to identify target software stack\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Extract product and version from reachable HTTP responses, banners, or service probes.",
+        ),
+        (
+            re.compile(
+                r"^run fingerprinting block to identify product and version\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Extract product and version from reachable HTTP responses, banners, or service probes.",
+        ),
+        (
+            re.compile(
+                r"^run fingerprinting block to identify (?:target )?software (?:stack )?and versions?\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Extract product and version from reachable HTTP responses, banners, or service probes.",
+        ),
+        (
+            re.compile(
+                r"^run fingerprinting block to identify products? and versions?\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Extract product and version from reachable HTTP responses, banners, or service probes.",
+        ),
+        (
+            re.compile(
+                r"^check if backend service is reachable or misconfigured\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Request alternate paths such as /openapi.json and /swagger-ui to identify a reachable upstream behind the 502.",
+        ),
+        (
+            re.compile(
+                r"^check if alternate paths? \(.+\) bypass 502\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Request alternate paths such as /openapi.json, /swagger-ui, /admin, and /api to identify a reachable upstream behind the 502.",
+        ),
+        (
+            re.compile(
+                r"^check if alternate paths? bypass 502\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Request alternate paths such as /openapi.json, /swagger-ui, /admin, and /api to identify a reachable upstream behind the 502.",
+        ),
+        (
+            re.compile(
+                r"^probe authentication endpoints or flows to capture session tokens\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Capture cookies and auth headers from a login or POST flow.",
+        ),
+        (
+            re.compile(
+                r"^probe authenticated endpoints for session token presence and security flags\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Capture cookies and auth headers from a login or POST flow and inspect Secure, HttpOnly, and SameSite flags.",
+        ),
+        (
+            re.compile(
+                r"^probe login/auth endpoints for session token generation and security\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Capture cookies and auth headers from a login or POST flow and inspect Secure, HttpOnly, and SameSite flags.",
+        ),
+        (
+            re.compile(
+                r"^probe login/auth endpoints for session token exposure\.?$",
+                flags=re.IGNORECASE,
+            ),
+            "Capture cookies and auth headers from a login or POST flow and inspect Secure, HttpOnly, and SameSite flags.",
+        ),
+    ]
+    drop_patterns = [
+        re.compile(r"^if .* later confirmed", flags=re.IGNORECASE),
+        re.compile(r"^proceed with manual discovery", flags=re.IGNORECASE),
+    ]
+    for item in raw_items:
+        text = item
+        for pattern, replacement in replacements:
+            text = pattern.sub(replacement, text)
+        text = text.strip()
+        if not text:
+            continue
+        if any(pattern.search(text) for pattern in drop_patterns):
             continue
         lowered = text.lower()
         if lowered in seen:
@@ -1397,10 +1612,13 @@ class SystemMemoryLLM:
             "selection_rationale": str(block.get("selection_rationale", "")).strip(),
             "skipped_tools": _normalize_string_list(block.get("skipped_tools"), limit=12),
             "status": status,
+            "objective": goal or block_name,
             "summary": summary,
-            "key_findings": summaries[:5],
-            "risk_signals": [],
-            "open_questions": [],
+            "confirmed_facts": summaries[:5],
+            "security_signals": [],
+            "unknowns": [],
+            "why_it_matters": "",
+            "next_actions": [],
             "artifacts": artifacts[:20],
             "results": results,
         }
@@ -1476,12 +1694,29 @@ class SystemMemoryLLM:
             summary = _sanitize_memory_text(fallback.get("summary", ""), limit=520)
         cleaned["summary"] = summary
 
-        for key in ("key_findings", "risk_signals", "open_questions"):
+        objective = _sanitize_memory_text(
+            organized.get("objective", fallback.get("objective", fallback.get("goal", fallback.get("name", "")))),
+            limit=260,
+        )
+        cleaned["objective"] = objective or _sanitize_memory_text(
+            fallback.get("goal", fallback.get("name", "")),
+            limit=260,
+        )
+
+        for key in ("confirmed_facts", "security_signals", "unknowns"):
             cleaned[key] = _sanitize_memory_list(
                 organized.get(key, fallback.get(key, [])),
                 limit=8,
                 text_limit=260,
             )
+        cleaned["next_actions"] = _sanitize_next_action_list(
+            organized.get("next_actions", fallback.get("next_actions", [])),
+            limit=3,
+        )
+        cleaned["why_it_matters"] = _sanitize_memory_text(
+            organized.get("why_it_matters", fallback.get("why_it_matters", "")),
+            limit=320,
+        )
         cleaned["artifacts"] = _sanitize_artifact_values(
             organized.get("artifacts", fallback.get("artifacts", [])),
             limit=20,
@@ -1490,33 +1725,55 @@ class SystemMemoryLLM:
         raw_results = organized.get("results", fallback.get("results", []))
         results: list[dict[str, Any]] = []
         fallback_results = fallback.get("results", []) if isinstance(fallback.get("results", []), list) else []
+        fallback_by_command: dict[str, dict[str, Any]] = {}
+        fallback_by_tool: dict[str, list[dict[str, Any]]] = {}
+        for fallback_row in fallback_results:
+            if not isinstance(fallback_row, dict):
+                continue
+            command_key = _normalized_result_identity(fallback_row.get("command", ""))
+            tool_key = _normalized_result_identity(fallback_row.get("tool", ""))
+            if command_key and command_key not in fallback_by_command:
+                fallback_by_command[command_key] = fallback_row
+            if tool_key:
+                fallback_by_tool.setdefault(tool_key, []).append(fallback_row)
         if isinstance(raw_results, list):
             for index, row in enumerate(raw_results[:12]):
                 if not isinstance(row, dict):
                     continue
-                tool_name = str(row.get("tool", "")).strip()
-                status_text = str(row.get("status", "")).strip().lower()
-                fallback_row = fallback_results[index] if index < len(fallback_results) and isinstance(fallback_results[index], dict) else {}
+                fallback_row = {}
+                command_key = _normalized_result_identity(row.get("command", ""))
+                tool_key = _normalized_result_identity(row.get("tool", ""))
+                if command_key and command_key in fallback_by_command:
+                    fallback_row = fallback_by_command[command_key]
+                elif tool_key and fallback_by_tool.get(tool_key):
+                    fallback_row = fallback_by_tool[tool_key].pop(0)
+                elif index < len(fallback_results) and isinstance(fallback_results[index], dict):
+                    fallback_row = fallback_results[index]
+                tool_name = str(fallback_row.get("tool", row.get("tool", ""))).strip()
+                status_text = str(fallback_row.get("status", row.get("status", ""))).strip().lower()
                 results.append(
-                    {
-                        "tool": tool_name,
-                        "status": status_text if status_text else "completed",
-                        "summary": _sanitize_memory_text(row.get("summary", ""), limit=320),
-                        "command": _sanitize_memory_text(
-                            row.get("command", fallback_row.get("command", "")),
-                            limit=420,
-                        ),
-                        "artifacts": _sanitize_artifact_values(row.get("artifacts", []), limit=8),
-                        "structured": _sanitize_structured_snapshot(
-                            row.get("structured", fallback_row.get("structured", {}))
-                        ),
-                    }
-                )
+                        {
+                            "tool": tool_name,
+                            "status": status_text if status_text else "completed",
+                            "summary": _sanitize_memory_text(
+                                fallback_row.get("summary", row.get("summary", "")),
+                                limit=320,
+                            ),
+                            "command": _sanitize_memory_text(
+                                fallback_row.get("command", row.get("command", "")),
+                                limit=420,
+                            ),
+                            "artifacts": _sanitize_artifact_values(row.get("artifacts", []), limit=8),
+                            "structured": _sanitize_structured_snapshot(
+                                fallback_row.get("structured", row.get("structured", {}))
+                            ),
+                        }
+                    )
         if results:
             cleaned["results"] = results
 
-        if not cleaned["key_findings"] and cleaned["summary"]:
-            cleaned["key_findings"] = [cleaned["summary"]]
+        if not cleaned["confirmed_facts"] and cleaned["summary"]:
+            cleaned["confirmed_facts"] = [cleaned["summary"]]
         return cleaned
 
     async def organize_block(
@@ -1555,14 +1812,20 @@ class SystemMemoryLLM:
             status = str(payload.get("status", "")).strip().lower()
             if status in {"completed", "partial", "skipped"}:
                 organized["status"] = status
+            objective = str(payload.get("objective", "")).strip()
+            if objective:
+                organized["objective"] = objective
             summary = str(payload.get("summary", "")).strip()
             if summary:
                 organized["summary"] = summary
-            for key in ("key_findings", "risk_signals", "open_questions", "artifacts"):
+            for key in ("confirmed_facts", "security_signals", "unknowns", "next_actions", "artifacts"):
                 organized[key] = _normalize_string_list(
                     payload.get(key),
                     limit=20 if key == "artifacts" else 8,
                 )
+            why_it_matters = str(payload.get("why_it_matters", "")).strip()
+            if why_it_matters:
+                organized["why_it_matters"] = why_it_matters
             raw_structured_results = payload.get("results", [])
             if isinstance(raw_structured_results, list):
                 results: list[dict[str, Any]] = []
@@ -1573,6 +1836,7 @@ class SystemMemoryLLM:
                         {
                             "tool": str(row.get("tool", "")).strip(),
                             "status": str(row.get("status", "")).strip(),
+                            "command": str(row.get("command", "")).strip(),
                             "summary": str(row.get("summary", "")).strip(),
                             "artifacts": _normalize_string_list(row.get("artifacts"), limit=8),
                         }

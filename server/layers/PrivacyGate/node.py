@@ -7,6 +7,9 @@ import logging
 import redis
 import json
 from datetime import datetime
+from time import time
+
+from server.config.database import db_config
 
 # ── Logger ────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +37,75 @@ nlp = None
 #         "NER coverage is reduced. Set PRIVACYGATE_STRICT=1 to block this."
 #     )
 
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+_SESSION_TTL_SECONDS = 86_400
+_redis_client = None
+_redis_error_logged = False
+_in_memory_sessions: dict[str, dict] = {}
+
+
+def _get_redis_client():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(
+            db_config.redis_url,
+            decode_responses=True,
+        )
+    return _redis_client
+
+
+def _store_session_payload(redis_key: str, payload: dict) -> None:
+    """Persist session payload in Redis when available, else in memory."""
+    global _redis_error_logged
+    payload_with_expiry = {
+        **payload,
+        "_expires_at": time() + _SESSION_TTL_SECONDS,
+    }
+    _in_memory_sessions[redis_key] = payload_with_expiry
+    try:
+        _get_redis_client().setex(
+            redis_key,
+            _SESSION_TTL_SECONDS,
+            json.dumps(payload),
+        )
+    except Exception as exc:
+        if not _redis_error_logged:
+            logger.warning(
+                "PrivacyGate: redis unavailable, using in-memory session storage",
+                exc_info=exc,
+            )
+            _redis_error_logged = True
+
+
+def _load_session_payload(redis_key: str) -> dict | None:
+    """Load session payload from Redis, falling back to in-memory storage."""
+    raw = None
+    try:
+        raw = _get_redis_client().get(redis_key)
+    except Exception as exc:
+        global _redis_error_logged
+        if not _redis_error_logged:
+            logger.warning(
+                "PrivacyGate: redis read failed, using in-memory session storage",
+                exc_info=exc,
+            )
+            _redis_error_logged = True
+
+    if raw:
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+
+    payload = _in_memory_sessions.get(redis_key)
+    if not isinstance(payload, dict):
+        return None
+    expires_at = float(payload.get("_expires_at", 0) or 0)
+    if expires_at and expires_at < time():
+        _in_memory_sessions.pop(redis_key, None)
+        return None
+    return {k: v for k, v in payload.items() if k != "_expires_at"}
 
 # ─────────────────────────────────────────────────────────────────
 #  Pre-compiled patterns
@@ -256,14 +327,13 @@ def anonymize(
     # ...
 
     # ── Pass 3: Persist mapping to Redis (TTL = 24 h) ────────────
-    r.setex(
+    _store_session_payload(
         redis_key,
-        86_400,
-        json.dumps({
-            "mapping":    mapping,
+        {
+            "mapping": mapping,
             "created_at": datetime.utcnow().isoformat(),
             "session_id": session_id,
-        }),
+        },
     )
 
     if verbose:
@@ -299,9 +369,9 @@ def deanonymize(response: str, session_id: str) -> str:
         if alias mutation was detected.
     """
     redis_key = f"anon:{session_id}"
-    raw = r.get(redis_key)
+    payload = _load_session_payload(redis_key)
 
-    if not raw:
+    if not payload:
         logger.error(
             "PrivacyGate.deanonymize: no mapping found for session '%s'. "
             "Response returned as-is — inspect before use.",
@@ -309,7 +379,7 @@ def deanonymize(response: str, session_id: str) -> str:
         )
         return response
 
-    mapping: dict = json.loads(raw)["mapping"]
+    mapping: dict = payload.get("mapping", {})
 
     # Longest alias first — prevents __CRED_010__ being partially replaced
     # if __CRED_01__ also exists.
@@ -341,8 +411,8 @@ def get_session_mapping(session_id: str) -> dict:
     Debug helper — retrieve the alias mapping for a session.
     Returns an empty dict if the session has expired or never existed.
     """
-    raw = r.get(f"anon:{session_id}")
-    return json.loads(raw) if raw else {}
+    payload = _load_session_payload(f"anon:{session_id}")
+    return payload if payload else {}
 
 
 def _print_verbose(clean_prompt: str, mapping: dict) -> None:

@@ -63,6 +63,7 @@ class SourceConfig(BaseModel):
     api_params: dict[str, str] = Field(default_factory=dict)
     css_selector: str | None = None
     max_pages: int = 1000
+    intel_inline_refresh: bool = True
 
     @property
     def is_cooldown_active(self) -> bool:
@@ -77,7 +78,7 @@ class SourceConfig(BaseModel):
 # ═════════════════════════════════════════════════════════════════════════════
 
 _SHARED_STRATEGIES: list[SourceConfig] = [
-    SourceConfig(name="HackTricks", url="https://github.com/HackTricks-wiki/hacktricks", source_type=SourceType.GITHUB_REPO, domain="shared", category="methodology", content_type=ContentType.STRATEGIES, priority=1, branch="master", subdirectory="src", include_patterns=["**/*.md"], exclude_patterns=["**/SUMMARY.md", "**/banners/**"], tags=["hacktricks", "web", "pentest", "methodology"], license="CC-BY-NC-4.0", description="HackTricks — comprehensive pentest tricks & techniques."),
+    SourceConfig(name="HackTricks", url="https://github.com/HackTricks-wiki/hacktricks", source_type=SourceType.GITHUB_REPO, domain="shared", category="methodology", content_type=ContentType.STRATEGIES, priority=1, branch="master", subdirectory="src", include_patterns=["**/*.md"], exclude_patterns=["**/SUMMARY.md", "**/banners/**"], tags=["hacktricks", "web", "pentest", "methodology"], license="CC-BY-NC-4.0", description="HackTricks — comprehensive pentest tricks & techniques.", intel_inline_refresh=False),
     SourceConfig(name="PayloadsAllTheThings", url="https://github.com/swisskyrepo/PayloadsAllTheThings", source_type=SourceType.GITHUB_REPO, domain="shared", category="methodology", content_type=ContentType.STRATEGIES, priority=1, branch="master", clone_id="PayloadsAllTheThings", include_patterns=["**/*.md"], exclude_patterns=["**/CONTRIBUTING.md", "**/LICENSE*"], tags=["payloads", "injection", "bypass", "methodology"], license="MIT", description="PayloadsAllTheThings — payloads, bypass techniques, methodology."),
     SourceConfig(name="KeyHacks", url="https://github.com/streaak/keyhacks", source_type=SourceType.GITHUB_REPO, domain="shared", category="secrets", content_type=ContentType.STRATEGIES, branch="master", include_patterns=["**/*.md"], tags=["api-keys", "secrets", "validation"], license="MIT", description="KeyHacks — validate & exploit leaked API keys."),
 ]
@@ -99,7 +100,7 @@ _SHARED_STANDARDS: list[SourceConfig] = [
 _SHARED_ATTACK_TYPES: list[SourceConfig] = [
     SourceConfig(name="AtomicRedTeam", url="https://github.com/redcanaryco/atomic-red-team", source_type=SourceType.GITHUB_REPO, domain="shared", category="methodology", content_type=ContentType.ATTACK_TYPES, priority=1, branch="master", include_patterns=["**/*.md", "**/*.yaml"], exclude_patterns=["**/LICENSE*"], tags=["atomic", "red-team", "mitre", "testing"], license="MIT", description="Atomic Red Team — portable detection tests."),
     SourceConfig(name="AdversaryEmulationLibrary", url="https://github.com/center-for-threat-informed-defense/adversary_emulation_library", source_type=SourceType.GITHUB_REPO, domain="shared", category="methodology", content_type=ContentType.ATTACK_TYPES, branch="master", include_patterns=["**/*.md", "**/*.yaml"], tags=["emulation", "mitre", "apt", "campaigns"], description="MITRE adversary emulation plans."),
-    SourceConfig(name="MITRE-ATTACK-Enterprise", url="https://attack.mitre.org/techniques/enterprise/", source_type=SourceType.WEBSITE, domain="shared", category="attack_framework", content_type=ContentType.ATTACK_TYPES, priority=1, max_pages=500, tags=["mitre", "att&ck", "enterprise", "techniques", "tactics"], description="MITRE ATT&CK Enterprise — complete tactic and technique reference."),
+    SourceConfig(name="MITRE-ATTACK-Enterprise", url="https://attack.mitre.org/techniques/enterprise/", source_type=SourceType.WEBSITE, domain="shared", category="attack_framework", content_type=ContentType.ATTACK_TYPES, priority=1, max_pages=500, tags=["mitre", "att&ck", "enterprise", "techniques", "tactics"], description="MITRE ATT&CK Enterprise — complete tactic and technique reference.", intel_inline_refresh=False),
     SourceConfig(name="PAT-SharedEvasion", url="https://github.com/swisskyrepo/PayloadsAllTheThings", source_type=SourceType.GITHUB_REPO, domain="shared", category="detection_evasion", content_type=ContentType.ATTACK_TYPES, branch="master", clone_id="PayloadsAllTheThings", subdirectory="Methodology and Resources", include_patterns=["**/Evasion.md", "**/Defense Evasion.md"], tags=["payloadsallthethings", "evasion", "defense-evasion", "bypass"], description="Consolidated PayloadsAllTheThings evasion techniques."),
 ]
 

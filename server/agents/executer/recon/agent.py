@@ -62,6 +62,36 @@ _RECON_TARGET_TYPE_SCOPE_MATRIX: dict[str, tuple[str, ...]] = {
 }
 
 
+def _truncate_prompt_tool_description(value: object, limit: int = 140) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def build_recon_callable_tool_guide_for_target_types(
+    target_types: list[str] | None,
+) -> list[dict[str, str]]:
+    normalized = normalize_target_types(target_types)
+    scoped_tools = filter_tools_for_target_types(
+        role="recon",
+        tools=ALL_RECON_TOOLS,
+        target_types=normalized,
+    )
+    guide: list[dict[str, str]] = []
+    for tool in scoped_tools:
+        name = str(getattr(tool, "name", "")).strip()
+        if not name or name in {"run_custom", "run_python"}:
+            continue
+        description = _truncate_prompt_tool_description(getattr(tool, "description", ""))
+        guide.append({
+            "name": name,
+            "description": description,
+        })
+    guide.sort(key=lambda item: item["name"])
+    return guide
+
+
 def build_recon_run_custom_catalog_for_target_types(
     target_types: list[str] | None,
 ) -> dict[str, dict[str, object]]:
@@ -87,6 +117,7 @@ def build_recon_run_custom_catalog_for_target_types(
 
 def build_recon_scoped_prompt(target_types: list[str] | None) -> str:
     run_custom_catalog = build_recon_run_custom_catalog_for_target_types(target_types)
+    callable_tool_guide = build_recon_callable_tool_guide_for_target_types(target_types)
     local_resource_catalog = format_executer_resource_catalog_for_prompt()
     scope_text = ", ".join(str(x).strip() for x in (target_types or []) if str(x).strip())
     scoped_prompt = SYSTEM_PROMPT
@@ -104,6 +135,13 @@ def build_recon_scoped_prompt(target_types: list[str] | None) -> str:
             "For external security CLIs from this catalog, use "
             "run_custom(command=..., args=[...], reason=...). "
             "Treat the catalog as guidance for what tools are appropriate in this scope."
+        )
+    if callable_tool_guide:
+        scoped_prompt = (
+            f"{scoped_prompt}\n\n"
+            "Scoped built-in recon tools for this target type:\n"
+            f"{json.dumps(callable_tool_guide[:20], ensure_ascii=True, indent=2)}\n"
+            "If one of these agent-native tools directly fits the scenario, prefer it before falling back to run_custom."
         )
     scoped_prompt = (
         f"{scoped_prompt}\n\n"
@@ -178,9 +216,8 @@ class ReconExecuterAgent(BaseExecuterAgent):
 
         available_tools = sorted(self._tools.keys())
         normalized_targets = normalize_target_types(self._target_types)
-        run_custom_catalog = sorted(
-            build_recon_run_custom_catalog_for_target_types(self._target_types).keys()
-        )
+        run_custom_catalog = build_recon_run_custom_catalog_for_target_types(self._target_types)
+        callable_tool_guide = build_recon_callable_tool_guide_for_target_types(self._target_types)
         local_resource_catalog = format_executer_resource_catalog_for_prompt()
         max_tool_calls_for_run = _max_tool_calls_per_round_for_message(user_message)
         max_rounds_for_run = (
@@ -194,6 +231,7 @@ class ReconExecuterAgent(BaseExecuterAgent):
             available_tools=available_tools,
             target_types=normalized_targets,
             run_custom_catalog=run_custom_catalog,
+            callable_tool_guide=callable_tool_guide,
             local_resource_catalog=local_resource_catalog,
             max_tool_calls_per_round=max_tool_calls_for_run,
             max_rounds_per_scenario=max_rounds_for_run,
@@ -228,11 +266,38 @@ def build_recon_scenario_packet(
     context_block: str,
     available_tools: list[str],
     target_types: list[str],
-    run_custom_catalog: list[str],
+    run_custom_catalog: dict[str, dict[str, object]] | list[str],
+    callable_tool_guide: list[dict[str, str]] | None = None,
     local_resource_catalog: str = "",
     max_tool_calls_per_round: int,
     max_rounds_per_scenario: int,
 ) -> str:
+    if isinstance(run_custom_catalog, dict):
+        run_custom_catalog_names = sorted(run_custom_catalog.keys())
+        run_custom_catalog_details = json.dumps(
+            run_custom_catalog,
+            ensure_ascii=True,
+            sort_keys=True,
+            indent=2,
+        )
+    else:
+        run_custom_catalog_names = [
+            str(item).strip()
+            for item in run_custom_catalog
+            if str(item).strip()
+        ] if isinstance(run_custom_catalog, list) else []
+        run_custom_catalog_details = (
+            ", ".join(run_custom_catalog_names)
+            if run_custom_catalog_names
+            else "none"
+        )
+
+    callable_tool_guide_block = (
+        json.dumps(callable_tool_guide[:20], ensure_ascii=True, indent=2)
+        if isinstance(callable_tool_guide, list) and callable_tool_guide
+        else "none"
+    )
+
     local_catalog_block = (
         "Preferred local executer resource catalog:\n"
         f"{local_resource_catalog}\n\n"
@@ -256,7 +321,15 @@ def build_recon_scenario_packet(
         "Available callable tools in this run:\n"
         f"{', '.join(available_tools)}\n\n"
         "run_custom catalog security tools for this scope:\n"
-        f"{', '.join(run_custom_catalog) if run_custom_catalog else 'none'}\n\n"
+        f"{', '.join(run_custom_catalog_names) if run_custom_catalog_names else 'none'}\n\n"
+        "Scoped run_custom catalog details:\n"
+        f"{run_custom_catalog_details}\n\n"
+        "Scoped built-in recon tools for this run:\n"
+        f"{callable_tool_guide_block}\n\n"
+        "If a scoped built-in recon tool already matches the objective, prefer that agent-native tool first.\n"
+        "Use run_custom for external CLIs that are appropriate in this scoped catalog.\n\n"
+        "When a suitable external security CLI appears in this scoped catalog, prefer executing it via "
+        "run_custom(command=..., args=[...], reason=...) instead of inventing shell syntax or using a generic substitute.\n\n"
         f"{local_catalog_block}"
         "Scenario + target info:\n"
         f"{scenario_and_target}"

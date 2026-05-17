@@ -17,14 +17,10 @@ _RECON_MODULES_BY_SCOPE: dict[str, tuple[str, ...]] = {
         "all.run_python",
     ),
     "api": (
+        "api.api_service_recon",
         "api.api_endpoint_discovery",
         "api.api_passive_enum",
         "api.api_response_analyzer",
-        "api.graphql_recon",
-        "api.grpc_recon",
-        "api.oauth_oidc_check",
-        "api.soap_wsdl_recon",
-        "api.zap_daemon_scan",
     ),
     "cloud": (
         "cloud.cloud_misconfig_scan",
@@ -37,9 +33,7 @@ _RECON_MODULES_BY_SCOPE: dict[str, tuple[str, ...]] = {
         "container.container_runtime_audit",
         "container.container_startup_config_audit",
     ),
-    "infra": (
-        "infra.binary_analysis",
-    ),
+    "infra": (),
     "iot": (
         "iot.firmware_analysis",
         "iot.iot_protocol_scan",
@@ -53,11 +47,7 @@ _RECON_MODULES_BY_SCOPE: dict[str, tuple[str, ...]] = {
         "network.arp_scan",
         "network.dns_recon",
         "network.ike_scan",
-        "network.name_service_surface",
-        "network.remote_access_recon",
-        "network.route_topology",
         "network.traffic_analyze",
-        "network.voip_recon",
         "network.wireless_scan",
         "network.zgrab2_enrich",
     ),
@@ -70,11 +60,7 @@ _RECON_MODULES_BY_SCOPE: dict[str, tuple[str, ...]] = {
         "repository.secret_scan",
         "repository.sensitive_files_scan",
     ),
-    "server": (
-        "server.db_enum_and_audit",
-        "server.smb_deep_enum",
-        "server.snmp_fast_enum",
-    ),
+    "server": (),
     "web": (
         *WEB_ALIAS_MODULES,
         *WEB_SMART_PYTHON_MODULES,
@@ -87,14 +73,10 @@ _RECON_TOOL_SCOPE_INDEX: dict[str, tuple[str, ...]] = {
         "run_python",
     ),
     "api": (
+        "api_service_recon",
         "api_endpoint_discovery",
         "api_passive_enum",
         "api_response_analyzer",
-        "graphql_recon",
-        "grpc_recon",
-        "oauth_oidc_check",
-        "soap_wsdl_recon",
-        "zap_daemon_scan",
     ),
     "cloud": (
         "cloud_misconfig_scan",
@@ -107,9 +89,7 @@ _RECON_TOOL_SCOPE_INDEX: dict[str, tuple[str, ...]] = {
         "container_runtime_audit",
         "container_startup_config_audit",
     ),
-    "infra": (
-        "binary_analysis",
-    ),
+    "infra": (),
     "iot": (
         "firmware_analysis",
         "iot_protocol_scan",
@@ -123,11 +103,7 @@ _RECON_TOOL_SCOPE_INDEX: dict[str, tuple[str, ...]] = {
         "arp_scan",
         "dns_recon",
         "ike_scan",
-        "name_service_surface",
-        "remote_access_recon",
-        "route_topology",
         "traffic_analyze",
-        "voip_recon",
         "wireless_scan",
         "zgrab2_enrich",
     ),
@@ -140,11 +116,7 @@ _RECON_TOOL_SCOPE_INDEX: dict[str, tuple[str, ...]] = {
         "secret_scan",
         "sensitive_files_scan",
     ),
-    "server": (
-        "db_enum_and_audit",
-        "smb_deep_enum",
-        "snmp_fast_enum",
-    ),
+    "server": (),
     "web": (
         *WEB_ALIAS_BACKED_TOOL_NAMES,
         *WEB_SMART_PYTHON_TOOL_NAMES,
@@ -166,24 +138,9 @@ _RECON_TARGET_TYPES_BY_SCOPE: dict[str, set[str]] = {
 }
 
 _RECON_TARGET_TYPE_OVERRIDES: dict[str, set[str]] = {
-    "binary_analysis": {"desktop"},
     "container_registry_enum": {"cloud", "container"},
-    "db_enum_and_audit": {
-        "web_app",
-        "api",
-        "network",
-        "infra",
-        "linux_server",
-        "mobile",
-        "desktop",
-        "cloud",
-        "container",
-        "repository",
-        "iot",
-    },
     "dns_recon": {"network", "infra", "web_app", "api"},
     "secret_scan": {"repository", "cloud"},
-    "ssl_tls_analysis": {"web_app", "api", "network"},
 }
 
 

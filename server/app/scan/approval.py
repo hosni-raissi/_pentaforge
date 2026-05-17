@@ -18,6 +18,19 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+
+def _approval_prefix_for_role(role: str) -> str:
+    normalized = str(role or "").strip().lower().replace("-", "_")
+    if "intel" in normalized:
+        return "Intel"
+    if "planner" in normalized:
+        return "Planner"
+    if "information_gathering" in normalized or "information gathering" in normalized:
+        return "Information Gathering"
+    if "analyzer" in normalized or "verify" in normalized or "retest" in normalized:
+        return "Analyzer"
+    return "Executer"
+
 class ApprovalGateService:
     """Manages manual approval gates for tools, plans, and passwords."""
 
@@ -46,8 +59,10 @@ class ApprovalGateService:
         call_id: str,
     ) -> bool:
         approval_mode = self._persistence.get_approval_mode(project_id)
+        require_manual = bool(args.get("_require_manual_approval")) if isinstance(args, dict) else False
+        display_prefix = _approval_prefix_for_role(role)
         
-        if approval_mode == "auto":
+        if approval_mode == "auto" and not require_manual:
             logger.info("tool_auto_approved", project_id=project_id, tool_name=tool_name)
             return True
 
@@ -80,6 +95,7 @@ class ApprovalGateService:
                 "role": role,
                 "tool_name": tool_name,
                 "call_id": call_id,
+                "args": args,
                 "safety_profile": safety_profile,
             }
             self._persistence.set_run_state(project_id, run_state)
@@ -89,7 +105,7 @@ class ApprovalGateService:
             event="executer_tool_waiting_approval",
             scan_id=scan_id,
             level="warn",
-            message=f"Executer [waiting approval] {role} requested tool '{tool_name}'.",
+            message=f"{display_prefix} [waiting approval] {role} requested tool '{tool_name}'.",
             data={
                 "stage": "executer",
                 "kind": "waiting_tool_approval",
@@ -132,7 +148,7 @@ class ApprovalGateService:
                         project_id,
                         event="executer_tool_approval_waiting",
                         scan_id=scan_id,
-                        message=f"Executer [approval waiting] {role} tool '{tool_name}' ({elapsed}s/{TIMEOUT}s)",
+                        message=f"{display_prefix} [approval waiting] {role} tool '{tool_name}' ({elapsed}s/{TIMEOUT}s)",
                         data={
                             "stage": "executer",
                             "kind": "tool_approval_waiting",
@@ -162,6 +178,7 @@ class ApprovalGateService:
                     "role": next_pending.role,
                     "tool_name": next_pending.tool_name,
                     "call_id": next_pending.call_id,
+                    "args": next_pending.args,
                 }
             else:
                 run_state["awaiting_tool_approval"] = False

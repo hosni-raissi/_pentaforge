@@ -1,41 +1,27 @@
-# PentaForge RAG Knowledge Base — Dependencies
-# Install: pip install -r requirements.txt
+# PentaForge server dependencies
+# Install: python -m pip install -r server/requirements.txt
 
-# Core
-pydantic>=2.5,<3.0
-pydantic-settings>=2.1,<3.0
-structlog>=23.1,<25.0
-
-# Async HTTP
-httpx>=0.25,<1.0
-mistralai>=1.2,<2.0
-dnspython>=2.6,<3.0
-
-# Embedding (local, no API key needed)
-sentence-transformers>=2.2,<4.0
-
-# Vector DB (Qdrant)
-qdrant-client>=1.9,<2.0
-
-
-# Cache (Redis)
-redis>=5.0,<6.0
-langgraph
-# HTML parsing (website/gitbook extractors)
 beautifulsoup4>=4.12,<5.0
-fastapi>=0.115,<1.0
-uvicorn[standard]>=0.30,<1.0
-
-# Optional: OpenAI embeddings (if KNOWLEDGE_EMBEDDING_PROVIDER=openai)
-# openai>=1.6,<2.0
-# Optional: Nomic MegaBlocks acceleration (requires torch/toolchain)
-# git+https://github.com/nomic-ai/megablocks.git
-#==========================llm proxy====================================
 cryptography
-requests
-bs4 
-packaging
+dnspython>=2.6,<3.0
+einops
+fastapi>=0.115,<1.0
+httpx>=0.25,<1.0
 jsbeautifier
-requests_file
+langgraph
+markdown
+mistralai>=1.2,<2.0
+openai
+packaging
+pydantic-settings>=2.1,<3.0
+pydantic>=2.5,<3.0
 python-owasp-zap-v2.4>=0.0.20
+grpcio>=1.74,<2.0
+qdrant-client==1.17.1
+redis>=5.0,<6.0
+requests
+requests_file
+sentence-transformers>=2.2,<4.0
+structlog>=23.1,<25.0
+uvicorn[standard]>=0.30,<1.0
 zaproxy

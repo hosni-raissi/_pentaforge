@@ -4037,6 +4037,13 @@ def _is_user_managed_target_info_profile(profile: dict[str, Any]) -> bool:
     return generated_from in {"ui", "ui_settings", "user", "manual"}
 
 
+def _canonical_target_info_blocks(profile: dict[str, Any]) -> str:
+    blocks = profile.get("blocks", []) if isinstance(profile, dict) else []
+    if not isinstance(blocks, list):
+        blocks = []
+    return json.dumps(blocks, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
 
 def _should_refresh_target_info_profile_from_defaults(
     stored_profile: dict[str, Any],
@@ -4052,17 +4059,7 @@ def _should_refresh_target_info_profile_from_defaults(
     if not isinstance(built_in_blocks, list) or not built_in_blocks:
         return False
 
-    stored_names = [
-        str(item.get("block_name") or item.get("name") or "").strip()
-        for item in stored_blocks
-        if isinstance(item, dict)
-    ]
-    built_in_names = [
-        str(item.get("block_name") or item.get("name") or "").strip()
-        for item in built_in_blocks
-        if isinstance(item, dict)
-    ]
-    return stored_names[: len(built_in_names)] != built_in_names
+    return _canonical_target_info_blocks(stored_profile) != _canonical_target_info_blocks(built_in_profile)
 
 
 

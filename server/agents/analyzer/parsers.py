@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from server.agents.tool_output_parsers import summarize_tool_output
+
 _CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 _ROUTE_RE = re.compile(r"(/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,160})")
 _STATUS_RE = re.compile(r"\b(?:status|code|http(?:/1\.[01])?)\s*[:=]?\s*(\d{3})\b", re.IGNORECASE)
@@ -85,8 +87,9 @@ def normalize_tool_output(tool_name: str, raw_result: Any) -> dict[str, Any]:
     text = raw_result if isinstance(raw_result, str) else json.dumps(raw_result, ensure_ascii=True)
     parsed_json = _safe_json_loads(text)
     tool = str(tool_name or "").strip().lower()
+    structured = summarize_tool_output(parsed_json if parsed_json is not None else text)
 
-    parser_name = "plain_text"
+    parser_name = str(structured.get("output_parser", "") or "plain_text")
     snippets = _first_lines(text)
     routes = _extract_routes(text)
     status_codes = _extract_status_codes(text)
@@ -100,6 +103,8 @@ def normalize_tool_output(tool_name: str, raw_result: Any) -> dict[str, Any]:
         routes = json_routes or routes
         status_codes = json_codes or status_codes
         cves = json_cves or cves
+        if parser_name == "plain_text":
+            parser_name = "json"
 
     if tool == "http_header_analysis":
         parser_name = "http_headers"
@@ -113,6 +118,16 @@ def normalize_tool_output(tool_name: str, raw_result: Any) -> dict[str, Any]:
         parser_name = "sqlmap"
     elif tool == "nmap" or "<nmaprun" in text.lower():
         parser_name = "nmap"
+
+    observations = structured.get("observations", [])
+    if isinstance(observations, list) and observations:
+        snippets = [str(item) for item in observations[:6]] or snippets
+    structured_codes = structured.get("status_codes", [])
+    if isinstance(structured_codes, list) and structured_codes:
+        status_codes = list(dict.fromkeys([*status_codes, *[int(code) for code in structured_codes if isinstance(code, int)]]))[:12]
+    structured_urls = structured.get("urls", [])
+    if isinstance(structured_urls, list) and structured_urls:
+        urls = sorted(set(urls + [str(item) for item in structured_urls if str(item).strip()]))[:20]
 
     evidence_markers: list[str] = []
     lowered = text.lower()
@@ -142,6 +157,7 @@ def normalize_tool_output(tool_name: str, raw_result: Any) -> dict[str, Any]:
         "status_codes": status_codes[:12],
         "urls": urls[:20],
         "cves": cves[:20],
+        "observations": observations[:8] if isinstance(observations, list) else [],
         "evidence_markers": evidence_markers[:16],
         "raw_excerpt": (text[:1200] + ("... [truncated]" if len(text) > 1200 else "")),
     }
@@ -162,6 +178,12 @@ def summarize_normalized_outputs(entries: list[dict[str, Any]]) -> str:
         codes = entry.get("status_codes", [])
         if isinstance(codes, list) and codes:
             parts.append(f"status={','.join(str(code) for code in codes[:5])}")
+        observations = entry.get("observations", [])
+        if isinstance(observations, list) and observations:
+            parts.append(
+                "observations="
+                + " || ".join(str(item) for item in observations[:3])
+            )
         markers = entry.get("evidence_markers", [])
         if isinstance(markers, list) and markers:
             parts.append(f"markers={','.join(str(marker) for marker in markers[:5])}")

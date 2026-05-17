@@ -8,11 +8,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from server.agents.executer.recon.tools.all.run_custom import run_custom
+from server.agents.tools.run_custom import run_custom
 
 _WORKDIR = Path(__file__).resolve().parents[6]
 _MAX_TIMEOUT = 300
-_WEB_WORDLIST_DIR = _WORKDIR / "server" / "share" / "wordlists" / "web"
+_WEB_WORDLIST_DIR = Path("wordlists/web")
 
 
 def _safe_timeout(value: int, default: int) -> tuple[int, list[str]]:

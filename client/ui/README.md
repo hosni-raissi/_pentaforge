@@ -20,7 +20,7 @@ Desktop UI built with React + Vite (frontend) and Tauri 2 (desktop shell).
 From repo root:
 
 ```bash
-python -m pip install -r server/requirements-api.txt
+python -m pip install -r server/requirements.txt
 python -m uvicorn server.api.app:app --host 127.0.0.1 --port 8000
 ```
 
@@ -33,3 +33,26 @@ Then run the desktop UI:
 ```bash
 npm run dev
 ```
+
+## Run Desktop UI With Docker Backend
+
+From repo root:
+
+```bash
+bash scripts/run-desktop-with-docker.sh
+```
+
+This starts the Docker backend stack, waits for `http://127.0.0.1:8000/api/health`, and then launches the Tauri desktop app.
+
+If you need to rebuild Docker images first:
+
+```bash
+bash scripts/run-desktop-with-docker.sh --build
+```
+
+The desktop app defaults to:
+
+- `serverUrl = http://localhost`
+- `serverPort = 8000`
+
+So it talks to the Dockerized backend automatically unless you changed the saved UI config.

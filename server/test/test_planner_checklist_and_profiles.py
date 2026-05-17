@@ -20,11 +20,17 @@ from server.app.scan.utils import (
     _scenario_missing_prerequisites,
 )
 from server.agents.executer.recon.tools import ALL_RECON_TOOLS
+from server.agents.executer.run_custom_guard import current_execution_context
 from server.agents.planner.agent import PlannerAgent
 from server.core.llm import LLMResponse
 from server.core.tool import tool
-from server.nodes.information_gathering.node import InformationGatheringNode
+from server.app._full_orchestrator_impl import _build_info_gathering_report_entry
+from server.app._full_orchestrator_impl import _should_refresh_target_info_profile_from_defaults as _orchestrator_profile_should_refresh
+from server.app.scan.utils import _should_refresh_target_info_profile_from_defaults as _scan_utils_profile_should_refresh
+from server.nodes.information_gathering.node import InformationGatheringNode, _summarize_tool_result
+from server.nodes.system_memory import SystemMemoryNode
 from server.nodes.system_memory.schema import Brain
+from unittest.mock import AsyncMock, patch
 
 
 def test_target_info_profiles_only_reference_registered_recon_tools() -> None:
@@ -75,6 +81,9 @@ def test_information_gathering_executes_object_style_builtin_tools() -> None:
 
     result = asyncio.run(
         node._execute_block(
+            project_id="proj-1",
+            scan_id="scan-1",
+            project_cache_dir="/tmp/pf-test",
             prepared_block={
                 "id": "fingerprinting",
                 "status": "keep",
@@ -95,6 +104,706 @@ def test_information_gathering_executes_object_style_builtin_tools() -> None:
     assert recorded == [{"target": "https://example.com", "args": ["-follow-redirects"], "timeout": 120}]
     assert result[0]["tool"] == "http_probe"
     assert result[0]["status"] == "completed"
+
+
+def test_information_gathering_uses_profile_args_and_target_placeholders() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class FakeTool:
+        parameters = {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "timeout": {"type": "integer"},
+                "threads": {"type": "integer"},
+                "max_urls": {"type": "integer"},
+            },
+        }
+
+        async def execute(self, **kwargs):
+            recorded.append(kwargs)
+            return "ok"
+
+    node = InformationGatheringNode()
+
+    result = asyncio.run(
+        node._execute_block(
+            project_id="proj-1",
+            scan_id="scan-1",
+            project_cache_dir="/tmp/pf-test",
+            prepared_block={
+                "id": "passive_context",
+                "status": "keep",
+                "tools": [
+                    {
+                        "name": "passive_web_recon",
+                        "args": [
+                            "target",
+                            "trgt",
+                            "timeout",
+                            40,
+                            "threads",
+                            "4",
+                            "--max-urls",
+                            150,
+                            "json-only",
+                        ],
+                    }
+                ],
+            },
+            memory={},
+            target="https://scanme.nmap.org/api/data",
+            target_type="web_app",
+            info="",
+            tool_map={"passive_web_recon": FakeTool()},
+            tool_arg_builder=lambda tool_name, target, target_type, info, memory: (
+                {"target": "builder-should-not-run"},
+                None,
+            ),
+        )
+    )
+
+    assert recorded == [{
+        "target": "scanme.nmap.org",
+        "timeout": 40,
+        "threads": 4,
+        "max_urls": 150,
+    }]
+    assert result[0]["tool"] == "passive_web_recon"
+    assert result[0]["status"] == "completed"
+
+
+def test_information_gathering_resolves_full_target_for_profile_run_custom() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class FakeTool:
+        async def execute(self, **kwargs):
+            recorded.append(kwargs)
+            return "ok"
+
+    node = InformationGatheringNode()
+
+    result = asyncio.run(
+        node._execute_block(
+            project_id="proj-1",
+            scan_id="scan-1",
+            project_cache_dir="/tmp/pf-test",
+            prepared_block={
+                "id": "fingerprinting",
+                "status": "keep",
+                "tools": [
+                    {
+                        "name": "run_custom",
+                        "args": ["wafw00f", "-a", "full_trgt"],
+                    }
+                ],
+            },
+            memory={},
+            target="scanme.nmap.org",
+            target_type="web_app",
+            info="",
+            tool_map={"run_custom": FakeTool()},
+            tool_arg_builder=lambda tool_name, target, target_type, info, memory: (
+                None,
+                "builder-should-not-run",
+            ),
+        )
+    )
+
+    assert recorded == [{
+        "command": "wafw00f",
+        "args": ["-a", "https://scanme.nmap.org"],
+        "reason": "Profile-defined information gathering step for wafw00f against scanme.nmap.org.",
+    }]
+    assert result[0]["tool"] == "run_custom"
+    assert result[0]["status"] == "completed"
+
+
+def test_information_gathering_normalizes_wappalyzer_input_to_full_target() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class FakeTool:
+        async def execute(self, **kwargs):
+            recorded.append(kwargs)
+            return "ok"
+
+    node = InformationGatheringNode()
+
+    result = asyncio.run(
+        node._execute_block(
+            project_id="proj-1",
+            scan_id="scan-1",
+            project_cache_dir="/tmp/pf-test",
+            prepared_block={
+                "id": "fingerprinting",
+                "status": "keep",
+                "tools": [
+                    {
+                        "name": "run_custom",
+                        "args": ["wappalyzer", "-i", "trgt", "-t", "4", "--scan-type", "full"],
+                    }
+                ],
+            },
+            memory={},
+            target="scanme.nmap.org",
+            target_type="web_app",
+            info="",
+            tool_map={"run_custom": FakeTool()},
+            tool_arg_builder=lambda tool_name, target, target_type, info, memory: (
+                None,
+                "builder-should-not-run",
+            ),
+        )
+    )
+
+    assert recorded == [{
+        "command": "wappalyzer",
+        "args": ["-i", "https://scanme.nmap.org", "-t", "4", "--scan-type", "full"],
+        "reason": "Profile-defined information gathering step for wappalyzer against scanme.nmap.org.",
+    }]
+    assert result[0]["tool"] == "run_custom"
+    assert result[0]["status"] == "completed"
+
+
+def test_information_gathering_summarizes_run_custom_failure_from_actual_output() -> None:
+    class FakeTool:
+        async def execute(self, **kwargs):
+            return {
+                "success": False,
+                "command": "httpx",
+                "full_command": "httpx -u pentest-ground.com -silent -json",
+                "stderr": (
+                    "runtime/cgo: pthread_create failed: Resource temporarily unavailable\n"
+                    "SIGABRT: abort\n"
+                ),
+                "return_code": 2,
+                "error": "Exited with code 2",
+            }
+
+    node = InformationGatheringNode()
+
+    result = asyncio.run(
+        node._execute_block(
+            project_id="proj-1",
+            scan_id="scan-1",
+            project_cache_dir="/tmp/pf-test",
+            prepared_block={
+                "id": "fingerprinting",
+                "status": "keep",
+                "tools": [
+                    {
+                        "name": "run_custom",
+                        "args": ["httpx", "-u", "trgt", "-silent", "-json"],
+                    }
+                ],
+            },
+            memory={},
+            target="pentest-ground.com",
+            target_type="web_app",
+            info="",
+            tool_map={"run_custom": FakeTool()},
+            tool_arg_builder=lambda tool_name, target, target_type, info, memory: (
+                None,
+                "builder-should-not-run",
+            ),
+        )
+    )
+
+    assert result[0]["tool"] == "run_custom"
+    assert result[0]["status"] == "error"
+    assert result[0]["summary"] == (
+        "Custom command `httpx -u pentest-ground.com -silent -json` failed: "
+        "Process crashed with pthread_create resource error and SIGABRT."
+    )
+
+
+def test_information_gathering_summarizes_json_string_run_custom_failure() -> None:
+    class FakeTool:
+        async def execute(self, **kwargs):
+            return json.dumps(
+                {
+                    "success": False,
+                    "command": "gau",
+                    "args": ["pentest-ground.com", "|", "sort", "-u"],
+                    "reason": "Profile-defined information gathering step for gau against pentest-ground.com.",
+                    "full_command": "gau pentest-ground.com '|' sort -u",
+                    "error": "Validation error: Dangerous shell token '|' detected in arg: '|'",
+                }
+            )
+
+    node = InformationGatheringNode()
+
+    result = asyncio.run(
+        node._execute_block(
+            project_id="proj-1",
+            scan_id="scan-1",
+            project_cache_dir="/tmp/pf-test",
+            prepared_block={
+                "id": "surface_mapping",
+                "status": "keep",
+                "tools": [
+                    {
+                        "name": "run_custom",
+                        "args": ["gau", "trgt", "|", "sort", "-u"],
+                    }
+                ],
+            },
+            memory={},
+            target="pentest-ground.com",
+            target_type="web_app",
+            info="",
+            tool_map={"run_custom": FakeTool()},
+            tool_arg_builder=lambda tool_name, target, target_type, info, memory: (
+                None,
+                "builder-should-not-run",
+            ),
+        )
+    )
+
+    assert result[0]["tool"] == "run_custom"
+    assert result[0]["status"] == "error"
+    assert result[0]["summary"] == (
+        "Validation error: Dangerous shell token '|' detected in arg: '|'"
+    )
+
+
+def test_information_gathering_summarizes_sandbox_executor_blocker() -> None:
+    summary = _summarize_tool_result(
+        "run_custom",
+        {
+            "success": False,
+            "command": "curl http://scanme.nmap.org",
+            "return_code": -1,
+            "error": "Sandbox executor unavailable: run_custom may only execute through the tool sandbox. Configure SANDBOX_EXECUTOR_URL for backend-side callers.",
+        },
+    )
+
+    assert "Execution environment blocked" in summary
+    assert "sandbox executor was unavailable" in summary
+
+
+def test_information_gathering_does_not_render_literal_none_for_failed_command() -> None:
+    summary = _summarize_tool_result(
+        "run_custom",
+        {
+            "success": False,
+            "command": "wafw00f",
+            "full_command": "wafw00f -a http://scanme.nmap.org",
+            "stderr": None,
+            "stdout": "",
+            "return_code": 1,
+            "error": None,
+        },
+    )
+
+    assert summary == "Custom command `wafw00f -a http://scanme.nmap.org` failed: Exited with code 1."
+
+
+def test_information_gathering_sets_shared_execution_context_for_tools() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class FakeTool:
+        async def execute(self, **kwargs):
+            recorded.append({
+                "kwargs": kwargs,
+                "context": current_execution_context(),
+            })
+            return "ok"
+
+    node = InformationGatheringNode()
+
+    result = asyncio.run(
+        node._execute_block(
+            project_id="proj-ctx",
+            scan_id="scan-ctx",
+            project_cache_dir="/tmp/pf-info-gathering",
+            prepared_block={
+                "id": "fingerprinting",
+                "status": "keep",
+                "tools": [{
+                    "name": "run_custom",
+                    "command": "curl",
+                    "args": ["-I", "full_trgt"],
+                    "reason": "check headers",
+                }],
+            },
+            memory={},
+            target="http://scanme.nmap.org",
+            target_type="web_app",
+            info="",
+            tool_map={"run_custom": FakeTool()},
+            tool_arg_builder=lambda tool_name, target, target_type, info, memory: (None, "builder-should-not-run"),
+        )
+    )
+
+    assert result[0]["status"] == "completed"
+    assert recorded == [{
+        "kwargs": {"command": "curl", "args": ["-I", "http://scanme.nmap.org"], "reason": "check headers"},
+        "context": {
+            "project_id": "proj-ctx",
+            "project_cache_dir": "/tmp/pf-info-gathering",
+            "scan_id": "scan-ctx",
+            "role": "information_gathering",
+            "tool": "run_custom",
+            "target_url": "http://scanme.nmap.org",
+        },
+    }]
+
+
+def test_system_memory_sanitize_preserves_fallback_tool_result_summary() -> None:
+    helper = SystemMemoryNode()
+    fallback = {
+        "id": "fingerprinting",
+        "name": "Fingerprinting",
+        "goal": "Identify live web behavior, headers, and technology fingerprints.",
+        "interaction": "active_safe",
+        "planned_tools": ["run_custom"],
+        "selection_rationale": "",
+        "skipped_tools": [],
+        "status": "partial",
+        "objective": "Identify live web behavior, headers, and technology fingerprints.",
+        "summary": "Fingerprinting produced mixed results.",
+        "confirmed_facts": [],
+        "security_signals": [],
+        "unknowns": [],
+        "why_it_matters": "",
+        "next_actions": [],
+        "artifacts": [],
+        "results": [
+            {
+                "tool": "run_custom",
+                "status": "error",
+                "summary": (
+                    "Custom command `httpx -u pentest-ground.com -silent -json` failed: "
+                    "Process crashed with pthread_create resource error and SIGABRT."
+                ),
+                "command": "httpx -u pentest-ground.com -silent -json",
+                "artifacts": [],
+                "structured": {},
+            }
+        ],
+    }
+    organized = {
+        **fallback,
+        "results": [
+            {
+                "tool": "run_custom",
+                "status": "failed",
+                "summary": "CLI error: invalid option '-u'",
+                "command": "httpx -u pentest-ground.com -silent -json",
+                "artifacts": [],
+                "structured": {},
+            }
+        ],
+    }
+
+    cleaned = helper.llm._sanitize_organized_block(organized, fallback)
+
+    assert cleaned["results"][0]["summary"] == fallback["results"][0]["summary"]
+    assert cleaned["results"][0]["command"] == "httpx -u pentest-ground.com -silent -json"
+
+
+def test_system_memory_sanitize_matches_results_by_command_not_position() -> None:
+    helper = SystemMemoryNode()
+    fallback = {
+        "id": "fingerprinting",
+        "name": "Fingerprinting",
+        "goal": "Identify live web behavior, headers, and technology fingerprints.",
+        "interaction": "active_safe",
+        "planned_tools": ["run_custom"],
+        "selection_rationale": "",
+        "skipped_tools": [],
+        "status": "partial",
+        "objective": "Identify live web behavior, headers, and technology fingerprints.",
+        "summary": "Fingerprinting produced mixed results.",
+        "confirmed_facts": [],
+        "security_signals": [],
+        "unknowns": [],
+        "why_it_matters": "",
+        "next_actions": [],
+        "artifacts": [],
+        "results": [
+            {
+                "tool": "run_custom",
+                "status": "error",
+                "summary": "Custom command `wappalyzer -i http://scanme.nmap.org -t 4 --scan-type full` failed: Process failed with a Python traceback.",
+                "command": "wappalyzer -i http://scanme.nmap.org -t 4 --scan-type full",
+                "artifacts": [],
+                "structured": {},
+            },
+            {
+                "tool": "run_custom",
+                "status": "completed",
+                "summary": "Custom command `wafw00f -a http://scanme.nmap.org` completed successfully.",
+                "command": "wafw00f -a http://scanme.nmap.org",
+                "artifacts": [],
+                "structured": {},
+            },
+            {
+                "tool": "run_custom",
+                "status": "completed",
+                "summary": "Custom command `curl --connect-timeout 10 -m 30 -s -I -L http://scanme.nmap.org` completed successfully.",
+                "command": "curl --connect-timeout 10 -m 30 -s -I -L http://scanme.nmap.org",
+                "artifacts": [],
+                "structured": {},
+            },
+        ],
+    }
+    organized = {
+        **fallback,
+        "results": [
+            {
+                "tool": "run_custom",
+                "status": "completed",
+                "summary": "Custom command `curl --connect-timeout 10 -m 30 -s -I -L http://scanme.nmap.org` completed successfully.",
+                "command": "curl --connect-timeout 10 -m 30 -s -I -L http://scanme.nmap.org",
+                "artifacts": [],
+                "structured": {},
+            },
+            {
+                "tool": "run_custom",
+                "status": "error",
+                "summary": "Custom command `wappalyzer -i http://scanme.nmap.org -t 4 --scan-type full` failed: Process failed with a Python traceback.",
+                "command": "wappalyzer -i http://scanme.nmap.org -t 4 --scan-type full",
+                "artifacts": [],
+                "structured": {},
+            },
+            {
+                "tool": "run_custom",
+                "status": "completed",
+                "summary": "Custom command `wafw00f -a http://scanme.nmap.org` completed successfully.",
+                "command": "wafw00f -a http://scanme.nmap.org",
+                "artifacts": [],
+                "structured": {},
+            },
+        ],
+    }
+
+    cleaned = helper.llm._sanitize_organized_block(organized, fallback)
+
+    assert cleaned["results"][0]["command"] == "curl --connect-timeout 10 -m 30 -s -I -L http://scanme.nmap.org"
+    assert cleaned["results"][0]["status"] == "completed"
+    assert cleaned["results"][0]["summary"] == "Custom command `curl --connect-timeout 10 -m 30 -s -I -L http://scanme.nmap.org` completed successfully."
+    assert cleaned["results"][1]["command"] == "wappalyzer -i http://scanme.nmap.org -t 4 --scan-type full"
+    assert cleaned["results"][1]["status"] == "error"
+
+
+def test_information_gathering_preserves_static_tool_objects_and_block_metadata() -> None:
+    node = InformationGatheringNode()
+    original_block = {
+        "id": "fingerprinting",
+        "block_name": "Fingerprinting",
+        "goal": "Identify live web behavior, headers, and technology fingerprints with low-noise wrappers.",
+        "interaction": "active_safe",
+        "tools": [
+            {
+                "name": "run_custom",
+                "args": ["wappalyzer", "-i", "trgt", "-t", "4", "--scan-type", "full"],
+            },
+            {
+                "name": "run_custom",
+                "args": ["wafw00f", "-a", "full_trgt"],
+            },
+        ],
+    }
+
+    prepared = node._normalize_prepared_block(
+        original_block=original_block,
+        payload_block={
+            "name": "Changed Name",
+            "goal": "Changed goal",
+            "interaction": "passive",
+            "tools": ["run_custom"],
+            "rationale": "Keep the static fingerprinting commands as-is.",
+        },
+        available_tools=["run_custom", "passive_web_recon"],
+    )
+
+    assert prepared["block_name"] == original_block["block_name"]
+    assert prepared["goal"] == original_block["goal"]
+    assert prepared["interaction"] == original_block["interaction"]
+    assert prepared["tools"] == original_block["tools"]
+
+
+def test_info_gathering_report_entry_includes_command_status_details() -> None:
+    entry = _build_info_gathering_report_entry(
+        scan_id="scan-1",
+        payload={
+            "index": 4,
+            "total": 4,
+            "name": "Trust And Auth",
+            "goal": "Check for trust-boundary and session-handling exposure using safe wrappers.",
+            "status": "completed",
+            "summary": "CORS check failed but session sampling succeeded.",
+            "confirmed_facts": [
+                "Custom command `python3 server/tools/Corsy/corsy.py -u https://pentest-ground.com:5013` failed.",
+                "Session analysis collected 20 token samples.",
+            ],
+            "results": [
+                {
+                    "tool": "run_custom",
+                    "status": "error",
+                    "command": "python3 server/tools/Corsy/corsy.py -u https://pentest-ground.com:5013",
+                    "summary": "Connection refused",
+                },
+                {
+                    "tool": "session_token_analysis",
+                    "status": "completed",
+                    "command": "session_token_analysis(target=\"https://pentest-ground.com:5013\")",
+                    "summary": "Collected 20 token samples.",
+                },
+            ],
+        },
+    )
+
+    report = entry["scenario_report"][0]
+    assert report["tool_results"] == [
+        {
+            "tool": "run_custom",
+            "command": "python3 server/tools/Corsy/corsy.py -u https://pentest-ground.com:5013",
+            "status": "failed",
+            "raw_status": "error",
+            "summary": "Connection refused",
+        },
+        {
+            "tool": "session_token_analysis",
+            "command": "session_token_analysis(target=\"https://pentest-ground.com:5013\")",
+            "status": "passed",
+            "raw_status": "completed",
+            "summary": "Collected 20 token samples.",
+        },
+    ]
+    assert "## Full Tool History" in entry["markdown"]
+    assert "## What We Find" in entry["markdown"]
+    assert "## What We Should Do" in entry["markdown"]
+    assert "## Unknowns / Gaps" in entry["markdown"]
+    assert "`failed` `python3 server/tools/Corsy/corsy.py -u https://pentest-ground.com:5013`" in entry["markdown"]
+    assert "`passed` `session_token_analysis(target=\"https://pentest-ground.com:5013\")`" in entry["markdown"]
+
+
+def test_info_gathering_report_entry_surfaces_concrete_passive_recon_artifacts() -> None:
+    entry = _build_info_gathering_report_entry(
+        scan_id="scan-2",
+        payload={
+            "index": 1,
+            "total": 4,
+            "name": "Passive Context",
+            "goal": "Collect passive hostname, DNS, and archive context for the target domain before active probing.",
+            "status": "partial",
+            "summary": "Passive recon found subdomains and historical URLs.",
+            "confirmed_facts": [
+                "2 subdomains observed via crt.sh",
+            ],
+            "results": [
+                {
+                    "tool": "passive_web_recon",
+                    "status": "partial",
+                    "command": "passive_web_recon(pentest-ground.com, timeout=40, threads=4, max_urls=150)",
+                    "summary": "2 subdomains from crt.sh; Wayback returned historical URLs.",
+                    "structured": {
+                        "tool": "passive_web_recon",
+                        "normalized_domain": "pentest-ground.com",
+                        "subdomains": ["api.pentest-ground.com", "dev.pentest-ground.com"],
+                        "historical_urls": [
+                            "https://pentest-ground.com/admin",
+                            "https://pentest-ground.com/debug",
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+
+    markdown = entry["markdown"]
+    assert "Observed subdomains: api.pentest-ground.com, dev.pentest-ground.com" in markdown
+    assert "Historical URLs: https://pentest-ground.com/admin, https://pentest-ground.com/debug" in markdown
+
+
+def test_target_info_profile_refresh_detects_block_content_changes() -> None:
+    stored_profile = {
+        "generated_from": "database",
+        "blocks": [
+            {
+                "id": "fingerprinting",
+                "block_name": "Fingerprinting",
+                "tools": [
+                    {"name": "run_custom", "args": ["wappalyzer", "-u", "full_trgt"]},
+                ],
+            }
+        ],
+    }
+    built_in_profile = {
+        "generated_from": "static_target_info_profile",
+        "blocks": [
+            {
+                "id": "fingerprinting",
+                "block_name": "Fingerprinting",
+                "tools": [
+                    {"name": "run_custom", "args": ["wappalyzer", "-i", "trgt", "-t", "4", "--scan-type", "full"]},
+                ],
+            }
+        ],
+    }
+
+    assert _orchestrator_profile_should_refresh(stored_profile, built_in_profile) is True
+    assert _scan_utils_profile_should_refresh(stored_profile, built_in_profile) is True
+
+
+def test_information_gathering_forces_keep_for_web_fingerprinting_block() -> None:
+    node = InformationGatheringNode()
+    valid_blocks = [
+        {
+            "id": "fingerprinting",
+            "block_name": "Fingerprinting",
+            "goal": "Identify live web behavior, headers, and technology fingerprints with low-noise wrappers.",
+            "interaction": "active_safe",
+            "tools": [
+                {"name": "run_custom", "args": ["wappalyzer", "-i", "trgt", "-t", "4", "--scan-type", "full"]},
+                {"name": "run_custom", "args": ["wafw00f", "-a", "full_trgt"]},
+                {"name": "run_custom", "args": ["httpx", "-u", "trgt", "-silent", "-json"]},
+            ],
+        }
+    ]
+    fake_payload = {
+        "blocks": [
+            {
+                "status": "skip",
+                "tools": [],
+                "rationale": "Too active for this stage.",
+                "skipped_tools": ["run_custom"],
+            }
+        ]
+    }
+
+    with patch("server.nodes.information_gathering.node.get_llm") as mock_get_llm:
+        llm_ctx = AsyncMock()
+        llm_ctx.__aenter__.return_value.chat = AsyncMock(
+            return_value=LLMResponse(
+                content=json.dumps(fake_payload),
+                tool_calls=[],
+                finish_reason="stop",
+                usage={},
+            )
+        )
+        llm_ctx.__aexit__.return_value = False
+        mock_get_llm.return_value = llm_ctx
+
+        prepared_blocks = asyncio.run(
+            node._prepare_blocks(
+                target="https://pentest-ground.com:5013",
+                target_type="web_app",
+                scope="public web",
+                info="",
+                profile={"blocks": valid_blocks},
+                valid_blocks=valid_blocks,
+                available_tools=["run_custom", "passive_web_recon", "cors_misconfig_check"],
+            )
+        )
+
+    assert len(prepared_blocks) == 1
+    prepared = prepared_blocks[0]
+    assert prepared["status"] == "keep"
+    assert prepared["tools"] == valid_blocks[0]["tools"]
 
 
 def test_generate_checklist_can_use_tools_before_finalizing() -> None:

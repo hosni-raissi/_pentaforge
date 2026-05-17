@@ -10,6 +10,7 @@ This service is the API entrypoint for scan execution:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import json
 import os
@@ -103,6 +104,11 @@ PROMPT_HISTORY_ROLE_LIMIT = 6
 PROMPT_HISTORY_TOOL_LIMIT = 4
 PROJECT_FINDINGS_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 WARMUP_PERCEPTOR_CACHE_TTL_SECONDS = 2 * 60 * 60
+ANALYZER_AGENT_REPORT_HISTORY_LIMIT = 12
+ANALYZER_AGENT_REPORT_MAX_RESULT_CHARS = 12000
+ANALYZER_AGENT_REPORT_MAX_MARKDOWN_CHARS = 60000
+FINDINGS_HISTORY_KEY = "findings_history"
+LEGACY_FINDINGS_HISTORY_KEY = "analyzer_agent_reports"
 _FINDING_CWE_MAP: dict[str, str] = {
     "command injection": "CWE-78",
     "sql injection": "CWE-89",
@@ -164,6 +170,18 @@ def _coerce_string_list(value: Any) -> list[str]:
         clean = value.strip()
         return [clean] if clean else []
     return [] 
+
+
+def _unique_strings(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique.append(text)
+    return unique
 
 
 def _extract_target_host(target: str) -> str:
@@ -426,10 +444,33 @@ def _render_tool_command(tool_name: str, args: dict[str, Any], result: Any = "")
             return f"capture_screenshot {redacted_url}"
         return "capture_screenshot"
 
+    if tool_name == "run_python":
+        code = str(args.get("code", "")).strip()
+        if code:
+            # Show the first few lines or a snippet
+            snippet = _compact_preview(code, 180).replace("\n", " ")
+            return f"python: {snippet}"
+        return "run_python"
+
+    if tool_name == "search_web":
+        query = str(args.get("query", "")).strip()
+        if query:
+            return f"search_web: {query}"
+        return "search_web"
+
+    if tool_name == "fetch_url_content" or tool_name == "get_page":
+        url = str(args.get("Url", args.get("url", ""))).strip()
+        if url:
+            return f"fetch: {url}"
+        return "fetch_url_content"
+
     if tool_name:
         compact_args = []
         for key, value in (args or {}).items():
             if value in ("", None, [], {}):
+                continue
+            # Skip code/payload fields if we already handled them or they are too large
+            if key in {"code", "args", "payload"}:
                 continue
             compact_args.append(f"{key}={_compact_preview(value, 80)}")
         if compact_args:
@@ -479,6 +520,572 @@ def _extract_tool_names(tool_results: Any) -> list[str]:
         if tool_name and tool_name not in names:
             names.append(tool_name)
     return names
+
+
+def _stringify_markdown_value(value: Any, *, max_chars: int | None = None) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=True, indent=2)
+        except TypeError:
+            text = str(value)
+        text = text.strip()
+    text = text.replace("```", "'''")
+    if max_chars and max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars] + "\n...[truncated]"
+    return text
+
+
+def _build_analyzer_agent_report_markdown(
+    *,
+    scan_id: str,
+    entry_id: str,
+    generated_at: str,
+    scenario: dict[str, Any],
+    row_result: dict[str, Any],
+    assessment: dict[str, Any],
+    compact_summary: str,
+    verdict: str,
+    detail_summary: str,
+    verify_data: dict[str, Any] | None = None,
+) -> str:
+    safe_scenario = scenario if isinstance(scenario, dict) else {}
+    safe_row_result = row_result if isinstance(row_result, dict) else {}
+    safe_assessment = assessment if isinstance(assessment, dict) else {}
+    safe_verify = verify_data if isinstance(verify_data, dict) else {}
+
+    agent_role = str(safe_scenario.get("agent", "")).strip().lower() or "unknown"
+    overall = safe_assessment.get("overall", {}) if isinstance(safe_assessment.get("overall"), dict) else {}
+    confidence = safe_verify.get("confidence", overall.get("confidence"))
+    normalized_summary = str(safe_assessment.get("normalized_summary", "")).strip()
+    reasoning = str(safe_verify.get("reasoning", "")).strip()
+    base_markdown = str(safe_assessment.get("agent_markdown", "")).strip()
+    if not base_markdown:
+        scenario_task = str(safe_scenario.get("task", "")).strip() or "Untitled scenario"
+        tool_names = _extract_tool_names(safe_row_result.get("tool_results", []))
+        row_summary = str(safe_row_result.get("summary", "")).strip()
+        base_lines = [
+            f"# {agent_role.upper()} Analyzer Report",
+            "",
+            "## Scenario Run",
+            "",
+            f"- Scenario Ran: {scenario_task}",
+            f"- Tools Run: {', '.join(f'`{tool}`' for tool in tool_names) or 'No tools recorded'}",
+        ]
+        if row_summary:
+            base_lines.append(f"- Execution Summary: {row_summary}")
+        if normalized_summary:
+            base_lines.extend(["", "## What The Tools Found", ""])
+            for summary_line in normalized_summary.splitlines()[:8]:
+                clean_line = str(summary_line).strip()
+                if clean_line:
+                    base_lines.append(f"- {clean_line}")
+        base_markdown = "\n".join(base_lines).strip()
+
+    lines = [
+        base_markdown,
+        "",
+        "## Analyzer Decision",
+        "",
+        f"- Scan ID: `{scan_id}`",
+        f"- Entry ID: `{entry_id}`",
+        f"- Generated At: `{generated_at}`",
+        f"- Verdict: `{verdict}`",
+        f"- Finding Type: `{str(safe_assessment.get('finding_type', 'info')).strip() or 'info'}`",
+        f"- Confidence: `{confidence}`" if confidence not in ("", None) else "- Confidence: `unknown`",
+        f"- SSVC: `{str(overall.get('ssvc', '')).strip() or 'TRACK'}`",
+        f"- Deep Description: {detail_summary or compact_summary or 'No analyzer summary available.'}",
+    ]
+    if reasoning:
+        lines.extend(["", "### Reasoning", "", reasoning])
+
+    markdown = "\n".join(lines).strip()
+    if len(markdown) > ANALYZER_AGENT_REPORT_MAX_MARKDOWN_CHARS:
+        return markdown[:ANALYZER_AGENT_REPORT_MAX_MARKDOWN_CHARS] + "\n\n...[truncated]"
+    return markdown
+
+
+def _build_info_gathering_report_entry(
+    *,
+    scan_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    def _extra_findings_from_structured(rows: list[dict[str, Any]]) -> list[str]:
+        derived: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            structured = row.get("structured", {})
+            if not isinstance(structured, dict):
+                continue
+            tool_name = str(structured.get("tool", "")).strip().lower()
+            if tool_name == "passive_web_recon":
+                domain = str(structured.get("normalized_domain", "")).strip()
+                subdomains = [
+                    str(value).strip()
+                    for value in structured.get("subdomains", [])
+                    if str(value).strip()
+                ] if isinstance(structured.get("subdomains"), list) else []
+                urls = [
+                    str(value).strip()
+                    for value in structured.get("historical_urls", [])
+                    if str(value).strip()
+                ] if isinstance(structured.get("historical_urls"), list) else []
+                if domain:
+                    derived.append(f"Domain: {domain}")
+                if subdomains:
+                    rendered = ", ".join(subdomains[:5])
+                    suffix = " ..." if len(subdomains) > 5 else ""
+                    derived.append(f"Observed subdomains: {rendered}{suffix}")
+                if urls:
+                    rendered = ", ".join(urls[:5])
+                    suffix = " ..." if len(urls) > 5 else ""
+                    derived.append(f"Historical URLs: {rendered}{suffix}")
+        return _unique_strings(derived)
+
+    safe_payload = payload if isinstance(payload, dict) else {}
+    block_index = int(safe_payload.get("index", 0) or 0)
+    total_blocks = int(safe_payload.get("total", 0) or 0)
+    block_name = str(safe_payload.get("name", "")).strip() or "Unnamed Gathering Block"
+    block_goal = str(safe_payload.get("goal", "")).strip()
+    block_summary = str(safe_payload.get("summary", "")).strip()
+    block_status = str(safe_payload.get("status", "")).strip().lower() or "completed"
+    objective = str(safe_payload.get("objective", "")).strip() or block_goal or block_name
+    confirmed_facts = _unique_strings([
+        str(item).strip()
+        for item in (safe_payload.get("confirmed_facts", []) if isinstance(safe_payload.get("confirmed_facts"), list) else [])
+        if str(item).strip()
+    ])
+    security_signals = _unique_strings([
+        str(item).strip()
+        for item in (safe_payload.get("security_signals", []) if isinstance(safe_payload.get("security_signals"), list) else [])
+        if str(item).strip()
+    ])
+    unknowns = _unique_strings([
+        str(item).strip()
+        for item in (safe_payload.get("unknowns", []) if isinstance(safe_payload.get("unknowns"), list) else [])
+        if str(item).strip()
+    ])
+    next_actions = _unique_strings([
+        str(item).strip()
+        for item in (safe_payload.get("next_actions", []) if isinstance(safe_payload.get("next_actions"), list) else [])
+        if str(item).strip()
+    ])
+    why_it_matters = str(safe_payload.get("why_it_matters", "")).strip()
+    result_rows = [
+        item
+        for item in (safe_payload.get("results", []) if isinstance(safe_payload.get("results"), list) else [])
+        if isinstance(item, dict)
+    ]
+    command_results: list[dict[str, str]] = []
+    for item in result_rows:
+        command_text = str(item.get("command", "")).strip() or str(item.get("tool", "")).strip()
+        raw_status = str(item.get("status", "")).strip().lower() or "unknown"
+        status_label = (
+            "passed"
+            if raw_status == "completed"
+            else "failed"
+            if raw_status == "error"
+            else raw_status
+        )
+        if not command_text:
+            continue
+        command_results.append(
+            {
+                "tool": str(item.get("tool", "")).strip() or "tool",
+                "command": command_text,
+                "status": status_label,
+                "raw_status": raw_status,
+                "summary": str(item.get("summary", "")).strip(),
+            }
+        )
+    tools_ran = [
+        str(item.get("command", "")).strip() or str(item.get("tool", "")).strip()
+        for item in result_rows
+        if str(item.get("command", "")).strip() or str(item.get("tool", "")).strip()
+    ]
+    findings_summary = _unique_strings([
+        f"{str(item.get('tool', '')).strip() or 'tool'}: {str(item.get('summary', '')).strip()}"
+        for item in result_rows
+        if str(item.get("summary", "")).strip()
+    ])
+    raw_tool_evidence = findings_summary
+    if not findings_summary:
+        findings_summary = confirmed_facts[:]
+    derived_findings = _extra_findings_from_structured(result_rows)
+    scenario_text = objective
+    execution_summary = (
+        f"Completed information-gathering block {block_index}/{total_blocks} with "
+        f"{len(result_rows)} tool result(s). Status: {block_status}."
+        if total_blocks > 0 and block_index > 0
+        else f"Completed information-gathering block with {len(result_rows)} tool result(s). Status: {block_status}."
+    )
+    sequence_label = f"g{block_index}" if block_index > 0 else "g?"
+    entry_id = f"{scan_id}:information_gathering:{sequence_label}:classified"
+    scenario_report = [
+        {
+            "scenario_ran": scenario_text,
+            "agent": "information_gathering",
+            "status": block_status,
+            "tools_ran": _unique_strings(tools_ran),
+            "tool_results": command_results,
+            "findings_summary": _unique_strings(confirmed_facts + security_signals + derived_findings) or findings_summary,
+            "execution_summary": execution_summary,
+        }
+    ]
+    markdown_lines = [
+        "# INFORMATION GATHERING Report",
+        "",
+        f"- Agent / Node: information_gathering",
+        f"- Block: {sequence_label} ({block_name})",
+        f"- Scenario: {scenario_text}",
+        f"- Status: {block_status}",
+        "",
+        "## Full Tool History",
+        "",
+    ]
+    if command_results:
+        for item in command_results:
+            status = str(item.get("status", "")).strip() or "unknown"
+            command_text = str(item.get("command", "")).strip() or str(item.get("tool", "")).strip() or "tool"
+            line = f"- `{status}` `{command_text}`"
+            summary_text = str(item.get("summary", "")).strip()
+            if summary_text:
+                line = f"{line} -> {summary_text}"
+            markdown_lines.append(line)
+    else:
+        markdown_lines.append("- No tool history recorded.")
+
+    markdown_lines.extend(["", "## What We Find", ""])
+    combined_findings = _unique_strings(confirmed_facts + security_signals + derived_findings)
+    if combined_findings:
+        markdown_lines.extend(f"- {line}" for line in combined_findings)
+    elif block_summary:
+        markdown_lines.append(f"- {block_summary}")
+    else:
+        markdown_lines.append("- No grounded confirmed facts were produced.")
+
+    markdown_lines.extend(["", "## What We Should Do", ""])
+    if next_actions:
+        markdown_lines.extend(f"- {line}" for line in next_actions)
+    else:
+        markdown_lines.append("- No next action was recorded.")
+
+    markdown_lines.extend(["", "## Unknowns / Gaps", ""])
+    if unknowns:
+        markdown_lines.extend(f"- {line}" for line in unknowns)
+    else:
+        markdown_lines.append("- No unresolved unknowns were recorded.")
+    markdown_lines.extend([
+        "",
+        "## Metadata",
+        "",
+        f"- Scan ID: `{scan_id}`",
+        f"- Entry ID: `{entry_id}`",
+        f"- Verdict: `info`",
+        f"- Deep Description: {block_summary or scenario_text}",
+    ])
+    return {
+        "id": entry_id,
+        "scan_id": scan_id,
+        "agent": "information_gathering",
+        "phase": "classified",
+        "cycle_number": 0,
+        "scenario_index": block_index,
+        "sequence_label": sequence_label,
+        "scenario_task": scenario_text,
+        "execution_status": block_status,
+        "verdict": "info",
+        "summary": (block_summary or scenario_text)[:400],
+        "objective": objective,
+        "confirmed_facts": _unique_strings(confirmed_facts + derived_findings),
+        "security_signals": security_signals[:12],
+        "unknowns": unknowns,
+        "why_it_matters": why_it_matters,
+        "next_actions": next_actions,
+        "raw_tool_evidence": raw_tool_evidence,
+        "scenario_report": scenario_report,
+        "markdown": "\n".join(markdown_lines).strip(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _persist_information_gathering_report(
+    *,
+    project_store: ProjectsStore,
+    project_id: str,
+    scan_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    project = project_store.get_project(project_id)
+    if not isinstance(project, dict):
+        return None
+
+    project_payload = project.get("payload")
+    if not isinstance(project_payload, dict):
+        project_payload = {}
+        project["payload"] = project_payload
+
+    existing_root = project_payload.get(FINDINGS_HISTORY_KEY)
+    if not isinstance(existing_root, dict):
+        existing_root = project_payload.get(LEGACY_FINDINGS_HISTORY_KEY)
+    reports_root = dict(existing_root) if isinstance(existing_root, dict) else {}
+    entry = _build_info_gathering_report_entry(scan_id=scan_id, payload=payload)
+    existing_bucket = reports_root.get("information_gathering")
+    bucket_entries = (
+        list(existing_bucket.get("entries", []))
+        if isinstance(existing_bucket, dict) and isinstance(existing_bucket.get("entries", []), list)
+        else []
+    )
+    bucket_entries = [
+        item for item in bucket_entries
+        if isinstance(item, dict) and str(item.get("id", "")).strip() != str(entry.get("id", "")).strip()
+    ]
+    bucket_entries.append(entry)
+    bucket_entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    reports_root["information_gathering"] = {
+        "updated_at": str(entry.get("updated_at", "")).strip(),
+        "entries": bucket_entries,
+    }
+    project_payload[FINDINGS_HISTORY_KEY] = reports_root
+    project["updatedAt"] = str(entry.get("updated_at", "")).strip() or datetime.now(timezone.utc).isoformat()
+    project_store.upsert_project(project)
+    return entry
+
+
+def _persist_analyzer_agent_reports(
+    *,
+    project_store: ProjectsStore,
+    project_id: str,
+    scan_id: str,
+    info_only_items: list[dict[str, Any]],
+    verify_results: dict[str, list[dict[str, Any]]],
+) -> None:
+    project = project_store.get_project(project_id)
+    if not isinstance(project, dict):
+        return
+
+    payload = project.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+        project["payload"] = payload
+
+    existing_root = payload.get(FINDINGS_HISTORY_KEY)
+    if not isinstance(existing_root, dict):
+        existing_root = payload.get(LEGACY_FINDINGS_HISTORY_KEY)
+    reports_root = dict(existing_root) if isinstance(existing_root, dict) else {}
+
+    def _append_report(
+        *,
+        role: str,
+        idx: Any,
+        scenario: dict[str, Any],
+        row_result: dict[str, Any],
+        assessment: dict[str, Any],
+        compact_summary: str,
+        verdict: str,
+        detail_summary: str,
+        verify_data: dict[str, Any] | None = None,
+    ) -> None:
+        safe_role = str(role or "").strip().lower()
+        if safe_role not in {"recon", "exploit"}:
+            return
+
+        generated_at = datetime.now(timezone.utc).isoformat()
+        entry_id = f"{scan_id}:{safe_role}:{str(idx or '0').strip() or '0'}:{verdict}"
+        markdown = _build_analyzer_agent_report_markdown(
+            scan_id=scan_id,
+            entry_id=entry_id,
+            generated_at=generated_at,
+            scenario=scenario if isinstance(scenario, dict) else {},
+            row_result=row_result if isinstance(row_result, dict) else {},
+            assessment=assessment if isinstance(assessment, dict) else {},
+            compact_summary=compact_summary,
+            verdict=verdict,
+            detail_summary=detail_summary,
+            verify_data=verify_data if isinstance(verify_data, dict) else None,
+        )
+
+        existing_bucket = reports_root.get(safe_role)
+        bucket_entries = (
+            list(existing_bucket.get("entries", []))
+            if isinstance(existing_bucket, dict) and isinstance(existing_bucket.get("entries", []), list)
+            else []
+        )
+        bucket_entries = [
+            item for item in bucket_entries
+            if isinstance(item, dict) and str(item.get("id", "")).strip() != entry_id
+        ]
+        bucket_entries.append(
+            {
+                "id": entry_id,
+                "scan_id": scan_id,
+                "agent": safe_role,
+                "phase": "verified",
+                "scenario_index": idx,
+                "scenario_task": str((scenario or {}).get("task", "")).strip(),
+                "verdict": verdict,
+                "summary": detail_summary[:400],
+                "markdown": markdown,
+                "updated_at": generated_at,
+            }
+        )
+        bucket_entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+        reports_root[safe_role] = {
+            "updated_at": generated_at,
+            "entries": bucket_entries,
+        }
+
+    for item in info_only_items:
+        if not isinstance(item, dict):
+            continue
+        scenario = item.get("scenario", {}) if isinstance(item.get("scenario"), dict) else {}
+        row_result = item.get("row_result", {}) if isinstance(item.get("row_result"), dict) else {}
+        assessment = item.get("assessment", {}) if isinstance(item.get("assessment"), dict) else {}
+        compact_summary = str(item.get("compact_summary", "")).strip()
+        detail_summary = (
+            compact_summary
+            or str(assessment.get("overall", {}).get("summary", "")).strip()
+            if isinstance(assessment.get("overall"), dict)
+            else compact_summary
+        )
+        _append_report(
+            role=str(scenario.get("agent", "")).strip().lower(),
+            idx=item.get("idx"),
+            scenario=scenario,
+            row_result=row_result,
+            assessment=assessment,
+            compact_summary=compact_summary,
+            verdict="info",
+            detail_summary=detail_summary or str(row_result.get("summary", "")).strip(),
+        )
+
+    for bucket_name, bucket_items in verify_results.items():
+        if not isinstance(bucket_items, list):
+            continue
+        for item in bucket_items:
+            if not isinstance(item, dict):
+                continue
+            scenario = item.get("scenario", {}) if isinstance(item.get("scenario"), dict) else {}
+            row_result = item.get("row_result", {}) if isinstance(item.get("row_result"), dict) else {}
+            assessment = item.get("assessment", {}) if isinstance(item.get("assessment"), dict) else {}
+            compact_summary = str(item.get("compact_summary", "")).strip()
+            verify_summary = str(item.get("verify_summary", "")).strip()
+            _append_report(
+                role=str(scenario.get("agent", "")).strip().lower(),
+                idx=item.get("idx"),
+                scenario=scenario,
+                row_result=row_result,
+                assessment=assessment,
+                compact_summary=compact_summary,
+                verdict=str(item.get("verdict", bucket_name)).strip().lower() or bucket_name,
+                detail_summary=verify_summary or compact_summary or str(row_result.get("summary", "")).strip(),
+                verify_data=item.get("verify_data", {}) if isinstance(item.get("verify_data"), dict) else {},
+            )
+
+    payload[FINDINGS_HISTORY_KEY] = reports_root
+    project["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    project_store.upsert_project(project)
+
+
+def _persist_single_analyzer_agent_report(
+    *,
+    project_store: ProjectsStore,
+    project_id: str,
+    scan_id: str,
+    cycle_number: int,
+    role: str,
+    idx: Any,
+    scenario: dict[str, Any],
+    row_result: dict[str, Any],
+    assessment: dict[str, Any],
+    compact_summary: str,
+    verdict: str,
+    detail_summary: str,
+    verify_data: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    safe_role = str(role or "").strip().lower()
+    if safe_role not in {"recon", "exploit"}:
+        return None
+
+    project = project_store.get_project(project_id)
+    if not isinstance(project, dict):
+        return None
+
+    payload = project.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+        project["payload"] = payload
+
+    existing_root = payload.get(FINDINGS_HISTORY_KEY)
+    if not isinstance(existing_root, dict):
+        existing_root = payload.get(LEGACY_FINDINGS_HISTORY_KEY)
+    reports_root = dict(existing_root) if isinstance(existing_root, dict) else {}
+    generated_at = datetime.now(timezone.utc).isoformat()
+    scenario_index = int(idx or 0)
+    normalized_cycle = int(cycle_number or 0)
+    sequence_label = f"c{normalized_cycle}s{scenario_index}"
+    entry_id = f"{scan_id}:{safe_role}:{sequence_label}:classified"
+    markdown = _build_analyzer_agent_report_markdown(
+        scan_id=scan_id,
+        entry_id=entry_id,
+        generated_at=generated_at,
+        scenario=scenario if isinstance(scenario, dict) else {},
+        row_result=row_result if isinstance(row_result, dict) else {},
+        assessment=assessment if isinstance(assessment, dict) else {},
+        compact_summary=compact_summary,
+        verdict=verdict,
+        detail_summary=detail_summary,
+        verify_data=verify_data if isinstance(verify_data, dict) else None,
+    )
+
+    scenario_report = (
+        assessment.get("scenario_reports", [])
+        if isinstance(assessment.get("scenario_reports", []), list)
+        else (
+            verify_data.get("scenario_report", [])
+            if isinstance(verify_data, dict) and isinstance(verify_data.get("scenario_report", []), list)
+            else []
+        )
+    )
+    entry = {
+        "id": entry_id,
+        "scan_id": scan_id,
+        "agent": safe_role,
+        "phase": "classified",
+        "cycle_number": normalized_cycle,
+        "scenario_index": scenario_index,
+        "sequence_label": sequence_label,
+        "scenario_task": str((scenario or {}).get("task", "")).strip(),
+        "verdict": verdict,
+        "summary": detail_summary[:400],
+        "scenario_report": scenario_report,
+        "markdown": markdown,
+        "updated_at": generated_at,
+    }
+
+    existing_bucket = reports_root.get(safe_role)
+    bucket_entries = (
+        list(existing_bucket.get("entries", []))
+        if isinstance(existing_bucket, dict) and isinstance(existing_bucket.get("entries", []), list)
+        else []
+    )
+    bucket_entries = [
+        item for item in bucket_entries
+        if isinstance(item, dict) and str(item.get("id", "")).strip() != entry_id
+    ]
+    bucket_entries.append(entry)
+    bucket_entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    reports_root[safe_role] = {
+        "updated_at": generated_at,
+        "entries": bucket_entries,
+    }
+
+    payload[FINDINGS_HISTORY_KEY] = reports_root
+    project["updatedAt"] = generated_at
+    project_store.upsert_project(project)
+    return entry
 
 
 def _normalize_recon_result_status(
@@ -3392,6 +3999,13 @@ def _is_user_managed_target_info_profile(profile: dict[str, Any]) -> bool:
     return generated_from in {"ui", "ui_settings", "user", "manual"}
 
 
+def _canonical_target_info_blocks(profile: dict[str, Any]) -> str:
+    blocks = profile.get("blocks", []) if isinstance(profile, dict) else []
+    if not isinstance(blocks, list):
+        blocks = []
+    return json.dumps(blocks, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
 def _should_refresh_target_info_profile_from_defaults(
     stored_profile: dict[str, Any],
     built_in_profile: dict[str, Any],
@@ -3406,17 +4020,7 @@ def _should_refresh_target_info_profile_from_defaults(
     if not isinstance(built_in_blocks, list) or not built_in_blocks:
         return False
 
-    stored_names = [
-        str(item.get("block_name") or item.get("name") or "").strip()
-        for item in stored_blocks
-        if isinstance(item, dict)
-    ]
-    built_in_names = [
-        str(item.get("block_name") or item.get("name") or "").strip()
-        for item in built_in_blocks
-        if isinstance(item, dict)
-    ]
-    return stored_names[: len(built_in_names)] != built_in_names
+    return _canonical_target_info_blocks(stored_profile) != _canonical_target_info_blocks(built_in_profile)
 
 
 def _resolve_target_info_profile(projects_store: Any, target_type: str) -> dict[str, Any]:
@@ -4861,6 +5465,19 @@ class PrintCallback:
         return False
 
 
+def _approval_prefix_for_role(role: str) -> str:
+    normalized = str(role or "").strip().lower().replace("-", "_")
+    if "intel" in normalized:
+        return "Intel"
+    if "planner" in normalized:
+        return "Planner"
+    if "information_gathering" in normalized or "information gathering" in normalized:
+        return "Information Gathering"
+    if "analyzer" in normalized or "verify" in normalized or "retest" in normalized:
+        return "Analyzer"
+    return "Executer"
+
+
 class ExecuterScanCallback:
     """Executer callback bridged to scan event bus + approval workflow."""
 
@@ -5102,12 +5719,15 @@ class WorkerExecuterCallback:
         args: dict[str, Any],
         call_id: str,
     ) -> bool:
-        return await self._parent.request_tool_approval(
+        result = self._parent.request_tool_approval(
             role=f"{self._prefix} {role}",
             tool_name=tool_name,
             args=args,
             call_id=call_id,
         )
+        if asyncio.iscoroutine(result) or asyncio.isfuture(result) or inspect.isawaitable(result):
+            return await result
+        return bool(result)
 
     async def request_password(
         self,
@@ -5116,11 +5736,14 @@ class WorkerExecuterCallback:
         reason: str,
         call_id: str,
     ) -> str | None:
-        return await self._parent.request_password(
+        result = self._parent.request_password(
             prompt=prompt,
             reason=reason,
             call_id=call_id,
         )
+        if asyncio.iscoroutine(result) or asyncio.isfuture(result) or inspect.isawaitable(result):
+            return await result
+        return str(result) if result is not None else None
 
 
 @dataclass
@@ -5176,6 +5799,11 @@ class ScanOrchestratorService:
         resume: bool = False,
         force: bool = False,
     ) -> dict[str, Any]:
+        # Ensure event loop is captured for threadsafe approval callbacks (may be
+        # None when the orchestrator was constructed before uvicorn started).
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
         project_key = str(project_id or "").strip()
         if not project_key:
             raise ValueError("project_id is required")
@@ -5758,6 +6386,8 @@ class ScanOrchestratorService:
 
         project = self._projects_store.get_project(project_key)
         approval_mode = str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
+        require_manual = bool(args.get("_require_manual_approval")) if isinstance(args, dict) else False
+        display_prefix = _approval_prefix_for_role(role)
         
         run_state = self._runs.get(project_key)
         if isinstance(run_state, dict):
@@ -5765,7 +6395,7 @@ class ScanOrchestratorService:
             run_state["approval_mode"] = approval_mode
             self._runs[project_key] = run_state
 
-        if approval_mode == "auto":
+        if approval_mode == "auto" and not require_manual:
             logger.info(
                 "executer_tool_auto_approved",
                 project_id=project_key,
@@ -5795,6 +6425,7 @@ class ScanOrchestratorService:
                 "role": pending.role,
                 "tool_name": pending.tool_name,
                 "call_id": pending.call_id,
+                "args": pending.args,
             }
             run_state["updated_at"] = _utc_now_iso()
             self._runs[project_key] = run_state
@@ -5805,8 +6436,8 @@ class ScanOrchestratorService:
             scan_id=pending.scan_id,
             level="warn",
             message=(
-                f"Executer [waiting approval] {pending.role} requested "
-                f"tool '{pending.tool_name}'. Approve or skip."
+                f"{display_prefix} [waiting approval] {pending.role} requested "
+                f"tool '{pending.tool_name}': {_render_tool_command(pending.tool_name, pending.args)}. Approve or skip."
             ),
             data={
                 "stage": "executer",
@@ -5817,6 +6448,8 @@ class ScanOrchestratorService:
                 "tool_name": pending.tool_name,
                 "call_id": pending.call_id,
                 "args": pending.args,
+                "rendered_command": _render_tool_command(pending.tool_name, pending.args),
+                "preview": str(pending.args.get("code", pending.args.get("command", ""))).strip()[:2000],
             },
         )
 
@@ -5826,9 +6459,9 @@ class ScanOrchestratorService:
             "hydra_bruteforce": 1800,      # 30 minutes - brute force takes time
             "nuclei_vuln_scan": 1200,      # 20 minutes - template scanning
             "sqlmap": 1200,                # 20 minutes - SQL injection testing
-            "run_custom": 900,             # 15 minutes - generic CLI commands
+            "run_custom": 40,              # 40 seconds - auto-approve fallback
             "run_python": 600,             # 10 minutes - Python scripts
-            "payload_generator": 300,      # 5 minutes - user approval should not auto-skip quickly
+            "payload_generator": 300,      # 5 minutes
         }
         # OPTIMIZATION: Default to 60 seconds for approval timeout (was 1800s/30min)
         # This prevents artificial delays while keeping tool-specific longer timeouts
@@ -5862,7 +6495,7 @@ class ScanOrchestratorService:
                         scan_id=pending.scan_id,
                         level="info",
                         message=(
-                            f"Executer [approval waiting] {pending.role} tool '{pending.tool_name}' "
+                            f"{display_prefix} [approval waiting] {pending.role} tool '{pending.tool_name}' "
                             f"waiting for approval... ({elapsed}s/{APPROVAL_TIMEOUT}s)"
                         ),
                         data={
@@ -5878,8 +6511,8 @@ class ScanOrchestratorService:
                     continue
 
         except asyncio.TimeoutError:
-            # Timeout - auto-skip the tool
-            pending.decision = "skip"
+            # Timeout - auto-approve the tool (USER requested auto-approve after 40s)
+            pending.decision = "approve"
             logger.warning(
                 "tool_approval_timeout",
                 project_id=project_key,
@@ -5893,8 +6526,8 @@ class ScanOrchestratorService:
                 scan_id=pending.scan_id,
                 level="warn",
                 message=(
-                    f"Executer [approval timeout] {pending.role} tool '{pending.tool_name}' "
-                    f"timeout after {APPROVAL_TIMEOUT}s - skipping tool"
+                    f"{display_prefix} [approval timeout] {pending.role} tool '{pending.tool_name}' "
+                    f"timeout after {APPROVAL_TIMEOUT}s - auto-approving tool"
                 ),
                 data={
                     "stage": "executer",
@@ -5925,6 +6558,7 @@ class ScanOrchestratorService:
                     "role": next_pending.role,
                     "tool_name": next_pending.tool_name,
                     "call_id": next_pending.call_id,
+                    "args": next_pending.args,
                 }
             else:
                 run_state["awaiting_tool_approval"] = False
@@ -5938,7 +6572,7 @@ class ScanOrchestratorService:
             scan_id=pending.scan_id,
             level="success" if approved else "warn",
             message=(
-                f"Executer [approval {'approved' if approved else 'skipped'}] "
+                f"{display_prefix} [approval {'approved' if approved else 'skipped'}] "
                 f"{pending.role} tool '{pending.tool_name}'."
             ),
             data={
@@ -6328,6 +6962,8 @@ class ScanOrchestratorService:
         self._tool_approval_events.pop(project_id, None)
         try:
             task.result()
+        except asyncio.CancelledError:
+            pass  # Expected when a scan is manually stopped
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("scan_orchestrator_task_crashed", project_id=project_id, error=repr(exc))
 
@@ -7363,6 +7999,53 @@ class ScanOrchestratorService:
                 },
             )
 
+            try:
+                classification_detail = (
+                    str(assessment.get("overall", {}).get("summary", "")).strip()
+                    if isinstance(assessment.get("overall"), dict)
+                    else ""
+                ) or compact_summary or str(row_result.get("summary", "")).strip()
+                saved_report = _persist_single_analyzer_agent_report(
+                    project_store=self._projects_store,
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    cycle_number=cycle_number,
+                    role=agent_role,
+                    idx=idx,
+                    scenario=scenario if isinstance(scenario, dict) else {},
+                    row_result=row_result if isinstance(row_result, dict) else {},
+                    assessment=assessment if isinstance(assessment, dict) else {},
+                    compact_summary=compact_summary,
+                    verdict=finding_type,
+                    detail_summary=classification_detail,
+                )
+                if saved_report:
+                    self._emit_event(
+                        project_id,
+                        event="analyzer_report_saved",
+                        scan_id=scan_id,
+                        level="info",
+                        message=(
+                            f"Analyzer [saved] {agent_role or 'unknown'} "
+                            f"scenario #{idx} classified as {finding_type}."
+                        ),
+                        data={
+                            "stage": "analyzer",
+                            "kind": "report_saved",
+                            "iteration": idx,
+                            "agent_role": agent_role,
+                            "report": saved_report,
+                        },
+                    )
+            except Exception as report_exc:
+                logger.warning(
+                    "analyzer_report_save_failed",
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    item_idx=idx,
+                    error=str(report_exc),
+                )
+
             # Organize by type for batch processing
             if finding_type == "vulnerability":
                 assessments_organized["vulnerabilities"].append({
@@ -7728,6 +8411,23 @@ class ScanOrchestratorService:
                 data={"error": str(phase2_exc)},
             )
             # Continue with empty results
+
+        try:
+            _persist_analyzer_agent_reports(
+                project_store=self._projects_store,
+                project_id=project_id,
+                scan_id=scan_id,
+                info_only_items=assessments_organized["info_only"],
+                verify_results=verify_results_organized,
+            )
+        except Exception as report_exc:
+            logger.warning(
+                "analyzer_agent_reports_persist_failed",
+                project_id=project_id,
+                scan_id=scan_id,
+                error=str(report_exc),
+                error_type=type(report_exc).__name__,
+            )
 
         retest_candidates = [
             item
@@ -8350,6 +9050,23 @@ class ScanOrchestratorService:
                     raw_message=message,
                 ),
             )
+            async def _request_intel_refresh_approval(
+                *,
+                role: str,
+                tool_name: str,
+                args: dict[str, Any],
+                call_id: str,
+            ) -> bool:
+                return await self.request_executer_tool_approval(
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    role=role,
+                    tool_name=tool_name,
+                    args=args,
+                    call_id=call_id,
+                )
+
+            callback.request_tool_approval = _request_intel_refresh_approval
             intel_agent = IntelNode(callback=callback, project_id=project_id)
             brain_builder = BrainBuilderNode(memory_node=SystemMemoryNode())
 
@@ -8420,6 +9137,38 @@ class ScanOrchestratorService:
                         },
                     )
                 elif stage == "block_completed":
+                    try:
+                        saved_report = _persist_information_gathering_report(
+                            project_store=self._projects_store,
+                            project_id=project_id,
+                            scan_id=scan_id,
+                            payload=payload,
+                        )
+                        if saved_report:
+                            self._emit_event(
+                                project_id,
+                                event="analyzer_report_saved",
+                                scan_id=scan_id,
+                                level="info",
+                                message=(
+                                    "Information Gathering [saved] organized block findings "
+                                    f"stored for {block_name}."
+                                ),
+                                data={
+                                    "stage": "information_gathering",
+                                    "kind": "report_saved",
+                                    "agent_role": "information_gathering",
+                                    "report": saved_report,
+                                },
+                            )
+                    except Exception as report_exc:
+                        logger.warning(
+                            "information_gathering_report_save_failed",
+                            project_id=project_id,
+                            scan_id=scan_id,
+                            block_name=block_name,
+                            error=str(report_exc),
+                        )
                     self._emit_event(
                         project_id,
                         event="target_info_gathering_block_completed",

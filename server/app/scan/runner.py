@@ -66,7 +66,29 @@ class PhaseRunnerService:
 
         try:
             from types import SimpleNamespace
-            callback = SimpleNamespace(on_step=_on_step, on_done=_on_step, on_warn=_on_step)
+
+            async def _request_intel_refresh_approval(
+                *,
+                role: str,
+                tool_name: str,
+                args: dict[str, Any],
+                call_id: str,
+            ) -> bool:
+                return await self._approval.request_tool_approval(
+                    project_id=project_id,
+                    scan_id=scan_id,
+                    role=role,
+                    tool_name=tool_name,
+                    args=args,
+                    call_id=call_id,
+                )
+
+            callback = SimpleNamespace(
+                on_step=_on_step,
+                on_done=_on_step,
+                on_warn=_on_step,
+                request_tool_approval=_request_intel_refresh_approval,
+            )
             intel_node = IntelNode(callback=callback, project_id=project_id)
             intel_result = await intel_node.run(
                 target=target,

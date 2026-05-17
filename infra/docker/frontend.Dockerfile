@@ -16,6 +16,8 @@ RUN npm run web:build
 # Use nginx for serving
 FROM nginx:alpine
 
+RUN apk add --no-cache curl
+
 # Copy built assets
 COPY --from=build /app/client/ui/dist /usr/share/nginx/html
 COPY infra/nginx/default.conf /etc/nginx/conf.d/default.conf

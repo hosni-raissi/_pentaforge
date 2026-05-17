@@ -696,12 +696,10 @@ if __name__ == "__main__":
         default="crtsh,wayback,otx,urlscan",
         help="Comma-separated sources (crtsh,wayback,otx,urlscan)",
     )
-    parser.add_argument("--timeout", type=int, default=20, help="Per-source timeout in seconds")
+    parser.add_argument("--timeout", type=int, default=40, help="Per-source timeout in seconds")
     parser.add_argument("--threads", type=int, default=4, help="Parallel source workers")
     parser.add_argument("--max-urls", type=int, default=150, help="Maximum historical URLs to keep")
-    parser.add_argument("--no-subdomains", action="store_true", help="Disable subdomain collection")
-    parser.add_argument("--no-urls", action="store_true", help="Disable historical URL collection")
-    parser.add_argument("--no-ip-history", action="store_true", help="Disable passive DNS IP history")
+
     parser.add_argument("--json-only", action="store_true", help="Print only JSON result")
     args = parser.parse_args()
 
@@ -714,9 +712,6 @@ if __name__ == "__main__":
     run = passive_web_recon(
         target=args.target,
         sources=_parse_sources_arg(args.sources),
-        include_subdomains=not args.no_subdomains,
-        include_historical_urls=not args.no_urls,
-        include_ip_history=not args.no_ip_history,
         max_urls=args.max_urls,
         timeout=args.timeout,
         threads=args.threads,

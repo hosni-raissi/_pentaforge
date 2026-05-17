@@ -89,7 +89,39 @@ You can run the entire PentaForge stack (Frontend, Backend, Redis, Qdrant) easil
    * **Frontend UI**: `http://localhost:8080`
    * **Backend API**: `http://localhost:8000`
 
+Desktop app:
+
+- Docker does not open the Tauri desktop window by itself.
+- To run the desktop shell against the Docker backend stack:
+  ```bash
+  bash scripts/run-desktop-with-docker.sh
+  ```
+- That script:
+  - starts the Docker services
+  - waits for the backend health check on `http://127.0.0.1:8000/api/health`
+  - launches the Tauri desktop app from `client/ui`
+- It reuses existing Docker images by default. Force a rebuild only when needed:
+  ```bash
+  bash scripts/run-desktop-with-docker.sh --build
+  ```
+
 See [infra/README.md](infra/README.md) for service details, persistence, and first-start notes.
+
+Important behavior:
+
+- the Docker image does not include your local vector data, knowledge cache, or model cache
+- each machine creates its own runtime state inside Docker volumes on first use
+- the `tool-sandbox` image now installs a broad recon/security toolchain during Docker build; rebuild it with:
+  ```bash
+  docker compose -f infra/docker/docker-compose.yml build tool-sandbox
+  ```
+- the sandbox now also ships catalog-aligned aliases and bundled wordlist paths like `/usr/share/wordlists/pentaforge` and `/usr/share/wordlists/SecLists`
+- `./scripts/run-desktop-with-docker.sh` now auto-rebuilds backend/sandbox images when the Docker bootstrap files change and warms the local Nomic embedding model before the desktop window opens
+- the desktop launcher now keeps the heavy sandbox image stable by default; use `--build-backend`, `--build-sandbox`, or `--build` when you want specific rebuilds
+- reset all Docker-managed state with:
+  ```bash
+  docker compose -f infra/docker/docker-compose.yml down -v
+  ```
 
 ---
 

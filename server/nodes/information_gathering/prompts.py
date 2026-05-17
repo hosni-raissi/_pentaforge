@@ -28,6 +28,9 @@ PREPARE_INFORMATION_BLOCK_SYSTEM_PROMPT = (
     "14. tools may contain strings for built-in tools or an object with keys:\n"
     "   tool, command, args, reason.\n"
     "15. Never place a full shell command inside run_custom.command. Split it into command + args.\n"
+    "16. Do not rewrite or reconfigure existing profile tools. Existing tool objects and args are static.\n"
+    "17. For existing tools, use the tools list only to indicate keep/remove decisions by name. Do not change flags, targets, goals, block names, or interaction text.\n"
+    "18. Preserve each original block name, goal, and interaction. Only remove unneeded tools, skip whole blocks, or add at most one extra run_custom entry when clearly justified.\n"
 )
 
 

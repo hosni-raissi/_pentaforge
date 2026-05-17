@@ -7,10 +7,7 @@ from dataclasses import dataclass
 
 
 DEFAULT_BLOCKED_STATIC_TOOLS: tuple[str, ...] = (
-    "api_endpoint_discovery",
-    "directory_file_fuzzing",
-    "dns_enum_fuzzing",
-    "param_discovery",
+   
 )
 
 DEFAULT_BLOCKED_STATIC_COMMANDS: tuple[str, ...] = (
@@ -20,7 +17,6 @@ DEFAULT_BLOCKED_STATIC_COMMANDS: tuple[str, ...] = (
     "gobuster",
     "hydra",
     "kiterunner",
-    "nuclei",
     "sqlmap",
     "wfuzz",
     "x8",

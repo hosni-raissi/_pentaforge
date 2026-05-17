@@ -30,6 +30,7 @@ _URL_VALUE_FLAGS = {
     "--url",
     "--target",
     "--uri",
+    "-t",
 }
 _DATA_VALUE_FLAGS = {
     "-d",
@@ -41,36 +42,49 @@ _DATA_VALUE_FLAGS = {
     "--header",
     "-b",
     "--cookie",
+    "-c",
+    "--cookie-jar",
     "-A",
     "--user-agent",
+    "-o",
+    "--output",
+    "-v",
+    "--verbose",
 }
 _NETWORK_TARGET_COMMANDS = {
-    "commix",
-    "curl",
-    "ffuf",
-    "gobuster",
-    "host",
-    "hydra",
-    "medusa",
-    "msfconsole",
-    "naabu",
-    "nikto",
-    "nmap",
-    "nslookup",
-    "nuclei",
-    "openssl",
-    "patator",
-    "ping",
-    "responder",
-    "sqlmap",
-    "wget",
-    "wpscan",
-    "zgrab2",
-    "nc",
-    "netcat",
-    "traceroute",
-    "mtr",
-    "dig",
+    # Web & API Fuzzing
+    "commix", "ffuf", "gobuster", "dirb", "dirbuster", "wfuzz", "nikto", "wpscan", "joomscan",
+    "arjun", "paramspider", "katana", "gospider", "gau", "waybackurls", "subjs", "linkfinder",
+    "secretfinder", "getjs", "getJS", "graphql-cop", "graphw00f", "inql", "ssrfmap", "tplmap", "xsstrike", "dalfox", "corscanner",
+    "linpeas", "linpeas.sh", "lse", "pspy", "kerbrute",
+    
+    # Network Scanning & Discovery
+    "nmap", "amap", "shodan", "censys", "naabu", "masscan", "zgrab2", "dnsx", "tlsx", "httpx", "subfinder", "amass",
+    "assetfinder", "dig", "host", "nslookup", "dnsrecon", "fping", "ike-scan", "nbtscan",
+    "onesixtyone", "snmpwalk", "snmpcheck", "mtr", "traceroute", "ping", "nc", "netcat", "tshark", "tcpdump",
+    
+    # Vulnerability & Cloud Scanning
+    "nuclei", "trivy", "grype", "syft", "dive", "osv-scanner", "gitleaks", "trufflehog",
+    "scoutsuite", "prowler", "pacu", "cloudsploit", "cloud_enum",
+    "s3scanner", "kube-hunter", "checkov", "bandit", "semgrep", "retire", "retire_js",
+    "whatweb", "wappalyzer", "wafw00f", "sslyze", "ssh-audit", "testssl", "testssl.sh", "mitmproxy",
+    "pynt", "frida", "frida-ps", "frida-trace", "frida-discover", "objection", "mobsfscan",
+    
+    # Exploitation & Auth
+    "sqlmap", "nosqlmap", "hydra", "medusa", "patator", "responder", "msfconsole",
+    "john", "hashcat", "jwt_tool", "jwt-tool", "smbclient", "smbmap", "rpcclient", "enum4linux", "enum4linux-ng",
+    "ldapdomaindump", "bloodhound", "impacket", "crackmapexec", "netexec", "ldapsearch",
+    
+    # Utility & Misc
+    "curl", "wget", "openssl", "git", "docker", "kubectl", "az", "gcloud", "gsutil", "aws", "crane", "searchsploit",
+    "kiterunner", "kr", "interactsh-client", "grpcurl", "chisel", "git-dumper", "protoc",
+    "ctop", "whaler", "k9s", "nomad", "kube-bench", "stern", "calicoctl", "clair-scanner", "skopeo", "reg", "kubenscan",
+    "binwalk", "apktool", "apkid", "firmwalker", "dmesg", "pulumi", "blobenum", "steampipe",
+    "gcpbucketbrute", "stormspotter", "kubescan.sh", "showmount", "oauth-scanner", "oauth-scanner.py",
+    "newman", "zap-cli", "paramminer", "param-miner",
+    "arp-scan", "rustscan", "knockpy", "secretsdump.py", "impacket-secretsdump",
+    "rdp-sec-check", "rdp-sec-check.pl", "ssh", "ftp", "theHarvester", "besttrace", "netdiscover",
+    "proxychains4", "proxychains", "ligolo-ng-agent", "sshuttle", "gh", "glab", "repo-supervisor", "detect-secrets", "git-dumper", "git-dumper.py", "codeql", "yq", "diggit", "recon-ng", "feroxbuster", "cmseek", "droopescan", "gowitness", "subjack", "alterx", "massdns", "cloudbrute",
 }
 _HOSTISH_RE = re.compile(
     r"^(?:localhost|"
@@ -132,6 +146,11 @@ def extract_network_targets(command: str, args: list[str]) -> list[str]:
             continue
         if Path(token).is_absolute() or "/" in token:
             continue
+        
+        # Ignore common local file extensions to avoid false-positive scope violations
+        if token.lower().endswith((".txt", ".json", ".log", ".xml", ".csv", ".bak", ".html", ".js")):
+            continue
+
         if _HOSTISH_RE.fullmatch(token):
             targets.append(token)
 

@@ -30,20 +30,15 @@ _LOW_RISK_TOOL_NAMES = {
     "web_crawler",
     "api_passive_enum",
     "api_response_analyzer",
+    "api_service_recon",
     "js_source_code_analyzer",
     "known_vuln_lookup",
     "param_discovery",
-    "graphql_recon",
-    "grpc_recon",
-    "soap_wsdl_recon",
-    "oauth_oidc_check",
 }
 
 _MEDIUM_RISK_TOOL_NAMES = {
     "directory_file_fuzzing",
     "dns_recon",
-    "ssl_tls_analysis",
-    "route_topology",
     "traffic_analyze",
     "wireless_scan",
     "nuclei_vuln_scan",

@@ -20,6 +20,7 @@ import structlog
 
 from server.agents.rate_limiter import get_backup_llm_fallback, get_global_llm_queue
 from server.agents.report.report_generator import generate_report
+from server.agents.tool_output_parsers import parse_ffuf_findings, summarize_tool_output
 from server.config.agent import get_public_agent_config
 from server.core.llm import ChatMessage, LLMClient, LLMResponse
 from server.core.tool import coerce_args_from_schema
@@ -28,12 +29,14 @@ from server.utils.target_scope import describe_url_scope_issue, extract_target_h
 
 from .tools import (
     ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION,
+    ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION,
     ASSISTANT_GET_PAGE_TOOL_DEFINITION,
     ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION,
     ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION,
     ASSISTANT_SEARCH_PROJECT_VECTORS_TOOL_DEFINITION,
     ASSISTANT_SEARCH_WEB_TOOL_DEFINITION,
     add_finding_to_brain as assistant_add_finding_to_brain,
+    fetch_url_content as assistant_fetch_url_content,
     get_page as assistant_get_page,
     mark_false_positive as assistant_mark_false_positive,
     run_custom as assistant_run_custom,
@@ -42,6 +45,10 @@ from .tools import (
 )
  
 from .prompts import CONTEXT_COMPRESSION_PROMPT, SYSTEM_PROMPT
+from .security_tools import (
+    ASSISTANT_ALLOWED_NETWORK_COMMANDS,
+    ASSISTANT_TARGET_OPTIONAL_COMMANDS,
+)
 from .config import (
     _HISTORY_TOKEN_LIMIT ,
     _MAX_TOOL_ROUNDS,
@@ -53,7 +60,49 @@ from .config import (
 )
 logger = structlog.get_logger(__name__)
 
-
+_ASSISTANT_BLOCKED_COMMANDS = {
+    "apt",
+    "apt-get",
+    "apk",
+    "brew",
+    "bun",
+    "cargo",
+    "composer",
+    "dnf",
+    "gem",
+    "go",
+    "make",
+    "mkdir",
+    "node",
+    "npm",
+    "npx",
+    "patch",
+    "perl",
+    "php",
+    "pip",
+    "pip3",
+    "poetry",
+    "python",
+    "python3",
+    "ruby",
+    "rustc",
+    "sed",
+    "sh",
+    "tar",
+    "touch",
+    "unzip",
+    "vi",
+    "vim",
+    "yarn",
+    "zsh",
+    "bash",
+}
+_ASSISTANT_BLOCKED_ARG_FLAGS = {
+    "--in-place",
+    "--write-out",
+    "--create-dirs",
+    "--output-dir",
+}
 
 _PRIVILEGE_RETRY_COMMANDS = {
     "nmap",
@@ -67,46 +116,60 @@ _PRIVILEGE_RETRY_COMMANDS = {
 _VAGUE_COMMAND_TOKENS = {
     "it", "that", "this", "them", "result", "results", "output", "command",
 }
-_ASSISTANT_NETWORK_COMMANDS = {
-    "arjun",
-    "cat",
-    "curl",
-    "dalfox",
-    "dig",
-    "feroxbuster",
-    "ffuf",
-    "find",
-    "ftp",
-    "grep",
-    "head",
-    "httpx",
-    "hydra",
-    "katana",
-    "ls",
-    "netstat",
-    "nikto",
-    "nmap",
-    "nslookup",
-    "openssl",
-    "ping",
-    "ps",
-    "pwd",
-    "sqlmap",
-    "ss",
-    "sudo",
-    "tail",
-    "whatweb",
-    "wget",
-    "whois",
-    "gobuster",
-    "nuclei",
-    "nc",
-    "netcat",
-    "traceroute",
-    "mtr",
-    "telnet",
-    "msfconsole",
+_ASSISTANT_NETWORK_COMMANDS = ASSISTANT_ALLOWED_NETWORK_COMMANDS
+_ASSISTANT_SANDBOX_PATH_REWRITES = {
+    "../share/wordlists/short.txt": "wordlists/short.txt",
+    "../share/wordlists/medium.txt": "wordlists/medium.txt",
+    "../share/wordlists/large.txt": "wordlists/large.txt",
+    "../share/wordlists/rockyou.txt": "wordlists/rockyou.txt",
+    "../share/wordlists/dns-fuzz-common.txt": "wordlists/dns-fuzz-common.txt",
+    "../share/seclists": "seclists",
+    "/usr/share/wordlists/pentaforge/short.txt": "wordlists/short.txt",
+    "/usr/share/wordlists/pentaforge/medium.txt": "wordlists/medium.txt",
+    "/usr/share/wordlists/pentaforge/large.txt": "wordlists/large.txt",
+    "/usr/share/wordlists/pentaforge/rockyou.txt": "wordlists/rockyou.txt",
+    "/usr/share/wordlists/pentaforge/dns-fuzz-common.txt": "wordlists/dns-fuzz-common.txt",
+    "/usr/share/seclists/pentaforge": "seclists",
+    "/app/server/sandbox/share/wordlists/short.txt": "wordlists/short.txt",
+    "/app/server/sandbox/share/wordlists/medium.txt": "wordlists/medium.txt",
+    "/app/server/sandbox/share/wordlists/large.txt": "wordlists/large.txt",
+    "/app/server/sandbox/share/wordlists/rockyou.txt": "wordlists/rockyou.txt",
+    "/app/server/sandbox/share/wordlists/dns-fuzz-common.txt": "wordlists/dns-fuzz-common.txt",
+    "/app/server/sandbox/share/seclists": "seclists",
 }
+_ASSISTANT_COMMAND_REWRITES = {
+    "fuf": "ffuf",
+}
+
+
+def _assistant_policy_error(
+    command: str,
+    args: list[str],
+    cwd: str | None,
+) -> str | None:
+    normalized_command = str(command or "").strip().lower()
+    if normalized_command in _ASSISTANT_BLOCKED_COMMANDS:
+        return (
+            f"Assistant policy blocks '{normalized_command}' because it can modify the local machine, "
+            "the project, or execute arbitrary local code."
+        )
+
+    normalized_args = [str(arg or "").strip() for arg in args]
+    for arg in normalized_args:
+        if arg in _ASSISTANT_BLOCKED_ARG_FLAGS:
+            return f"Assistant policy blocks argument '{arg}' because it can write locally."
+        lowered = arg.lower()
+        if lowered.startswith("--output=") or lowered.startswith("--output-file="):
+            return f"Assistant policy blocks argument '{arg}' because it can write locally."
+        if lowered.startswith("--directory-prefix=") or lowered.startswith("--output-dir="):
+            return f"Assistant policy blocks argument '{arg}' because it can write locally."
+
+    if cwd:
+        return "Assistant policy blocks custom working directories. Commands must run without changing local workspace context."
+
+    return None
+
+
 _ASSISTANT_CAPABILITY_QUESTION_PATTERNS = (
     "who are you",
     "what are you",
@@ -129,16 +192,22 @@ _ASSISTANT_CAPABILITY_QUESTION_PATTERNS = (
 )
 
 _EXTERNAL_RESEARCH_INTENT_PATTERNS = (
+    "search the internet",
+    "search in internet",
+    "search on internet",
     "search the web",
+    "search in web",
+    "search on web",
     "search web",
+    "search internet",
     "search online",
+    "look up online",
     "look it up",
-    "look this up",
     "google it",
+    "google for",
     "google this",
     "find online",
     "check online",
-    "search the internet",
     "browse the web",
     "browse online",
     "use the web",
@@ -239,6 +308,8 @@ _RAW_TOOL_TRACE_NAMES = (
     "run_custom",
     "search_project_vectors",
     "get_page",
+    "fetch_url_content",
+
     "add_finding_to_brain",
     "mark_false_positive",
     "search_web",
@@ -300,6 +371,13 @@ _STRUCTURED_FINDING_ANALYSIS_INTENTS = (
     "is this real",
     "is it real",
 )
+_FFUF_NO_MATCH_REPLY_MARKERS = (
+    "no hidden files or directories were discovered",
+    "returned no matches",
+    "no matches",
+    "all requests returned 404",
+    "no accessible pages or endpoints were identified",
+)
 
 _RUN_CUSTOM_SCHEMA = {
     "type": "function",
@@ -325,6 +403,15 @@ _GET_PAGE_SCHEMA = {
         "name": ASSISTANT_GET_PAGE_TOOL_DEFINITION["name"],
         "description": ASSISTANT_GET_PAGE_TOOL_DEFINITION["description"],
         "parameters": ASSISTANT_GET_PAGE_TOOL_DEFINITION["parameters"],
+    },
+}
+
+_FETCH_URL_CONTENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION["name"],
+        "description": ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION["description"],
+        "parameters": ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION["parameters"],
     },
 }
 
@@ -946,7 +1033,7 @@ class AssistantAgent:
                         tool_call,
                         ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION["parameters"],
                     )
-                    cmd = raw_args.get("command", "")
+                    cmd = self._normalize_run_custom_command(str(raw_args.get("command", "")))
                     args = self._normalize_run_custom_args(
                         str(cmd),
                         raw_args.get("args", []) if isinstance(raw_args.get("args", []), list) else [],
@@ -967,6 +1054,13 @@ class AssistantAgent:
                     )
                     tool_input = raw_args.get("url", "")
                     tool_reason = f"Inspecting page: {tool_input}"
+                elif tool_name == "fetch_url_content":
+                    raw_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION["parameters"],
+                    )
+                    tool_input = raw_args.get("url", "")
+                    tool_reason = f"Fetching external URL: {tool_input}"
                 elif tool_name == "add_finding_to_brain":
                     raw_args = self._parse_tool_call_args(
                         tool_call,
@@ -1014,6 +1108,9 @@ class AssistantAgent:
                         tool_call,
                         ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION["parameters"],
                     )
+                    parsed_args["command"] = self._normalize_run_custom_command(
+                        str(parsed_args.get("command", ""))
+                    )
                     parsed_args["args"] = self._normalize_run_custom_args(
                         str(parsed_args.get("command", "")),
                         parsed_args.get("args", []) if isinstance(parsed_args.get("args", []), list) else [],
@@ -1027,6 +1124,11 @@ class AssistantAgent:
                     parsed_args = self._parse_tool_call_args(
                         tool_call,
                         ASSISTANT_GET_PAGE_TOOL_DEFINITION["parameters"],
+                    )
+                elif tool_name == "fetch_url_content":
+                    parsed_args = self._parse_tool_call_args(
+                        tool_call,
+                        ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION["parameters"],
                     )
                 elif tool_name == "add_finding_to_brain":
                     parsed_args = self._parse_tool_call_args(
@@ -1073,14 +1175,14 @@ class AssistantAgent:
                         error=f"Repeated check avoided because this was already attempted recently: {tool_name}",
                         previous_attempt=prior_tool_memory.get(signature),
                     )
-                elif tool_name == "search_web" and not allow_external_research:
+                elif tool_name in {"search_web", "fetch_url_content", "get_page"} and not allow_external_research:
                     tool_payload = self._blocked_tool_payload(
                         tool_name=tool_name,
                         parsed_args=parsed_args,
                         target=target,
                         operator_mode=operator_mode,
                         error=(
-                            "External web search is disabled for this turn. "
+                            f"External {tool_name.replace('_', ' ')} is disabled for this turn. "
                             "Ask explicitly to search the web or look something up online to allow it."
                         ),
                     )
@@ -1093,6 +1195,7 @@ class AssistantAgent:
                         "run_custom",
                         "search_project_vectors",
                         "get_page",
+                        "fetch_url_content",
                         "add_finding_to_brain",
                         "mark_false_positive",
                         "search_web",
@@ -1110,6 +1213,8 @@ class AssistantAgent:
                         )
                     elif tool_name == "get_page":
                         tool_payload = await self._execute_get_page(parsed_args, target=target)
+                    elif tool_name == "fetch_url_content":
+                        tool_payload = await self._execute_fetch_url_content(parsed_args)
                     elif tool_name == "add_finding_to_brain":
                         tool_payload = await self._execute_add_finding_to_brain(
                             parsed_args,
@@ -1170,23 +1275,33 @@ class AssistantAgent:
                     break
 
         yield {"type": "ping", "data": {"step": "generating_final_reply"}}
-        try:
-            final_response = await self._chat_with_fallback(
-                messages,
-                allow_tools=False,
-                allow_external_research=allow_external_research,
-            )
-            reply = self._sanitize_reply_text(final_response.content or "") or self._format_tool_only_reply(tool_results)
-        except Exception as exc:
-            if not tool_results:
-                raise
-            reply = self._reply_from_tool_results_after_llm_failure(
-                exc,
-                tool_results=tool_results,
-                response_style=response_style,
-                prompt=prompt,
-                target=target,
-            )
+        if self._prompt_is_direct_run_custom_request(prompt) and tool_results:
+            last_result = tool_results[-1]
+            if isinstance(last_result, dict) and (
+                str(last_result.get("full_command", "")).strip()
+                or str(last_result.get("command", "")).strip()
+            ):
+                reply = self._format_direct_command_reply(last_result)
+            else:
+                reply = self._format_tool_only_reply(tool_results)
+        else:
+            try:
+                final_response = await self._chat_with_fallback(
+                    messages,
+                    allow_tools=False,
+                    allow_external_research=allow_external_research,
+                )
+                reply = self._sanitize_reply_text(final_response.content or "") or self._format_tool_only_reply(tool_results)
+            except Exception as exc:
+                if not tool_results:
+                    raise
+                reply = self._reply_from_tool_results_after_llm_failure(
+                    exc,
+                    tool_results=tool_results,
+                    response_style=response_style,
+                    prompt=prompt,
+                    target=target,
+                )
         reply = self._normalize_reply_for_style(
             reply,
             response_style=response_style,
@@ -1873,8 +1988,6 @@ class AssistantAgent:
             if text:
                 turns.append(f"{role}: {text[:max(60, max_chars)]}")
 
-        return "\n".join(turns)
-
     @staticmethod
     def _tool_schemas_for_turn(*, allow_external_research: bool) -> list[dict[str, Any]]:
         schemas = [
@@ -1885,6 +1998,7 @@ class AssistantAgent:
             _MARK_FALSE_POSITIVE_SCHEMA,
         ]
         if allow_external_research:
+            schemas.append(_FETCH_URL_CONTENT_SCHEMA)
             schemas.append(_SEARCH_WEB_SCHEMA)
         return schemas
 
@@ -1894,6 +2008,7 @@ class AssistantAgent:
         *,
         allow_tools: bool = True,
         allow_external_research: bool = False,
+        allow_backup_fallback: bool = True,
     ):
         tool_payload = self._tool_schemas_for_turn(allow_external_research=allow_external_research) if allow_tools else None
 
@@ -1929,6 +2044,9 @@ class AssistantAgent:
             if not is_transient_provider_failure:
                 raise
 
+            if not allow_backup_fallback:
+                raise
+
             backup_llm = await self._backup.get_backup_llm()
             if backup_llm is None:
                 raise
@@ -1958,6 +2076,31 @@ class AssistantAgent:
         return coerce_args_from_schema(schema, args)
 
     @staticmethod
+    def _normalize_run_custom_command(command: str) -> str:
+        normalized = str(command or "").strip()
+        if not normalized:
+            return ""
+        return _ASSISTANT_COMMAND_REWRITES.get(normalized.lower(), normalized)
+
+    @classmethod
+    def _prompt_is_direct_run_custom_request(cls, prompt: str) -> bool:
+        text = str(prompt or "").strip()
+        if not text or "\n" in text:
+            return False
+        try:
+            parts = shlex.split(text)
+        except ValueError:
+            return False
+        if not parts:
+            return False
+        command = cls._normalize_run_custom_command(parts[0]).strip().lower()
+        if not command:
+            return False
+        if command == "sudo" and len(parts) > 1:
+            command = cls._normalize_run_custom_command(parts[1]).strip().lower()
+        return command in (_ASSISTANT_NETWORK_COMMANDS | set(_ASSISTANT_COMMAND_REWRITES.values()) | {"sudo"})
+
+    @staticmethod
     def _normalize_run_custom_args(command: str, args: list[str]) -> list[str]:
         normalized_command = str(command or "").strip().lower()
         normalized_args: list[str] = []
@@ -1976,7 +2119,9 @@ class AssistantAgent:
                         if expanded:
                             normalized_args.extend(expanded)
                             continue
-                    normalized_args.append(cleaned_piece)
+                    normalized_args.append(
+                        _ASSISTANT_SANDBOX_PATH_REWRITES.get(cleaned_piece, cleaned_piece)
+                    )
         if normalized_command != "curl":
             return normalized_args
 
@@ -2072,10 +2217,21 @@ class AssistantAgent:
         payload["args"] = redacted_args
         if command:
             payload["full_command"] = cls._render_run_custom_preview(command, redacted_args)
+        structured = summarize_tool_output(payload)
+        if structured.get("observations") and not payload.get("observations"):
+            payload["observations"] = structured.get("observations")
+        if structured.get("output_parser") and not payload.get("output_parser"):
+            payload["output_parser"] = structured.get("output_parser")
+        if str(command).strip().lower() == "ffuf":
+            payload["parsed_findings"] = cls._parse_ffuf_findings(payload)
         return payload
 
+    @classmethod
+    def _parse_ffuf_findings(cls, result: dict[str, Any]) -> list[dict[str, Any]]:
+        return parse_ffuf_findings(result)
+
     async def _execute_run_custom(self, args: dict[str, Any], *, target: str, project_id: str | None = None) -> dict[str, Any]:
-        command = str(args.get("command", "")).strip()
+        command = self._normalize_run_custom_command(str(args.get("command", "")).strip())
         reason = str(args.get("reason", "")).strip() or "User-requested diagnostic command"
         raw_args = args.get("args", [])
         if not isinstance(raw_args, list):
@@ -2087,6 +2243,30 @@ class AssistantAgent:
             command,
             [str(item) for item in raw_args],
         )
+        policy_error = _assistant_policy_error(command, normalized_args, str(cwd) if cwd else None)
+        if policy_error:
+            payload = self._blocked_tool_payload(
+                tool_name="run_custom",
+                parsed_args={
+                    "command": command,
+                    "args": normalized_args,
+                    "reason": reason,
+                },
+                target=target,
+                operator_mode="Investigate",
+                error=policy_error,
+            )
+            payload.update(
+                {
+                    "command": command,
+                    "args": normalized_args,
+                    "reason": reason,
+                    "return_code": -1,
+                    "execution_time": 0.0,
+                    "logged": False,
+                }
+            )
+            return payload
 
         scope_issue = self._assistant_scope_issue_for_command(
             command=command,
@@ -2207,6 +2387,11 @@ class AssistantAgent:
         )
         normalized_args = [str(arg or "").strip() for arg in list(args or [])]
 
+        if "sandbox executor unavailable" in haystack:
+            return (
+                "The command never reached the target because backend-side command execution is configured "
+                "to run only through the tool sandbox, and that sandbox executor was unavailable."
+            )
         if normalized_command == "curl":
             if "getaddrinfo() thread failed to start" in haystack:
                 return (
@@ -2221,6 +2406,11 @@ class AssistantAgent:
             if "timed out" in haystack or return_code == 28:
                 return "The target did not respond before the timeout, so the result is inconclusive."
         if normalized_command == "ffuf" and return_code == 2:
+            if "pthread_create failed" in haystack or "runtime/cgo" in haystack:
+                return (
+                    "FFUF reached the sandbox but crashed while creating runtime threads, "
+                    "which points to a sandbox resource limit rather than bad ffuf CLI syntax."
+                )
             if any("?" in arg for arg in normalized_args):
                 return "FFUF likely rejected the argument syntax; query-style probes like '?wsdl' usually need their own URL path or wordlist entry instead of the -e extension list."
             return "FFUF exit code 2 usually means invalid CLI usage or an unsupported flag/value combination."
@@ -2328,6 +2518,13 @@ class AssistantAgent:
             payload["css_selector"] = str(args.get("css_selector", "")).strip()
             return payload
         return await assistant_get_page(
+            url=url,
+            css_selector=str(args.get("css_selector", "")).strip(),
+        )
+
+    async def _execute_fetch_url_content(self, args: dict[str, Any]) -> dict[str, Any]:
+        url = str(args.get("url", "")).strip()
+        return await assistant_fetch_url_content(
             url=url,
             css_selector=str(args.get("css_selector", "")).strip(),
         )
@@ -2457,6 +2654,8 @@ class AssistantAgent:
                 elif tool == "search_project_vectors":
                     args = {"query": str(raw_input or "").strip()}
                 elif tool == "get_page":
+                    args = {"url": str(raw_input or "").strip()}
+                elif tool == "fetch_url_content":
                     args = {"url": str(raw_input or "").strip()}
                 elif tool == "search_web":
                     args = {"query": str(raw_input or "").strip()}
@@ -2645,13 +2844,26 @@ class AssistantAgent:
         lowered = str(prompt or "").strip().lower()
         if not lowered:
             return False
-        if any(pattern in lowered for pattern in _EXTERNAL_RESEARCH_INTENT_PATTERNS):
+        
+        # Explicit block if user wants to stay offline
+        if any(token in lowered for token in ("offline", "no internet", "without internet", "local only")):
+            return False
+            
+        # Allow by default if any web-related intent is detected, 
+        # or just allow by default for assistant-style queries.
+        web_tokens = (
+            "search", "web", "online", "google", "find", "look up", "research",
+            "cve", "vuln", "advisory", "latest", "current", "recent", "news",
+            "browse", "internet", "sourch", # Added sourch for the user's typo
+        )
+        if any(token in lowered for token in web_tokens):
             return True
-        if any(token in lowered for token in ("latest", "current", "recent", "today")) and any(
-            token in lowered for token in ("cve", "advisory", "docs", "documentation", "release", "news")
-        ):
-            return True
-        return False
+            
+        # Default to False for very short or non-research queries to save tokens/latency
+        if len(lowered.split()) < 3:
+            return False
+            
+        return True
 
     @staticmethod
     def _tool_call_signature(tool_name: str, args: dict[str, Any]) -> str:
@@ -2760,9 +2972,24 @@ class AssistantAgent:
         return cls._is_connectivity_failure_text(cls._tool_result_text_haystack(result))
 
     @classmethod
+    def _tool_result_indicates_sandbox_execution_blocker(cls, result: dict[str, Any]) -> bool:
+        haystack = cls._tool_result_text_haystack(result)
+        return "sandbox executor unavailable" in haystack or (
+            "tool sandbox" in haystack and "configure sandbox_executor_url" in haystack
+        )
+
+    @classmethod
     def _tool_results_include_connectivity_failure(cls, tool_results: list[dict[str, Any]]) -> bool:
         return any(
             cls._tool_result_indicates_connectivity_failure(result)
+            for result in tool_results
+            if isinstance(result, dict)
+        )
+
+    @classmethod
+    def _tool_results_include_sandbox_execution_blocker(cls, tool_results: list[dict[str, Any]]) -> bool:
+        return any(
+            cls._tool_result_indicates_sandbox_execution_blocker(result)
             for result in tool_results
             if isinstance(result, dict)
         )
@@ -2900,7 +3127,7 @@ class AssistantAgent:
                 total_args=len(args),
             ):
                 matched_target = True
-        if target_host and not matched_target:
+        if target_host and not matched_target and normalized_command not in ASSISTANT_TARGET_OPTIONAL_COMMANDS:
             return (
                 "Assistant command execution is limited to the current target. "
                 f"Include the active target host {target_host} in the command."
@@ -3686,6 +3913,16 @@ class AssistantAgent:
             return True
         evidence_lines = cls._build_evidence_lines(tool_results)
         lowered = text.lower()
+        if cls._tool_results_include_sandbox_execution_blocker(tool_results):
+            if "sandbox" not in lowered and "executor" not in lowered:
+                return True
+            if "get_page(" in lowered or "attempt to fetch the page content using the get_page tool" in lowered:
+                return True
+        if cls._tool_results_include_ffuf_findings(tool_results):
+            if cls._reply_denies_ffuf_findings(reply):
+                return True
+            if not cls._reply_covers_ffuf_findings(reply, tool_results):
+                return True
         if evidence_lines and "no direct evidence was collected in this turn" in lowered:
             return True
         if not tool_results and cls._reply_claims_live_checks_without_evidence(text):
@@ -3693,6 +3930,62 @@ class AssistantAgent:
         if not cls._reply_matches_prompt_focus(text, prompt):
             return True
         return False
+
+    @classmethod
+    def _tool_results_include_ffuf_findings(cls, tool_results: list[dict[str, Any]]) -> bool:
+        for result in tool_results:
+            if not isinstance(result, dict):
+                continue
+            command = str(result.get("command", "")).strip().lower()
+            if command != "ffuf":
+                continue
+            parsed = result.get("parsed_findings", [])
+            if isinstance(parsed, list) and parsed:
+                return True
+            if cls._parse_ffuf_findings(result):
+                return True
+        return False
+
+    @staticmethod
+    def _reply_denies_ffuf_findings(reply: str) -> bool:
+        lowered = " ".join(str(reply or "").strip().lower().split())
+        return any(marker in lowered for marker in _FFUF_NO_MATCH_REPLY_MARKERS)
+
+    @classmethod
+    def _reply_covers_ffuf_findings(cls, reply: str, tool_results: list[dict[str, Any]]) -> bool:
+        lowered = " ".join(str(reply or "").strip().lower().split())
+        findings: list[dict[str, Any]] = []
+        for result in tool_results:
+            if not isinstance(result, dict):
+                continue
+            command = str(result.get("command", "")).strip().lower()
+            if command != "ffuf":
+                continue
+            parsed = result.get("parsed_findings", [])
+            if not isinstance(parsed, list) or not parsed:
+                parsed = cls._parse_ffuf_findings(result)
+            for finding in parsed:
+                if isinstance(finding, dict):
+                    findings.append(finding)
+        if not findings:
+            return True
+
+        required = min(2, len(findings))
+        covered = 0
+        for finding in findings[:4]:
+            path = str(finding.get("path", "")).strip().lower()
+            if not path:
+                continue
+            variants = {path}
+            normalized = path.lstrip("/")
+            if normalized:
+                variants.add(normalized)
+                variants.add(f"/{normalized}")
+                if not normalized.endswith("/"):
+                    variants.add(f"/{normalized}/")
+            if any(variant and variant in lowered for variant in variants):
+                covered += 1
+        return covered >= max(1, required)
 
     @staticmethod
     def _reply_claims_live_checks_without_evidence(reply: str) -> bool:
@@ -3722,6 +4015,32 @@ class AssistantAgent:
         for result in tool_results[-6:]:
             if not isinstance(result, dict):
                 continue
+            command = str(result.get("full_command") or result.get("command") or "").strip()
+            normalized_command = str(result.get("command", "")).strip().lower()
+            structured = summarize_tool_output(result)
+            observations = structured.get("observations", [])
+            if normalized_command == "ffuf":
+                parsed_findings = result.get("parsed_findings", [])
+                if not isinstance(parsed_findings, list) or not parsed_findings:
+                    parsed_findings = cls._parse_ffuf_findings(result)
+                for finding in parsed_findings[:4]:
+                    if not isinstance(finding, dict):
+                        continue
+                    path = str(finding.get("path", "")).strip()
+                    status = str(finding.get("status", "")).strip()
+                    size = str(finding.get("size", "")).strip()
+                    words = str(finding.get("words", "")).strip()
+                    if path and status:
+                        line = f"ffuf matched `{path}` with HTTP {status}"
+                        if size and words:
+                            line += f" (size={size}, words={words})"
+                        lines.append(line)
+            elif isinstance(observations, list):
+                prefix = f"`{command}`" if command else f"`{normalized_command}`" if normalized_command else "Tool output"
+                for observation in observations[:3]:
+                    text = str(observation or "").strip()
+                    if text:
+                        lines.append(f"{prefix} observed: {text}")
             matches = result.get("matches", [])
             if isinstance(matches, list):
                 for match in matches[:3]:
@@ -3762,7 +4081,6 @@ class AssistantAgent:
             if str(result.get("url", "")).strip() and str(result.get("text", "")).strip():
                 page_line = f"Fetched {str(result.get('url', '')).strip()}: {str(result.get('text', '')).strip()[:240]}"
                 lines.append(page_line)
-            command = str(result.get("full_command") or result.get("command") or "").strip()
             stdout = str(result.get("stdout", "")).strip()
             likely_cause = str(result.get("likely_cause", "")).strip()
             if command and stdout:
@@ -3818,6 +4136,8 @@ class AssistantAgent:
         for result in tool_results[-6:]:
             if not isinstance(result, dict):
                 continue
+            if AssistantAgent._tool_result_indicates_sandbox_execution_blocker(result):
+                lines.append("The command execution lane is blocked because the tool sandbox is unavailable.")
             if bool(result.get("success")) and not str(result.get("error", "")).strip():
                 if any(isinstance(result.get(key), list) and result.get(key) for key in ("matches", "results")):
                     continue
@@ -3872,6 +4192,8 @@ class AssistantAgent:
         *,
         prompt: str,
     ) -> str:
+        if cls._tool_results_include_sandbox_execution_blocker(tool_results):
+            return "needs_retest"
         if cls._tool_results_include_connectivity_failure(tool_results) and not cls._tool_results_have_explicit_contradictory_evidence(tool_results):
             return "needs_retest"
 
@@ -4007,7 +4329,12 @@ class AssistantAgent:
         evidence_lines = cls._build_evidence_lines(tool_results)
         unknown_lines = cls._build_unknown_lines(tool_results, summary)
         verdict = cls._estimate_verdict(tool_results, unknown_lines, prompt=prompt)
-        if verdict == "false_positive":
+        if cls._tool_results_include_sandbox_execution_blocker(tool_results):
+            next_step = (
+                "Restore the tool-sandbox execution path first, then rerun the blocked command. "
+                "Verify SANDBOX_EXECUTOR_URL and confirm the tool-sandbox service is healthy before drawing target conclusions."
+            )
+        elif verdict == "false_positive":
             next_step = "Keep the finding dismissed unless new contradictory evidence appears, and document why it was ruled out."
         elif verdict == "confirmed":
             next_step = "Use the confirmed evidence to drive remediation, reporting, or one final scope-limited confirmation if the operator asks for it."
@@ -4164,6 +4491,7 @@ class AssistantAgent:
                     ChatMessage(role="user", content=user_content),
                 ],
                 allow_tools=False,
+                allow_backup_fallback=False,
             )
             text = str(response.content or "").strip()
             if text:
@@ -4176,8 +4504,15 @@ class AssistantAgent:
                 )
                 if normalized:
                     return normalized
-        except Exception:
-            logger.warning("assistant_context_compression_failed", exc_info=True)
+        except Exception as exc:
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code == 429:
+                logger.warning(
+                    "assistant_context_compression_rate_limited",
+                    provider=getattr(self._llm, "_provider", ""),
+                    status=exc.response.status_code,
+                )
+            else:
+                logger.warning("assistant_context_compression_failed", exc_info=True)
 
         return self._build_local_context_memory(
             operator_mode=operator_mode,

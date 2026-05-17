@@ -1,5 +1,7 @@
 services:
   backend:
+    restart: unless-stopped
+    init: true
     build:
       context: ../../
       dockerfile: infra/docker/backend.Dockerfile
@@ -9,59 +11,102 @@ services:
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
       PROJECTS_DB_PATH: /data/projects/projects.db
+      KNOWLEDGE_DATA_DIR: /data/knowledge
+      KNOWLEDGE_CACHE_DIR: /data/knowledge/cache
       PENTAFORGE_RELOAD: "0"
       HF_HOME: /data/huggingface
       SENTENCE_TRANSFORMERS_HOME: /data/huggingface
       SANDBOX_EXECUTOR_URL: http://tool-sandbox:8010
     volumes:
       - backend_projects_data:/data/projects
+      - backend_knowledge_data:/data/knowledge
       - backend_model_cache:/data/huggingface
       - backend_cache:/app/server/cache
       - backend_logs:/app/server/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     depends_on:
-      - redis
-      - qdrant
-      - tool-sandbox
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      tool-sandbox:
+        condition: service_healthy
 
   frontend:
+    restart: unless-stopped
+    init: true
     build:
       context: ../../
       dockerfile: infra/docker/frontend.Dockerfile
     ports:
       - "8080:80"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   tool-sandbox:
+    restart: unless-stopped
+    init: true
     build:
       context: ../../
       dockerfile: infra/docker/sandbox.Dockerfile
     environment:
       PENTAFORGE_SANDBOX_SERVICE: "1"
+      PENTAFORGE_SANDBOX_ROOT: /data/sandbox
+      PENTAFORGE_SANDBOX_SHARE_DIR: /app/server/sandbox/share
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     expose:
       - "8010"
     volumes:
-      - sandbox_workspace:/app/server/sandbox
+      - sandbox_workspace:/data/sandbox
       - backend_cache:/app/server/cache
       - backend_logs:/app/server/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8010/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    expose:
+      - "6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   qdrant:
+    restart: unless-stopped
     image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    expose:
+      - "6333"
+      - "6334"
     volumes:
       - qdrant_data:/qdrant/storage
 
 volumes:
   backend_projects_data:
+  backend_knowledge_data:
   backend_model_cache:
   backend_cache:
   backend_logs:

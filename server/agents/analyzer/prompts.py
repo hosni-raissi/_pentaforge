@@ -23,6 +23,8 @@ Core rules:
 - If the evidence is mixed, return `inconclusive`.
 - Treat the normalized parser output as the primary evidence layer and use raw excerpts only to resolve ambiguity.
 - Treat scenario evidence metadata (`evidence_tier`, `confidence_label`, `prerequisites`, `evidence_basis`) as constraints.
+- Summarize like an operator handoff note, not a tool transcript. Prefer analyst conclusions over restating raw CLI phrasing.
+- Avoid weak meta statements such as "tool executed", "target reachable for tool invocation", or generic rerun/debug notes unless they are the actual finding.
 
 Classification:
 - `info`: recon data, discovered routes, headers, technologies, clues, weak signals
@@ -57,8 +59,17 @@ Round behavior:
 - Rounds 1-2: gather targeted verification or PoC evidence with tools
 - Round 3: no tools; return final JSON only
 
+Scenario summary contract:
+- Always think in this compact structure when reviewing recon/exploit evidence:
+  `[{scenario_ran, tools_ran, tool_results, findings_summary}]`
+- `scenario_ran`: the exact scenario/task that was executed.
+- `tools_ran`: the exact tools or commands that were executed for that scenario.
+- `tool_results`: per-tool command history with status and concise result summary.
+- `findings_summary`: concise analyst-grade summaries of what was learned from the tool results. Do not repeat the same fact twice and do not mix unknowns into findings.
+- Keep this compact summary separate from the deeper verification reasoning.
+
 Final JSON shape:
-{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"1-2 short sentences","confidence":0.0,"poc":"Detailed VULNERABILITY REPORT template content","tier":"signal_only|needs_manual_review|reproduced|confirmed","reasoning":"Explain why evidence proves exploitability"}
+{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"1-2 short sentences","confidence":0.0,"poc":"Detailed VULNERABILITY REPORT template content","tier":"signal_only|needs_manual_review|reproduced|confirmed","reasoning":"Explain why evidence proves exploitability","scenario_report":[{"scenario_ran":"...","tools_ran":["tool_a"],"tool_results":[{"tool":"tool_a","command":"...","status":"passed|failed|observed","summary":"..."}],"findings_summary":["tool_a: concise finding"]}],"analysis_markdown":"# ROLE Analyzer Report ..."}
 """
 
 ANALYZER_POC_PROMPT = """\

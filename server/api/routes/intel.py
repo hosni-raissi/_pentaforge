@@ -239,6 +239,8 @@ def _update_progress_from_message(message: str) -> int:
         return 10
     if "ingesting rag resources" in lowered:
         return 16
+    if "update: ingesting source" in lowered:
+        return 32
     if "ingesting source" in lowered:
         return 22
     if "rag source ingestion complete" in lowered:

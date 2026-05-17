@@ -20,7 +20,9 @@ client/src-tauri/target
 server/venv
 server/cache
 server/logs
-server/sandbox
+server/sandbox/*
+!server/sandbox/share/
+!server/sandbox/share/**
 server/db/knowledge/data
 server/db/projects/postgres_data
 server/db/projects/projects.db

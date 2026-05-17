@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 
 from server.agents.analyzer.agent import AnalyzerAgent
+from server.agents.analyzer.parsers import normalize_tool_output
 
 
 @dataclass
@@ -114,3 +116,28 @@ def test_analyzer_tool_split_keeps_screenshots_for_retest_only() -> None:
     assert "capture_screenshot" in poc_tools
     assert "annotate_screenshot" in poc_tools
     assert "analyze_screenshot_with_vision" in poc_tools
+
+
+def test_analyzer_run_custom_summary_prefers_generic_observations() -> None:
+    analyzer = AnalyzerAgent()
+    raw_result = json.dumps(
+        {
+            "command": "nmap",
+            "observations": [
+                "Open port 80/tcp on target",
+                "Service banner: Apache/2.4.7",
+            ],
+            "stdout": "80/tcp open http Apache 2.4.7",
+        }
+    )
+
+    summary = analyzer._tool_findings_summary(  # type: ignore[attr-defined]
+        tool_name="run_custom",
+        raw_result=raw_result,
+        normalized=normalize_tool_output("run_custom", raw_result),
+        tool_args={"command": "nmap", "reason": "Port scan"},
+    )
+
+    assert "Open port 80/tcp on target" in summary
+    assert "Service banner: Apache/2.4.7" in summary
+    assert "Port scan" not in summary

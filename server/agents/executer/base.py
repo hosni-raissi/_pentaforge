@@ -23,6 +23,7 @@ from server.agents.executer.tool_safety import (
     requires_approval_for_execution,
 )
 from server.agents.executer.target_tool_routing import extract_discovered_target_types
+from server.agents.tool_output_parsers import summarize_tool_output, _short_text
 from server.config.agent import (
     LocalLLMConfig,
     PublicLLMConfig,
@@ -309,6 +310,23 @@ def _compact_tool_result_payload(result: str) -> str:
         return _truncate_tool_text(encoded, _TOOL_RESULT_MAX_TOTAL_CHARS)
 
     return _truncate_tool_text(raw, _TOOL_RESULT_MAX_TOTAL_CHARS)
+
+
+def _structured_result_excerpt(raw_result: Any) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return ""
+    payload: Any = text
+    if text[:1] in {"{", "["}:
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = text
+    summary = summarize_tool_output(payload)
+    observations = summary.get("observations", [])
+    if not isinstance(observations, list) or not observations:
+        return ""
+    return " ".join(str(item).strip() for item in observations[:3] if str(item).strip())
 
 
 def _extract_json_from_text(raw: str) -> dict[str, Any]:
@@ -1085,6 +1103,9 @@ class BaseExecuterAgent:
         text = str(raw_result or "").strip()
         if not text:
             return "No output returned."
+        structured_excerpt = _structured_result_excerpt(text)
+        if structured_excerpt:
+            return _short_text(structured_excerpt, limit=limit)
         compacted = _compact_tool_result_payload(text)
         flattened = re.sub(r"\s+", " ", compacted).strip()
         if len(flattened) <= limit:
@@ -1475,14 +1496,14 @@ class BaseExecuterAgent:
     ) -> str:
         semantic_tool_names = {
             "js_source_code_analyzer",
-            "detect_tech",
-            "http_header_analysis",
             "http_probe",
-            "web_crawler",
             "api_passive_enum",
-            "param_discovery",
+            "api_endpoint_discovery",
+            "api_response_analyzer",
+            "api_service_recon",
+            "passive_web_recon",
             "session_token_analysis",
-            "oauth_oidc_check",
+            "websocket_recon",
         }
         if tool_name.strip().lower() in semantic_tool_names:
             normalized_target = str(
@@ -1622,6 +1643,15 @@ class BaseExecuterAgent:
                 self._cb.on_warn(
                     f"[{self._role}] recovered malformed tool call for {tool_name}"
                 )
+
+            if tool_name == "run_custom" and isinstance(args, dict):
+                from server.agents.tools.run_custom import RunCustomRequest
+                try:
+                    # Normalize and resolve paths via RunCustomRequest validation
+                    validated = RunCustomRequest(**args)
+                    args = validated.model_dump()
+                except Exception:
+                    pass
 
             args = self._filter_tool_args(tool_name, args)
             args, sanitized_output_flags = self._sanitize_known_file_output_args(tool_name, args)
@@ -1923,12 +1953,23 @@ class BaseExecuterAgent:
         if str(tool_name or "").strip().lower() == "run_custom":
             command_name = str(args.get("command", "")).strip().lower() if isinstance(args, dict) else ""
             profile = get_run_custom_command_profile(command_name, role=self._role)
-            return requires_approval_for_execution(
+            result = requires_approval_for_execution(
                 profile=profile,
                 approval_mode=approval_mode,
                 role=self._role,
                 tool_name="run_custom",
             )
+            logger.info(
+                "tool_approval_check",
+                tool_name=tool_name,
+                command=command_name,
+                approval_mode=approval_mode,
+                role=self._role,
+                requires_approval=result,
+                callback_type=type(self._cb).__name__,
+                has_request_tool_approval=hasattr(self._cb, "request_tool_approval"),
+            )
+            return result
 
         profile = get_tool_safety_profile(tool_name, role=self._role)
         return requires_approval_for_execution(
@@ -1947,7 +1988,19 @@ class BaseExecuterAgent:
     ) -> bool:
         callback_fn = getattr(self._cb, "request_tool_approval", None)
         if not callable(callback_fn):
+            logger.warning(
+                "tool_approval_no_callback",
+                tool_name=tool_name,
+                callback_type=type(self._cb).__name__,
+            )
             return False
+
+        logger.info(
+            "tool_approval_requesting",
+            tool_name=tool_name,
+            role=self._role,
+            callback_type=type(self._cb).__name__,
+        )
 
         try:
             decision = callback_fn(
@@ -1962,6 +2015,13 @@ class BaseExecuterAgent:
 
         if inspect.isawaitable(decision):
             decision = await decision
+
+        logger.info(
+            "tool_approval_decision_received",
+            tool_name=tool_name,
+            decision_type=type(decision).__name__,
+            decision_value=str(decision)[:200] if decision is not None else "None",
+        )
 
         if isinstance(decision, dict):
             if "approved" in decision:
@@ -2485,9 +2545,9 @@ class BaseExecuterAgent:
                             "You did not invoke any tools this non-final round. In your next response, call at least one "
                             "focused scenario-locked recon tool with `_scenario_id`, unless every assigned scenario is "
                             "objectively impossible for this target. For loopback/local web targets, prefer focused "
-                            "local tools such as http_probe, detect_tech, http_header_analysis, web_crawler, "
-                            "directory_file_fuzzing, api_endpoint_discovery, api_passive_enum, js_source_code_analyzer, "
-                            "param_discovery, websocket_recon, cors_misconfig_check, or session_token_analysis. "
+                            "local tools such as http_probe, directory_file_fuzzing, api_endpoint_discovery, "
+                            "api_passive_enum, api_response_analyzer, api_service_recon, js_source_code_analyzer, "
+                            "passive_web_recon, websocket_recon, or session_token_analysis. "
                             "Do not spend another non-final round only thinking."
                         )
                     else:

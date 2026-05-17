@@ -231,13 +231,14 @@ class AnalyzerAgent:
         decision, score, reason = self._ssvc_decision(parsed, asset_score)
         confidence = self._confidence(parsed)
         finding_type = "vulnerability" if decision in {"ACT", "ATTEND"} else "info"
+        cvss_val = f"{parsed['cvss']:.1f}" if parsed.get('cvss') is not None else "na"
+        epss_val = f"{parsed['epss']:.3f}" if parsed.get('epss') is not None else "na"
         summary = MINIMAL_ANALYZER_SUMMARY_FORMAT.format(
             finding_type=finding_type,
             confidence=confidence,
             summary=(
                 f"ssvc={decision} score={float(score):.2f} "
-                f"cvss={(f'{parsed['cvss']:.1f}' if parsed['cvss'] is not None else 'na')} "
-                f"epss={(f'{parsed['epss']:.3f}' if parsed['epss'] is not None else 'na')} "
+                f"cvss={cvss_val} epss={epss_val} "
                 f"kev={'yes' if parsed['kev'] else 'no'} cves={len(parsed['cves'])} "
                 f"reason={reason}"
             ),
@@ -291,6 +292,12 @@ class AnalyzerAgent:
             evaluations.append(per_tool)
 
         overall = self._overall_assessment(evaluations)
+        scenario_reports = self._build_scenario_reports(
+            scenario=scenario if isinstance(scenario, dict) else {},
+            tool_results=tool_results if isinstance(tool_results, list) else [],
+            normalized_outputs=normalized_outputs,
+            row_summary="",
+        )
         return {
             "scenario": {
                 "task": str(scenario.get("task", "")),
@@ -303,6 +310,12 @@ class AnalyzerAgent:
             "normalized_outputs": normalized_outputs[:ANALYZER_MAX_NORMALIZED_EVIDENCE_ITEMS],
             "normalized_summary": summarize_normalized_outputs(normalized_outputs),
             "compact_summary": self._compact_bridge_line(scenario=scenario, overall=overall),
+            "scenario_reports": scenario_reports,
+            "agent_markdown": self._build_agent_markdown(
+                scenario=scenario if isinstance(scenario, dict) else {},
+                scenario_reports=scenario_reports,
+                row_summary="",
+            ),
         }
 
     async def classify(
@@ -330,6 +343,27 @@ class AnalyzerAgent:
                 ),
                 "internet_exposed": target_type in {"web_app", "api"},
             },
+        )
+        execution_summary = (
+            str(row_result.get("summary", "")).strip()
+            if isinstance(row_result, dict)
+            else ""
+        )
+        scenario_reports = self._build_scenario_reports(
+            scenario=scenario if isinstance(scenario, dict) else {},
+            tool_results=tool_results if isinstance(tool_results, list) else [],
+            normalized_outputs=(
+                assessment.get("normalized_outputs", [])
+                if isinstance(assessment.get("normalized_outputs"), list)
+                else []
+            ),
+            row_summary=execution_summary,
+        )
+        assessment["scenario_reports"] = scenario_reports
+        assessment["agent_markdown"] = self._build_agent_markdown(
+            scenario=scenario if isinstance(scenario, dict) else {},
+            scenario_reports=scenario_reports,
+            row_summary=execution_summary,
         )
         return AnalyzerCandidate(
             idx=idx,
@@ -506,6 +540,9 @@ class AnalyzerAgent:
         codes = normalized.get("status_codes", [])
         if isinstance(codes, list) and codes:
             parts.append("status_codes=" + ", ".join(str(item) for item in codes[:6]))
+        observations = normalized.get("observations", [])
+        if isinstance(observations, list) and observations:
+            parts.append("observations=" + " || ".join(str(item) for item in observations[:4]))
         routes = normalized.get("routes", [])
         if isinstance(routes, list) and routes:
             parts.append("routes=" + ", ".join(str(item) for item in routes[:6]))
@@ -518,6 +555,320 @@ class AnalyzerAgent:
         if not isinstance(outputs, list) or not outputs:
             return "No normalized parser output available."
         return summarize_normalized_outputs(outputs[:ANALYZER_MAX_NORMALIZED_EVIDENCE_ITEMS])
+
+    def _short_text(self, value: Any, *, limit: int | None = 220) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if isinstance(limit, int) and limit > 0 and len(text) > limit:
+            return text[:limit].rstrip() + "..."
+        return text
+
+    def _tool_findings_summary(
+        self,
+        *,
+        tool_name: str,
+        raw_result: Any,
+        normalized: dict[str, Any] | None,
+        tool_args: dict[str, Any] | None = None,
+    ) -> str:
+        parsed = self._parse_tool_result_payload(raw_result)
+        normalized_map = normalized if isinstance(normalized, dict) else {}
+        args_map = tool_args if isinstance(tool_args, dict) else {}
+
+        if tool_name == "dns_recon":
+            warnings = parsed.get("warnings", []) if isinstance(parsed.get("warnings"), list) else []
+            interesting = parsed.get("interesting_findings", []) if isinstance(parsed.get("interesting_findings"), list) else []
+            subdomains = parsed.get("subdomains", []) if isinstance(parsed.get("subdomains"), list) else []
+            nameservers = parsed.get("nameservers", []) if isinstance(parsed.get("nameservers"), list) else []
+            wildcard_warning = next(
+                (
+                    self._short_text(item, limit=None)
+                    for item in warnings
+                    if "wildcard" in str(item).lower()
+                ),
+                "",
+            )
+            if wildcard_warning:
+                return wildcard_warning
+            if interesting:
+                labels = []
+                for item in interesting[:3]:
+                    if isinstance(item, dict):
+                        labels.append(str(item.get("type", "")).replace("_", " ").strip() or "finding")
+                if labels:
+                    return f"Interesting DNS findings: {', '.join(labels)}."
+            if subdomains:
+                return f"Discovered {len(subdomains)} subdomain(s) from DNS recon."
+            if nameservers:
+                return f"Enumerated {len(nameservers)} nameserver(s); no hidden subdomains confirmed."
+            if parsed.get("success") is False:
+                return "DNS recon did not identify additional hidden subdomains or records."
+
+        if tool_name == "passive_web_recon":
+            insights = parsed.get("insights", []) if isinstance(parsed.get("insights"), list) else []
+            warnings = parsed.get("warnings", []) if isinstance(parsed.get("warnings"), list) else []
+            totals: list[str] = []
+            if parsed.get("total_subdomains") not in (None, ""):
+                totals.append(f"{parsed.get('total_subdomains')} passive subdomain(s)")
+            if parsed.get("total_historical_urls") not in (None, ""):
+                totals.append(f"{parsed.get('total_historical_urls')} historical URL(s)")
+            if parsed.get("total_ip_history") not in (None, ""):
+                totals.append(f"{parsed.get('total_ip_history')} historical IP(s)")
+            if insights:
+                return self._short_text("; ".join(str(item) for item in insights[:3]), limit=None)
+            if totals:
+                return "Collected " + ", ".join(totals) + "."
+            if warnings:
+                return self._short_text("; ".join(str(item) for item in warnings[:2]), limit=None)
+
+        if tool_name == "run_custom":
+            parsed_observations = (
+                parsed.get("observations", [])
+                if isinstance(parsed.get("observations"), list)
+                else normalized_map.get("observations", [])
+            )
+            if isinstance(parsed_observations, list) and parsed_observations:
+                return self._short_text("; ".join(str(item) for item in parsed_observations[:3]), limit=None)
+            error_text = self._short_text(parsed.get("error", ""), limit=None)
+            reason_text = self._short_text(args_map.get("reason", ""), limit=None)
+            if error_text and reason_text:
+                return f"{reason_text} Failed: {error_text}"
+            if error_text:
+                return f"Failed: {error_text}"
+            if reason_text:
+                return reason_text
+            command_args = args_map.get("args", [])
+            if isinstance(command_args, list) and command_args:
+                return "Ran custom command: " + self._short_text(" ".join(str(item) for item in command_args[:6]), limit=None)
+
+        if parsed:
+            success = parsed.get("success")
+            error_text = self._short_text(parsed.get("error", ""), limit=None)
+            if success is False and error_text:
+                return f"Failed: {error_text}"
+
+            phrases: list[str] = []
+            summary_keys = (
+                "summary",
+                "reason",
+                "info_disclosure_risk",
+                "average_grade",
+                "severity",
+            )
+            for key in summary_keys:
+                value = parsed.get(key)
+                if str(value or "").strip():
+                    phrases.append(f"{key.replace('_', ' ')}={self._short_text(value, limit=None)}")
+
+            if isinstance(parsed.get("unique_parameters"), list) and parsed.get("unique_parameters"):
+                params = ", ".join(str(item) for item in parsed.get("unique_parameters", [])[:5])
+                phrases.append(f"parameters={params}")
+            if isinstance(parsed.get("detected_fields"), list) and parsed.get("detected_fields"):
+                fields = ", ".join(str(item) for item in parsed.get("detected_fields", [])[:5])
+                phrases.append(f"fields={fields}")
+            if isinstance(parsed.get("missing_headers"), list) and parsed.get("missing_headers"):
+                headers = ", ".join(str(item) for item in parsed.get("missing_headers", [])[:5])
+                phrases.append(f"missing_headers={headers}")
+            if isinstance(parsed.get("observations"), list) and parsed.get("observations"):
+                obs = ", ".join(self._short_text(item, limit=None) for item in parsed.get("observations", [])[:3])
+                phrases.append(f"observations={obs}")
+            if isinstance(parsed.get("findings"), list) and parsed.get("findings"):
+                findings = ", ".join(self._short_text(item, limit=None) for item in parsed.get("findings", [])[:3])
+                phrases.append(f"findings={findings}")
+            if isinstance(parsed.get("status_summary"), dict) and parsed.get("status_summary"):
+                statuses = ", ".join(
+                    f"{str(key)}={str(value)}"
+                    for key, value in list(parsed.get("status_summary", {}).items())[:4]
+                )
+                phrases.append(f"status_summary={statuses}")
+            if parsed.get("total_parameters_found") not in (None, ""):
+                phrases.append(f"parameters_found={parsed.get('total_parameters_found')}")
+            if parsed.get("total_vulnerable") not in (None, ""):
+                phrases.append(f"vulnerable_endpoints={parsed.get('total_vulnerable')}")
+
+            if phrases:
+                return self._short_text("; ".join(phrases[:4]), limit=None)
+
+        markers = normalized_map.get("evidence_markers", [])
+        routes = normalized_map.get("routes", [])
+        codes = normalized_map.get("status_codes", [])
+        snippets = normalized_map.get("snippets", [])
+        fallback_parts: list[str] = []
+        if isinstance(markers, list) and markers:
+            fallback_parts.append("markers=" + ", ".join(str(item) for item in markers[:4]))
+        if isinstance(routes, list) and routes:
+            fallback_parts.append("routes=" + ", ".join(str(item) for item in routes[:4]))
+        if isinstance(codes, list) and codes:
+            fallback_parts.append("status=" + ", ".join(str(item) for item in codes[:4]))
+        if isinstance(snippets, list) and snippets:
+            fallback_parts.append("snippets=" + " | ".join(self._short_text(item, limit=None) for item in snippets[:2]))
+        if fallback_parts:
+            return self._short_text("; ".join(fallback_parts), limit=None)
+
+        raw_text = self._short_text(raw_result, limit=None)
+        return raw_text or f"No concise findings were extracted for {tool_name}."
+
+    def _execution_summary_for_report(
+        self,
+        *,
+        tool_results: list[dict[str, Any]],
+        row_summary: str,
+    ) -> str:
+        summary_text = self._short_text(row_summary, limit=None)
+        if summary_text:
+            summary_text = re.sub(r"\s*Observed evidence:.*$", "", summary_text, flags=re.IGNORECASE).strip()
+            summary_text = re.sub(r"\s*Forwarding raw evidence.*$", "", summary_text, flags=re.IGNORECASE).strip()
+        rounds_match = re.search(r"across\s+(\d+)\s+tool round", row_summary, re.IGNORECASE)
+        rounds_value = rounds_match.group(1) if rounds_match else ""
+        tool_calls = sum(1 for item in tool_results if isinstance(item, dict))
+        if rounds_value and tool_calls > 0:
+            return f"Completed {rounds_value} round(s) with {tool_calls} tool call(s)."
+        if tool_calls > 0:
+            return f"Completed this scenario with {tool_calls} tool call(s)."
+        return summary_text or "Execution summary not available."
+
+    def _tool_command_text(self, *, tool_name: str, tool_args: dict[str, Any] | None) -> str:
+        args_map = tool_args if isinstance(tool_args, dict) else {}
+        for key in ("command", "cmd", "raw_command", "script", "code", "url"):
+            value = args_map.get(key)
+            if str(value or "").strip():
+                command = str(value).strip()
+                arg_list = args_map.get("args", [])
+                if key == "command" and isinstance(arg_list, list) and arg_list:
+                    return self._short_text(
+                        " ".join([command, *[str(item) for item in arg_list[:10]]]),
+                        limit=None,
+                    )
+                return self._short_text(command, limit=None)
+
+        compact_args: list[str] = []
+        for key, value in list(args_map.items())[:6]:
+            if value in ("", None, [], {}):
+                continue
+            if isinstance(value, list):
+                rendered = "[" + ", ".join(self._short_text(item, limit=None) for item in value[:5]) + "]"
+            else:
+                rendered = self._short_text(value, limit=None)
+            compact_args.append(f"{key}={rendered}")
+        if compact_args:
+            return self._short_text(f"{tool_name}({', '.join(compact_args)})", limit=None)
+        return tool_name
+
+    def _build_scenario_reports(
+        self,
+        *,
+        scenario: dict[str, Any],
+        tool_results: list[dict[str, Any]],
+        normalized_outputs: list[dict[str, Any]],
+        row_summary: str,
+    ) -> list[dict[str, Any]]:
+        safe_scenario = scenario if isinstance(scenario, dict) else {}
+        safe_tool_results = tool_results if isinstance(tool_results, list) else []
+        safe_normalized = normalized_outputs if isinstance(normalized_outputs, list) else []
+        tools_ran: list[str] = []
+        findings_summary: list[str] = []
+        tool_details: list[dict[str, str]] = []
+
+        for index, item in enumerate(safe_tool_results):
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("name", "")).strip() or f"tool_{index + 1}"
+            command_text = self._tool_command_text(
+                tool_name=tool_name,
+                tool_args=item.get("args", {}) if isinstance(item.get("args", {}), dict) else {},
+            )
+            tools_ran.append(command_text)
+            normalized = safe_normalized[index] if index < len(safe_normalized) and isinstance(safe_normalized[index], dict) else {}
+            tool_summary = self._tool_findings_summary(
+                tool_name=tool_name,
+                raw_result=item.get('result', ''),
+                normalized=normalized,
+                tool_args=item.get('args', {}) if isinstance(item.get('args', {}), dict) else {},
+            )
+            findings_summary.append(f"{tool_name}: {tool_summary}")
+            raw_status = str(item.get("status", "")).strip().lower()
+            status_label = (
+                "passed"
+                if raw_status in {"completed", "success", "passed"}
+                else "failed"
+                if raw_status in {"error", "failed"}
+                else raw_status or "observed"
+            )
+            tool_details.append(
+                {
+                    "tool": tool_name,
+                    "command": command_text,
+                    "status": status_label,
+                    "raw_status": raw_status or "observed",
+                    "summary": tool_summary,
+                }
+            )
+
+        return [
+            {
+                "scenario_ran": str(safe_scenario.get("task", "")).strip() or "Untitled scenario",
+                "agent": str(safe_scenario.get("agent", "")).strip().lower() or "unknown",
+                "tools_ran": _unique_strings(tools_ran),
+                "tool_results": tool_details,
+                "findings_summary": findings_summary,
+                "execution_summary": self._execution_summary_for_report(
+                    tool_results=safe_tool_results,
+                    row_summary=row_summary,
+                ),
+            }
+        ]
+
+    def _build_agent_markdown(
+        self,
+        *,
+        scenario: dict[str, Any],
+        scenario_reports: list[dict[str, Any]],
+        row_summary: str,
+    ) -> str:
+        safe_scenario = scenario if isinstance(scenario, dict) else {}
+        safe_reports = scenario_reports if isinstance(scenario_reports, list) else []
+        agent_role = str(safe_scenario.get("agent", "")).strip().lower() or "unknown"
+        title = f"# {agent_role.upper()} Analyzer Report"
+        lines: list[str] = [title]
+
+        for report in safe_reports:
+            if not isinstance(report, dict):
+                continue
+            tool_results = report.get("tool_results", [])
+            lines.extend([
+                "",
+                "## Scenario Run",
+                "",
+                f"- Scenario Ran: {str(report.get('scenario_ran', '')).strip() or 'Untitled scenario'}",
+                f"- Tools Run: {', '.join(f'`{str(item).strip()}`' for item in report.get('tools_ran', []) if str(item).strip()) or 'No tools recorded'}",
+            ])
+            execution_summary = str(report.get("execution_summary", "")).strip() or self._short_text(row_summary, limit=None)
+            if execution_summary:
+                lines.append(f"- Execution Summary: {execution_summary}")
+
+            lines.extend(["", "## Full Tool History", ""])
+            if isinstance(tool_results, list) and tool_results:
+                for item in tool_results:
+                    if not isinstance(item, dict):
+                        continue
+                    status = str(item.get("status", "")).strip() or "observed"
+                    command = str(item.get("command", "")).strip() or str(item.get("tool", "")).strip() or "tool"
+                    summary = str(item.get("summary", "")).strip()
+                    line = f"- `{status}` `{command}`"
+                    if summary:
+                        line += f" -> {summary}"
+                    lines.append(line)
+            else:
+                lines.append("- No tool history recorded.")
+
+            findings_summary = report.get("findings_summary", [])
+            lines.extend(["", "## What The Tools Found", ""])
+            if isinstance(findings_summary, list) and findings_summary:
+                for item in findings_summary:
+                    lines.append(f"- {self._short_text(item, limit=None)}")
+            else:
+                lines.append("- No concise findings summary was produced.")
+
+        return "\n".join(lines).strip()
 
     def _executor_history_block(self, tool_results: Any) -> str:
         if not isinstance(tool_results, list) or not tool_results:
@@ -762,6 +1113,8 @@ class AnalyzerAgent:
         data.setdefault("reasoning", data.get("reasoning", "LLM-based analysis of verification evidence."))
         data["evidence"] = evidence_map
         data.setdefault("normalized_outputs", candidate.normalized_outputs)
+        data.setdefault("scenario_report", candidate.assessment.get("scenario_reports", []))
+        data.setdefault("analysis_markdown", str(candidate.assessment.get("agent_markdown", "")).strip())
         data.setdefault("ssvc", candidate.assessment.get("overall", {}).get("ssvc", "TRACK"))
         data.setdefault("ssvc_action", candidate.assessment.get("overall", {}).get("ssvc", "TRACK"))
         data.setdefault("hitl_required", str(data.get("ssvc", "")).upper() in set(ANALYZER_HITL_DECISIONS))
