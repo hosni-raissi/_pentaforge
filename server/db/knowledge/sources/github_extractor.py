@@ -74,6 +74,14 @@ class GitHubRepoExtractor(BaseExtractor):
 
         file_count = 0
         for file_path in self._walk_files(root):
+            if file_count >= self.config.max_pages:
+                logger.info(
+                    "source_document_cap_reached",
+                    source=self.source_name,
+                    max_pages=self.config.max_pages,
+                )
+                break
+
             try:
                 content = file_path.read_text(encoding="utf-8", errors="replace")
             except Exception as exc:

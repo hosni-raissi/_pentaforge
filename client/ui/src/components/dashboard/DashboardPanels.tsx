@@ -210,6 +210,9 @@ interface DashboardProjectHeaderProps {
   isRunning: boolean;
   canRun: boolean;
   isStarting: boolean;
+  startingMessage?: string | null;
+  isStopping?: boolean;
+  stoppingMessage?: string | null;
   hasAnotherRunningProject: boolean;
   onStartScan: () => void;
   onStopScan: () => void;
@@ -223,6 +226,9 @@ export function DashboardProjectHeader({
   isRunning,
   canRun,
   isStarting,
+  startingMessage,
+  isStopping,
+  stoppingMessage,
   hasAnotherRunningProject,
   onStartScan,
   onStopScan,
@@ -263,6 +269,8 @@ export function DashboardProjectHeader({
                 size="xs"
                 variant="danger"
                 onClick={onStopScan}
+                loading={Boolean(isStopping)}
+                disabled={Boolean(isStopping)}
                 title="Stop running scan"
                 className="font-bold uppercase tracking-wider"
               >
@@ -272,7 +280,14 @@ export function DashboardProjectHeader({
             </div>
           )}
           {isStarting ? (
-            <span className="text-[11px] font-bold text-pf-500 uppercase animate-pulse">Starting scan...</span>
+            <span className="text-[11px] font-bold text-pf-500 uppercase animate-pulse">
+              {startingMessage || 'Starting scan...'}
+            </span>
+          ) : null}
+          {isStopping ? (
+            <span className="text-[11px] font-bold text-red-500 uppercase animate-pulse">
+              {stoppingMessage || 'Stopping scan...'}
+            </span>
           ) : null}
           <Button size="xs" variant="secondary" onClick={onChangeProject} className="font-bold uppercase tracking-wider">
             <Repeat2 size={12} />
@@ -295,6 +310,11 @@ interface DashboardTargetOverviewCardProps {
   updatedAt: string;
   effectiveStatus: ProjectStatus;
   displayedPentestElapsed: string;
+  runtimeNotice?: {
+    tone: "success" | "warning" | "info";
+    title: string;
+    detail: string;
+  } | null;
   onEditProject: () => void;
   formatDateTime: (value: string) => string;
 }
@@ -306,6 +326,7 @@ export function DashboardTargetOverviewCard({
   updatedAt,
   effectiveStatus,
   displayedPentestElapsed,
+  runtimeNotice,
   onEditProject,
   formatDateTime,
 }: DashboardTargetOverviewCardProps) {
@@ -389,6 +410,28 @@ export function DashboardTargetOverviewCard({
           </p>
         </div>
       </div>
+      {runtimeNotice ? (
+        <div className={`rounded-xl border px-3 py-2.5 ${
+          runtimeNotice.tone === "success"
+            ? "border-emerald-500/25 bg-emerald-500/10"
+            : runtimeNotice.tone === "warning"
+              ? "border-amber-500/25 bg-amber-500/10"
+              : "border-sky-500/25 bg-sky-500/10"
+        }`}>
+          <p className={`text-xs font-bold uppercase tracking-wider ${
+            runtimeNotice.tone === "success"
+              ? "text-emerald-300"
+              : runtimeNotice.tone === "warning"
+                ? "text-amber-300"
+                : "text-sky-300"
+          }`}>
+            {runtimeNotice.title}
+          </p>
+          <p className="mt-1 text-sm text-text-secondary">
+            {runtimeNotice.detail}
+          </p>
+        </div>
+      ) : null}
     </Card>
   );
 }

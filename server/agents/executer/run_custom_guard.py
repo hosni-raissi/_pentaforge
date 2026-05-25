@@ -54,21 +54,21 @@ _DATA_VALUE_FLAGS = {
 _NETWORK_TARGET_COMMANDS = {
     # Web & API Fuzzing
     "commix", "ffuf", "gobuster", "dirb", "dirbuster", "wfuzz", "nikto", "wpscan", "joomscan",
-    "arjun", "paramspider", "katana", "gospider", "gau", "waybackurls", "subjs",
-    "secretfinder", "getjs", "getJS", "graphql-cop", "graphw00f", "inql", "ssrfmap", "tplmap", "xsstrike", "dalfox", "corscanner",
+    "arjun", "paramspider", "katana", "gospider", "gau", "subjs",
+    "secretfinder", "graphql-cop", "graphw00f", "inql", "ssrfmap", "tplmap", "xsstrike", "dalfox", "corscanner",
     "linpeas", "linpeas.sh", "lse", "pspy", "kerbrute",
     
     # Network Scanning & Discovery
     "nmap", "amap", "shodan", "censys", "naabu", "masscan", "zgrab2", "dnsx", "tlsx", "httpx", "subfinder", "amass",
-    "assetfinder", "dig", "host", "nslookup", "dnsrecon", "fping", "ike-scan", "nbtscan",
+    "dig", "host", "nslookup", "dnsrecon", "fping", "ike-scan", "nbtscan",
     "onesixtyone", "snmpwalk", "snmpcheck", "mtr", "traceroute", "ping", "nc", "netcat", "tshark", "tcpdump",
     
     # Vulnerability & Cloud Scanning
     "nuclei", "trivy", "grype", "syft", "dive", "osv-scanner", "gitleaks", "trufflehog",
-    "scoutsuite", "prowler", "pacu", "cloudsploit", "cloud_enum",
+    "scoutsuite", "prowler", "pacu", "cloud_enum",
     "s3scanner", "kube-hunter", "checkov", "bandit", "semgrep", "retire", "retire_js",
     "whatweb", "wappalyzer", "wafw00f", "sslyze", "ssh-audit", "testssl", "testssl.sh", "mitmproxy",
-    "pynt", "frida", "frida-ps", "frida-trace", "frida-discover", "objection", "mobsfscan",
+    "pynt", "mobsfscan",
     
     # Exploitation & Auth
     "sqlmap", "nosqlmap", "hydra", "medusa", "patator", "responder", "msfconsole",
@@ -78,12 +78,12 @@ _NETWORK_TARGET_COMMANDS = {
     # Utility & Misc
     "curl", "wget", "openssl", "git", "docker", "kubectl", "az", "gcloud", "gsutil", "aws", "crane", "searchsploit",
     "kiterunner", "kr", "interactsh-client", "grpcurl", "chisel", "git-dumper", "protoc",
-    "ctop", "whaler", "k9s", "nomad", "kube-bench", "stern", "calicoctl", "clair-scanner", "skopeo", "reg", "kubenscan",
-    "binwalk", "apktool", "apkid", "firmwalker", "dmesg", "pulumi", "blobenum", "steampipe",
-    "gcpbucketbrute", "stormspotter", "kubescan.sh", "showmount", "oauth-scanner", "oauth-scanner.py",
+    "ctop", "k9s", "nomad", "kube-bench", "stern", "calicoctl", "skopeo",
+    "binwalk", "apktool", "apkid", "firmwalker", "dmesg", "pulumi", "steampipe",
+    "gcpbucketbrute", "stormspotter", "showmount", "oauth-scanner", "oauth-scanner.py",
     "newman", "zap-cli", "paramminer", "param-miner",
     "arp-scan", "rustscan", "knockpy", "secretsdump.py", "impacket-secretsdump",
-    "rdp-sec-check", "rdp-sec-check.pl", "ssh", "ftp", "theHarvester", "besttrace", "netdiscover",
+    "rdp-sec-check", "rdp-sec-check.pl", "ssh", "ssh-mitm", "ftp", "theHarvester", "besttrace", "netdiscover",
     "proxychains4", "proxychains", "ligolo-ng-agent", "sshuttle", "gh", "glab", "repo-supervisor", "detect-secrets", "git-dumper", "git-dumper.py", "codeql", "yq", "diggit", "recon-ng", "feroxbuster", "cmseek", "droopescan", "gowitness", "subjack", "alterx", "massdns", "cloudbrute",
 }
 _HOSTISH_RE = re.compile(
@@ -129,16 +129,17 @@ def extract_network_targets(command: str, args: list[str]) -> list[str]:
         if skip_next:
             skip_next = False
             continue
-        lowered = token.lower()
-        if lowered in _DATA_VALUE_FLAGS:
+        # CLI flags are case-sensitive (e.g. -H for header, -h for host)
+        if token in _DATA_VALUE_FLAGS:
             skip_next = True
             continue
-        if lowered in _URL_VALUE_FLAGS | _HOST_VALUE_FLAGS:
+        if token in _URL_VALUE_FLAGS | _HOST_VALUE_FLAGS:
             next_value = str(args[idx + 1]).strip().strip("'\"") if idx + 1 < len(args) else ""
             if next_value:
                 targets.append(next_value)
             skip_next = True
             continue
+        lowered = token.lower()
         if lowered.startswith(("http://", "https://", "ws://", "wss://")):
             targets.append(token)
             continue

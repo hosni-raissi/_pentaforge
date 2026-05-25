@@ -3,8 +3,19 @@ FROM ${SANDBOX_BASE_IMAGE}
 
 WORKDIR /app
 
+RUN rm -f /etc/apt/sources.list.d/azure-cli.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libcairo2-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY server/requirements.txt /tmp/requirements.txt
-RUN pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.3.1+cpu" && \
+RUN for attempt in 1 2 3; do \
+        pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.3.1+cpu" && break; \
+        if [ "$attempt" -eq 3 ]; then exit 1; fi; \
+        echo "torch install failed on attempt $attempt, retrying..." >&2; \
+        sleep 5; \
+    done && \
     pip install --prefer-binary -r /tmp/requirements.txt
 
 COPY server /app/server

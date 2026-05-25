@@ -65,28 +65,26 @@ RECON_TOOL_TARGET_TYPES: dict[str, set[str]] = {
     "api_passive_enum": {"api", "web_app"},
     "api_response_analyzer": {"api", "web_app"},
     "arp_scan": {"network", "infra", "iot"},
-    "ci_cd_pipeline_audit": {"repository"},
+    "ci_cd_pipeline_audit": set(),
     "cloud_misconfig_scan": {"cloud"},
     "cloud_storage_enum": {"cloud"},
     "container_image_scan": {"container"},
     "container_layer_analysis": {"container"},
     "container_registry_enum": {"cloud", "container"},
     "container_runtime_audit": {"container"},
-    "dependency_scan": {"repository"},
+    "dependency_scan": set(),
     "dns_recon": {"network", "infra", "web_app"},
     "firmware_analysis": {"iot"},
     "git_history_audit": {"repository"},
     "iac_security_scan": {"repository", "infra"},
     "iot_protocol_scan": {"iot", "network"},
-    "mobile_dynamic_analysis": {"mobile"},
     "mobile_static_analysis": {"mobile"},
-    "mobile_storage_check": {"mobile"},
     "known_vuln_lookup": {"web_app", "api", "linux_server", "infra", "network", "cloud"},
     "run_custom": {"shared"},
     "run_python": {"shared"},
     "sast_scan": {"repository"},
-    "secret_scan": {"repository", "cloud"},
-    "sensitive_files_scan": {"repository"},
+    "secret_scan": {"cloud"},
+    "sensitive_files_scan": set(),
     "traffic_analyze": {"network", "infra"},
     "wireless_scan": {"network", "iot"},
     **_WEB_SCOPE_RECON_TOOL_TARGET_TYPES,
@@ -217,7 +215,7 @@ def filter_tools_for_target_types(
     filtered: list[Tool] = []
     for tool in tools:
         allowed_for_tool = mapping.get(tool.name)
-        if not allowed_for_tool:
+        if allowed_for_tool is None:
             # Keep unmapped tools available by default to avoid accidental outages.
             filtered.append(tool)
             continue

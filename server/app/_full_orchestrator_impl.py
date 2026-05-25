@@ -30,6 +30,7 @@ from server.db.projects import ProjectsStore
 from server.db.projects.project_rag import index_verified_finding
 from server.db.projects.runtime_cache import get_project_runtime_cache
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
+from server.agents.executer.sandbox import delete_project_workspace
 from server.agents.executer.payload_filter import get_payloads as _get_filtered_payloads
 from server.agents.executer.base import _executer_callback_context
 from server.nodes.information_gathering import load_target_info_profile_defaults
@@ -2841,7 +2842,13 @@ def _build_target_info_tool_kwargs(
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_type = _normalize_target_type(target_type)
     host = _extract_target_host(target)
-    target_text = str(target or "").strip()
+    runtime_state = memory.get("target_runtime", {}) if isinstance(memory, dict) else {}
+    repo_checkout_path = (
+        str(runtime_state.get("repository_checkout_path", "")).strip()
+        if isinstance(runtime_state, dict)
+        else ""
+    )
+    target_text = repo_checkout_path if normalized_type == "repository" and repo_checkout_path else str(target or "").strip()
     repo_like = normalized_type == "repository" or os.path.exists(target_text)
     mobile_artifact = target_text.lower().endswith((".apk", ".ipa", ".aab"))
     container_artifact = bool(re.search(r"(dockerfile|\.tar$|:[A-Za-z0-9._-]+$|/)", target_text, re.IGNORECASE))
@@ -6214,6 +6221,7 @@ class ScanOrchestratorService:
         project.pop("contextWindows", None)
         self._reset_project_runtime_state(project)
         self._projects_store.upsert_project(project)
+        delete_project_workspace(project_key, project_payload=project)
         try:
             self._projects_store.clear_scan_event_cache(project_key)
         except Exception as exc:  # pragma: no cover - defensive

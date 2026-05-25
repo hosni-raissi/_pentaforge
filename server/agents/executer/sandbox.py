@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 
 def get_sandbox_root() -> Path:
@@ -27,6 +29,84 @@ def get_sandbox_share_dir() -> Path:
     path = Path(configured).expanduser() if configured else get_sandbox_root() / "share"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_project_workspace_dir(project_id: str) -> Path:
+    safe_project_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(project_id or "").strip())
+    if not safe_project_id:
+        return get_sandbox_root()
+    path = get_sandbox_root() / "projects" / safe_project_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _legacy_repository_clone_candidates(project_payload: dict | None) -> list[Path]:
+    if not isinstance(project_payload, dict):
+        return []
+    target_type = str(project_payload.get("targetType", "")).strip().lower()
+    if target_type != "repository":
+        return []
+
+    target_config = project_payload.get("targetConfig")
+    if not isinstance(target_config, dict):
+        return []
+
+    repo_url = str(target_config.get("repo_url") or project_payload.get("target") or "").strip()
+    if not repo_url:
+        return []
+
+    parsed = urlsplit(repo_url)
+    raw_path = parsed.path.rstrip("/")
+    parts = [part for part in raw_path.split("/") if part]
+    if not parts:
+        return []
+
+    repo_name = parts[-1]
+    if repo_name.endswith(".git"):
+        repo_name = repo_name[:-4]
+    owner = parts[-2] if len(parts) >= 2 else ""
+
+    root = get_sandbox_root().resolve()
+    candidates: list[Path] = []
+    if owner and repo_name:
+        candidates.append((root / "repos" / owner / repo_name).resolve())
+    if repo_name:
+        candidates.append((root / repo_name).resolve())
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for item in candidates:
+        text = str(item)
+        if text in seen:
+            continue
+        seen.add(text)
+        deduped.append(item)
+    return deduped
+
+
+def delete_project_workspace(project_id: str, project_payload: dict | None = None) -> dict[str, int]:
+    removed = 0
+    root = get_sandbox_root().resolve()
+    workspace = root / "projects" / re.sub(r"[^A-Za-z0-9._-]", "_", str(project_id or "").strip())
+    candidates = [workspace.resolve(), *_legacy_repository_clone_candidates(project_payload)]
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        text = str(candidate)
+        if text in seen:
+            continue
+        seen.add(text)
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if not candidate.exists():
+            continue
+        shutil.rmtree(candidate, ignore_errors=True)
+        if not candidate.exists():
+            removed += 1
+
+    return {"sandbox_paths_removed": removed}
 
 
 def ensure_sandbox_environment() -> Path:

@@ -4,9 +4,9 @@ This catalog supplements the live web recon runtime. Smart Python tools remain
 active until each wrapper has a real alias-backed or router-backed replacement.
 """
 
-from __future__ import annotations
+from server.agents.executer.recon.tools.security_catalog import normalize_security_catalog
 
-WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
+_RAW_WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
 
     # ── PHASE 1: PASSIVE OSINT ─────────────────────────────────────────────
     "subfinder": {
@@ -25,14 +25,6 @@ WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
         "d": ["deep passive+active subdomain enum", "ASN and CIDR mapping", "relationship graph across assets", "when subfinder misses subdomains"],
         "tgt": ["domain", "org"],
         "note": "(CONFIG:amass) resolves to config path; output to stdout",
-        "pipe_into": ["dnsx", "httpx"]
-    },
-    "assetfinder": {
-        "t": "subdomain_enum",
-        "c": "lightweight_sweep",
-        "u": "assetfinder --subs-only TARGET 2>/dev/null",
-        "d": ["fast lightweight passive subdomain sweep", "quick pipeline input"],
-        "tgt": ["domain"],
         "pipe_into": ["dnsx", "httpx"]
     },
     "theHarvester": {
@@ -76,14 +68,6 @@ WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
         "d": ["mine historical URLs from Wayback and Common Crawl", "find old endpoints and parameters", "discover forgotten paths"],
         "tgt": ["domain"],
         "pipe_into": ["ffuf", "nuclei"]
-    },
-    "waybackurls": {
-        "t": "url_harvest",
-        "c": "archive_mining",
-        "u": "echo TARGET | waybackurls 2>/dev/null",
-        "d": ["pull URLs from Wayback Machine specifically", "simpler alternative to gau for archive mining"],
-        "tgt": ["domain"],
-        "pipe_into": ["ffuf"]
     },
     "paramspider": {
         "t": "param_harvest",
@@ -411,8 +395,8 @@ WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
             "active_directory", "network_services", "auth_testing"
         ],
         "note": "(WORDLIST:userpass) piped via stdin as 'user:pass' pairs; -o - outputs to stdout; SERVICE = ssh/ftp/http/etc.",
-        "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]'"
     }
 }
 
+WEB_RECON_TOOLS: dict[str, dict[str, object]] = normalize_security_catalog(_RAW_WEB_RECON_TOOLS)
 web_recon_tools = WEB_RECON_TOOLS

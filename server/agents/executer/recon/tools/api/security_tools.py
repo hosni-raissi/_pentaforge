@@ -12,8 +12,7 @@ _RAW_API_RECON_TOOLS: dict[str, dict[str, object]] = {
         "c": "historical_api_enum",
         "u": "gau TARGET | grep -iE 'api|v[0-9]+|graphql|rest' | sort -u",
         "d": ["Wayback Machine API harvesting", "Historical endpoint discovery", "Version path detection"],
-        "tgt": ["rest_api", "graphql", "public_apis", "legacy_versions"],
-        "alt": "waybackurls TARGET | grep -iE 'api|graphql'"
+        "tgt": ["rest_api", "graphql", "public_apis", "legacy_versions"]
     },
     
     "httpx": {
@@ -34,14 +33,6 @@ _RAW_API_RECON_TOOLS: dict[str, dict[str, object]] = {
         "alt": "subfinder -d TARGET -silent | dnsx -silent -resp"
     },
     
-    "assetfinder": {
-        "t": "discovery",
-        "c": "passive_api_asset_enum",
-        "u": "assetfinder -subs-only TARGET | grep -iE 'api|graphql|swagger'",
-        "d": ["Passive subdomain enumeration", "API-related domain discovery"],
-        "tgt": ["external_apis", "api_gateways", "third_party_integrations"]
-    },
-
     "kiterunner": {
         "t": "discovery",
         "c": "api_route_bruteforce",
@@ -292,14 +283,6 @@ _RAW_API_RECON_TOOLS: dict[str, dict[str, object]] = {
         "tgt": ["mobile_backends", "ios_apis", "android_apis"]
     },
     
-    "frida-api-tracer": {
-        "t": "analysis",
-        "c": "runtime_api_monitoring",
-        "u": "frida -U -f com.app -l api-tracer.js --no-pause 2>&1 | grep -iE 'api|graphql|http'",
-        "d": ["Runtime API call tracing", "Request/response logging", "Dynamic endpoint discovery"],
-        "tgt": ["mobile_apis", "encrypted_traffic", "runtime_enum"]
-    },
-
     # ─────────────────────────────────────────────────────────────
     # 🤖 AUTOMATION & ORCHESTRATION (API Recon Pipelines)
     # ─────────────────────────────────────────────────────────────

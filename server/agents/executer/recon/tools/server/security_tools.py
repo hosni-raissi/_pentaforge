@@ -34,13 +34,12 @@ _RAW_SERVER_RECON_TOOLS: dict[str, dict[str, object]] = {
         "note": "-f - outputs to stdout instead of HTML file"
     },
     
-    "waybackurls-gau": {
+    "gau-historical": {
         "t": "passive",
         "c": "historical_url_enum",
         "u": "gau TARGET_DOMAIN 2>/dev/null | grep -iE 'admin|api|backup|config' | sort -u",
         "d": ["Wayback Machine harvesting", "Hidden endpoint discovery", "Parameter mining"],
-        "tgt": ["web_server", "api_recon", "js_analysis"],
-        "alt": "waybackurls TARGET_DOMAIN | grep -iE 'admin|api'"
+        "tgt": ["web_server", "api_recon", "js_analysis"]
     },
 
     # ─────────────────────────────────────────────────────────────

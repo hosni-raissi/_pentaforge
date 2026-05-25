@@ -2124,6 +2124,7 @@ dependencies = [
 name = "pentaforge_desktop_ui"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "tauri",
  "tauri-build",
 ]

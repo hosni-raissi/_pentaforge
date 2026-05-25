@@ -20,6 +20,7 @@ _TARGET_VALIDATION_METHODS = {"POST", "PUT", "PATCH"}
 _IP_FIELD_SEGMENTS = {"ip", "ip_address", "target_ip", "gateway", "cidr"}
 _URL_FIELD_SEGMENTS = {"url", "uri", "link", "endpoint"}
 _KEY_SPLIT_RE = re.compile(r"[._-]+")
+_WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def _extract_source_ip(request: Request) -> str | None:
@@ -85,6 +86,21 @@ def _is_target_field(key: str) -> bool:
     return lowered == "target" or lowered.endswith(".target")
 
 
+def _looks_like_local_path(value: str) -> bool:
+    candidate = (value or "").strip()
+    if not candidate:
+        return False
+    if "://" in candidate:
+        return False
+    return (
+        candidate.startswith("/")
+        or candidate.startswith("./")
+        or candidate.startswith("../")
+        or candidate.startswith("~/")
+        or bool(_WINDOWS_PATH_RE.match(candidate))
+    )
+
+
 async def _extract_json_payload(request: Request) -> tuple[Request, Any | None]:
     content_type = request.headers.get("content-type", "").lower()
     if "application/json" not in content_type:
@@ -123,6 +139,8 @@ async def _normalize_string_target_field(field: str, value: str) -> tuple[str, d
         return value, None
 
     if is_target_field:
+        if _looks_like_local_path(value):
+            return value, None
         ip_result = IPValidator(value).validate()
         if ip_result.get("valid", False):
             return value, None

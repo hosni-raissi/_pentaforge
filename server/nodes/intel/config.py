@@ -5,79 +5,62 @@ from __future__ import annotations
 RAG_REFRESH_DAYS: int = 5
 UPDATE_DAYS_BACK: int = 14
 UPDATE_MAX_RESULTS: int = 25
+INTEL_INLINE_MAX_SOURCES: int = 2
+INTEL_INLINE_MAX_DOCS_PER_SOURCE: int = 60
+INTEL_INLINE_SOURCE_TIMEOUT_SECONDS: int = 300
 
 VERIFY_SOURCES: dict[str, list[str]] = {
     "web_app": [
         "OWASP-WSTG",
-        "PayloadsAllTheThings",
-        "HackTricks",
-        "MITRE-ATTACK-Enterprise",
+        "PortSwigger-WebSecurity",
     ],
     "api": [
         "OWASP-APISecurity",
-        "PayloadsAllTheThings",
-        "HackTricks",
-        "MITRE-ATTACK-Enterprise",
+        "PortSwigger-WebSecurity",
     ],
     "mobile": [
         "OWASP-MASTG",
-        "HackTricks",
-        "MITRE-ATTACK-Enterprise",
+        "HackTricks-Android",
     ],
     "infra": [
         "InternalAllTheThings",
-        "HackingTheCloud",
-        "MITRE-ATTACK-Enterprise",
-        "PayloadsAllTheThings",
-        "HackTricks",
+        "CISA-KEV",
     ],
     "network": [
-        "MITRE-ATTACK-Enterprise",
-        "PayloadsAllTheThings",
-        "HackTricks",
+        "MitreAttack-Discovery",
+        "MitreAttack-LateralMovement",
     ],
     "iot": [
         "OWASP-FSTM",
-        "HackTricks",
-        "PayloadsAllTheThings",
+        "CISA-KEV",
     ],
     "linux_server": [
         "InternalAllTheThings",
-        "PayloadsAllTheThings",
-        "HackTricks",
+        "GTFOBins",
     ],
     "desktop": [
-        "PayloadsAllTheThings",
-        "MITRE-ATTACK-Enterprise",
-        "HackTricks",
+        "LOLBAS",
+        "CISA-KEV",
     ],
     "cloud": [
         "HackingTheCloud",
-        "MITRE-ATTACK-Enterprise",
-        "PayloadsAllTheThings",
+        "CISA-KEV",
     ],
     "container": [
         "OWASP-K8sTop10",
-        "HackingTheCloud",
-        "MITRE-ATTACK-Enterprise",
+        "CISA-KEV",
     ],
     "repository": [
         "OWASP-CICDTop10",
         "OSSFScorecard",
-        "PayloadsAllTheThings",
     ],
     "shared": [
-        "PayloadsAllTheThings",
-        "HackTricks",
         "CISA-KEV",
         "Vulhub",
-        "MITRE-ATTACK-Enterprise",
-        "DatabaseSecurityAudit",
     ],
 }
 
 DEFAULT_VERIFY_SOURCES: list[str] = [
-    "PayloadsAllTheThings",
-    "HackTricks",
-    "MITRE-ATTACK-Enterprise",
+    "CISA-KEV",
+    "OWASP-WSTG",
 ]

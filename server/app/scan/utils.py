@@ -39,6 +39,7 @@ from server.nodes.system_memory import (
 )
 from server.tools.session.session_manager import SessionContext, SessionManager
 from server.db.projects.runtime_cache import get_project_runtime_cache
+from server.utils.cvss import enrich_payload_with_cvss
 
 WARMUP_RECON_SCENARIO_COUNT = 8
 
@@ -1811,6 +1812,24 @@ async def _run_poc_background(
                     "status": "poc_generated",
                 }
             ],
+            verified_findings=[
+                enrich_payload_with_cvss(
+                    {
+                        "id": f"vuln-{item['idx']}",
+                        "severity": poc_data.get("severity"),
+                        "cwe_id": poc_data.get("cwe_id"),
+                        "cve_id": poc_data.get("cve_id"),
+                        "steps_to_reproduce": poc_data.get("steps_to_reproduce", []),
+                        "exploit_script": poc_data.get("exploit_script"),
+                        "verification_commands": poc_data.get("verification_commands", []),
+                        "visual_evidence_paths": poc_data.get("visual_evidence_paths", []),
+                        "impact_assessment": poc_data.get("impact_assessment", {}),
+                        "remediation_steps": poc_data.get("remediation_steps", []),
+                        "poc_path": poc_summary,
+                        "cvss_vector": poc_data.get("cvss_vector"),
+                    }
+                )
+            ],
         )
     except Exception as exc:
         if emit_event is not None:
@@ -1827,6 +1846,7 @@ async def _run_poc_background(
 def _build_verified_finding_memory_entry(entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         return {}
+    entry = enrich_payload_with_cvss(dict(entry))
     now_iso = _utc_now_iso()
     return {
         "id": str(entry.get("id", "")).strip() or str(uuid.uuid4()),
@@ -1842,6 +1862,8 @@ def _build_verified_finding_memory_entry(entry: dict[str, Any]) -> dict[str, Any
         "cve": str(entry.get("cve", "")).strip(),
         "proof_quality": str(entry.get("proof_quality", "")).strip(),
         "evidence_status": str(entry.get("evidence_status", "")).strip(),
+        "cvss_score": entry.get("cvss_score"),
+        "cvss_vector": str(entry.get("cvss_vector", "")).strip(),
         "verification_methods": _coerce_string_list(entry.get("verification_methods", [])),
         "commands": _coerce_string_list(entry.get("commands", [])),
         "tools_used": _coerce_string_list(entry.get("tools_used", [])),
@@ -2534,7 +2556,11 @@ def _build_verified_finding_entry(
     verify_data = item.get("verify_data", {}) if isinstance(item.get("verify_data", {}), dict) else {}
     verify_summary = str(item.get("verify_summary", "")).strip()
     verify_confidence = _coerce_confidence(item.get("verify_confidence"))
-    severity = _normalize_finding_severity(scenario.get("priority", "medium"))
+    verify_data = enrich_payload_with_cvss(dict(verify_data), scenario)
+    cvss_score = verify_data.get("cvss_score")
+    cvss_vector = str(verify_data.get("cvss_vector", "")).strip()
+    cvss_severity = str(verify_data.get("cvss_severity", "")).strip().lower()
+    severity = _normalize_finding_severity(cvss_severity or scenario.get("priority", "medium"))
     vuln_type = str(scenario.get("vulnerability_type", "")).strip() or "Security Issue"
     endpoint = str(scenario.get("endpoint", "")).strip() or "N/A"
     scenario_task = str(scenario.get("task", "")).strip()
@@ -2625,6 +2651,10 @@ def _build_verified_finding_entry(
         f"Deterministic Validation: {'YES' if deterministic_validation else 'NO'}",
         f"Severity Level: {severity.upper()}",
     ]
+    if isinstance(cvss_score, (int, float)):
+        description_parts.append(f"CVSS Base Score: {float(cvss_score):.1f} ({severity.upper()})")
+    if cvss_vector:
+        description_parts.append(f"CVSS Vector: {cvss_vector}")
     if verify_confidence is not None:
         description_parts.append(f"Verification Confidence: {verify_confidence:.2f}")
     if scenario_task:
@@ -2669,6 +2699,12 @@ def _build_verified_finding_entry(
     evidence_map.setdefault("deterministic_validation", deterministic_validation)
     evidence_map.setdefault("verification_methods", verification_methods)
     evidence_map.setdefault("artifact_quality", verify_data.get("artifact_quality"))
+    if isinstance(cvss_score, (int, float)):
+        evidence_map.setdefault("cvss_score", float(cvss_score))
+    if cvss_vector:
+        evidence_map.setdefault("cvss_vector", cvss_vector)
+    if cvss_severity:
+        evidence_map.setdefault("cvss_severity", cvss_severity)
     if cve_candidates:
         evidence_map.setdefault("cve_candidates", cve_candidates)
 
@@ -2683,7 +2719,10 @@ def _build_verified_finding_entry(
         "category": vuln_type,
         "target": target,
         "status": "verified",
-        "cvss": scenario.get("cvss"),
+        "cvss": float(cvss_score) if isinstance(cvss_score, (int, float)) else scenario.get("cvss"),
+        "cvss_score": float(cvss_score) if isinstance(cvss_score, (int, float)) else None,
+        "cvss_vector": cvss_vector or None,
+        "cvss_severity": cvss_severity or None,
         "cve": cve_candidates[0] if cve_candidates else scenario.get("cve"),
         "ssvc": verify_data.get("ssvc"),
         "evidence_status": evidence_status,
@@ -2798,7 +2837,13 @@ def _build_target_info_tool_kwargs(
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_type = _normalize_target_type(target_type)
     host = _extract_target_host(target)
-    target_text = str(target or "").strip()
+    runtime_state = memory.get("target_runtime", {}) if isinstance(memory, dict) else {}
+    repo_checkout_path = (
+        str(runtime_state.get("repository_checkout_path", "")).strip()
+        if isinstance(runtime_state, dict)
+        else ""
+    )
+    target_text = repo_checkout_path if normalized_type == "repository" and repo_checkout_path else str(target or "").strip()
     repo_like = normalized_type == "repository" or os.path.exists(target_text)
     mobile_artifact = target_text.lower().endswith((".apk", ".ipa", ".aab"))
     container_artifact = bool(re.search(r"(dockerfile|\.tar$|:[A-Za-z0-9._-]+$|/)", target_text, re.IGNORECASE))
@@ -4095,7 +4140,6 @@ def _format_target_info_profile_for_prompt(profile: dict[str, Any]) -> str:
                 + (f" | tools: {tools}" if tools else "")
             )
     return "\n".join(lines) if lines else "(no target-info gathering profile available)"
-
 
 
 def _format_static_recon_plan_for_prompt(static_plan: dict[str, Any]) -> str:

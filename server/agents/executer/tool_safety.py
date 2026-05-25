@@ -80,11 +80,23 @@ _CRITICAL_TOOL_NAMES = {
 }
 
 _PASSIVE_COMMANDS = {
+    "cat",
+    "cloc",
     "curl",
     "dig",
+    "find",
+    "grep",
+    "head",
     "host",
+    "jq",
+    "ls",
     "nslookup",
     "openssl",
+    "pwd",
+    "rg",
+    "sed",
+    "tail",
+    "wc",
     "whatweb",
     "wget",
 }
@@ -145,8 +157,28 @@ def get_tool_safety_profile(tool_name: str, *, role: str = "") -> ToolSafetyProf
     return _build_profile(clean_name or "unknown", category="active_scan", risk_level="medium", requires_human_approval=False)
 
 
-def get_run_custom_command_profile(command: str, *, role: str = "") -> ToolSafetyProfile:
+def get_run_custom_command_profile(
+    command: str,
+    *,
+    role: str = "",
+    args: list[str] | None = None,
+) -> ToolSafetyProfile:
     clean_command = str(command or "").strip().lower()
+    clean_args = [str(arg or "").strip().lower() for arg in (args or [])]
+    first_arg = clean_args[0] if clean_args else ""
+
+    if clean_command == "git" and first_arg == "clone":
+        return _build_profile("git clone", category="passive_recon", risk_level="medium", requires_human_approval=False)
+    if clean_command == "git" and first_arg in {
+        "status",
+        "log",
+        "show",
+        "branch",
+        "ls-tree",
+        "rev-parse",
+        "grep",
+    }:
+        return _build_profile(f"git {first_arg}", category="passive_recon", risk_level="low", requires_human_approval=False)
     if clean_command in _EXPLOITATION_COMMANDS:
         return _build_profile(clean_command or "run_custom", category="exploitation", risk_level="critical", requires_human_approval=True)
     if clean_command in _ACTIVE_SCAN_COMMANDS:
@@ -174,7 +206,5 @@ def requires_approval_for_execution(
     if clean_tool_name == "run_python":
         return True
     if clean_mode != "auto":
-        if clean_tool_name == "run_custom":
-            return True
         return profile.requires_human_approval or profile.risk_level in {"high", "critical"}
     return profile.requires_human_approval or profile.risk_level == "critical"

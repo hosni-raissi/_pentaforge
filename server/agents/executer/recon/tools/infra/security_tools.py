@@ -80,15 +80,6 @@ _RAW_INFRA_RECON_TOOLS: dict[str, dict[str, object]] = {
         "tgt": ["kubernetes", "api_server", "rbac_enum", "cluster_recon"]
     },
     
-    "kubescan": {
-        "t": "k8s",
-        "c": "k8s_risk_assessment",
-        "u": "kubescan.sh --namespace default --output json 2>/dev/null | jq -r '.results[]?.name?'",
-        "d": ["Pod security context analysis", "Service account privilege mapping", "Network policy enumeration", "Risk scoring"],
-        "tgt": ["kubernetes", "security_context", "rbac_audit", "compliance_recon"],
-        "note": "Removed --output report.html; JSON to stdout"
-    },
-    
     "trivy-k8s": {
         "t": "k8s",
         "c": "cluster_config_scanning",
@@ -225,15 +216,6 @@ _RAW_INFRA_RECON_TOOLS: dict[str, dict[str, object]] = {
         "d": ["AWS S3 bucket brute-forcing", "Region enumeration", "Permission testing", "Public bucket identification"],
         "tgt": ["aws_s3", "bucket_enum", "storage_recon", "public_assets"],
         "note": "(WORDLIST:s3_buckets) piped via stdin; no -o results.txt"
-    },
-    
-    "blobenum": {
-        "t": "storage",
-        "c": "azure_blob_enumeration",
-        "u": "python3 blobenum.py -d TARGET -t 50 2>/dev/null | grep -E '^\\[\\+\\]|^\\[\\*\\]'",
-        "d": ["Azure Blob storage name brute-forcing", "Container enumeration", "Anonymous access testing", "Public container discovery"],
-        "tgt": ["azure_blobs", "storage_enum", "container_recon", "public_assets"],
-        "note": "Removed -o azure_blobs.txt; stdout filtered for findings"
     },
     
     "gcs-bruter": {

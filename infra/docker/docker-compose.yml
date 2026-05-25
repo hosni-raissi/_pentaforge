@@ -71,6 +71,7 @@ services:
     expose:
       - "8010"
     volumes:
+      - backend_projects_data:/data/projects:ro
       - sandbox_workspace:/data/sandbox
       - backend_cache:/app/server/cache
       - backend_logs:/app/server/logs

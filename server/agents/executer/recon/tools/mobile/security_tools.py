@@ -191,14 +191,6 @@ _RAW_MOBILE_APP_RECON_TOOLS: dict[str, dict[str, object]] = {
         "tgt": ["ios_ipa", "url_schemes", "universal_links"]
     },
     
-    "app-link-tester": {
-        "t": "static",
-        "c": "link_validation",
-        "u": "adb shell am start -W -a android.intent.action.VIEW -d 'myapp://path?param=value' com.app.package",
-        "d": ["Deep link launch testing", "Parameter injection validation", "Activity resolution verification", "Intent data inspection"],
-        "tgt": ["android_apk", "deep_link_testing", "intent_recon"]
-    },
-
     # ─────────────────────────────────────────────────────────────
     # 📚 LIBRARY & DEPENDENCY ENUMERATION
     # ─────────────────────────────────────────────────────────────
@@ -251,91 +243,6 @@ _RAW_MOBILE_APP_RECON_TOOLS: dict[str, dict[str, object]] = {
         "u": "aapt2 dump permissions app.apk | grep -E 'uses-permission|permission'",
         "d": ["Android permission enumeration", "Dangerous permission identification", "Custom permission discovery", "Permission group mapping"],
         "tgt": ["android_apk", "permission_audit", "privacy_recon"]
-    },
-
-    # ─────────────────────────────────────────────────────────────
-    # 🔄 DYNAMIC ANALYSIS PREP (Recon Only)
-    # ─────────────────────────────────────────────────────────────
-    "frida-tracer-recon": {
-        "t": "dynamic_prep",
-        "c": "method_enumeration",
-        "u": "frida-trace -U -f com.app.package -i '*API*' -i '*Network*' -i '*HTTP*'",
-        "d": ["API/Network method tracing setup", "Function hook discovery", "Class/method enumeration", "Runtime behavior mapping (read-only)"],
-        "tgt": ["android_apk", "ios_ipa", "runtime_recon"]
-    },
-    
-    "objection-explore": {
-        "t": "dynamic_prep",
-        "c": "runtime_environment_enum",
-        "u": "objection explore  # Then: android hooking list classes / ios hooking list classes",
-        "d": ["Runtime class enumeration", "Method listing", "SSL pinning detection", "Root/jailbreak detection identification", "Framework inspection"],
-        "tgt": ["android_apk", "ios_ipa", "runtime_mapping"]
-    },
-    
-    "adb-logcat-filter": {
-        "t": "dynamic_prep",
-        "c": "log_analysis_setup",
-        "u": "adb logcat -v time | grep -E 'api|http|network|retrofit|okhttp' > app_logs.txt",
-        "d": ["Logcat output filtering", "Network library log capture", "API endpoint discovery via logs", "Error message enumeration", "Debug string extraction"],
-        "tgt": ["android_apk", "log_recon", "debug_info"]
-    },
-    
-    "ios-syslog-monitor": {
-        "t": "dynamic_prep",
-        "c": "ios_log_capture",
-        "u": "idevicesyslog | grep -iE 'api|network|http|cfnetwork' > ios_logs.txt",
-        "d": ["iOS syslog monitoring", "CFNetwork log capture", "NSURLSession/URLSession activity", "API call enumeration", "Error discovery"],
-        "tgt": ["ios_ipa", "ios_logs", "network_recon"]
-    },
-
-    # ─────────────────────────────────────────────────────────────
-    # 📱 EMULATOR/SIMULATOR RECON
-    # ─────────────────────────────────────────────────────────────
-    "avd-manager": {
-        "t": "environment",
-        "c": "android_emulator_setup",
-        "u": "avdmanager list avd  # OR  emulator -list-avds",
-        "d": ["Android Virtual Device enumeration", "Emulator configuration inspection", "API level discovery", "System image identification", "Root status check"],
-        "tgt": ["android_emulator", "test_environment", "avd_recon"]
-    },
-    
-    "ios-simulator-enum": {
-        "t": "environment",
-        "c": "simulator_discovery",
-        "u": "xcrun simctl list devices available",
-        "d": ["iOS Simulator enumeration", "Device type/version discovery", "Runtime identification", "Booted simulator detection", "App installation paths"],
-        "tgt": ["ios_simulator", "test_environment", "sim_recon"]
-    },
-    
-    "genymotion-tools": {
-        "t": "environment",
-        "c": "genymotion_enum",
-        "u": "gmtool admin list  # OR  adb devices -l | grep -i genymotion",
-        "d": ["Genymotion device enumeration", "Virtual device configuration", "Root status verification", "Google Play Services detection", "Network configuration inspection"],
-        "tgt": ["genymotion", "custom_emulator", "third_party_avd"]
-    },
-    "mitmproxy-mobile": {
-        "t": "traffic",
-        "c": "http_interception",
-        "u": "mitmproxy --mode transparent --listen-port 8080 --set block_global=false",
-        "d": ["HTTP/HTTPS traffic interception", "API request/response capture", "Header inspection", "Certificate installation guidance", "WebSocket support"],
-        "tgt": ["android_apk", "ios_ipa", "network_traffic"]
-    },
-    
-    "proxyman": {
-        "t": "traffic",
-        "c": "macos_mobile_proxy",
-        "u": "# GUI tool: Auto-detects iOS devices, captures traffic with SSL proxying",
-        "d": ["macOS-native proxy", "iOS/Android traffic capture", "SSL certificate auto-install", "Request/response inspection", "API endpoint mapping"],
-        "tgt": ["ios_ipa", "android_apk", "macos_users"]
-    },
-    
-    "charles-proxy": {
-        "t": "traffic",
-        "c": "cross_platform_proxy",
-        "u": "# GUI tool: Configure device proxy → Install Charles root cert → Capture",
-        "d": ["Cross-platform proxy", "SSL proxying configuration", "API traffic capture", "Bandwidth throttling simulation", "Request rewriting (for recon: read-only)"],
-        "tgt": ["android_apk", "ios_ipa", "enterprise_recon"]
     },
 
     "mobile-recon-automation": {

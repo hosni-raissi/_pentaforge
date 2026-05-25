@@ -6,10 +6,19 @@ import { Play, Square, RotateCcw } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Dialog } from '../components/ui/Dialog';
 import { useState } from 'react';
+import { getProjectMobileRuntimeNotice } from '../lib/mobileRuntime';
 
 export default function Scan() {
   const project = useProjects((s) => s.getActive());
-  const { setRunning, runningProjectId, startingProjectId, stopScan } = useProjects();
+  const {
+    setRunning,
+    runningProjectId,
+    startingProjectId,
+    startingProjectMessage,
+    stoppingProjectId,
+    stoppingProjectMessage,
+    stopScan,
+  } = useProjects();
   const navigate = useNavigate();
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
 
@@ -23,7 +32,9 @@ export default function Scan() {
 
   const isRunning = runningProjectId === project.id;
   const isStarting = startingProjectId === project.id;
-  const canRun = (!runningProjectId && !startingProjectId) || runningProjectId === project.id;
+  const isStopping = stoppingProjectId === project.id;
+  const canRun = ((!runningProjectId && !startingProjectId && !stoppingProjectId) || runningProjectId === project.id) && !isStopping;
+  const mobileRuntimeNotice = getProjectMobileRuntimeNotice(project);
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
@@ -77,10 +88,10 @@ export default function Scan() {
               </Button>
             ) : (
               <>
-                <Button variant="danger" onClick={() => setStopDialogOpen(true)}>
+                <Button variant="danger" onClick={() => setStopDialogOpen(true)} loading={isStopping} disabled={isStopping}>
                   <Square size={14} /> Stop Scan
                 </Button>
-                <Button variant="secondary">
+                <Button variant="secondary" disabled={isStopping}>
                   <RotateCcw size={14} /> Restart
                 </Button>
               </>
@@ -92,10 +103,27 @@ export default function Scan() {
               Another project is currently running. Stop it first.
             </p>
           )}
+          {isStopping && (
+            <p className="text-sm text-text-muted">
+              {stoppingProjectMessage || 'Stopping scan...'}
+            </p>
+          )}
           {isStarting && (
             <p className="text-sm text-text-muted">
-              Starting scan...
+              {startingProjectMessage || 'Starting scan...'}
             </p>
+          )}
+          {mobileRuntimeNotice && !isStarting && (
+            <div className={`rounded-lg border px-3 py-2 text-sm ${
+              mobileRuntimeNotice.tone === 'success'
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                : mobileRuntimeNotice.tone === 'warning'
+                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                  : 'border-sky-500/30 bg-sky-500/10 text-sky-200'
+            }`}>
+              <p className="font-semibold">{mobileRuntimeNotice.title}</p>
+              <p className="mt-1 text-xs leading-relaxed opacity-90">{mobileRuntimeNotice.detail}</p>
+            </div>
           )}
         </div>
       </Card>
@@ -126,6 +154,8 @@ export default function Scan() {
                 setStopDialogOpen(false);
                 void stopScan(project.id, 'pause');
               }}
+              loading={isStopping}
+              disabled={isStopping}
             >
               Pause Scan
             </Button>
@@ -136,6 +166,8 @@ export default function Scan() {
                 setStopDialogOpen(false);
                 void stopScan(project.id, 'cancel');
               }}
+              loading={isStopping}
+              disabled={isStopping}
             >
               Cancel Scan
             </Button>

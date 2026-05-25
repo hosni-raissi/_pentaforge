@@ -226,7 +226,7 @@ def test_refresh_rag_defers_large_sources_during_routine_refresh(monkeypatch) ->
     assert any("Deferred source HackTricks" in msg for msg in callback.done)
 
 
-def test_refresh_rag_requests_manual_approval_for_deferred_source_and_skips_when_denied(monkeypatch) -> None:
+def test_refresh_rag_defers_large_source_without_manual_approval(monkeypatch) -> None:
     callback = _ApprovalCallbackRecorder(decision=False)
     ingest_calls: list[str] = []
 
@@ -307,19 +307,11 @@ def test_refresh_rag_requests_manual_approval_for_deferred_source_and_skips_when
 
     assert ingest_calls == []
     assert result.stats["sources_deferred"] == 1
-    assert len(callback.requests) == 1
-    request = callback.requests[0]
-    assert request["role"] == "intel"
-    assert request["tool_name"] == "refresh RAG knowledge source HackTricks"
-    assert request["call_id"] == "intel-rag-refresh:HackTricks"
-    request_args = request["args"]
-    assert isinstance(request_args, dict)
-    assert request_args["source_name"] == "HackTricks"
-    assert request_args["_require_manual_approval"] is True
-    assert any("skipped by operator" in msg for msg in callback.done)
+    assert callback.requests == []
+    assert any("large source; use manual Intel force update" in msg for msg in callback.done)
 
 
-def test_refresh_rag_ingests_deferred_source_when_operator_approves(monkeypatch) -> None:
+def test_refresh_rag_ignores_approval_callback_for_large_source(monkeypatch) -> None:
     callback = _ApprovalCallbackRecorder(decision=True)
     ingest_calls: list[str] = []
 
@@ -398,7 +390,8 @@ def test_refresh_rag_ingests_deferred_source_when_operator_approves(monkeypatch)
         )
     )
 
-    assert ingest_calls == ["HackTricks"]
-    assert result.stats["sources_deferred"] == 0
-    assert result.stats["sources_updated"] == 1
-    assert any(msg == "Update: ingesting source 1/1: HackTricks" for msg in callback.steps)
+    assert ingest_calls == []
+    assert callback.requests == []
+    assert result.stats["sources_deferred"] == 1
+    assert result.stats["sources_updated"] == 0
+    assert any("Deferred source HackTricks" in msg for msg in callback.done)

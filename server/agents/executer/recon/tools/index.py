@@ -39,9 +39,7 @@ _RECON_MODULES_BY_SCOPE: dict[str, tuple[str, ...]] = {
         "iot.iot_protocol_scan",
     ),
     "mobile": (
-        "mobile.mobile_dynamic_analysis",
         "mobile.mobile_static_analysis",
-        "mobile.mobile_storage_check",
     ),
     "network": (
         "network.arp_scan",
@@ -52,13 +50,9 @@ _RECON_MODULES_BY_SCOPE: dict[str, tuple[str, ...]] = {
         "network.zgrab2_enrich",
     ),
     "repository": (
-        "repository.ci_cd_pipeline_audit",
-        "repository.dependency_scan",
         "repository.git_history_audit",
         "repository.iac_security_scan",
         "repository.sast_scan",
-        "repository.secret_scan",
-        "repository.sensitive_files_scan",
     ),
     "server": (),
     "web": (
@@ -95,9 +89,7 @@ _RECON_TOOL_SCOPE_INDEX: dict[str, tuple[str, ...]] = {
         "iot_protocol_scan",
     ),
     "mobile": (
-        "mobile_dynamic_analysis",
         "mobile_static_analysis",
-        "mobile_storage_check",
     ),
     "network": (
         "arp_scan",
@@ -108,13 +100,9 @@ _RECON_TOOL_SCOPE_INDEX: dict[str, tuple[str, ...]] = {
         "zgrab2_enrich",
     ),
     "repository": (
-        "ci_cd_pipeline_audit",
-        "dependency_scan",
         "git_history_audit",
         "iac_security_scan",
         "sast_scan",
-        "secret_scan",
-        "sensitive_files_scan",
     ),
     "server": (),
     "web": (
@@ -140,7 +128,7 @@ _RECON_TARGET_TYPES_BY_SCOPE: dict[str, set[str]] = {
 _RECON_TARGET_TYPE_OVERRIDES: dict[str, set[str]] = {
     "container_registry_enum": {"cloud", "container"},
     "dns_recon": {"network", "infra", "web_app", "api"},
-    "secret_scan": {"repository", "cloud"},
+    "secret_scan": {"cloud"},
 }
 
 

@@ -174,132 +174,15 @@ _RAW_REPOSITORY_RECON_TOOLS: dict[str, dict[str, object]] = {
     },
 
     # ─────────────────────────────────────────────────────────────
-    # 🔐 SECRET DETECTION (READ-ONLY SCAN MODE)
-    # ─────────────────────────────────────────────────────────────
-    "gitleaks-detect": {
-        "t": "secret_scan",
-        "c": "pattern_based_credential_discovery",
-        "u": "echo '(MANIFEST:repo)' | gitleaks detect --source=- --report-format json --report-path - --no-git 2>/dev/null | jq -c '.[]?'",
-        "d": ["Regex-based secret pattern matching", "High-entropy string detection", "Config file scanning", "JSON to stdout"],
-        "tgt": ["local_repo", "secret_recon", "credential_audit"],
-        "note": "(MANIFEST:repo) piped via stdin; --source=- reads from stdin; --report-path - outputs to stdout"
-    },
-    
-    "trufflehog-filesystem": {
-        "t": "secret_scan",
-        "c": "verified_secret_detection",
-        "u": "echo '(MANIFEST:repo)' | trufflehog filesystem - --only-verified --json --no-update 2>/dev/null | jq -c '.[]?'",
-        "d": ["Verified credential detection", "API key validation", "Private key identification", "Structured JSON output"],
-        "tgt": ["local_repo", "verified_secrets", "high_confidence_findings"],
-        "note": "(MANIFEST:repo) piped via stdin; trufflehog reads repo content from -"
-    },
-    
-    "detect-secrets": {
-        "t": "secret_scan",
-        "c": "baseline_secret_audit",
-        "u": "echo '(MANIFEST:repo)' | detect-secrets scan - --baseline (CONFIG:baseline) --json 2>/dev/null | jq -r '.results[]?.filename?'",
-        "d": ["Baseline-based secret tracking", "Plugin architecture", "False positive suppression", "JSON output to stdout"],
-        "tgt": ["local_repo", "baseline_audit", "ci_integration"],
-        "note": "(MANIFEST:repo) piped via stdin; (CONFIG:baseline) resolves to default or injected path"
-    },
-    
-    "repo-supervisor": {
-        "t": "secret_scan",
-        "c": "lightweight_secret_hunt",
-        "u": "repo-supervisor -d - -o - 2>/dev/null | grep -E '^\\[\\+\\]|^\\[\\*\\]'",
-        "d": ["Fast regex-based scanning", "Low memory footprint", "Multiple secret patterns", "stdout output"],
-        "tgt": ["local_repo", "quick_scan", "resource_constrained"],
-        "note": "-d - reads from stdin; -o - outputs to stdout; may require patching for stream support"
-    },
-
-    # ─────────────────────────────────────────────────────────────
-    # 📦 DEPENDENCY & SUPPLY CHAIN RECON
-    # ─────────────────────────────────────────────────────────────
-    "trivy-repo": {
-        "t": "supply_chain",
-        "c": "repo_vulnerability_scanning",
-        "u": "echo '(MANIFEST:repo)' | trivy repo - --severity HIGH,CRITICAL --format json --exit-code 0 2>/dev/null | jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID?'",
-        "d": ["Repository-wide vulnerability scanning", "Language-agnostic detection", "CVE/CVSS mapping", "JSON to stdout"],
-        "tgt": ["local_repo", "vuln_recon", "supply_chain_audit"],
-        "note": "(MANIFEST:repo) piped via stdin; trivy reads repo content from -"
-    },
-    
-    "grype-repo": {
-        "t": "supply_chain",
-        "c": "dependency_vulnerability_enum",
-        "u": "echo '(MANIFEST:repo)' | grype dir:- --output json --only-fixed 2>/dev/null | jq -r '.matches[]?.vulnerability?.id?'",
-        "d": ["Directory-based scanning", "Package enumeration", "CVE correlation", "Fixed version mapping"],
-        "tgt": ["local_repo", "dependency_recon", "fix_priority"],
-        "note": "(MANIFEST:repo) piped via stdin; dir:- reads from stdin"
-    },
-    
-    "syft-sbom": {
-        "t": "supply_chain",
-        "c": "software_bill_of_materials",
-        "u": "echo '(MANIFEST:repo)' | syft - -o spdx-json 2>/dev/null | jq -r '.artifacts[]?.name?'",
-        "d": ["SBOM generation (SPDX/CycloneDX)", "Package inventory extraction", "License enumeration", "JSON to stdout"],
-        "tgt": ["local_repo", "sbom_generation", "compliance_recon"],
-        "note": "(MANIFEST:repo) piped via stdin; -o spdx-json outputs JSON to stdout"
-    },
-    
-    "osv-scanner": {
-        "t": "supply_chain",
-        "c": "osv_database_correlation",
-        "u": "echo '(MANIFEST:repo)' | osv-scanner -r - --format json 2>/dev/null | jq -r '.results[]?.vulns[]?.id?'",
-        "d": ["OSV.dev database correlation", "Lockfile parsing", "Vulnerability ID mapping", "JSON to stdout"],
-        "tgt": ["local_repo", "osv_recon", "multi_ecosystem"],
-        "note": "(MANIFEST:repo) piped via stdin; -r - reads recursively from stdin path"
-    },
-
-    # ─────────────────────────────────────────────────────────────
-    # 🔁 CI/CD PIPELINE & WORKFLOW DISCOVERY
-    # ─────────────────────────────────────────────────────────────
-    "github-actions-audit": {
-        "t": "ci_cd",
-        "c": "workflow_security_recon",
-        "u": "echo '(MANIFEST:workflows)' | yq eval '.jobs.*.steps[].uses' - 2>/dev/null | sort -u",
-        "d": ["Third-party action enumeration", "Action version pinning audit", "Permission scope mapping", "YAML parsing from stdin"],
-        "tgt": ["github_actions", "workflow_audit", "action_enum"],
-        "note": "(MANIFEST:workflows) piped via stdin; yq reads from -"
-    },
-    
-    "gitlab-ci-audit": {
-        "t": "ci_cd",
-        "c": "pipeline_config_recon",
-        "u": "echo '(MANIFEST:gitlab_ci)' | yq eval '.stages, .variables' - 2>/dev/null | grep -v '^---$'",
-        "d": ["Stage/job enumeration", "Variable name extraction", "Runner tag discovery", "YAML from stdin"],
-        "tgt": ["gitlab_ci", "pipeline_recon", "config_enum"],
-        "note": "(MANIFEST:gitlab_ci) piped via stdin; yq reads from -"
-    },
-    
-    "circleci-config-enum": {
-        "t": "ci_cd",
-        "c": "circleci_workflow_discovery",
-        "u": "echo '(MANIFEST:circleci)' | yq eval '.jobs.*.steps' - 2>/dev/null | grep -E 'run:|uses:'",
-        "d": ["Job/step enumeration", "Executor type discovery", "Context/variable name mapping", "YAML from stdin"],
-        "tgt": ["circleci", "workflow_recon", "orb_enum"],
-        "note": "(MANIFEST:circleci) piped via stdin; yq reads from -"
-    },
-    
-    "jenkinsfile-audit": {
-        "t": "ci_cd",
-        "c": "jenkins_pipeline_recon",
-        "u": "echo '(MANIFEST:jenkinsfile)' | grep -E 'sh\\(|withCredentials\\(|credentialsId' - 2>/dev/null",
-        "d": ["Pipeline step enumeration", "Credential reference discovery", "Shell command extraction", "Groovy from stdin"],
-        "tgt": ["jenkins", "pipeline_recon", "credential_ref_enum"],
-        "note": "(MANIFEST:jenkinsfile) piped via stdin; grep reads from -"
-    },
-
-    # ─────────────────────────────────────────────────────────────
     # 🔎 CODE SEARCH & PATTERN MATCHING
     # ─────────────────────────────────────────────────────────────
     "ripgrep-repo": {
         "t": "code_search",
         "c": "fast_regex_code_hunt",
-        "u": "echo '(MANIFEST:repo)' | rg -i 'api[_-]?key|password|secret|token' --type-add 'env:*.env' -t env -t json -t yaml - 2>/dev/null | head -50",
+        "u": "rg -i 'api[_-]?key|password|secret|token' --type-add 'env:*.env' -t env -t json -t yaml (CONFIG:repo_path)",
         "d": ["Fast regex-based code search", "File type filtering", "Case-insensitive matching", "Context extraction"],
         "tgt": ["local_repo", "pattern_recon", "quick_search"],
-        "note": "(MANIFEST:repo) piped via stdin; rg reads from -; head limits verbose output"
+        "note": "(CONFIG:repo_path) resolves to the local repository checkout"
     },
     
     "git-grep-pattern": {
@@ -323,10 +206,10 @@ _RAW_REPOSITORY_RECON_TOOLS: dict[str, dict[str, object]] = {
     "semgrep-repo-scan": {
         "t": "code_search",
         "c": "pattern_based_security_scan",
-        "u": "echo '(MANIFEST:repo)' | semgrep --config=auto --json --stdin-targets - 2>/dev/null | jq -r '.results[]?.check_id?'",
+        "u": "semgrep --config=auto --json (CONFIG:repo_path)",
         "d": ["Pattern-based security scanning", "Community rule library", "Custom rule support", "JSON to stdout"],
         "tgt": ["local_repo", "security_recon", "rule_based_audit"],
-        "note": "(MANIFEST:repo) piped via stdin; --stdin-targets - reads content from stdin"
+        "note": "(CONFIG:repo_path) resolves to the local repository checkout"
     },
 
     # ─────────────────────────────────────────────────────────────

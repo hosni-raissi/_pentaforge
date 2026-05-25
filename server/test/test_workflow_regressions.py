@@ -5,6 +5,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 from typing import Any
 
@@ -2133,6 +2134,75 @@ def test_report_regenerate_replaces_old_content_and_status_stays_fresh(tmp_path,
         assert status_2.run_status == "completed"
         assert "Report Version 2" in markdown_2.content
         assert markdown_2.content != markdown_1.content
+
+    asyncio.run(_run())
+
+
+def test_report_export_builds_password_protected_archives(tmp_path, monkeypatch) -> None:
+    store = _make_store(tmp_path)
+    monkeypatch.setattr(reports_routes, "projects_store", store)
+
+    markdown_content = "# Locked Report\n\nSensitive findings live here."
+    html_content = "<html><body><h1>Locked Report</h1><p>Sensitive findings live here.</p></body></html>"
+    store.save_report(
+        "proj-1",
+        report_id="report-md",
+        format="markdown",
+        content=markdown_content,
+        metadata={"target": "https://example.com"},
+    )
+    store.save_report(
+        "proj-1",
+        report_id="report-html",
+        format="html",
+        content=html_content,
+        metadata={"target": "https://example.com"},
+    )
+
+    async def _run() -> None:
+        markdown_response = await reports_routes.export_report_download(
+            "proj-1",
+            reports_routes.ExportReportRequest(format="markdown", password="Secret123"),
+        )
+        pdf_response = await reports_routes.export_report_download(
+            "proj-1",
+            reports_routes.ExportReportRequest(format="pdf", password="Secret123"),
+        )
+
+        assert markdown_response.media_type == "application/zip"
+        assert pdf_response.media_type == "application/zip"
+        assert 'pentaforge-report-proj-1.md.zip' in markdown_response.headers["Content-Disposition"]
+        assert 'pentaforge-report-proj-1.pdf.zip' in pdf_response.headers["Content-Disposition"]
+
+        markdown_archive = tmp_path / "report-md.zip"
+        markdown_extract = tmp_path / "md-extract"
+        markdown_extract.mkdir()
+        markdown_archive.write_bytes(markdown_response.body)
+        markdown_run = subprocess.run(
+            ["7z", "x", "-pSecret123", str(markdown_archive), f"-o{markdown_extract}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert markdown_run.returncode == 0, markdown_run.stderr or markdown_run.stdout
+        extracted_markdown = markdown_extract / "pentaforge-report-proj-1.md"
+        assert extracted_markdown.exists()
+        assert extracted_markdown.read_text(encoding="utf-8") == markdown_content
+
+        pdf_archive = tmp_path / "report-pdf.zip"
+        pdf_extract = tmp_path / "pdf-extract"
+        pdf_extract.mkdir()
+        pdf_archive.write_bytes(pdf_response.body)
+        pdf_run = subprocess.run(
+            ["7z", "x", "-pSecret123", str(pdf_archive), f"-o{pdf_extract}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert pdf_run.returncode == 0, pdf_run.stderr or pdf_run.stdout
+        extracted_pdf = pdf_extract / "pentaforge-report-proj-1.pdf"
+        assert extracted_pdf.exists()
+        assert extracted_pdf.read_bytes().startswith(b"%PDF-")
 
     asyncio.run(_run())
 

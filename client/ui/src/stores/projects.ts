@@ -17,6 +17,9 @@ interface ProjectStore {
   activeProjectId: string | null;
   runningProjectId: string | null;
   startingProjectId: string | null;
+  startingProjectMessage: string | null;
+  stoppingProjectId: string | null;
+  stoppingProjectMessage: string | null;
 
   // Actions
   addProject: (project: Project, opts?: { persist?: boolean }) => void;
@@ -32,8 +35,73 @@ interface ProjectStore {
 
 type PersistedProjectStore = Pick<ProjectStore, 'activeProjectId'>;
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isAndroidMobileArtifactProject(project: Project | null | undefined): boolean {
+  if (!project) {
+    return false;
+  }
+  if (String(project.targetType || "").trim().toLowerCase() !== "mobile") {
+    return false;
+  }
+
+  const candidates = new Set<string>();
+  const pushCandidate = (value: unknown) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const clean = value.trim().toLowerCase();
+    if (clean) {
+      candidates.add(clean);
+    }
+  };
+
+  pushCandidate(project.target);
+  if (isRecord(project.targetConfig)) {
+    for (const [key, value] of Object.entries(project.targetConfig)) {
+      if (typeof value !== "string") {
+        continue;
+      }
+      const cleanKey = key.trim().toLowerCase();
+      if (
+        cleanKey.includes("path")
+        || cleanKey.includes("file")
+        || cleanKey.includes("target")
+        || cleanKey.includes("artifact")
+        || cleanKey.includes("apk")
+        || cleanKey.includes("aab")
+      ) {
+        pushCandidate(value);
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (candidate.endsWith(".apk") || candidate.endsWith(".aab")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export const useProjects = create<ProjectStore>()(
@@ -43,6 +111,9 @@ export const useProjects = create<ProjectStore>()(
       activeProjectId: null,
       runningProjectId: null,
       startingProjectId: null,
+      startingProjectMessage: null,
+      stoppingProjectId: null,
+      stoppingProjectMessage: null,
 
       addProject: (project, opts) =>
         set((s) => {
@@ -60,12 +131,17 @@ export const useProjects = create<ProjectStore>()(
         }),
 
       removeProject: async (id) => {
+        let deleteFailed = false;
         try {
           await deleteProjectFromDesktop(id);
         } catch (error) {
           console.error('Failed to delete project from desktop DB:', error);
-          // We still remove it from local state for responsiveness, 
-          // but we could also throw here if we wanted to block the UI.
+          deleteFailed = true;
+        }
+
+        if (deleteFailed) {
+          await get().hydrateFromDatabase().catch(() => false);
+          throw new Error('Project deletion did not reach backend storage. The project was reloaded from the server.');
         }
 
         set((s) => ({
@@ -73,7 +149,12 @@ export const useProjects = create<ProjectStore>()(
           activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
           runningProjectId: s.runningProjectId === id ? null : s.runningProjectId,
           startingProjectId: s.startingProjectId === id ? null : s.startingProjectId,
+          startingProjectMessage: s.startingProjectId === id ? null : s.startingProjectMessage,
+          stoppingProjectId: s.stoppingProjectId === id ? null : s.stoppingProjectId,
+          stoppingProjectMessage: s.stoppingProjectId === id ? null : s.stoppingProjectMessage,
         }));
+
+        await get().hydrateFromDatabase().catch(() => false);
       },
 
       setActive: (id) => {
@@ -98,10 +179,13 @@ export const useProjects = create<ProjectStore>()(
             (project) => project.id !== id && project.status === 'running',
           );
 
-          if (state.startingProjectId === id || targetIsRunning) {
+          if (state.startingProjectId === id || state.stoppingProjectId === id || targetIsRunning) {
             return;
           }
-          if (state.startingProjectId && state.startingProjectId !== id) {
+          if (
+            (state.startingProjectId && state.startingProjectId !== id)
+            || (state.stoppingProjectId && state.stoppingProjectId !== id)
+          ) {
             return;
           }
           if (otherProjectRunning) {
@@ -131,7 +215,10 @@ export const useProjects = create<ProjectStore>()(
             projects: updated,
             runningProjectId: id,
             startingProjectId: id,
+            startingProjectMessage: 'Preparing scan startup…',
             activeProjectId: id,
+            stoppingProjectId: null,
+            stoppingProjectMessage: null,
           });
 
           if (supportsDesktopProjectBridge()) {
@@ -145,12 +232,24 @@ export const useProjects = create<ProjectStore>()(
             }
           }
         } else {
+          const targetProject = state.projects.find((project) => project.id === id);
+          const isMobileArtifactStart = isAndroidMobileArtifactProject(targetProject);
           const nowIso = new Date().toISOString();
           updated = state.projects.map((project) => {
             if (project.id !== id) {
               return project;
             }
             const previousLastScan = project.lastScan ?? {};
+            if (isMobileArtifactStart) {
+              return {
+                ...project,
+                updatedAt: nowIso,
+                lastScan: {
+                  ...previousLastScan,
+                  error: '',
+                },
+              };
+            }
             return {
               ...project,
               status: 'running',
@@ -179,15 +278,21 @@ export const useProjects = create<ProjectStore>()(
 
           set({
             projects: updated,
-            runningProjectId: id,
+            runningProjectId: isMobileArtifactStart ? null : id,
             startingProjectId: id,
+            startingProjectMessage: isMobileArtifactStart
+              ? 'Preparing static APK analysis…'
+              : 'Preparing scan startup…',
             activeProjectId: id,
+            stoppingProjectId: null,
+            stoppingProjectMessage: null,
           });
         }
 
         if (!id || !supportsDesktopProjectBridge() || !shouldTriggerScan) {
           set((inner) => ({
             startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
+            startingProjectMessage: inner.startingProjectId === id ? null : inner.startingProjectMessage,
           }));
           return;
         }
@@ -197,6 +302,7 @@ export const useProjects = create<ProjectStore>()(
           set((inner) => ({
             runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
             startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
+            startingProjectMessage: inner.startingProjectId === id ? null : inner.startingProjectMessage,
           }));
           return;
         }
@@ -209,6 +315,15 @@ export const useProjects = create<ProjectStore>()(
           }
 
           try {
+            if (isAndroidMobileArtifactProject(runningProject)) {
+              set((inner) => inner.startingProjectId === id
+                ? { startingProjectMessage: 'Preparing static APK analysis…' }
+                : {});
+            }
+
+            set((inner) => inner.startingProjectId === id
+              ? { startingProjectMessage: 'Handing off to planner…' }
+              : {});
             const response = await startProjectScanFromDesktop({
               projectId: id,
               target: runningProject.target,
@@ -250,19 +365,42 @@ export const useProjects = create<ProjectStore>()(
                           finishedAt: undefined,
                           elapsedSeconds: 0,
                           durationSeconds: undefined,
-                          error: '',
+                          error: (
+                            typeof response.mobile_runtime?.warning === 'string' && response.mobile_runtime.warning.trim()
+                              ? response.mobile_runtime.warning.trim()
+                              : ''
+                          ),
+                          mobileRuntime: {
+                            mode: typeof response.mobile_runtime?.mode === 'string'
+                              ? response.mobile_runtime.mode
+                              : undefined,
+                            executionMode: typeof response.mobile_runtime?.execution_mode === 'string'
+                              ? response.mobile_runtime.execution_mode
+                              : 'static_only',
+                            runtimeAvailable: Boolean(response.mobile_runtime?.runtime_available),
+                            prepared: Boolean(response.mobile_runtime?.prepared),
+                            warning: typeof response.mobile_runtime?.warning === 'string'
+                              ? response.mobile_runtime.warning
+                              : '',
+                            deviceId: typeof response.mobile_runtime?.device_id === 'string'
+                              ? response.mobile_runtime.device_id
+                              : undefined,
+                          },
                         }
                         : project.lastScan,
                     }
                     : project
                 )),
-                activeProjectId: id,
-                runningProjectId: nextStatus === 'running'
-                  ? id
-                  : (inner.runningProjectId === id ? null : inner.runningProjectId),
-                startingProjectId: null,
-              };
-            });
+              activeProjectId: id,
+              runningProjectId: nextStatus === 'running'
+                ? id
+                : (inner.runningProjectId === id ? null : inner.runningProjectId),
+              startingProjectId: null,
+              startingProjectMessage: null,
+              stoppingProjectId: inner.stoppingProjectId === id ? null : inner.stoppingProjectId,
+              stoppingProjectMessage: inner.stoppingProjectId === id ? null : inner.stoppingProjectMessage,
+            };
+          });
           } catch (error) {
             console.error('Failed to start orchestrator scan:', error);
             const nowIso = new Date().toISOString();
@@ -293,6 +431,9 @@ export const useProjects = create<ProjectStore>()(
               activeProjectId: id,
               runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
               startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
+              startingProjectMessage: inner.startingProjectId === id ? null : inner.startingProjectMessage,
+              stoppingProjectId: inner.stoppingProjectId === id ? null : inner.stoppingProjectId,
+              stoppingProjectMessage: inner.stoppingProjectId === id ? null : inner.stoppingProjectMessage,
             }));
           }
         })();
@@ -301,9 +442,20 @@ export const useProjects = create<ProjectStore>()(
       stopScan: async (id, mode) => {
         const state = get();
         const target = state.projects.find((project) => project.id === id);
-        if (!target) {
+        if (!target || state.stoppingProjectId === id) {
           return;
         }
+
+        const stopMessage = mode === 'cancel'
+          ? 'Canceling scan…'
+          : mode === 'pause'
+            ? 'Pausing scan…'
+            : 'Stopping scan…';
+
+        set((inner) => ({
+          stoppingProjectId: id,
+          stoppingProjectMessage: stopMessage,
+        }));
 
         try {
           await stopProjectScanFromDesktop({ projectId: id, mode });
@@ -351,6 +503,9 @@ export const useProjects = create<ProjectStore>()(
             )),
             runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
             startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
+            startingProjectMessage: inner.startingProjectId === id ? null : inner.startingProjectMessage,
+            stoppingProjectId: inner.stoppingProjectId === id ? null : inner.stoppingProjectId,
+            stoppingProjectMessage: inner.stoppingProjectId === id ? null : inner.stoppingProjectMessage,
           }));
           try {
             window.sessionStorage.removeItem(`pf-assistant-chat:${id}:${target.target}:${target.targetType}`);
@@ -383,6 +538,9 @@ export const useProjects = create<ProjectStore>()(
           )),
           runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
           startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
+          startingProjectMessage: inner.startingProjectId === id ? null : inner.startingProjectMessage,
+          stoppingProjectId: inner.stoppingProjectId === id ? null : inner.stoppingProjectId,
+          stoppingProjectMessage: inner.stoppingProjectId === id ? null : inner.stoppingProjectMessage,
         }));
       },
 
@@ -424,6 +582,11 @@ export const useProjects = create<ProjectStore>()(
             projects,
             runningProjectId: nextRunningProjectId,
             startingProjectId: nextStartingProjectId,
+            startingProjectMessage: nextStartingProjectId ? s.startingProjectMessage : null,
+            stoppingProjectId: nextStatus ? (s.stoppingProjectId === id ? null : s.stoppingProjectId) : s.stoppingProjectId,
+            stoppingProjectMessage: nextStatus
+              ? (s.stoppingProjectId === id ? null : s.stoppingProjectMessage)
+              : s.stoppingProjectMessage,
           };
         }),
 
@@ -515,6 +678,9 @@ export const useProjects = create<ProjectStore>()(
                 : nextProjects[0]?.id ?? null,
               runningProjectId: runningProject?.id ?? null,
               startingProjectId: state.startingProjectId,
+              startingProjectMessage: state.startingProjectMessage,
+              stoppingProjectId: state.stoppingProjectId,
+              stoppingProjectMessage: state.stoppingProjectMessage,
             };
           });
           return true;

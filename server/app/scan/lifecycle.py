@@ -5,6 +5,8 @@ import uuid
 import structlog
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from server.agents.executer.sandbox import delete_project_workspace
+
 from .types import ScanStatus
 from .utils import (
     _utc_now_iso, 
@@ -259,6 +261,9 @@ class ScanLifecycleService:
         # Cancel mode
         self._persistence.pop_run_state(project_key)
         self._persistence.reset_project_runtime_state(project_key)
+        project_for_cleanup = self._persistence.get_project(project_key)
+        if isinstance(project_for_cleanup, dict):
+            delete_project_workspace(project_key, project_payload=project_for_cleanup)
         
         self._events.emit(
             project_key,

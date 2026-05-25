@@ -76,6 +76,8 @@ class Finding:
     type: Literal["vulnerability", "info", "false_positive"]
     name: str
     severity: Optional[Literal["critical", "high", "medium", "low", "info"]] = None
+    cvss_score: Optional[float] = None
+    cvss_vector: Optional[str] = None
     endpoint: Optional[str] = None
     parameter: Optional[str] = None
     tool: Optional[str] = None
@@ -150,6 +152,8 @@ class Brain:
                     type=_normalize_finding_type(item.get("status")),
                     name=str(item.get("title", item.get("summary", "Finding"))).strip() or "Finding",
                     severity=_normalize_severity(item.get("severity")),
+                    cvss_score=_coerce_optional_float(item.get("cvss_score", item.get("cvss"))),
+                    cvss_vector=str(item.get("cvss_vector", "")).strip() or None,
                     endpoint=str(item.get("endpoint", item.get("target", ""))).strip() or None,
                     parameter=str(item.get("parameter", "")).strip() or None,
                     tool=str(item.get("tool", "")).strip() or None,
@@ -289,6 +293,8 @@ class Brain:
                     "name": f.name,
                     "endpoint": f.endpoint,
                     "severity": f.severity,
+                    "cvss_score": f.cvss_score,
+                    "cvss_vector": f.cvss_vector,
                     "ssvc": f.ssvc_decision,
                     "claim_status": f.claim_status,
                     "cwe_id": f.cwe_id,
@@ -414,6 +420,15 @@ def _normalize_claim_status(value: Any) -> Literal["observed", "inferred", "assu
     if normalized in {"observed", "inferred", "assumed", "unsupported"}:
         return normalized
     return "unsupported"
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_tool_status(value: Any) -> Literal["success", "failed", "blocked", "timeout", "info"]:

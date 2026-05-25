@@ -63,6 +63,14 @@ export default function ClientShare() {
   const [viewFormat, setViewFormat] = useState<"html" | "markdown">("html");
   const [downloading, setDownloading] = useState(false);
 
+  const requestExportPassword = (format: "html" | "markdown") => {
+    const password = window.prompt(
+      `Enter a password for the protected ${format.toUpperCase()} report download.\nThe exported file will be saved as a password-protected ZIP package.`,
+    );
+    const clean = password?.trim() || "";
+    return clean || null;
+  };
+
   const fetchMessages = async () => {
     if (!project) return;
     try {
@@ -210,9 +218,21 @@ export default function ClientShare() {
 
   const handleDownloadReport = async () => {
     if (!project) return;
+    const password = requestExportPassword(viewFormat);
+    if (!password) {
+      return;
+    }
     setDownloading(true);
     try {
-      await downloadReportBlobFromDesktop(project.id, viewFormat);
+      const result = await downloadReportBlobFromDesktop(project.id, viewFormat, password);
+      const url = URL.createObjectURL(result.blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = result.filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(url), 15000);
     } catch (err) {
       console.error("Failed to download report", err);
     } finally {

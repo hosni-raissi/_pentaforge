@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Titlebar } from './Titlebar';
 import { Sidebar } from './Sidebar';
-import { StatusBar } from './StatusBar';
 import { useProjects } from '../../stores/projects';
 
 export function AppShell() {
@@ -38,7 +37,6 @@ export function AppShell() {
           <Outlet />
         </main>
       </div>
-      <StatusBar />
     </div>
   );
 }

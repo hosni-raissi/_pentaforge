@@ -1460,6 +1460,62 @@ def safe_execute(cmd: list[str], timeout: int = 300) -> tuple[str, str, int]:
         return "", str(e), -1
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _default_android_device_id() -> str:
+    remote = str(os.environ.get("PENTAFORGE_MOBILE_REMOTE_ADB_ENDPOINT", "")).strip()
+    if remote:
+        return remote
+    explicit = str(os.environ.get("PENTAFORGE_MOBILE_ANDROID_DEFAULT_DEVICE_ID", "")).strip()
+    if explicit:
+        return explicit
+    host = str(os.environ.get("PENTAFORGE_MOBILE_ANDROID_HOST", "")).strip()
+    port = str(os.environ.get("PENTAFORGE_MOBILE_ANDROID_ADB_PORT", "5555")).strip() or "5555"
+    if host:
+        return f"{host}:{port}"
+    return ""
+
+
+def _prepare_android_mobile_lab(
+    *,
+    device_id: Optional[str],
+    frida_port: int,
+) -> tuple[Optional[str], Optional[str], str]:
+    resolved_device = str(device_id or _default_android_device_id()).strip()
+    if not resolved_device:
+        return device_id, None, ""
+
+    notes: list[str] = [f"mobile-lab: selected Android device {resolved_device}"]
+
+    stdout, stderr, rc = safe_execute(["adb", "connect", resolved_device], timeout=45)
+    connect_output = (stdout or stderr or "").strip()
+    notes.append(f"mobile-lab adb connect: {connect_output or 'ok'}")
+    lowered = connect_output.lower()
+    if rc != 0 and "connected to" not in lowered and "already connected" not in lowered:
+        return resolved_device, f"ADB connection to {resolved_device} failed: {connect_output or 'unknown error'}", "\n".join(notes)
+
+    stdout, stderr, rc = safe_execute(
+        ["adb", "-s", resolved_device, "forward", f"tcp:{frida_port}", f"tcp:{frida_port}"],
+        timeout=30,
+    )
+    forward_output = (stdout or stderr or "").strip()
+    notes.append(f"mobile-lab adb forward tcp:{frida_port}: {forward_output or 'ok'}")
+    if rc != 0:
+        notes.append(
+            "mobile-lab note: Frida port forwarding failed. Install and start frida-server inside the Android container before runtime instrumentation."
+        )
+
+    return resolved_device, None, "\n".join(notes)
+
+
 # ══════════════════════════════════════════════════════════════
 # 8. MAIN TOOL FUNCTION
 # ══════════════════════════════════════════════════════════════
@@ -1550,11 +1606,16 @@ def mobile_dynamic_analysis(
     # ══════════════════════════════
     # VALIDATE
     # ══════════════════════════════
+    default_frida_port = _env_int("PENTAFORGE_MOBILE_ANDROID_FRIDA_PORT", 27042)
+    effective_port = port
+    if str(platform or "").strip().lower() == "android" and port == 27042:
+        effective_port = default_frida_port
+
     try:
         req = MobileDynamicRequest(
             tool=tool, target=target, args=args,
             platform=platform, device_id=device_id,
-            host=host, port=port,
+            host=host, port=effective_port,
             proxy_host=proxy_host, proxy_port=proxy_port,
             scripts=scripts, functions=functions,
             intercept_duration=intercept_duration,
@@ -1577,6 +1638,20 @@ def mobile_dynamic_analysis(
     raw_output:      str = ""
     error_msg:       Optional[str] = None
 
+    if req.platform == "android":
+        resolved_device, prep_error, prep_notes = _prepare_android_mobile_lab(
+            device_id=req.device_id,
+            frida_port=req.port,
+        )
+        if resolved_device:
+            req.device_id = resolved_device
+        if prep_notes:
+            raw_output = (prep_notes + "\n" + raw_output).strip()
+        if prep_error:
+            result.error = prep_error
+            result.raw_output = raw_output or None
+            return result.model_dump()
+
     # ══════════════════════════════
     # TOOL: FRIDA
     # ══════════════════════════════
@@ -1587,9 +1662,10 @@ def mobile_dynamic_analysis(
             error_msg = (
                 f"Frida server not reachable at {req.host}:{req.port}. "
                 "Ensure frida-server is running on device and port is forwarded: "
-                "adb forward tcp:27042 tcp:27042"
+                f"adb forward tcp:{req.port} tcp:{req.port}"
             )
             result.error = error_msg
+            result.raw_output = raw_output or None
             return result.model_dump()
 
         # ── Build Frida script ──

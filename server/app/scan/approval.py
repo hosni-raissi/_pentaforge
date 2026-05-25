@@ -68,9 +68,13 @@ class ApprovalGateService:
 
         approval_id = str(uuid.uuid4())
         if str(tool_name or "").strip().lower() == "run_custom":
+            run_custom_args = args.get("args", []) if isinstance(args, dict) else []
+            if not isinstance(run_custom_args, list):
+                run_custom_args = []
             safety_profile = get_run_custom_command_profile(
                 str(args.get("command", "")).strip().lower() if isinstance(args, dict) else "",
                 role=role,
+                args=[str(item) for item in run_custom_args],
             ).to_dict()
         else:
             safety_profile = get_tool_safety_profile(tool_name, role=role).to_dict()

@@ -21,7 +21,7 @@ class CloudMisconfigScanRequest(BaseModel):
     @field_validator("tool")
     @classmethod
     def validate_tool(cls, v):
-        allowed = {"scoutsuite", "prowler", "cloudsploit", "pacu"}
+        allowed = {"scoutsuite", "prowler", "pacu"}
         if v not in allowed:
             raise ValueError(f"Tool '{v}' not allowed. Use: {allowed}")
         return v
@@ -300,65 +300,6 @@ def parse_scoutsuite_output(stdout: str, stderr: str) -> tuple[list[CloudFinding
     return findings, []
 
 
-def parse_cloudsploit_output(stdout: str, stderr: str) -> tuple[list[CloudFinding], list[CloudResourceSummary]]:
-    findings = []
-    resource_counts: dict[str, int] = {}
-    raw = stdout.strip() or stderr.strip()
-    if not raw:
-        return findings, []
-
-    try:
-        data = json.loads(raw)
-
-        # cloudsploit often nests under scans/checks/results
-        checks = []
-        if isinstance(data, dict):
-            for key in ["findings", "results", "checks", "scans"]:
-                if isinstance(data.get(key), list):
-                    checks.extend(data[key])
-
-        for item in checks:
-            if not isinstance(item, dict):
-                continue
-            sev = normalize_severity(item.get("severity"))
-            status = str(item.get("status", "warning")).lower()
-            resource_type = item.get("resource") or item.get("resourceType") or item.get("resource_type")
-            resource_id = item.get("resourceId") or item.get("resource_id")
-            region = item.get("region")
-            title = item.get("title") or item.get("name") or item.get("plugin") or "CloudSploit finding"
-
-            findings.append(CloudFinding(
-                category="cloudsploit",
-                title=str(title),
-                severity=sev,
-                status="fail" if status in {"fail", "failed"} else ("pass" if status in {"pass", "passed"} else "warning"),
-                resource_type=str(resource_type) if resource_type else None,
-                resource_id=str(resource_id) if resource_id else None,
-                region=region,
-                evidence=str(item.get("message") or item.get("description") or "")[:2000] or None,
-                recommendation=item.get("remediation"),
-                extra={"plugin": item.get("plugin")},
-            ))
-            if resource_type:
-                resource_counts[str(resource_type)] = resource_counts.get(str(resource_type), 0) + 1
-
-        return findings, [CloudResourceSummary(resource_type=k, count=v) for k, v in sorted(resource_counts.items())]
-    except Exception:
-        pass
-
-    for line in raw.splitlines():
-        if any(x in line.lower() for x in ["fail", "public", "over-permission", "metadata", "exposed"]):
-            findings.append(CloudFinding(
-                category="cloudsploit",
-                title="CloudSploit text finding",
-                severity="medium",
-                status="warning",
-                evidence=line[:2000],
-            ))
-
-    return findings, []
-
-
 def parse_pacu_output(stdout: str, stderr: str) -> tuple[list[CloudFinding], list[CloudResourceSummary]]:
     findings = []
     raw = stdout.strip() or stderr.strip()
@@ -410,20 +351,18 @@ def cloud_misconfig_scan(tool: str, provider: str, args: list[str] = []) -> dict
       └─────────────────────────────────────────────────────────────┘
 
     Args:
-        tool:     "scoutsuite" | "prowler" | "cloudsploit" | "pacu"
+        tool:     "scoutsuite" | "prowler" | "pacu"
         provider: "aws" | "azure" | "gcp" | "multi"
         args:     Raw tool args — agent decides
 
     Typical usage:
         prowler      → benchmark/compliance + IAM/public exposure
         scoutsuite   → broad multi-cloud misconfig review
-        cloudsploit  → config risk checks
         pacu         → AWS attack-path / privilege-escalation-oriented enum
 
     Examples:
         cloud_misconfig_scan("prowler", "aws", ["aws", "--compliance", "cis_1.5_aws"])
         cloud_misconfig_scan("scoutsuite", "aws", ["aws"])
-        cloud_misconfig_scan("cloudsploit", "aws", [])
         cloud_misconfig_scan("pacu", "aws", ["--module", "iam__enum_permissions"])
     """
 
@@ -451,11 +390,6 @@ def cloud_misconfig_scan(tool: str, provider: str, args: list[str] = []) -> dict
     elif req.tool == "scoutsuite":
         # Resolve ScoutSuite binary robustly (scoutsuite/ScoutSuite/scout)
         cmd = [_resolve_scoutsuite_binary(), req.provider]
-        cmd.extend(list(req.args))
-
-    elif req.tool == "cloudsploit":
-        # Wrapper assumes CLI available as "cloudsploit"
-        cmd = ["cloudsploit", "--cloud", req.provider]
         cmd.extend(list(req.args))
 
     elif req.tool == "pacu":
@@ -496,8 +430,6 @@ def cloud_misconfig_scan(tool: str, provider: str, args: list[str] = []) -> dict
         findings, resource_summary = parse_prowler_output(stdout, stderr)
     elif req.tool == "scoutsuite":
         findings, resource_summary = parse_scoutsuite_output(stdout, stderr)
-    elif req.tool == "cloudsploit":
-        findings, resource_summary = parse_cloudsploit_output(stdout, stderr)
     elif req.tool == "pacu":
         findings, resource_summary = parse_pacu_output(stdout, stderr)
 
@@ -529,18 +461,17 @@ CLOUD_MISCONFIG_SCAN_TOOL_DEFINITION = {
     "description": (
         "Scan cloud environments for IAM over-permissions, public exposure, insecure security groups, "
         "metadata exposure, role chaining risks, and Lambda environment leaks using ScoutSuite, "
-        "Prowler, CloudSploit, or Pacu."
+        "Prowler, or Pacu."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "tool": {
                 "type": "string",
-                "enum": ["scoutsuite", "prowler", "cloudsploit", "pacu"],
+                "enum": ["scoutsuite", "prowler", "pacu"],
                 "description": (
                     "scoutsuite = broad multi-cloud audit | "
                     "prowler = compliance and cloud security checks | "
-                    "cloudsploit = cloud misconfig checks | "
                     "pacu = AWS attack-path and IAM-focused assessment"
                 ),
             },
@@ -556,7 +487,6 @@ CLOUD_MISCONFIG_SCAN_TOOL_DEFINITION = {
                     "Raw tool arguments. Examples:\n"
                     "Prowler:    ['--compliance', 'cis_1.5_aws']\n"
                     "ScoutSuite: ['--no-browser']\n"
-                    "CloudSploit:['--json']\n"
                     "Pacu:       ['--module', 'iam__enum_permissions']"
                 )
             }
@@ -617,18 +547,7 @@ if __name__ == "__main__":
     print(json.dumps(r, indent=2))
 
     # ─────────────────────────────
-    # 5. CloudSploit AWS
-    # ─────────────────────────────
-    r = cloud_misconfig_scan(
-        tool="cloudsploit",
-        provider="aws",
-        args=["--json"]
-    )
-    print("=== CLOUDSPLOIT AWS ===")
-    print(json.dumps(r, indent=2))
-
-    # ─────────────────────────────
-    # 6. Pacu IAM enumeration
+    # 5. Pacu IAM enumeration
     # ─────────────────────────────
     r = cloud_misconfig_scan(
         tool="pacu",

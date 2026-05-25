@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import re
 from typing import Any
 from pathlib import Path
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from server.api.dependencies import projects_store
 from server.agents.assistant.tools.mark_false_positive import mark_false_positive as mark_project_finding_false_positive
+from server.agents.executer.sandbox import delete_project_workspace
+from server.app.mobile_runtime import prepare_mobile_runtime_for_project, uninstall_mobile_runtime_for_project
+from server.db.projects.config import projects_db_config
 
 router = APIRouter(tags=["projects"])
 
@@ -32,6 +36,28 @@ class FalsePositivePayload(BaseModel):
 
 def _cache_root() -> Path:
     return (Path(__file__).resolve().parents[2] / "cache").resolve()
+
+
+def _projects_artifacts_root() -> Path:
+    db_path = Path(projects_db_config.projects_db_path).expanduser().resolve()
+    return db_path.parent / "artifacts"
+
+
+def _sanitize_artifact_name(value: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    return clean.strip("._") or "artifact"
+
+
+def _delete_project_uploaded_artifacts(project_id: str) -> dict[str, int]:
+    safe_project_id = str(project_id or "").strip()
+    if not safe_project_id:
+        return {"uploaded_artifacts_removed": 0}
+    project_root = _projects_artifacts_root() / safe_project_id
+    if not project_root.exists():
+        return {"uploaded_artifacts_removed": 0}
+    count = sum(1 for path in project_root.rglob("*") if path.is_file())
+    shutil.rmtree(project_root, ignore_errors=True)
+    return {"uploaded_artifacts_removed": count}
 
 
 def _delete_project_cache_artifacts(project_id: str) -> dict[str, int]:
@@ -70,6 +96,15 @@ def _delete_project_cache_artifacts(project_id: str) -> dict[str, int]:
     return {
         "project_runs_removed": project_runs_removed,
         "project_findings_removed": project_findings_removed,
+    }
+
+
+def _delete_project_runtime_artifacts(project_id: str, project_payload: dict[str, Any] | None = None) -> dict[str, int]:
+    deleted_cache = _delete_project_cache_artifacts(project_id)
+    deleted_sandbox = delete_project_workspace(project_id, project_payload=project_payload)
+    return {
+        **deleted_cache,
+        **deleted_sandbox,
     }
 
 
@@ -131,26 +166,53 @@ def upsert_project(project: ProjectPayload) -> dict[str, Any]:
 
 @router.delete("/api/projects/{project_id}")
 def delete_project(project_id: str) -> dict[str, Any]:
+    mobile_runtime_cleanup: dict[str, Any] = {"skipped": True, "reason": "project unavailable"}
     try:
+        project = projects_store.get_project(project_id)
+        if isinstance(project, dict):
+            try:
+                mobile_runtime_cleanup = uninstall_mobile_runtime_for_project(project)
+            except Exception as cleanup_exc:
+                mobile_runtime_cleanup = {"error": str(cleanup_exc)}
         projects_store.delete_project(project_id)
-        deleted_cache = _delete_project_cache_artifacts(project_id)
+        deleted_cache = _delete_project_runtime_artifacts(
+            project_id,
+            project_payload=project if isinstance(project, dict) else None,
+        )
+        deleted_uploads = _delete_project_uploaded_artifacts(project_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to delete project: {exc}") from exc
-    return {"ok": True, "id": project_id, **deleted_cache}
+    return {
+        "ok": True,
+        "id": project_id,
+        **deleted_cache,
+        **deleted_uploads,
+        "mobile_runtime_cleanup": mobile_runtime_cleanup,
+    }
 
 
 @router.post("/api/projects/{project_id}/reset-runtime")
 def reset_project_runtime(project_id: str) -> dict[str, Any]:
     try:
         project = projects_store.reset_project_runtime_state(project_id)
-        deleted_cache = _delete_project_cache_artifacts(project_id)
+        deleted_cache = _delete_project_runtime_artifacts(project_id, project_payload=project)
+        try:
+            mobile_runtime_cleanup = uninstall_mobile_runtime_for_project(project)
+        except Exception as cleanup_exc:
+            mobile_runtime_cleanup = {"error": str(cleanup_exc)}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to reset project runtime: {exc}") from exc
-    return {"ok": True, "project": project, "id": project_id, **deleted_cache}
+    return {
+        "ok": True,
+        "project": project,
+        "id": project_id,
+        **deleted_cache,
+        "mobile_runtime_cleanup": mobile_runtime_cleanup,
+    }
 
 
 @router.get("/api/projects/{project_id}/runs/active")
@@ -208,3 +270,90 @@ async def mark_finding_false_positive(
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=str(result.get("error") or "Unable to mark finding as false positive"))
     return {"ok": True, **result}
+
+
+@router.post("/api/projects/{project_id}/artifacts/mobile-upload")
+async def upload_mobile_artifact(
+    project_id: str,
+    file: UploadFile = File(...),
+    target_type: str = Form(default="mobile"),
+) -> dict[str, Any]:
+    safe_project_id = str(project_id or "").strip()
+    if not safe_project_id:
+        raise HTTPException(status_code=400, detail="Project id is required.")
+
+    if str(target_type or "").strip().lower() != "mobile":
+        raise HTTPException(status_code=400, detail="This upload route only accepts mobile project artifacts.")
+
+    original_name = str(file.filename or "").strip()
+    if not original_name:
+        raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
+
+    extension = Path(original_name).suffix.lower()
+    if extension not in {".apk", ".aab", ".ipa"}:
+        raise HTTPException(status_code=400, detail="Only .apk, .aab, and .ipa mobile artifacts are supported.")
+
+    safe_name = _sanitize_artifact_name(Path(original_name).name)
+    destination_dir = _projects_artifacts_root() / safe_project_id / "mobile"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination_path = destination_dir / safe_name
+
+    try:
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        destination_path.write_bytes(content)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to store uploaded artifact: {exc}") from exc
+
+    return {
+        "ok": True,
+        "project_id": safe_project_id,
+        "filename": safe_name,
+        "path": str(destination_path),
+        "size": destination_path.stat().st_size,
+        "content_type": str(file.content_type or ""),
+    }
+
+
+@router.post("/api/projects/{project_id}/mobile-runtime/prepare")
+def prepare_mobile_runtime(project_id: str) -> dict[str, Any]:
+    try:
+        project = projects_store.get_project(project_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load project: {exc}") from exc
+
+    if not isinstance(project, dict):
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    target_type = str(project.get("targetType", "")).strip().lower()
+    if target_type != "mobile":
+        raise HTTPException(status_code=400, detail="Mobile runtime preparation is only available for mobile projects.")
+
+    target_config = project.get("targetConfig")
+    if not isinstance(target_config, dict):
+        target_config = {}
+
+    target_path = str(target_config.get("file_path") or project.get("target") or "").strip()
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Mobile project has no uploaded artifact path.")
+
+    try:
+        prepared = prepare_mobile_runtime_for_project(project)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to prepare mobile runtime: {exc}") from exc
+
+    package_name = str(prepared.get("package_name") or "").strip()
+    if package_name and not str(target_config.get("package_name") or "").strip():
+        target_config["package_name"] = package_name
+        project["targetConfig"] = target_config
+        try:
+            projects_store.upsert_project(project)
+        except Exception:
+            pass
+
+    return {"ok": True, "project_id": project_id, **prepared}

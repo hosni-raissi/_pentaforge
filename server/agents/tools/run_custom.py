@@ -14,6 +14,7 @@ import re
 import shlex
 import time
 import uuid
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -29,6 +30,7 @@ from server.agents.executer.sandbox import (
     SandboxExecutionPolicy,
     build_sandbox_env,
     build_sandbox_preexec,
+    get_project_workspace_dir,
     get_sandbox_root,
     get_sandbox_share_dir,
     resolve_sandbox_cwd,
@@ -96,6 +98,40 @@ _WGET_BLOCKED_FLAGS  = {"--post-file",
                         "-E", "--adjust-extension",
                         "-K", "--backup-converted",
                         "--no-parent"}                       # mirroring/page save workflows
+
+
+def _arg_contains_blocked_shell_token(arg: str) -> str | None:
+    text = str(arg or "")
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    for tok in ("\n", "\r"):
+        if tok in text:
+            return tok
+
+    # Standalone shell operators are never allowed.
+    for tok in (";", "&&", "||", "|", "`", "$(", ">", ">>", "<", "<<"):
+        if stripped == tok:
+            return tok
+
+    # Reject obvious shell chaining, but allow regex alternation or literals inside a normal arg.
+    shell_chain_patterns = (
+        ("&&", r"(?:^|\s)&&(?=\s|$)"),
+        ("||", r"(?:^|\s)\|\|(?=\s|$)"),
+        ("|", r"(?:^|\s)\|(?=\s|$)"),
+        (";", r";(?=\s|$)"),
+        ("`", r"`"),
+        ("$(", r"\$\("),
+        (">>", r"(?:^|\s)>>(?=\s|$)"),
+        (">", r"(?:^|\s)>(?=\s|$)"),
+        ("<<", r"(?:^|\s)<<(?=\s|$)"),
+        ("<", r"(?:^|\s)<(?=\s|$)"),
+    )
+    for tok, pattern in shell_chain_patterns:
+        if re.search(pattern, text):
+            return tok
+    return None
 
 # ══════════════════════════════════════════════════════════════
 # 2. SCHEMAS
@@ -176,9 +212,9 @@ class RunCustomRequest(BaseModel):
                 raise ValueError("All args must be strings")
             
             if not allow_shell_tokens:
-                for tok in BLOCKED_TOKENS:
-                    if tok in arg:
-                        raise ValueError(f"Dangerous shell token '{tok}' detected in arg: {repr(arg)}")
+                tok = _arg_contains_blocked_shell_token(arg)
+                if tok is not None:
+                    raise ValueError(f"Dangerous shell token '{tok}' detected in arg: {repr(arg)}")
             
             for pat in BLOCKED_ARG_PATTERNS:
                 if re.search(pat, arg):
@@ -270,7 +306,7 @@ def validate_command_policy(command: str, args: list[str]) -> Optional[str]:
     # Prevent git operations that modify the repo or contact remotes
     if command == "git":
         write_subcmds = {
-            "push", "pull", "fetch", "clone", "commit", "merge",
+            "push", "pull", "fetch", "commit", "merge",
             "rebase", "reset", "checkout", "switch", "restore",
             "stash", "tag", "apply", "am", "cherry-pick",
         }
@@ -294,6 +330,60 @@ def validate_command_policy(command: str, args: list[str]) -> Optional[str]:
             return f"kubectl subcommand '{args[0]}' is blocked (modifies cluster state)"
 
     return None
+
+
+def _prepare_git_clone_destination(cmd: list[str], execution_cwd: str) -> None:
+    if len(cmd) < 3:
+        return
+    if str(cmd[0]).strip().lower() != "git" or str(cmd[1]).strip().lower() != "clone":
+        return
+
+    destination: str | None = None
+    positional: list[str] = []
+    skip_next = False
+    for token in cmd[2:]:
+        value = str(token or "").strip()
+        if not value:
+            continue
+        if skip_next:
+            skip_next = False
+            continue
+        if value in {"-b", "--branch", "--depth", "--origin", "-c", "--config", "--reference"}:
+            skip_next = True
+            continue
+        if value.startswith("-"):
+            continue
+        positional.append(value)
+
+    if len(positional) >= 2:
+        destination = positional[-1]
+    elif positional:
+        parsed = urlsplit(positional[0])
+        repo_name = Path(parsed.path.rstrip("/")).name
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        if repo_name:
+            destination = repo_name
+
+    if not destination:
+        return
+
+    root = get_sandbox_root().resolve()
+    destination_path = Path(destination).expanduser()
+    if destination_path.is_absolute():
+        try:
+            resolved = destination_path.resolve()
+        except Exception:
+            return
+    else:
+        resolved = (Path(execution_cwd).resolve() / destination_path).resolve()
+
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -688,6 +778,7 @@ def safe_execute(
     )
 
     try:
+        _prepare_git_clone_destination(cmd, execution_cwd)
         proc = subprocess.run(
             cmd,
             input=password if password else None,
@@ -712,6 +803,10 @@ def safe_execute(
 
 
 def _effective_command_cwd() -> str:
+    context = current_execution_context()
+    project_id = str(context.get("project_id", "")).strip() if isinstance(context, dict) else ""
+    if project_id:
+        return str(get_project_workspace_dir(project_id))
     return str(get_sandbox_root())
 
 

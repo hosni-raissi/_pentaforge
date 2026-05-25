@@ -12,6 +12,7 @@ import structlog
 from server.config.agent import get_public_agent_config
 from server.core.llm import ChatMessage, LLMClient
 from server.agents.rate_limiter import get_global_llm_queue
+from server.utils.cvss import enrich_payload_with_cvss
 
 from .prompts import REPORT_SYSTEM_PROMPT, REPORT_USER_PROMPT_TEMPLATE
 
@@ -37,7 +38,8 @@ def _format_finding(finding: dict[str, Any], index: int) -> str:
     status = str(finding.get("status", "open")).strip()
     description = str(finding.get("description", "")).strip()
     remediation = str(finding.get("remediation", "")).strip()
-    cvss = finding.get("cvss")
+    cvss = finding.get("cvss", finding.get("cvss_score"))
+    cvss_vector = str(finding.get("cvss_vector", "")).strip()
     cve = str(finding.get("cve", "")).strip()
     target = str(finding.get("target", "")).strip()
     evidence = finding.get("evidence", {})
@@ -67,6 +69,8 @@ def _format_finding(finding: dict[str, Any], index: int) -> str:
         lines.append(f"- **Category**: {category}")
     if cvss is not None:
         lines.append(f"- **CVSS**: {cvss}")
+    if cvss_vector:
+        lines.append(f"- **CVSS Vector**: {cvss_vector}")
     if cve:
         lines.append(f"- **CVE**: {cve}")
     if target:
@@ -155,6 +159,18 @@ def _format_findings_section(findings: list[dict[str, Any]]) -> str:
     if len(full_text) > 15000:
         return full_text[:15000] + "\n... [Findings Truncated]"
     return full_text
+
+
+def _prepare_report_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        if str(row.get("status", "")).strip().lower() == "verified":
+            row = enrich_payload_with_cvss(row)
+        prepared.append(row)
+    return prepared
 
 
 def _format_checklist_section(project: dict[str, Any]) -> str:
@@ -345,6 +361,7 @@ async def generate_report(
     findings = project.get("findings", [])
     if not isinstance(findings, list):
         findings = []
+    findings = _prepare_report_findings(findings)
 
     # Build prompt sections.
     findings_section = _format_findings_section(findings)
@@ -353,11 +370,19 @@ async def generate_report(
     tech_section = _format_tech_section(project)
     plan_section = _format_plan_section(project)
 
+    # Determine report date.
+    date_val = project.get("createdAt", project.get("created_at", ""))
+    if not date_val:
+        date_val = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    elif isinstance(date_val, str) and "T" in date_val:
+        date_val = date_val.split("T")[0]
+
     user_message = REPORT_USER_PROMPT_TEMPLATE.format(
         target=target,
         target_type=target_type,
         scope=scope,
         engagement_type=engagement_type,
+        date=date_val,
         scan_status=scan_status,
         total_findings=len(findings),
         findings_section=findings_section,

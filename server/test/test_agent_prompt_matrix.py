@@ -133,13 +133,13 @@ def test_print_recon_prompt_matrix() -> None:
         assert preview["prompt"]
 
 
-def test_web_recon_surface_restores_security_tool_aliases() -> None:
+def test_web_recon_surface_excludes_unsupported_aliases() -> None:
     tool_names = _tool_names(ALL_RECON_TOOLS)
     catalog = build_recon_run_custom_catalog_for_target_types(["web_app"])
 
-    assert "http_probe" in tool_names
-    assert "cms_detect_and_scan" in tool_names
-    assert "directory_file_fuzzing" in tool_names
+    assert "http_probe" not in tool_names
+    assert "cms_detect_and_scan" not in tool_names
+    assert "directory_file_fuzzing" not in tool_names
     assert "web_fuzz" not in tool_names
     assert "ffuf" in catalog
     assert "httpx" in catalog
@@ -152,7 +152,7 @@ def test_web_recon_prompt_and_packet_include_run_custom_catalog_guidance() -> No
     packet = build_recon_scenario_packet(
         scenario_and_target="Check the web target safely.",
         context_block="No prior findings.",
-        available_tools=["run_custom", "http_probe", "js_source_code_analyzer"],
+        available_tools=["run_custom", "js_source_code_analyzer"],
         target_types=["web_app"],
         run_custom_catalog=catalog,
         callable_tool_guide=callable_guide,
@@ -160,6 +160,7 @@ def test_web_recon_prompt_and_packet_include_run_custom_catalog_guidance() -> No
         max_tool_calls_per_round=4,
         max_rounds_per_scenario=3,
     )
+
 
     assert callable_guide
     assert "run_custom command catalog for this target scope:" in prompt

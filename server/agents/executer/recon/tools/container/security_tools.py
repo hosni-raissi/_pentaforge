@@ -40,14 +40,6 @@ _RAW_CONTAINER_RECON_TOOLS: dict[str, dict[str, object]] = {
         "tgt": ["docker_images", "layer_recon", "image_audit"]
     },
     
-    "whaler": {
-        "t": "docker",
-        "c": "container_info_enrichment",
-        "u": "whaler CONTAINER_ID 2>/dev/null | grep -v '^#'",
-        "d": ["Container metadata enrichment", "Image details extraction", "Port mapping visualization", "Environment variable listing"],
-        "tgt": ["docker_containers", "metadata_enum", "config_recon"]
-    },
-
     # ─────────────────────────────────────────────────────────────
     # ☸️ KUBERNETES CLUSTER RECON
     # ─────────────────────────────────────────────────────────────
@@ -91,14 +83,6 @@ _RAW_CONTAINER_RECON_TOOLS: dict[str, dict[str, object]] = {
         "tgt": ["k8s_contexts", "namespace_enum", "multi_cluster"]
     },
     
-    "kubenscan": {
-        "t": "k8s",
-        "c": "risk_assessment",
-        "u": "kubenscan --namespace default --output json 2>/dev/null | jq -r '.results[]?.name'",
-        "d": ["Pod security context analysis", "Service account privilege mapping", "Network policy enumeration", "Risk scoring"],
-        "tgt": ["k8s_security", "rbac_recon", "compliance_audit"]
-    },
-    
     "trivy-k8s": {
         "t": "k8s",
         "c": "cluster_scanning",
@@ -116,14 +100,6 @@ _RAW_CONTAINER_RECON_TOOLS: dict[str, dict[str, object]] = {
         "u": "crane ls TARGET_REGISTRY/repo 2>/dev/null; crane manifest TARGET_REGISTRY/repo:tag 2>/dev/null | jq -r '.config.digest'",
         "d": ["Container registry listing", "Image tag enumeration", "Manifest/layer inspection", "Config extraction"],
         "tgt": ["docker_hub", "ecr", "gcr", "acr", "registry_recon"]
-    },
-    
-    "reg": {
-        "t": "registry",
-        "c": "registry_scanning",
-        "u": "reg ls TARGET_REGISTRY/repo 2>/dev/null; reg manifest TARGET_REGISTRY/repo:tag 2>/dev/null | jq -r '.layers[]?.digest'",
-        "d": ["Registry repository listing", "Tag enumeration", "Manifest inspection", "Layer digest extraction"],
-        "tgt": ["container_registries", "image_enum", "manifest_recon"]
     },
     
     "docker-registry-cli": {
@@ -162,15 +138,6 @@ _RAW_CONTAINER_RECON_TOOLS: dict[str, dict[str, object]] = {
         "tgt": ["container_images", "vuln_recon", "sbom_generation"]
     },
     
-    "clair-scanner": {
-        "t": "image",
-        "c": "static_analysis",
-        "u": "clair-scanner --ip YOUR_IP --report-json - TARGET_IMAGE:TAG 2>/dev/null | jq -r '.vulnerabilities[]?.name?'",
-        "d": ["Image layer analysis", "Vulnerability database correlation", "CVE mapping", "JSON to stdout"],
-        "tgt": ["container_images", "static_analysis", "vuln_db_correlation"],
-        "note": "Requires clair server; use (CONFIG:clair) for config path if needed"
-    },
-
     # ─────────────────────────────────────────────────────────────
     # 🌐 CONTAINER NETWORK RECON
     # ─────────────────────────────────────────────────────────────

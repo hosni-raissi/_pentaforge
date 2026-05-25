@@ -2,7 +2,7 @@
 """
 JS Source Code Analyzer — Agent Tool
 =====================================
-Wraps getjs, linkfinder, secretfinder, and js-beautify into a single
+Wraps secretfinder and js-beautify into a single
 structured, LLM-callable tool with proper validation, SSRF protection,
 and resilient output parsing.
 """
@@ -107,7 +107,7 @@ def _is_ssrf_safe(hostname: str) -> tuple[bool, str]:
 # 3. SCHEMAS
 # ══════════════════════════════════════════════════════════════════════
 
-VALID_TOOLS = frozenset({"getjs", "secretfinder", "js-beautify"})
+VALID_TOOLS = frozenset({"secretfinder", "js-beautify"})
 
 
 class JsAnalyzerRequest(BaseModel):
@@ -125,7 +125,7 @@ class JsAnalyzerRequest(BaseModel):
         tool = str(data.get("tool", "")).strip()
         target = str(data.get("target", "")).strip()
         if (
-            tool in {"getjs", "secretfinder"}
+            tool in {"secretfinder"}
             and target
             and not target.startswith(("http://", "https://"))
         ):
@@ -264,16 +264,6 @@ def download_file(url: str) -> tuple[Optional[Path], Optional[str]]:
         return None, str(exc)
 
 
-def _build_getjs_cmd(target: str, args: list[str]) -> list[str]:
-    extra: list[str] = []
-    if not _target_in_args(target, args, "-url", "--url", "-input"):
-        extra += ["-url", target]
-    if not _has_flag(args, "-complete"):
-        extra.append("-complete")
-    return ["getJS", *extra, *args]
-
-
-
 def _build_secretfinder_cmd(target: str, args: list[str]) -> list[str]:
     extra: list[str] = []
     if not _target_in_args(target, args, "-i", "--input"):
@@ -325,15 +315,6 @@ def _deduplicate(items: list[str]) -> list[str]:
     return out
 
 
-def parse_getjs(stdout: str) -> list[str]:
-    return _deduplicate(
-        line.strip()
-        for line in stdout.splitlines()
-        if _URL_RE.match(line.strip())
-    )
-
-
-
 def parse_secretfinder(stdout: str) -> list[Secret]:
     seen: set[str] = set()
     secrets: list[Secret] = []
@@ -372,11 +353,11 @@ def js_source_code_analyzer(
     """
     Agent Tool — JS Source Code Analyzer
 
-    Dispatches to one of four JS analysis tools and returns structured results.
+    Dispatches to one of the supported JS analysis tools and returns structured results.
 
     Args:
-        tool:   One of 'getjs', 'linkfinder', 'secretfinder', 'js-beautify'.
-        target: A URL (webpage for getjs, direct .js URL for the others).
+        tool:   One of 'secretfinder' or 'js-beautify'.
+        target: A URL for secretfinder, or a URL/local file path for js-beautify.
         args:   Optional extra CLI flags to forward to the underlying tool.
 
     Returns:
@@ -405,9 +386,7 @@ def js_source_code_analyzer(
     tmp_file: Optional[Path] = None
     download_error: Optional[str] = None
 
-    if req.tool == "getjs":
-        cmd = _build_getjs_cmd(req.target, req.args)
-    elif req.tool == "secretfinder":
+    if req.tool == "secretfinder":
         cmd = _build_secretfinder_cmd(req.target, req.args)
     elif req.tool == "js-beautify":
         cmd, tmp_file, download_error = _build_jsbeautify_cmd(req.target, req.args)
@@ -446,9 +425,7 @@ def js_source_code_analyzer(
     secrets: list[Secret] = []
     beautified_code: Optional[str] = None
 
-    if req.tool == "getjs":
-        js_urls = parse_getjs(stdout)
-    elif req.tool == "secretfinder":
+    if req.tool == "secretfinder":
         secrets = parse_secretfinder(stdout)
     elif req.tool == "js-beautify":
         if len(stdout) > BEAUTIFY_CHAR_LIMIT:
@@ -488,7 +465,6 @@ JS_ANALYZER_TOOL_DEFINITION: dict = {
     "name": "js_source_code_analyzer",
     "description": (
         "Analyze JavaScript files from a target web application. "
-        "Use 'getjs' to enumerate all JS files loaded by a webpage. "
         "Use 'secretfinder' to find API keys, tokens, and secrets embedded in JS. "
         "Use 'js-beautify' to unminify/deobfuscate a JS file for manual review."
     ),
@@ -503,7 +479,7 @@ JS_ANALYZER_TOOL_DEFINITION: dict = {
             "target": {
                 "type": "string",
                 "description": (
-                    "Target URL. For 'getjs' and 'secretfinder', "
+                    "Target URL. For 'secretfinder', "
                     "provide a full URL starting with http:// or https://. "
                     "For 'js-beautify', provide either a full URL or a local file path."
                 ),
@@ -526,30 +502,27 @@ JS_ANALYZER_TOOL_DEFINITION: dict = {
 if __name__ == "__main__":
     # ⚠️  Replace with a domain you own or have written authorisation to test.
     TEST_TARGET = "https://hackerone.com"
-    first_result = js_source_code_analyzer(tool="getjs", target=TEST_TARGET, args=[])
+    first_result = js_source_code_analyzer(tool="secretfinder", target=TEST_TARGET, args=[])
 
     print(f"\n{'=' * 60}")
-    print(f"  GETJS  →  {TEST_TARGET}")
+    print(f"  SECRETFINDER  →  {TEST_TARGET}")
     print("=" * 60)
     print(f"  Success : {first_result['success']}")
     print(f"  Command : {first_result['command']}")
     print(f"  Time    : {first_result['execution_time']}s")
     if first_result.get("error"):
         print(f"  Error   : {first_result['error']}")
-    if first_result["js_urls"]:
-        print(f"  JS URLs ({len(first_result['js_urls'])}):")
-        for u in first_result["js_urls"][:5]:
-            print(f"    - {u}")
+    if first_result["secrets"]:
+        print(f"  Secrets ({len(first_result['secrets'])}):")
+        for item in first_result["secrets"][:5]:
+            print(f"    - {item['name']}: {item['value']}")
 
-    demo_js = _pick_demo_js_url(first_result["js_urls"])
+    demo_js = TEST_TARGET
     if not demo_js:
-        print("\nSkipping follow-up demos: GETJS did not return a usable JS URL.")
+        print("\nSkipping follow-up demos: no usable JS target was selected.")
         raise SystemExit(0)
 
-    demos = [
-        ("secretfinder", demo_js, []),
-        ("js-beautify", demo_js, []),
-    ]
+    demos = [("js-beautify", demo_js, [])]
 
     for tool_name, tgt, extra_args in demos:
         print(f"\n{'=' * 60}")
@@ -576,4 +549,3 @@ if __name__ == "__main__":
         if result["beautified_code"]:
             preview = result["beautified_code"][:300].replace("\n", " ")
             print(f"  Code preview: {preview}...")
-

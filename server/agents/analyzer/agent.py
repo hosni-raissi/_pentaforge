@@ -14,6 +14,7 @@ from server.agents.executer.base import (
 )
 from server.app.scan.verification import VerificationTier, VERIFICATION_PLAYBOOKS, classify_evidence
 from server.config.agent import LocalLLMConfig, PublicLLMConfig
+from server.utils.cvss import enrich_payload_with_cvss
 
 from .config import (
     ACT_MIN_CVSS,
@@ -413,6 +414,13 @@ class AnalyzerAgent:
         )
         verify_result = await self._verify.run(verify_message)
         data = asdict(verify_result) if hasattr(verify_result, "__dataclass_fields__") else verify_result
+        if isinstance(data, dict):
+            raw_payload = data.get("raw_payload", {})
+            if isinstance(raw_payload, dict) and raw_payload:
+                merged = dict(raw_payload)
+                merged.update(data)
+                data = merged
+            data = enrich_payload_with_cvss(data, prepared.scenario, prepared.row_result)
         return self._finalize_verification_payload(
             candidate=prepared,
             verify_data=data if isinstance(data, dict) else {},
@@ -452,6 +460,12 @@ class AnalyzerAgent:
         poc_result = await self._poc.run(poc_message)
         data = asdict(poc_result) if hasattr(poc_result, "__dataclass_fields__") else poc_result
         if isinstance(data, dict):
+            raw_payload = data.get("raw_payload", {})
+            if isinstance(raw_payload, dict) and raw_payload:
+                merged = dict(raw_payload)
+                merged.update(data)
+                data = merged
+
             # Ensure mandatory fields for orchestrator/memory
             data.setdefault("verdict", "real_vulnerability")
             data.setdefault("summary", str(data.get("summary", "PoC generated")).strip())
@@ -465,6 +479,7 @@ class AnalyzerAgent:
             data.setdefault("visual_evidence_paths", data.get("visual_evidence_paths", []))
             data.setdefault("impact_assessment", data.get("impact_assessment", {}))
             data.setdefault("remediation_steps", data.get("remediation_steps", []))
+            data = enrich_payload_with_cvss(data, scenario, verify_data)
             
             # Map 'poc' for legacy compatibility if needed
             if "poc" not in data:
@@ -1065,6 +1080,7 @@ class AnalyzerAgent:
         data = dict(verify_data) if isinstance(verify_data, dict) else {}
         if not data.get("verdict"):
             data["verdict"] = self._extract_verdict(data)
+        data = enrich_payload_with_cvss(data, candidate.scenario, candidate.row_result)
         data.setdefault("poc", "")
         data.setdefault(
             "analysis_chain",
@@ -1126,6 +1142,12 @@ class AnalyzerAgent:
         data.setdefault("deterministic_validation", verification_artifacts["deterministic_validation"])
         data.setdefault("verification_methods", verification_artifacts["verification_methods"])
         data.setdefault("artifact_quality", verification_artifacts["artifact_quality"])
+        if data.get("cvss_score") is not None:
+            evidence_map.setdefault("cvss_score", data.get("cvss_score"))
+        if data.get("cvss_vector"):
+            evidence_map.setdefault("cvss_vector", data.get("cvss_vector"))
+        if data.get("cvss_severity"):
+            evidence_map.setdefault("cvss_severity", data.get("cvss_severity"))
         return data
 
     def _extract_executor_commands(self, tool_results: Any) -> list[str]:

@@ -8,15 +8,10 @@ This module keeps the current approach explicit:
 
 from __future__ import annotations
 
-WEB_ALIAS_MODULES: tuple[str, ...] = (
-    "web.security_tool_aliases",
-)
+WEB_ALIAS_MODULES: tuple[str, ...] = ()
 
-WEB_ALIAS_BACKED_TOOL_NAMES: tuple[str, ...] = (
-    "cms_detect_and_scan",
-    "directory_file_fuzzing",
-    "http_probe",
-)
+WEB_ALIAS_BACKED_TOOL_NAMES: tuple[str, ...] = ()
+
 
 WEB_SMART_PYTHON_MODULES: tuple[str, ...] = (
     "web.cors_misconfig_check",

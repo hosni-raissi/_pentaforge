@@ -9,6 +9,7 @@ PentaForge ships with a local Docker Compose stack for the web UI, API server, R
 - `tool-sandbox`: isolated execution service for `run_custom` and `run_python`
 - `redis`: ephemeral cache and coordination
 - `qdrant`: vector store for knowledge and retrieval
+- `mobile-android` (optional): Google Android Emulator container runtime for APK/mobile engagements
 
 ## Start
 
@@ -24,12 +25,19 @@ Run detached:
 docker compose -f infra/docker/docker-compose.yml up -d --build
 ```
 
+Start the desktop stack with the optional Android mobile lab:
+
+```bash
+./scripts/run-desktop-with-docker.sh --build-backend --reinstall-sandbox-tools --build-sandbox
+```
+
 ## Access
 
 - Frontend: `http://localhost:8080`
 - Backend API: `http://localhost:8000`
 - Qdrant is internal-only by default and reachable from the backend at `http://qdrant:6333`
 - Redis is internal-only by default and reachable from the backend at `redis://redis:6379/0`
+- Mobile APK projects run through static analysis only in the default stack; no Android runtime sidecar is started.
 
 The frontend talks directly to the backend on `localhost:8000`, which matches the current UI defaults.
 
@@ -60,6 +68,7 @@ This is intentional:
 - `redis` is checked with `redis-cli ping`
 - `backend` waits for `redis` and `tool-sandbox` health before starting work
 - `qdrant` stays a separate service and collections are created lazily by the app when needed
+- `mobile-android` is optional and only starts when the Compose `mobile-lab` profile is enabled
 
 ## Reset Everything
 
@@ -99,3 +108,4 @@ That `-v` reset removes:
 - The launcher now separates rebuilds: backend changes still rebuild automatically, while sandbox/toolchain changes only print a reminder unless you run `./scripts/run-desktop-with-docker.sh --build-sandbox` or `--build`.
 - `tool-sandbox` gets `NET_RAW` and `NET_ADMIN` so tools like `arp-scan`, `arping`, `mtr`, and raw-socket `nmap` modes can run.
 - The Docker CLI is installed in the sandbox, but the host Docker socket is not mounted by default. That keeps the sandbox isolated; image-inspection workflows that need host Docker daemon access should be enabled separately and deliberately.
+- Mobile APK projects currently use static artifact analysis by default, which avoids host-dependent emulator requirements and keeps the scan path stable across environments.

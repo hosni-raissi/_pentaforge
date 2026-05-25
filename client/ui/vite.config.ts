@@ -13,6 +13,9 @@ export default defineConfig({
     port: 5173,
     open: false,
     allowedHosts: true,
+    watch: {
+      ignored: ['**/src-tauri/target/**', '**/src-tauri/gen/**'],
+    },
   },
   build: {
     outDir: 'dist',

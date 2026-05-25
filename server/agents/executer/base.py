@@ -209,6 +209,7 @@ class ExecuterResult:
     rounds_executed: int = 0
     round_labels: list[str] = field(default_factory=list)
     scenario_summaries: list[dict[str, Any]] = field(default_factory=list)
+    raw_payload: dict[str, Any] = field(default_factory=dict)
 
 
 def _dict_to_msg(d: dict[str, Any]) -> ChatMessage:
@@ -602,6 +603,7 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
                 status=verdict_value,
                 confidence=_coerce_optional_confidence(extracted_verdict.get("confidence")),
                 summary=str(extracted_verdict.get("summary", "")).strip() or raw.strip(),
+                raw_payload=extracted_verdict,
             )
 
         # If consolidation role (verify/retest) and no verdict found, default to inconclusive
@@ -856,6 +858,7 @@ def _parse_executer_output(raw: str, role: str = "unknown") -> ExecuterResult:
         summary=summary,
         next_hypotheses=[str(item) for item in next_hypotheses],
         scenario_summaries=normalized_scenario_summaries,
+        raw_payload=parsed if isinstance(parsed, dict) else {},
     )
 
 
@@ -1952,7 +1955,14 @@ class BaseExecuterAgent:
 
         if str(tool_name or "").strip().lower() == "run_custom":
             command_name = str(args.get("command", "")).strip().lower() if isinstance(args, dict) else ""
-            profile = get_run_custom_command_profile(command_name, role=self._role)
+            command_args = args.get("args", []) if isinstance(args, dict) else []
+            if not isinstance(command_args, list):
+                command_args = []
+            profile = get_run_custom_command_profile(
+                command_name,
+                role=self._role,
+                args=[str(item) for item in command_args],
+            )
             result = requires_approval_for_execution(
                 profile=profile,
                 approval_mode=approval_mode,
@@ -2047,8 +2057,15 @@ class BaseExecuterAgent:
                 f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/{max_rounds}). "
                 "You have analyzed all verification results. Now output ONLY valid JSON with two fields: "
                 '"verdict" (real_vulnerability|false_positive|inconclusive) and "summary" (1-2 sentences). '
+                'If the verdict is "real_vulnerability", also include "cvss_vector" when you can defend the base metrics from the evidence. '
                 "NO prose before or after JSON. NO markdown. Start with { and end with }. Example:\n"
-                '{"verdict": "real_vulnerability", "summary": "The vulnerability was confirmed through payload testing."}'
+                '{"verdict": "real_vulnerability", "summary": "The vulnerability was confirmed through payload testing.", "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N"}'
+            ),
+            "retest": (
+                f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/{max_rounds}). "
+                "You have completed PoC/report generation. Now output ONLY valid JSON with the structured vulnerability-report fields from the system prompt, "
+                'including "cvss_vector" for confirmed vulnerabilities. '
+                "NO prose before or after JSON. NO markdown. Start with { and end with }."
             ),
             "recon": (
                 f"[CONSOLIDATION ROUND {round_index}] This is your FINAL round (Round {round_index}/{max_rounds}). "
@@ -2106,7 +2123,7 @@ class BaseExecuterAgent:
             "retest": (
                 prefix
                 + "Do NOT call tools. Use only the already collected retest evidence below.\n"
-                'Return ONLY strict JSON with: {"verdict":"real_vulnerability|false_positive|inconclusive","summary":"..."}'
+                + 'Return ONLY strict JSON with: {"verdict":"real_vulnerability","summary":"...","confidence":0.0,"title":"...","severity":"critical|high|medium|low","cvss_vector":"CVSS:3.1/...","cwe_id":"CWE-XXX","cve_id":"CVE-YYYY-NNNN","description":"...","steps_to_reproduce":[],"expected_result":"...","actual_result":"...","exploit_script":"...","verification_commands":[],"visual_evidence_paths":[],"impact_assessment":{},"remediation_steps":[],"references":[]}'
             ),
             "recon": (
                 prefix

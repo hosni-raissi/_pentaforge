@@ -6,10 +6,13 @@ import asyncio
 import json
 import re
 import shlex
+import subprocess
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
+from server.agents.executer.sandbox import build_sandbox_env, get_project_workspace_dir
 from server.core.llm import ChatMessage, get_llm, get_public_agent_config
 from server.core.tool import coerce_args_from_schema
 from server.nodes.system_memory import (
@@ -25,7 +28,89 @@ from .prompts import (
 )
 
 
-def _build_target_placeholders(target: str) -> dict[str, str]:
+def _repository_checkout_relative_path(target: str) -> str:
+    raw = str(target or "").strip()
+    if not raw:
+        return ""
+
+    local_candidate = Path(raw).expanduser()
+    if local_candidate.exists():
+        return str(local_candidate.resolve())
+
+    parsed = urlsplit(raw)
+    path_text = parsed.path.rstrip("/")
+    parts = [part for part in path_text.split("/") if part]
+    if not parts:
+        return ""
+
+    repo_name = parts[-1]
+    if repo_name.endswith(".git"):
+        repo_name = repo_name[:-4]
+    if not repo_name:
+        return ""
+
+    owner = parts[-2] if len(parts) >= 2 else ""
+    if owner:
+        return str(Path("repos") / owner / repo_name)
+    return repo_name
+
+
+def _repository_checkout_absolute_path(project_id: str, target: str) -> str:
+    relative = _repository_checkout_relative_path(target)
+    if not relative:
+        return ""
+
+    candidate = Path(relative).expanduser()
+    if candidate.is_absolute():
+        return str(candidate.resolve())
+
+    workspace = get_project_workspace_dir(project_id)
+    return str((workspace / candidate).resolve())
+
+
+def _ensure_repository_checkout(project_id: str, target: str) -> str:
+    raw = str(target or "").strip()
+    if not raw:
+        return ""
+
+    local_candidate = Path(raw).expanduser()
+    if local_candidate.exists():
+        return str(local_candidate.resolve())
+
+    relative = _repository_checkout_relative_path(raw)
+    absolute = _repository_checkout_absolute_path(project_id, raw)
+    if not relative or not absolute:
+        return absolute
+
+    checkout_dir = Path(absolute)
+    if (checkout_dir / ".git").exists():
+        return str(checkout_dir)
+    if checkout_dir.exists() and any(checkout_dir.iterdir()):
+        return str(checkout_dir)
+
+    workspace = get_project_workspace_dir(project_id)
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", raw, relative],
+            cwd=str(workspace),
+            env=build_sandbox_env(),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            shell=False,
+            check=False,
+        )
+    except Exception:
+        pass
+    return str(checkout_dir)
+
+
+def _build_target_placeholders(
+    target: str,
+    *,
+    target_type: str = "",
+    project_id: str = "",
+) -> dict[str, str]:
     raw = str(target or "").strip()
     if not raw:
         return {
@@ -38,6 +123,33 @@ def _build_target_placeholders(target: str) -> dict[str, str]:
             "full_trgt": "",
             "full_target": "",
             "url": "",
+            "repo_url": "",
+            "repo_path": "",
+            "repo_abs_path": "",
+        }
+
+    normalized_target_type = str(target_type or "").strip().lower()
+    if normalized_target_type == "repository":
+        parsed = urlsplit(raw)
+        host = str(parsed.hostname or "").strip().lower()
+        repo_path = _repository_checkout_relative_path(raw)
+        repo_abs_path = _repository_checkout_absolute_path(project_id, raw) if project_id else repo_path
+        if Path(raw).expanduser().exists():
+            repo_path = repo_abs_path or str(Path(raw).expanduser().resolve())
+            repo_abs_path = repo_path
+        return {
+            "target": raw,
+            "raw_target": raw,
+            "trgt": repo_path,
+            "tgt": repo_path,
+            "host": host,
+            "hostname": host,
+            "full_trgt": raw,
+            "full_target": raw,
+            "url": raw,
+            "repo_url": raw,
+            "repo_path": repo_path,
+            "repo_abs_path": repo_abs_path,
         }
 
     parsed = urlsplit(raw if "://" in raw else f"//{raw}")
@@ -60,6 +172,9 @@ def _build_target_placeholders(target: str) -> dict[str, str]:
         "full_trgt": full_target,
         "full_target": full_target,
         "url": full_target,
+        "repo_url": "",
+        "repo_path": "",
+        "repo_abs_path": "",
     }
 
 
@@ -562,6 +677,7 @@ class InformationGatheringNode:
         tools: list[Any] = []
         removed_builtins: list[str] = []
         requested_keep_names: set[str] = set()
+        requested_keep_order: list[str] = []
         has_explicit_keep_selection = False
         raw_tools = payload.get("tools", [])
         if isinstance(raw_tools, list):
@@ -574,6 +690,8 @@ class InformationGatheringNode:
                         removed_builtins.append(tool_name)
                     elif tool_name in allowed_tool_names:
                         requested_keep_names.add(tool_name)
+                        if tool_name not in requested_keep_order:
+                            requested_keep_order.append(tool_name)
                     else:
                         removed_builtins.append(tool_name)
                     continue
@@ -586,6 +704,8 @@ class InformationGatheringNode:
                         removed_builtins.append(tool_name)
                     elif tool_name in allowed_tool_names:
                         requested_keep_names.add(tool_name)
+                        if tool_name not in requested_keep_order:
+                            requested_keep_order.append(tool_name)
                     else:
                         removed_builtins.append(tool_name)
                     continue
@@ -625,6 +745,14 @@ class InformationGatheringNode:
                 for tool_name, entry in original_named_entries
                 if tool_name in requested_keep_names
             ]
+            kept_names = {
+                tool_name
+                for tool_name, _entry in original_named_entries
+                if tool_name in requested_keep_names
+            }
+            for tool_name in requested_keep_order:
+                if tool_name not in kept_names:
+                    base_tools.append(tool_name)
             for tool_name, _entry in original_named_entries:
                 if tool_name not in requested_keep_names and tool_name not in removed_builtins:
                     removed_builtins.append(tool_name)
@@ -675,6 +803,8 @@ class InformationGatheringNode:
             ]
         if not prepared.get("tools"):
             prepared["status"] = "skip"
+        elif str(prepared.get("status", "")).strip().lower() == "skip":
+            prepared["status"] = "refine"
         if str(prepared.get("status", "")).strip().lower() == "skip":
             prepared["tools"] = []
         return prepared
@@ -744,6 +874,28 @@ class InformationGatheringNode:
                     prepared_block["skipped_tools"] = [
                         item for item in skipped if str(item).strip().lower() not in {"run_custom", "http_probe"}
                     ]
+            if normalized_target_type == "repository":
+                block_id = str(original_block.get("id", "")).strip().lower()
+                repository_builtin_fallbacks = {
+                    "code_security_review": ["sast_scan"],
+                }
+                fallback_tools = repository_builtin_fallbacks.get(block_id, [])
+                if fallback_tools and all(tool_name in available_tools for tool_name in fallback_tools):
+                    if (
+                        str(prepared_block.get("status", "")).strip().lower() == "skip"
+                        or not prepared_block.get("tools")
+                    ):
+                        prepared_block["status"] = "refine"
+                        prepared_block["tools"] = list(fallback_tools)
+                        prepared_block["selection_rationale"] = (
+                            str(prepared_block.get("selection_rationale", "")).strip()
+                            or "Repository static review converted to authorized built-in repository tools."
+                        )
+                        prepared_block["skipped_tools"] = [
+                            item
+                            for item in prepared_block.get("skipped_tools", [])
+                            if str(item).strip().lower() not in {tool_name.lower() for tool_name in fallback_tools}
+                        ]
             prepared_blocks.append(prepared_block)
         return prepared_blocks
 
@@ -762,7 +914,20 @@ class InformationGatheringNode:
         tool_arg_builder: Callable[[str, str, str, str, dict[str, Any]], tuple[dict[str, Any] | None, str | None]],
     ) -> list[dict[str, Any]]:
         result_rows: list[dict[str, Any]] = []
-        target_placeholders = _build_target_placeholders(target)
+        normalized_target_type = str(target_type or "").strip().lower()
+        if normalized_target_type == "repository":
+            checkout_path = _ensure_repository_checkout(project_id, target)
+            runtime_state = memory.get("target_runtime")
+            if not isinstance(runtime_state, dict):
+                runtime_state = {}
+            if checkout_path:
+                runtime_state["repository_checkout_path"] = checkout_path
+            memory["target_runtime"] = runtime_state
+        target_placeholders = _build_target_placeholders(
+            target,
+            target_type=target_type,
+            project_id=project_id,
+        )
         if str(prepared_block.get("status", "")).strip().lower() == "skip":
             result_rows.append({
                 "tool": "__block__",

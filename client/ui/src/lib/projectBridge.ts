@@ -57,6 +57,18 @@ export interface StartScanResponse {
   finished_at: string | null;
   error: string;
   already_running: boolean;
+  mobile_runtime?: {
+    requested?: boolean;
+    runtime_available?: boolean;
+    prepared?: boolean;
+    mode?: string;
+    execution_mode?: string | null;
+    fallback_mode?: string | null;
+    warning?: string;
+    error?: string;
+    device_id?: string;
+    [key: string]: unknown;
+  };
 }
 
 export interface StartScanRequest {
@@ -67,6 +79,17 @@ export interface StartScanRequest {
   info?: string;
   resume?: boolean;
   force?: boolean;
+}
+
+function isTauriRuntime(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const candidate = window as typeof window & {
+    __TAURI__?: unknown;
+    __TAURI_INTERNALS__?: unknown;
+  };
+  return Boolean(candidate.__TAURI__ || candidate.__TAURI_INTERNALS__);
 }
 
 export interface StopScanRequest {
@@ -534,6 +557,64 @@ async function requestJson<T>(
   }
 }
 
+function shouldSetJsonContentType(body: BodyInit | null | undefined): boolean {
+  if (body == null) {
+    return false;
+  }
+  if (typeof FormData !== "undefined" && body instanceof FormData) {
+    return false;
+  }
+  if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) {
+    return false;
+  }
+  if (typeof Blob !== "undefined" && body instanceof Blob) {
+    return false;
+  }
+  if (typeof ArrayBuffer !== "undefined" && body instanceof ArrayBuffer) {
+    return false;
+  }
+  return true;
+}
+
+async function requestBlob(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = 30000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers = new Headers(init?.headers ?? undefined);
+    const hasBody = init?.body !== undefined && init?.body !== null;
+    if (hasBody && shouldSetJsonContentType(init?.body) && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${apiBaseUrl()}${path}`, {
+        ...init,
+        credentials: "include",
+        headers,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+      }
+      throw error;
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`${response.status} ${response.statusText}: ${body}`);
+    }
+    return response;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export interface LLMProfile {
   id: string;
   name: string;
@@ -616,6 +697,61 @@ export async function saveProjectToDesktop(project: Project): Promise<void> {
   });
 }
 
+export async function uploadMobileArtifactToDesktop(
+  projectId: string,
+  file: File,
+): Promise<{
+  ok: boolean;
+  project_id: string;
+  filename: string;
+  path: string;
+  size: number;
+  content_type: string;
+}> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("target_type", "mobile");
+
+  const response = await requestBlob(
+    `/api/projects/${encodeURIComponent(projectId)}/artifacts/mobile-upload`,
+    {
+      method: "POST",
+      body: formData,
+    },
+    120000,
+  );
+  return await response.json();
+}
+
+export async function prepareMobileRuntimeFromDesktop(
+  projectId: string,
+): Promise<{
+  ok: boolean;
+  project_id: string;
+  device_id: string;
+  installed: boolean;
+  install_output: string;
+  package_name?: string | null;
+  launched: boolean;
+  launch_output: string;
+  artifact_path: string;
+  artifact_type: string;
+}> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/mobile-runtime/prepare`,
+    {
+      method: "POST",
+    },
+    360000,
+  );
+}
+
 export async function updateProjectSavedContextFromDesktop(projectId: string, context: string): Promise<void> {
   if (!supportsDesktopProjectBridge()) {
     return;
@@ -683,7 +819,7 @@ export async function startProjectScanFromDesktop(
       resume: request.resume ?? false,
       force: request.force ?? false,
     }),
-  });
+  }, 180000);
 }
 
 export async function stopProjectScanFromDesktop(
@@ -1854,18 +1990,29 @@ export async function updateReportContentFromDesktop(
 
 export async function downloadReportBlobFromDesktop(
   projectId: string,
-  format: "markdown" | "html",
-): Promise<{ content: string; filename: string; mimeType: string }> {
+  format: "markdown" | "html" | "pdf",
+  password: string,
+): Promise<{ blob: Blob; filename: string; mimeType: string }> {
   if (!supportsDesktopProjectBridge()) {
     throw new Error("desktop project bridge is disabled");
   }
-  const report = await getReportContentFromDesktop(projectId, format);
-  const ext = format === "html" ? "html" : "md";
-  const mime = format === "html" ? "text/html" : "text/markdown";
+  const response = await requestBlob(
+    `/api/projects/${encodeURIComponent(projectId)}/reports/export`,
+    {
+      method: "POST",
+      body: JSON.stringify({ format, password }),
+    },
+    format === "pdf" ? 180000 : 60000,
+  );
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = disposition.match(/filename="([^"]+)"/i);
+  const fallbackExtension = format === "pdf" ? "pdf" : `${format}.zip`;
+  const filename = match?.[1] || `pentaforge-report-${projectId.slice(0, 8)}.${fallbackExtension}`;
   return {
-    content: report.content,
-    filename: `pentaforge-report-${projectId.slice(0, 8)}.${ext}`,
-    mimeType: mime,
+    blob,
+    filename,
+    mimeType: response.headers.get("Content-Type") || (format === "pdf" ? "application/pdf" : "application/zip"),
   };
 }
 

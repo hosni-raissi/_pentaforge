@@ -1187,37 +1187,6 @@
       ]
     },
     {
-      "id": "secret_and_history",
-      "block_name": "Secret And History",
-      "interaction": "static",
-      "goal": "Scan repository secrets and recent commit history without writing output files.",
-      "tools": [
-        {
-          "name": "run_custom",
-          "args": [
-            "trufflehog",
-            "git",
-            "file://trgt",
-            "--json",
-            "--no-update",
-            "--since-commit",
-            "HEAD~100"
-          ]
-        },
-        {
-          "name": "run_custom",
-          "args": [
-            "gitleaks",
-            "detect",
-            "--source",
-            "trgt",
-            "--report-format",
-            "json"
-          ]
-        }
-      ]
-    },
-    {
       "id": "code_security_review",
       "block_name": "Code Security Review",
       "interaction": "static",
@@ -1243,63 +1212,6 @@
             "trgt",
             "-f",
             "json"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "dependency_review",
-      "block_name": "Dependency Review",
-      "interaction": "static",
-      "goal": "Review dependencies and package vulnerabilities without writing output files.",
-      "tools": [
-        {
-          "name": "run_custom",
-          "args": [
-            "trivy",
-            "fs",
-            "--format",
-            "json",
-            "--severity",
-            "LOW,MEDIUM,HIGH,CRITICAL",
-            "--scanners",
-            "vuln,secret,misconfig",
-            "trgt"
-          ]
-        },
-        {
-          "name": "run_custom",
-          "args": [
-            "osv-scanner",
-            "--recursive",
-            "--format",
-            "json",
-            "trgt"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "iac_and_pipeline_review",
-      "block_name": "IaC And Pipeline Review",
-      "interaction": "static",
-      "goal": "Review infrastructure-as-code and CI/CD configuration risks without writing output files.",
-      "tools": [
-        {
-          "name": "run_custom",
-          "args": ["checkov", "-d", "trgt", "-o", "json"]
-        },
-        {
-          "name": "run_custom",
-          "args": ["trivy", "config", "--format", "json", "trgt"]
-        },
-        {
-          "name": "run_custom",
-          "args": [
-            "actionlint",
-            "-format",
-            "{{json .}}",
-            "trgt/.github/workflows/*.yml"
           ]
         }
       ]

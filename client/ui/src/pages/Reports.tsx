@@ -45,6 +45,7 @@ import {
 } from "../lib/projectBridge";
 
 type ReportFormat = "markdown" | "html";
+type DownloadFormat = "markdown" | "html" | "pdf";
 
 interface FormatCardConfig {
   format: ReportFormat;
@@ -74,8 +75,7 @@ const FORMAT_CARDS: FormatCardConfig[] = [
   },
 ];
 
-function triggerFileDownload(content: string, filename: string, mimeType: string) {
-  const blob = new Blob([content], { type: mimeType });
+function triggerFileDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -83,10 +83,22 @@ function triggerFileDownload(content: string, filename: string, mimeType: string
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 15000);
 }
 
 const generateRandomPassword = () => `PF-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+
+function requestExportPassword(format: DownloadFormat): string | null {
+  const destination =
+    format === "pdf"
+      ? "The exported file will be saved as a password-protected PDF."
+      : "The exported file will be saved as a password-protected ZIP package.";
+  const password = window.prompt(
+    `Enter a password for the protected ${format.toUpperCase()} report download.\n${destination}`,
+  );
+  const clean = password?.trim() || "";
+  return clean || null;
+}
 
 export default function Reports() {
   const project = useProjects((s) => s.getActive());
@@ -100,7 +112,7 @@ export default function Reports() {
   const [viewFormat, setViewFormat] = useState<ReportFormat | null>(null);
   const [viewContent, setViewContent] = useState("");
   const [viewLoading, setViewLoading] = useState(false);
-  const [downloadingFormat, setDownloadingFormat] = useState<ReportFormat | null>(null);
+  const [downloadingFormat, setDownloadingFormat] = useState<DownloadFormat | null>(null);
   const [shareResult, setShareResult] = useState<ProjectShareLinkResponse | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareRevoking, setShareRevoking] = useState(false);
@@ -112,7 +124,7 @@ export default function Reports() {
   const [messages, setMessages] = useState<ClientMessage[]>([]);
   const [messageInput, setMessageInput] = useState("");
   const [messagesLoading, setMessagesLoading] = useState(false);
-  const [downloadSuccess, setDownloadSuccess] = useState<ReportFormat | null>(null);
+  const [downloadSuccess, setDownloadSuccess] = useState<DownloadFormat | null>(null);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
@@ -120,12 +132,18 @@ export default function Reports() {
   const statusPolling = useRef<ReturnType<typeof setInterval> | null>(null);
   const messagesPolling = useRef<ReturnType<typeof setInterval> | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const viewerRef = useRef<HTMLDivElement>(null);
   const hasAutoSelected = useRef<string | null>(null);
 
   const [echoTooltip, setEchoTooltip] = useState<{ visible: boolean; x: number; y: number; text: string }>({ visible: false, x: 0, y: 0, text: '' });
   const updateConfig = useConfig((s) => s.updateConfig);
 
   const handleSelection = useCallback(() => {
+    if (isEditing) {
+      setEchoTooltip(prev => prev.visible ? { ...prev, visible: false } : prev);
+      return;
+    }
+
     let selection = window.getSelection();
     let text = selection?.toString().trim() || "";
     let rect: DOMRect | null = null;
@@ -133,8 +151,14 @@ export default function Reports() {
     let offsetY = 0;
 
     if (selection && !selection.isCollapsed && text.length > 0) {
-      rect = selection.getRangeAt(0).getBoundingClientRect();
-    } else if (iframeRef.current?.contentWindow) {
+      const range = selection.getRangeAt(0);
+      const commonAncestor = range.commonAncestorContainer;
+      if (viewerRef.current && viewerRef.current.contains(commonAncestor)) {
+        rect = range.getBoundingClientRect();
+      }
+    }
+
+    if (!rect && iframeRef.current?.contentWindow) {
       const iframeWin = iframeRef.current.contentWindow;
       selection = iframeWin.getSelection();
       text = selection?.toString().trim() || "";
@@ -156,20 +180,20 @@ export default function Reports() {
     } else {
       setEchoTooltip(prev => prev.visible ? { ...prev, visible: false } : prev);
     }
-  }, []);
+  }, [isEditing]);
 
   useEffect(() => {
     document.addEventListener('mouseup', handleSelection);
     document.addEventListener('keyup', handleSelection);
     document.addEventListener('selectionchange', handleSelection);
-    
+
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'IFRAME_SELECTION_CHANGE') {
         handleSelection();
       }
     };
     window.addEventListener('message', handleMessage);
-    
+
     return () => {
       document.removeEventListener('mouseup', handleSelection);
       document.removeEventListener('keyup', handleSelection);
@@ -272,7 +296,7 @@ export default function Reports() {
       if (!stillActive && reportExists) {
         setGenerating(false);
         stopStatusPolling();
-        
+
         // Auto-select based on preference or default to HTML
         const savedPref = localStorage.getItem(`pf_report_view_${project.id}`) as ReportFormat | null;
         if (hasAutoSelected.current !== project.id) {
@@ -365,7 +389,7 @@ export default function Reports() {
   // Sync iframe theme with dashboard mode
   useEffect(() => {
     if (!iframeRef.current || !viewContent || viewFormat !== 'html') return;
-    
+
     const updateTheme = () => {
       const isDark = document.documentElement.classList.contains('dark');
       const doc = iframeRef.current?.contentWindow?.document;
@@ -378,7 +402,7 @@ export default function Reports() {
 
     const observer = new MutationObserver(updateTheme);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    
+
     return () => observer.disconnect();
   }, [viewContent, viewFormat]);
 
@@ -449,18 +473,22 @@ export default function Reports() {
     }
   };
 
-  const handleDownload = async (format: ReportFormat) => {
+  const handleDownload = async (format: DownloadFormat) => {
+    const password = requestExportPassword(format);
+    if (!password) {
+      return;
+    }
     setDownloadingFormat(format);
     setDownloadSuccess(null);
     try {
       // Minimum 1 second artificial delay for UX feel as requested
       const [result] = await Promise.all([
-        downloadReportBlobFromDesktop(project.id, format),
+        downloadReportBlobFromDesktop(project.id, format, password),
         new Promise(r => setTimeout(r, 1000))
       ]);
-      
-      triggerFileDownload(result.content, result.filename, result.mimeType);
-      
+
+      triggerFileDownload(result.blob, result.filename);
+
       setDownloadSuccess(format);
       setTimeout(() => setDownloadSuccess(null), 2000);
     } catch (err) {
@@ -598,11 +626,11 @@ export default function Reports() {
 
       {/* Main Content Split */}
       <div className="flex-1 grid grid-cols-2 overflow-hidden">
-        
+
         {/* Left Column: Share & Discussion (50%) */}
         <div className="border-r border-border bg-surface-1/30 flex flex-col overflow-hidden h-full">
           <div className="flex-1 flex flex-col p-5 space-y-5 overflow-hidden">
-            
+
             {/* Share Card */}
             <Card className="relative space-y-4 border-pf-500/20 bg-gradient-to-br from-pf-600/5 to-surface-1 overflow-hidden">
               <div className="flex items-start justify-between">
@@ -616,7 +644,7 @@ export default function Reports() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button 
+                  <button
                     onClick={async () => {
                       if (!project) return;
                       setShareBusy(true);
@@ -655,7 +683,7 @@ export default function Reports() {
                       <div className="w-full rounded-lg border border-pf-500/20 bg-surface-1/50 p-2.5 pr-12 shadow-inner font-mono text-[11px] text-pf-400 truncate select-all h-9 flex items-center">
                         {shareUrl}
                       </div>
-                      <button 
+                      <button
                         onClick={handleCopyShare}
                         className="absolute right-1 p-1.5 rounded-md text-text-muted hover:text-pf-400 hover:bg-pf-500/10 transition-all"
                         title="Copy Link"
@@ -673,7 +701,7 @@ export default function Reports() {
                         <div className="w-full rounded-lg border border-pf-500/30 bg-pf-500/5 p-2.5 pr-12 shadow-inner font-mono text-xs font-bold text-text-primary h-9 flex items-center">
                           {generatedPassword}
                         </div>
-                        <button 
+                        <button
                           onClick={handleCopyPassword}
                           className="absolute right-1 p-1.5 rounded-md text-text-muted hover:text-pf-400 hover:bg-pf-500/10 transition-all"
                           title="Copy Password"
@@ -685,21 +713,21 @@ export default function Reports() {
                   )}
 
                   <div className="flex gap-2">
-                    <Button 
-                      size="xs" 
-                      variant="ghost" 
-                      onClick={handleGenerateShare} 
-                      loading={shareBusy} 
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      onClick={handleGenerateShare}
+                      loading={shareBusy}
                       className="flex-1 h-8 border border-border hover:border-pf-500/30 hover:bg-pf-500/5"
                     >
                       <RefreshCw size={12} className={shareBusy ? "animate-spin" : ""} />
                       Regenerate
                     </Button>
-                    <Button 
-                      size="xs" 
-                      variant="secondary" 
-                      onClick={handleRevokeShare} 
-                      loading={shareRevoking} 
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={handleRevokeShare}
+                      loading={shareRevoking}
                       className="flex-1 h-8 bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/20 hover:border-red-500/40"
                     >
                       <X size={12} />
@@ -709,7 +737,7 @@ export default function Reports() {
                 </div>
               ) : (
                 <div className="space-y-3 pt-2">
-                   <div className="rounded-lg border border-dashed border-pf-500/20 bg-surface-1/40 p-5 text-center">
+                  <div className="rounded-lg border border-dashed border-pf-500/20 bg-surface-1/40 p-5 text-center">
                     <p className="text-xs text-text-muted italic">No active delivery channel</p>
                   </div>
                   <div className="flex items-center justify-between px-1">
@@ -793,8 +821,8 @@ export default function Reports() {
               <div className="px-4 pb-0 pt-3 border-t border-border bg-surface-2/20">
                 <div className={clsx(
                   "flex flex-col gap-2 p-2 rounded-xl border transition-all duration-300",
-                  shareResult 
-                    ? "bg-surface-0 border-border focus-within:border-pf-500 focus-within:ring-2 focus-within:ring-pf-500/10 shadow-sm" 
+                  shareResult
+                    ? "bg-surface-0 border-border focus-within:border-pf-500 focus-within:ring-2 focus-within:ring-pf-500/10 shadow-sm"
                     : "bg-surface-1 border-border opacity-50"
                 )}>
                   <textarea
@@ -831,7 +859,7 @@ export default function Reports() {
 
         {/* Right Column: Generation & Viewer (1.5fr) */}
         <div className="flex-1 flex flex-col overflow-hidden bg-surface-0/20">
-          
+
           {/* Top: Generation Controls */}
           <div className="p-5 border-b border-border bg-surface-1/40">
             {generating ? (
@@ -897,12 +925,12 @@ export default function Reports() {
                             "flex-1 h-7 text-[10px] uppercase font-bold tracking-wider transition-all duration-300",
                             downloadSuccess === card.format && "bg-emerald-500 hover:bg-emerald-600 border-emerald-500 text-white"
                           )}
-                          onClick={(e) => { 
-                            e.stopPropagation(); 
+                          onClick={(e) => {
+                            e.stopPropagation();
                             if (card.format === "html") {
                               setExportDialogOpen(true);
                             } else {
-                              handleDownload(card.format); 
+                              handleDownload(card.format);
                             }
                           }}
                           loading={isDownloading}
@@ -942,18 +970,18 @@ export default function Reports() {
                     <span className="text-xs font-bold text-text-primary uppercase tracking-[0.15em]">Previewing: {viewFormat}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button 
-                      size="xs" 
-                      variant="ghost" 
+                    <Button
+                      size="xs"
+                      variant="ghost"
                       onClick={() => setIsFullscreen(!isFullscreen)}
                       className="text-text-muted hover:text-pf-400"
                     >
                       {isFullscreen ? <Shrink size={12} /> : <Expand size={12} />}
                       <span className="ml-1 hidden sm:inline">{isFullscreen ? "Shrink" : "Expand"}</span>
                     </Button>
-                    <Button 
-                      size="xs" 
-                      variant={isEditing ? "primary" : "ghost"} 
+                    <Button
+                      size="xs"
+                      variant={isEditing ? "primary" : "ghost"}
                       onClick={async () => {
                         if (isEditing) {
                           setIsSavingEdit(true);
@@ -972,7 +1000,7 @@ export default function Reports() {
                             setIsEditing(true);
                           }
                         }
-                      }} 
+                      }}
                       loading={isSavingEdit}
                       className={clsx(
                         "transition-all duration-300",
@@ -984,8 +1012,8 @@ export default function Reports() {
                     </Button>
                   </div>
                 </div>
-                
-                <div className="flex-1 overflow-auto bg-surface-0/40 p-6 custom-scrollbar">
+
+                <div ref={viewerRef} className="flex-1 overflow-auto bg-surface-0/40 p-6 custom-scrollbar">
                   {viewLoading ? (
                     <div className="h-full flex flex-col items-center justify-center gap-3">
                       <Loader2 size={32} className="text-pf-400 animate-spin opacity-50" />
@@ -993,7 +1021,7 @@ export default function Reports() {
                     </div>
                   ) : isEditing ? (
                     <div className="w-full h-full rounded-xl overflow-hidden shadow-2xl bg-surface-0 ring-4 ring-pf-500/30">
-                      <textarea 
+                      <textarea
                         className={clsx(
                           "w-full h-full text-text-primary whitespace-pre-wrap font-mono leading-relaxed bg-surface-1/50 p-6 border-0 focus:outline-none resize-none custom-scrollbar transition-all duration-300",
                           isFullscreen ? "text-[15px]" : "text-[13px]"
@@ -1043,7 +1071,7 @@ export default function Reports() {
         open={exportDialogOpen}
         onClose={() => setExportDialogOpen(false)}
         title="Export Professional Report"
-        description="Choose how you want to download the final report"
+        description="Choose a protected export format. You will be asked for a password before download."
         width="max-w-md"
       >
         <div className="grid grid-cols-2 gap-4 mt-2">
@@ -1059,8 +1087,8 @@ export default function Reports() {
               <Globe size={24} />
             </div>
             <div className="text-center">
-              <h3 className="text-sm font-bold text-text-primary">HTML File</h3>
-              <p className="text-[11px] text-text-muted mt-1 leading-snug">Standalone styled web page</p>
+              <h3 className="text-sm font-bold text-text-primary">HTML Package</h3>
+              <p className="text-[11px] text-text-muted mt-1 leading-snug">Password-protected ZIP with the styled HTML report</p>
             </div>
           </button>
 
@@ -1068,20 +1096,7 @@ export default function Reports() {
           <button
             onClick={async () => {
               setExportDialogOpen(false);
-              if (!project) return;
-              try {
-                const report = await getReportContentFromDesktop(project.id, "html");
-                const printWindow = window.open("", "_blank");
-                if (printWindow) {
-                  printWindow.document.write(report.content);
-                  printWindow.document.close();
-                  printWindow.onload = () => {
-                    printWindow.print();
-                  };
-                }
-              } catch (e) {
-                console.error("Failed to generate PDF", e);
-              }
+              await handleDownload("pdf");
             }}
             className="flex flex-col items-center gap-3 p-5 rounded-xl border border-border bg-surface-1 hover:border-rose-500/50 hover:bg-rose-500/5 transition-all text-left group"
           >
@@ -1089,8 +1104,8 @@ export default function Reports() {
               <FileText size={24} />
             </div>
             <div className="text-center">
-              <h3 className="text-sm font-bold text-text-primary">PDF Document</h3>
-              <p className="text-[11px] text-text-muted mt-1 leading-snug">Print-ready formatted document</p>
+              <h3 className="text-sm font-bold text-text-primary">Protected PDF</h3>
+              <p className="text-[11px] text-text-muted mt-1 leading-snug">Encrypted PDF generated from the report content</p>
             </div>
           </button>
         </div>

@@ -96,6 +96,8 @@ def test_assistant_normalizes_legacy_sandbox_wordlist_paths() -> None:
         "wordlists/short.txt",
         "-mc",
         "200,301,302,403",
+        "-t",
+        "5",
     ]
 
 

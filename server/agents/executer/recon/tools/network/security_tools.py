@@ -222,15 +222,6 @@ _RAW_NETWORK_RECON_TOOLS: dict[str, dict[str, object]] = {
         "note": "-f - outputs to stdout instead of HTML file"
     },
     
-    "assetfinder-httpx": {
-        "t": "passive",
-        "c": "pipeline_discovery",
-        "u": "assetfinder TARGET.com 2>/dev/null | httpx -silent -status-code -title -tech-detect -json 2>/dev/null | jq -c '.[]?'",
-        "d": ["fast domain resolution", "HTTP probing", "pipeline-friendly JSON output"],
-        "tgt": ["external_recon", "bug_bounty", "attack_surface"],
-        "note": "Chained via pipe; no -o file flag"
-    },
-
     # ─────────────────────────────────────────────────────────────
     # 🗺️ NETWORK TOPOLOGY & PATH ANALYSIS
     # ─────────────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ from server.app.scan.warmup import (
     _select_warmup_recon_batches,
 )
 from server.app.scan.utils import (
+    _build_target_info_tool_kwargs,
     _extract_prioritized_exec_scenarios,
     _scenario_missing_prerequisites,
 )
@@ -263,6 +264,100 @@ def test_information_gathering_normalizes_wappalyzer_input_to_full_target() -> N
     }]
     assert result[0]["tool"] == "run_custom"
     assert result[0]["status"] == "completed"
+
+
+def test_information_gathering_resolves_repository_profile_path_to_local_checkout() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class FakeTool:
+        async def execute(self, **kwargs):
+            recorded.append(kwargs)
+            return "ok"
+
+    node = InformationGatheringNode()
+
+    with patch(
+        "server.nodes.information_gathering.node._ensure_repository_checkout",
+        return_value="/tmp/pentaforge-test/repos/hosni-raissi/fuse",
+    ):
+        result = asyncio.run(
+            node._execute_block(
+                project_id="proj-1",
+                scan_id="scan-1",
+                project_cache_dir="/tmp/pf-test",
+                prepared_block={
+                    "id": "repo_identity",
+                    "status": "keep",
+                    "tools": [
+                        {
+                            "name": "run_custom",
+                            "args": ["git", "-C", "trgt", "remote", "-v"],
+                        }
+                    ],
+                },
+                memory={},
+                target="https://github.com/hosni-raissi/fuse.git",
+                target_type="repository",
+                info="",
+                tool_map={"run_custom": FakeTool()},
+                tool_arg_builder=lambda tool_name, target, target_type, info, memory: (
+                    None,
+                    "builder-should-not-run",
+                ),
+            )
+        )
+
+    assert recorded == [{
+        "command": "git",
+        "args": ["-C", "repos/hosni-raissi/fuse", "remote", "-v"],
+        "reason": "Profile-defined information gathering step for git against repos/hosni-raissi/fuse.",
+    }]
+    assert result[0]["tool"] == "run_custom"
+    assert result[0]["status"] == "completed"
+
+
+def test_information_gathering_keeps_explicit_builtin_replacements() -> None:
+    node = InformationGatheringNode()
+
+    prepared = node._normalize_prepared_block(
+        original_block={
+            "id": "secret_and_history",
+            "tools": [
+                {"name": "run_custom", "args": ["trufflehog", "git", "file://trgt"]},
+                {"name": "run_custom", "args": ["gitleaks", "detect", "--source", "trgt"]},
+            ],
+        },
+        payload_block={
+            "status": "skip",
+            "tools": ["secret_scan", "git_history_audit"],
+            "rationale": "Replace custom commands with authorized built-in repository tools.",
+        },
+        available_tools=["run_custom", "secret_scan", "git_history_audit"],
+    )
+
+    assert prepared["status"] == "refine"
+    assert prepared["tools"] == ["secret_scan", "git_history_audit"]
+
+
+def test_repository_builtins_use_runtime_checkout_path() -> None:
+    kwargs, skip_reason = _build_target_info_tool_kwargs(
+        "secret_scan",
+        "https://github.com/hosni-raissi/fuse.git",
+        "repository",
+        "",
+        {
+            "target_runtime": {
+                "repository_checkout_path": "/tmp/pentaforge-test/repos/hosni-raissi/fuse",
+            }
+        },
+    )
+
+    assert skip_reason is None
+    assert kwargs == {
+        "tool": "gitleaks",
+        "target": "/tmp/pentaforge-test/repos/hosni-raissi/fuse",
+        "scan_scope": "repo",
+    }
 
 
 def test_information_gathering_summarizes_run_custom_failure_from_actual_output() -> None:

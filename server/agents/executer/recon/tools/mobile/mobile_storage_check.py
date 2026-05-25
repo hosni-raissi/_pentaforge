@@ -67,6 +67,34 @@ def safe_execute(cmd: list[str], timeout: int = 120,
         return "", str(e), -1, str(work_dir)
 
 
+def _default_android_device_id() -> str:
+    remote = str(os.environ.get("PENTAFORGE_MOBILE_REMOTE_ADB_ENDPOINT", "")).strip()
+    if remote:
+        return remote
+    explicit = str(os.environ.get("PENTAFORGE_MOBILE_ANDROID_DEFAULT_DEVICE_ID", "")).strip()
+    if explicit:
+        return explicit
+    host = str(os.environ.get("PENTAFORGE_MOBILE_ANDROID_HOST", "")).strip()
+    port = str(os.environ.get("PENTAFORGE_MOBILE_ANDROID_ADB_PORT", "5555")).strip() or "5555"
+    if host:
+        return f"{host}:{port}"
+    return ""
+
+
+def _prepare_android_storage_device(device_id: Optional[str]) -> tuple[Optional[str], Optional[str], str]:
+    resolved_device = str(device_id or _default_android_device_id()).strip()
+    if not resolved_device:
+        return device_id, None, ""
+
+    stdout, stderr, rc, _ = safe_execute(["adb", "connect", resolved_device], timeout=45)
+    output = (stdout or stderr or "").strip()
+    note = f"mobile-lab adb connect: {output or 'ok'}"
+    lowered = output.lower()
+    if rc != 0 and "connected to" not in lowered and "already connected" not in lowered:
+        return resolved_device, f"ADB connection to {resolved_device} failed: {output or 'unknown error'}", note
+    return resolved_device, None, note
+
+
 # ══════════════════════════════════════════════════════════════
 # 2. CONSTANTS — SENSITIVE PATTERNS
 # ══════════════════════════════════════════════════════════════
@@ -1094,6 +1122,23 @@ def mobile_storage_check(
     all_tool_outputs: dict[str, str]       = {}
     all_errors:       list[str]            = []
     checks_run:       list[str]            = []
+
+    needs_android_live_device = (
+        req.platform in (Platform.android, Platform.both)
+        and bool(req.package)
+        and any(
+            check in req.checks
+            for check in (CheckType.log_files, CheckType.clipboard, CheckType.objection)
+        )
+    )
+    if needs_android_live_device:
+        resolved_device, prep_error, prep_note = _prepare_android_storage_device(req.device_id)
+        if resolved_device:
+            req.device_id = resolved_device
+        if prep_note:
+            all_tool_outputs["mobile_lab"] = prep_note
+        if prep_error:
+            all_errors.append(prep_error)
 
     # ══════════════════════════════════════
     # DISPATCH CHECKS

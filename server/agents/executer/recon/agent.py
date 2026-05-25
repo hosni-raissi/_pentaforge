@@ -61,6 +61,23 @@ _RECON_TARGET_TYPE_SCOPE_MATRIX: dict[str, tuple[str, ...]] = {
     "iot": ("iot",),
 }
 
+_REPOSITORY_RUN_CUSTOM_CATALOG_EXCLUDES = {
+    "github-workflow-enum",
+    "github-secret-scan-read",
+    "github-dependency-enum",
+    "gitlab-ci-enum",
+    "circleci-config-enum",
+    "jenkinsfile-audit",
+    "gitleaks-detect",
+    "trufflehog-filesystem",
+    "detect-secrets",
+    "repo-supervisor",
+    "trivy-repo",
+    "grype-repo",
+    "syft-sbom",
+    "osv-scanner",
+}
+
 
 def _truncate_prompt_tool_description(value: object, limit: int = 140) -> str:
     text = " ".join(str(value or "").strip().split())
@@ -112,6 +129,9 @@ def build_recon_run_custom_catalog_for_target_types(
             continue
         for tool_name, meta in source.items():
             merged[tool_name] = dict(meta)
+    if "repository" in normalized:
+        for tool_name in _REPOSITORY_RUN_CUSTOM_CATALOG_EXCLUDES:
+            merged.pop(tool_name, None)
     return merged
 
 
@@ -142,6 +162,24 @@ def build_recon_scoped_prompt(target_types: list[str] | None) -> str:
             "Scoped built-in recon tools for this target type:\n"
             f"{json.dumps(callable_tool_guide[:20], ensure_ascii=True, indent=2)}\n"
             "If one of these agent-native tools directly fits the scenario, prefer it before falling back to run_custom."
+        )
+    if "repository" in normalize_target_types(target_types):
+        scoped_prompt = (
+            f"{scoped_prompt}\n\n"
+            "Repository target guidance:\n"
+            "- If the target is a remote repository URL, first create a local sandbox checkout before file-based inspection.\n"
+            "- Prefer cloning into a relative sandbox path such as repos/<owner>/<repo>.\n"
+            "- After the checkout exists, run read-only tools such as cloc, grep, find, gitleaks, semgrep, or dependency scanners against that local path.\n"
+            "- Treat missing local checkout paths as setup issues, not vulnerability evidence."
+        )
+    if "mobile" in normalize_target_types(target_types):
+        scoped_prompt = (
+            f"{scoped_prompt}\n\n"
+            "Mobile target guidance:\n"
+            "- Mobile scans in this deployment are static-only.\n"
+            "- Focus on APK/IPA decompilation, manifest and plist review, secret extraction, endpoint discovery, signing checks, and configuration analysis.\n"
+            "- Do not assume a live Android or iOS runtime is available for adb, Frida, Objection, or traffic-proxy steps.\n"
+            "- Treat runtime-only checks as unsupported in this environment unless the operator explicitly provides external evidence."
         )
     scoped_prompt = (
         f"{scoped_prompt}\n\n"

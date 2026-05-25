@@ -3070,7 +3070,7 @@ class AssistantAgent:
         normalized_command = str(command or "").strip().lower()
         if normalized_command not in _ASSISTANT_NETWORK_COMMANDS:
             return (
-                "Assistant command execution is limited to current-target network diagnostics. "
+                "Assistant command execution is limited to current-target diagnostics and approved local artifact inspection commands. "
                 f"'{normalized_command or command}' is not allowed in assistant chat."
             )
         target_host, target_port = extract_target_host_port(target)

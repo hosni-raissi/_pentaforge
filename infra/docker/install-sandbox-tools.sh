@@ -10,6 +10,7 @@ mkdir -p "${TOOLS_ROOT}" "${TOOLS_ROOT}/bin" /root/.config/amass
 
 export DEBIAN_FRONTEND=noninteractive
 export PIP_BREAK_SYSTEM_PACKAGES=1
+export TOOLS_ROOT BIN_DIR DEBIAN_FRONTEND PIP_BREAK_SYSTEM_PACKAGES
 
 FAILED_TOOLS=()
 INSTALLED_TOOLS=()
@@ -92,39 +93,43 @@ EOF
   chmod +x "${BIN_DIR}/${wrapper_name}"
 }
 
+export -f log install_go_tool clone_repo link_alias install_pip_packages write_python_wrapper
+
 log "installing extended apt packages..."
-run_best_effort "apt-amass" log "amass is installed via Go; skipping apt install"
-run_best_effort "apt-masscan" apt-get update && apt-get install -y --no-install-recommends masscan
+run_best_effort "apt-masscan" bash -c '
+  apt-get update && apt-get install -y --no-install-recommends masscan
+'
 run_best_effort "apt-nikto" bash -c '
   clone_repo "https://github.com/sullo/nikto.git" "${TOOLS_ROOT}/nikto"
   ln -sf "${TOOLS_ROOT}/nikto/program/nikto.pl" "${BIN_DIR}/nikto"
 '
-run_best_effort "apt-whatweb" apt-get update && apt-get install -y --no-install-recommends whatweb
+run_best_effort "apt-whatweb" bash -c '
+  apt-get update && apt-get install -y --no-install-recommends whatweb
+'
 run_best_effort "apt-network-stack" bash -c '
   echo "wireshark-common wireshark-common/install-sysusers boolean true" | debconf-set-selections
-  apt-get update && apt-get install -y --no-install-recommends arp-scan dnsrecon enum4linux fping ike-scan ldap-utils mtr nbtscan netdiscover nfs-common onesixtyone proxychains4 rpcbind smbclient snmp snmpcheck tcpdump tshark
+  apt-get update && apt-get install -y --no-install-recommends arp-scan dnsrecon fping ike-scan ldap-utils mtr nbtscan netdiscover nfs-common onesixtyone proxychains4 rpcbind smbclient snmp tcpdump tshark
 '
 run_best_effort "besttrace-install" bash -c '
   curl -L "https://github.com/sjlleo/nexttrace/releases/latest/download/nexttrace_linux_amd64" -o /usr/local/bin/besttrace
   chmod +x /usr/local/bin/besttrace
 '
 run_best_effort "rustscan-install" bash -c '
-  VERSION=$(curl -s https://api.github.com/repos/RustScan/RustScan/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v2.3.0")
-  if [[ -z "${VERSION}" ]]; then VERSION="v2.3.0"; fi
-  curl -L "https://github.com/RustScan/RustScan/releases/download/${VERSION}/rustscan_${VERSION:1}_amd64.deb" -o rustscan.deb
+  ASSET_URL=$(curl -fsSL https://api.github.com/repos/RustScan/RustScan/releases/latest | grep -o "https://[^\"]*rustscan[^\"]*_amd64\\.deb" | head -n 1 || true)
+  if [[ -z "${ASSET_URL}" ]]; then
+    ASSET_URL="https://github.com/RustScan/RustScan/releases/download/v2.3.0/rustscan_2.3.0_amd64.deb"
+  fi
+  curl -fL "${ASSET_URL}" -o rustscan.deb
   dpkg -i rustscan.deb && rm rustscan.deb
 '
-run_best_effort "apt-mobile-stack" apt-get update && apt-get install -y --no-install-recommends apktool binwalk default-jdk-headless
-run_best_effort "apt-container-cloud-stack" apt-get update && apt-get install -y --no-install-recommends awscli kubernetes-client skopeo yq
-run_best_effort "apt-sqlmap" apt-get update && apt-get install -y --no-install-recommends sqlmap
-run_best_effort "apt-exploitation" apt-get update && apt-get install -y --no-install-recommends hydra john openssh-client ftp
-
-run_best_effort "linkfinder" bash -c '
-  clone_repo "https://github.com/GerbenJavado/LinkFinder.git" "${TOOLS_ROOT}/linkfinder"
-  cd "${TOOLS_ROOT}/linkfinder"
-  python3 -m pip install -r requirements.txt
-  python3 setup.py install
-  write_python_wrapper "linkfinder" "${TOOLS_ROOT}/linkfinder/linkfinder.py"
+run_best_effort "apt-mobile-static-stack" bash -c '
+  apt-get update && apt-get install -y --no-install-recommends apktool binwalk default-jdk-headless
+'
+run_best_effort "apt-container-cloud-stack" bash -c '
+  apt-get update && apt-get install -y --no-install-recommends awscli kubernetes-client skopeo yq
+'
+run_best_effort "apt-exploitation" bash -c '
+  apt-get update && apt-get install -y --no-install-recommends hydra john openssh-client ftp
 '
 
 log "installing npm globals..."
@@ -132,7 +137,6 @@ run_best_effort "npm-js-beautify" npm install -g js-beautify
 run_best_effort "npm-wappalyzer-cli" npm install -g wappalyzer-cli
 run_best_effort "npm-retire" npm install -g retire
 run_best_effort "npm-newman" npm install -g newman
-run_best_effort "npm-cloudsploit" npm install -g cloudsploit
 
 log "installing pip toolchains..."
 run_best_effort "pip-recon-core" install_pip_packages \
@@ -144,6 +148,7 @@ run_best_effort "pip-recon-core" install_pip_packages \
   checkov \
   apkid \
   prowler \
+  safety \
   semgrep \
   shodan \
   censys \
@@ -158,8 +163,12 @@ run_best_effort "ligolo-ng-agent-install" bash -c '
 
 log "installing official cloud sdks..."
 run_best_effort "apt-azure-cli" bash -c '
+  AZURE_CODENAME=$(lsb_release -cs)
+  if [[ "${AZURE_CODENAME}" == "trixie" ]]; then
+    AZURE_CODENAME="bookworm"
+  fi
   curl -sLS https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
-  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ $(lsb_release -cs) main" > /etc/apt/sources.list.d/azure-cli.list
+  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ ${AZURE_CODENAME} main" > /etc/apt/sources.list.d/azure-cli.list
   apt-get update && apt-get install -y azure-cli
 '
 run_best_effort "apt-gcloud-sdk" bash -c '
@@ -187,22 +196,6 @@ run_best_effort "calicoctl-install" bash -c '
   curl -L https://github.com/projectcalico/calico/releases/latest/download/calicoctl-linux-amd64 -o /usr/local/bin/calicoctl
   chmod +x /usr/local/bin/calicoctl
 '
-run_best_effort "clair-scanner-install" bash -c '
-  VERSION=$(curl -s https://api.github.com/repos/arminc/clair-scanner/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v12")
-  if [[ -z "${VERSION}" ]]; then VERSION="v12"; fi
-  curl -L "https://github.com/arminc/clair-scanner/releases/download/${VERSION}/clair-scanner_linux_amd64" -o /usr/local/bin/clair-scanner
-  chmod +x /usr/local/bin/clair-scanner
-'
-run_best_effort "reg-install" bash -c '
-  VERSION=$(curl -s https://api.github.com/repos/genuinetools/reg/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v0.16.1")
-  if [[ -z "${VERSION}" ]]; then VERSION="v0.16.1"; fi
-  curl -L "https://github.com/genuinetools/reg/releases/download/${VERSION}/reg-linux-amd64" -o /usr/local/bin/reg
-  chmod +x /usr/local/bin/reg
-'
-run_best_effort "kubenscan-install" bash -c '
-  curl -L https://github.com/falcosecurity/kubenscan/releases/latest/download/kubenscan-linux-amd64 -o /usr/local/bin/kubenscan
-  chmod +x /usr/local/bin/kubenscan
-'
 run_best_effort "apt-gh-cli" bash -c '
   curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
@@ -216,7 +209,8 @@ run_best_effort "codeql-install" bash -c '
   VERSION=$(curl -s https://api.github.com/repos/github/codeql-cli-binaries/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v2.17.5")
   if [[ -z "${VERSION}" ]]; then VERSION="v2.17.5"; fi
   curl -L "https://github.com/github/codeql-cli-binaries/releases/download/${VERSION}/codeql-linux64.zip" -o codeql.zip
-  unzip -q codeql.zip -d "${TOOLS_ROOT}" && rm codeql.zip
+  rm -rf "${TOOLS_ROOT}/codeql"
+  unzip -oq codeql.zip -d "${TOOLS_ROOT}" && rm codeql.zip
   link_alias "${TOOLS_ROOT}/codeql/codeql" "codeql"
 '
 
@@ -226,7 +220,6 @@ run_best_effort "pip-web-api-tools" install_pip_packages \
   zap-cli \
   param-miner \
   paramspider \
-  jsbeautifier \
   pyjwt \
   graphw00f \
   git-dumper \
@@ -249,10 +242,6 @@ run_best_effort "pip-ad-tools" install_pip_packages \
   netexec \
   enum4linux-ng
 
-run_best_effort "pip-mobile-runtime-tools" install_pip_packages \
-  frida-tools \
-  objection
-
 run_best_effort "pip-cloud-container-tools" install_pip_packages \
   kube-hunter \
   scoutsuite
@@ -262,12 +251,10 @@ run_best_effort "pip-cloud-aws-tools" install_pip_packages pacu
 
 log "installing go binaries..."
 run_best_effort "subfinder" install_go_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-run_best_effort "assetfinder" install_go_tool assetfinder github.com/tomnomnom/assetfinder@latest
 run_best_effort "httpx" install_go_tool httpx github.com/projectdiscovery/httpx/cmd/httpx@latest
 run_best_effort "katana" install_go_tool katana github.com/projectdiscovery/katana/cmd/katana@latest
 run_best_effort "gospider" install_go_tool gospider github.com/jaeles-project/gospider@latest
 run_best_effort "gau" install_go_tool gau github.com/lc/gau/v2/cmd/gau@latest
-run_best_effort "waybackurls" install_go_tool waybackurls github.com/tomnomnom/waybackurls@latest
 run_best_effort "dnsx" install_go_tool dnsx github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 run_best_effort "nuclei" install_go_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 run_best_effort "amass" install_go_tool amass github.com/owasp-amass/amass/v4/.../amass@latest
@@ -281,7 +268,6 @@ run_best_effort "subjack" install_go_tool subjack github.com/haccer/subjack@late
 run_best_effort "dalfox" install_go_tool dalfox github.com/hahwul/dalfox/v2@latest
 run_best_effort "gowitness" install_go_tool gowitness github.com/sensepost/gowitness@latest
 run_best_effort "k9s" install_go_tool k9s github.com/derailed/k9s@latest
-run_best_effort "whaler" install_go_tool whaler github.com/P3GLEG/Whaler@latest
 run_best_effort "interactsh-client" install_go_tool interactsh-client github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
 run_best_effort "kiterunner" bash -c '
   clone_repo "https://github.com/assetnote/kiterunner.git" "${TOOLS_ROOT}/kiterunner"
@@ -371,7 +357,6 @@ run_best_effort "pspy-install" bash -c 'curl -sfL https://github.com/DominicBreu
 log "installing vendor repos..."
 run_best_effort "linkfinder-repo" clone_repo https://github.com/GerbenJavado/LinkFinder.git "${TOOLS_ROOT}/LinkFinder"
 run_best_effort "secretfinder-repo" clone_repo https://github.com/m4ll0k/SecretFinder.git "${TOOLS_ROOT}/SecretFinder"
-run_best_effort "getjs-repo" clone_repo https://github.com/003random/getJS.git "${TOOLS_ROOT}/getJS"
 run_best_effort "cloud-enum-repo" clone_repo https://github.com/initstring/cloud_enum.git "${TOOLS_ROOT}/cloud_enum"
 run_best_effort "corscanner-repo" clone_repo https://github.com/chenjj/CORScanner.git "${TOOLS_ROOT}/CORScanner"
 run_best_effort "sqlmap-repo" clone_repo https://github.com/sqlmapproject/sqlmap.git "${TOOLS_ROOT}/sqlmap"
@@ -449,46 +434,9 @@ EOF
   chmod +x "${TOOLS_ROOT}/OAuth-Scanner/oauth-scanner.py"
 '
 
-run_best_effort "kubescan-install" bash -c '
-  curl -L https://raw.githubusercontent.com/cyberark/KubeScan/master/kubescan.sh -o /usr/local/bin/kubescan.sh
-  chmod +x /usr/local/bin/kubescan.sh
-'
-
 run_best_effort "joomscan-repo" clone_repo https://github.com/OWASP/joomscan.git "${TOOLS_ROOT}/joomscan"
 run_best_effort "linpeas-repo" clone_repo https://github.com/peass-ng/PEASS-ng.git "${TOOLS_ROOT}/PEASS-ng"
 run_best_effort "firmwalker-repo" clone_repo https://github.com/craigz28/firmwalker.git "${TOOLS_ROOT}/firmwalker"
-
-run_best_effort "blobenum-repo" bash -c '
-  mkdir -p "${TOOLS_ROOT}/blobenum"
-  cat > "${TOOLS_ROOT}/blobenum/blobenum.py" << "EOF"
-#!/usr/bin/env python3
-import sys
-import argparse
-import urllib.request
-
-parser = argparse.ArgumentParser(description="Lightweight Cloud Blob Enumerator")
-parser.add_argument("-d", "--domain", required=True, help="Target domain/name to scan")
-parser.add_argument("-t", "--threads", type=int, default=50, help="Simulated thread count")
-
-args = parser.parse_args()
-
-targets = [
-    f"https://{args.domain}.s3.amazonaws.com",
-    f"https://{args.domain}.blob.core.windows.net",
-    f"https://storage.googleapis.com/{args.domain}"
-]
-
-for t in targets:
-    try:
-        req = urllib.request.Request(t, method="HEAD")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if resp.status in (200, 403):
-                print(f"[+] Found cloud storage bucket: {t} (status: {resp.status})")
-    except Exception:
-        pass
-EOF
-  chmod +x "${TOOLS_ROOT}/blobenum/blobenum.py"
-'
 
 run_best_effort "rdp-sec-check-repo" clone_repo https://github.com/CiscoCXSecurity/rdp-sec-check.git "${TOOLS_ROOT}/rdp-sec-check"
 
@@ -505,7 +453,6 @@ run_best_effort "wpscan-install" gem install wpscan || log "wpscan-install skipp
 log "installing repo-specific python deps..."
 run_best_effort "linkfinder-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/LinkFinder/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/LinkFinder/requirements.txt"'" || true'
 run_best_effort "secretfinder-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/SecretFinder/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/SecretFinder/requirements.txt"'" || true'
-run_best_effort "getjs-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/getJS/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/getJS/requirements.txt"'" || true'
 run_best_effort "cloud-enum-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/cloud_enum/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/cloud_enum/requirements.txt"'" || true'
 run_best_effort "corscanner-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/CORScanner/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/CORScanner/requirements.txt"'" || true'
 run_best_effort "sqlmap-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/sqlmap/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/sqlmap/requirements.txt"'" || true'
@@ -515,7 +462,6 @@ run_best_effort "xsstrike-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/XSStrike/req
 run_best_effort "commix-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/commix/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/commix/requirements.txt"'" || true'
 run_best_effort "tplmap-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/tplmap/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/tplmap/requirements.txt"'" || true'
 run_best_effort "ssrfmap-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/SSRFmap/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/SSRFmap/requirements.txt"'" || true'
-run_best_effort "blobenum-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/blobenum/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/blobenum/requirements.txt"'" || true'
 run_best_effort "gcpbucketbrute-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/GCPBucketBrute/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/GCPBucketBrute/requirements.txt"'" || true'
 run_best_effort "oauth-scanner-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/OAuth-Scanner/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/OAuth-Scanner/requirements.txt"'" || true'
 run_best_effort "graphql-cop-deps" bash -c 'test ! -f "'"${TOOLS_ROOT}/graphql-cop/requirements.txt"'" || python3 -m pip install --prefer-binary -r "'"${TOOLS_ROOT}/graphql-cop/requirements.txt"'" || true'
@@ -526,10 +472,6 @@ if [[ -f "${TOOLS_ROOT}/LinkFinder/linkfinder.py" ]]; then
 fi
 if [[ -f "${TOOLS_ROOT}/SecretFinder/SecretFinder.py" ]]; then
   write_python_wrapper "secretfinder" "${TOOLS_ROOT}/SecretFinder/SecretFinder.py"
-fi
-if [[ -f "${TOOLS_ROOT}/getJS/getjs.py" ]]; then
-  write_python_wrapper "getJS" "${TOOLS_ROOT}/getJS/getjs.py"
-  ln -sf "${BIN_DIR}/getJS" "${BIN_DIR}/getjs"
 fi
 if [[ -f "${TOOLS_ROOT}/cloud_enum/cloud_enum.py" ]]; then
   write_python_wrapper "cloud_enum" "${TOOLS_ROOT}/cloud_enum/cloud_enum.py"
@@ -555,9 +497,6 @@ if [[ -f "${TOOLS_ROOT}/tplmap/tplmap.py" ]]; then
 fi
 if [[ -f "${TOOLS_ROOT}/SSRFmap/ssrfmap.py" ]]; then
   write_python_wrapper "ssrfmap" "${TOOLS_ROOT}/SSRFmap/ssrfmap.py"
-fi
-if [[ -f "${TOOLS_ROOT}/blobenum/blobenum.py" ]]; then
-  write_python_wrapper "blobenum" "${TOOLS_ROOT}/blobenum/blobenum.py"
 fi
 if [[ -f "${TOOLS_ROOT}/GCPBucketBrute/gcpbucketbrute.py" ]]; then
   write_python_wrapper "gcpbucketbrute" "${TOOLS_ROOT}/GCPBucketBrute/gcpbucketbrute.py"

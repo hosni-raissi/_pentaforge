@@ -14,6 +14,7 @@ FORCE_BUILD_BACKEND=0
 FORCE_BUILD_SANDBOX=0
 FORCE_BUILD_SANDBOX_TOOLS=0
 STOP_STACK_ON_EXIT=0
+COMPOSE_PROFILE_ARGS=()
 
 for arg in "$@"; do
   case "$arg" in
@@ -74,6 +75,10 @@ compute_backend_hash() {
     "$ROOT_DIR/server/agents/assistant/prompts.py" \
     "$ROOT_DIR/server/agents/assistant/security_tools.py" \
     "$ROOT_DIR/server/agents/tools/run_custom.py" \
+    "$ROOT_DIR/server/nodes/intel/config.py" \
+    "$ROOT_DIR/server/nodes/intel/helpers.py" \
+    "$ROOT_DIR/server/db/knowledge/config/sources.py" \
+    "$ROOT_DIR/server/db/knowledge/sources/github_extractor.py" \
     "$ROOT_DIR/server/sandbox_service/app.py" | sha256sum | awk '{print $1}'
 }
 
@@ -130,9 +135,13 @@ if [[ "$CURRENT_SANDBOX_TOOLS_HASH" != "$PREVIOUS_SANDBOX_TOOLS_HASH" ]]; then
   SANDBOX_TOOLS_CHANGED=1
 fi
 
+if [[ "$FORCE_BUILD_SANDBOX_TOOLS" == "1" ]]; then
+  FORCE_BUILD_SANDBOX=1
+fi
+
 if [[ "$FORCE_BUILD_BACKEND" == "1" ]]; then
   echo "[1/5] Rebuilding backend image..."
-  docker compose -f "$COMPOSE_FILE" build backend
+  docker compose "${COMPOSE_PROFILE_ARGS[@]}" -f "$COMPOSE_FILE" build backend
   printf '%s\n' "$CURRENT_BACKEND_HASH" > "$BACKEND_HASH_FILE"
 else
   echo "[1/5] Reusing current backend image..."
@@ -149,13 +158,14 @@ if [[ "$FORCE_BUILD_SANDBOX_TOOLS" == "1" ]]; then
 elif [[ "$SANDBOX_TOOLS_CHANGED" == "1" ]]; then
   echo "[1a/5] Sandbox tools definition changed, but reusing the current tools base image."
   echo "        Run './scripts/run-desktop-with-docker.sh --reinstall-sandbox-tools' when you want to rebuild security tools."
+  printf '%s\n' "$CURRENT_SANDBOX_TOOLS_HASH" > "$SANDBOX_TOOLS_HASH_FILE"
 else
   echo "[1a/5] Reusing current sandbox tools base image..."
 fi
 
 if [[ "$FORCE_BUILD_SANDBOX" == "1" ]]; then
   echo "[1b/5] Rebuilding sandbox image..."
-  docker compose -f "$COMPOSE_FILE" build tool-sandbox
+  docker compose "${COMPOSE_PROFILE_ARGS[@]}" -f "$COMPOSE_FILE" build tool-sandbox
   printf '%s\n' "$CURRENT_SANDBOX_HASH" > "$SANDBOX_HASH_FILE"
 elif [[ "$SANDBOX_CHANGED" == "1" ]]; then
   echo "[1b/5] Sandbox bootstrap files changed, but reusing the current sandbox image."
@@ -165,7 +175,7 @@ else
 fi
 
 echo "[2/5] Starting Docker backend stack..."
-docker compose -f "$COMPOSE_FILE" "${COMPOSE_ARGS[@]}"
+docker compose "${COMPOSE_PROFILE_ARGS[@]}" -f "$COMPOSE_FILE" "${COMPOSE_ARGS[@]}"
 
 echo "[3/5] Waiting for backend health at $API_HEALTH_URL ..."
 for _ in $(seq 1 60); do
@@ -181,9 +191,12 @@ if ! curl -fsS "$API_HEALTH_URL" >/dev/null 2>&1; then
 fi
 
 echo "[4/5] Ensuring sandbox toolchain and embedding model are ready..."
-docker compose -f "$COMPOSE_FILE" exec -T tool-sandbox bash -lc \
-  'test -f /opt/pentaforge-tools/INSTALL-REPORT.txt || /usr/local/bin/install-sandbox-tools.sh'
-docker compose -f "$COMPOSE_FILE" exec -T backend python -m server.scripts.warm_embedding_model
+if ! docker compose "${COMPOSE_PROFILE_ARGS[@]}" -f "$COMPOSE_FILE" exec -T tool-sandbox bash -lc \
+  'test -f /opt/pentaforge-tools/INSTALL-REPORT.txt' >/dev/null 2>&1; then
+  echo "        Sandbox toolchain marker is missing; skipping automatic in-container install."
+  echo "        Run './scripts/run-desktop-with-docker.sh --reinstall-sandbox-tools --build-sandbox' to rebuild it deliberately."
+fi
+docker compose "${COMPOSE_PROFILE_ARGS[@]}" -f "$COMPOSE_FILE" exec -T backend python -m server.scripts.warm_embedding_model
 
 echo "[5/5] Launching Tauri desktop app..."
 cd "$UI_DIR"

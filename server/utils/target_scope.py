@@ -106,7 +106,7 @@ def describe_url_scope_issue(url: str, active_target: str) -> str | None:
 def describe_network_target_scope_issue(value: str, active_target: str) -> str | None:
     """Validate a URL or host[:port] token against the active target."""
     text = str(value or "").strip().strip("'\"")
-    if not text:
+    if not text or " " in text:
         return None
     if "://" in text:
         return describe_url_scope_issue(text, active_target)

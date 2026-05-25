@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -22,7 +23,14 @@ from server.db.knowledge.orchestrator import KnowledgeOrchestrator
 from server.db.knowledge.storage.intel_state_store import IntelStateStore
 from server.db.projects import ProjectsStore
 
-from .config import DEFAULT_VERIFY_SOURCES, RAG_REFRESH_DAYS, VERIFY_SOURCES
+from .config import (
+    DEFAULT_VERIFY_SOURCES,
+    INTEL_INLINE_MAX_DOCS_PER_SOURCE,
+    INTEL_INLINE_MAX_SOURCES,
+    INTEL_INLINE_SOURCE_TIMEOUT_SECONDS,
+    RAG_REFRESH_DAYS,
+    VERIFY_SOURCES,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -284,7 +292,7 @@ def _collect_source_entries(
     *,
     projects_store: ProjectsStore,
 ) -> list[dict[str, Any]]:
-    configured_names = VERIFY_SOURCES.get(target_type, DEFAULT_VERIFY_SOURCES)
+    configured_names = VERIFY_SOURCES.get(target_type, DEFAULT_VERIFY_SOURCES)[:INTEL_INLINE_MAX_SOURCES]
     rows: list[dict[str, Any]] = []
 
     for source_name in configured_names:
@@ -331,6 +339,38 @@ def _collect_source_entries(
         seen.add(key)
         deduped.append(row)
     return deduped
+
+
+def _bounded_inline_source_config(config: SourceConfig) -> SourceConfig:
+    """Return a scan-time source config capped for quick Intel refreshes."""
+    max_pages = min(
+        int(getattr(config, "max_pages", INTEL_INLINE_MAX_DOCS_PER_SOURCE) or INTEL_INLINE_MAX_DOCS_PER_SOURCE),
+        INTEL_INLINE_MAX_DOCS_PER_SOURCE,
+    )
+    if hasattr(config, "model_copy"):
+        return config.model_copy(update={"max_pages": max_pages})
+    return config
+
+
+async def _ingest_inline_source_with_timeout(
+    orchestrator: Any,
+    *,
+    source_name: str,
+    source_cfg: SourceConfig,
+    force_update: bool,
+) -> Any:
+    if hasattr(orchestrator, "_ingest"):
+        ingest_coro = orchestrator._ingest(source_cfg)
+    else:
+        ingest_coro = orchestrator.ingest_source(source_name)
+
+    if force_update:
+        return await ingest_coro
+
+    return await asyncio.wait_for(
+        ingest_coro,
+        timeout=INTEL_INLINE_SOURCE_TIMEOUT_SECONDS,
+    )
 
 
 def _custom_source_to_config(entry: dict[str, Any]) -> SourceConfig:
@@ -486,32 +526,16 @@ async def refresh_rag(
                     and not force_update
                     and not bool(getattr(builtin, "intel_inline_refresh", True))
                 ):
-                    has_approval_handler = _supports_deferred_source_approval(callback)
-                    approved = (
-                        await _request_deferred_source_approval(
-                            callback,
-                            target_type=normalized_target,
-                            source_name=source_name,
-                            source_url=str(getattr(builtin, "url", "") or str(entry.get("url", ""))),
-                        )
-                        if has_approval_handler
-                        else False
+                    stats["sources_deferred"] += 1
+                    _notify(
+                        callback,
+                        "on_done",
+                        (
+                            f"Deferred source {source_name} during routine Intel refresh "
+                            "(large source; use manual Intel force update to refresh it)."
+                        ),
                     )
-                    if not approved:
-                        stats["sources_deferred"] += 1
-                        _notify(
-                            callback,
-                            "on_done",
-                            (
-                                f"Deferred source {source_name} during routine Intel refresh "
-                                + (
-                                    "(large source skipped by operator)."
-                                    if has_approval_handler
-                                    else "(large source; use force update to refresh it)."
-                                )
-                            ),
-                        )
-                        continue
+                    continue
 
                 _notify(
                     callback,
@@ -520,11 +544,32 @@ async def refresh_rag(
                 )
                 source_cfg: SourceConfig
                 if builtin is not None:
-                    result = await orchestrator.ingest_source(source_name)
-                    source_cfg = builtin
+                    source_cfg = _bounded_inline_source_config(builtin) if not force_update else builtin
                 else:
                     source_cfg = _custom_source_to_config(entry)
-                    result = await orchestrator._ingest(source_cfg)
+                    if not force_update:
+                        source_cfg = _bounded_inline_source_config(source_cfg)
+
+                try:
+                    result = await _ingest_inline_source_with_timeout(
+                        orchestrator,
+                        source_name=source_name,
+                        source_cfg=source_cfg,
+                        force_update=force_update,
+                    )
+                except asyncio.TimeoutError:
+                    stats["source_errors"].append(
+                        f"{source_name}: exceeded {INTEL_INLINE_SOURCE_TIMEOUT_SECONDS}s inline refresh budget"
+                    )
+                    _notify(
+                        callback,
+                        "on_warn",
+                        (
+                            f"Source {source_name}: skipped after "
+                            f"{INTEL_INLINE_SOURCE_TIMEOUT_SECONDS}s inline refresh budget."
+                        ),
+                    )
+                    continue
 
                 if result.errors:
                     stats["source_errors"].extend(

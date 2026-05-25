@@ -25,9 +25,9 @@ from server.agents.tools.run_custom import (
 from server.agents.tools.run_python import run_python as local_run_python
 
 try:
-    from server.agents.executer.base import _executer_tool_context
+    from server.agents.executer.base import _executer_tool_context as executer_tool_context
 except Exception:  # pragma: no cover - defensive import for minimal runtime
-    _executer_tool_context = None
+    executer_tool_context = None
 
 
 app = FastAPI(
@@ -74,14 +74,14 @@ class RunPythonRemoteRequest(BaseModel):
 @contextmanager
 def _execution_context_scope(context: SandboxExecutionContext) -> Iterator[None]:
     token = None
-    if _executer_tool_context is not None:
+    if executer_tool_context is not None:
         payload = context.model_dump()
-        token = _executer_tool_context.set(payload)
+        token = executer_tool_context.set(payload)
     try:
         yield
     finally:
-        if _executer_tool_context is not None and token is not None:
-            _executer_tool_context.reset(token)
+        if executer_tool_context is not None and token is not None:
+            executer_tool_context.reset(token)
 
 
 @app.get("/health")

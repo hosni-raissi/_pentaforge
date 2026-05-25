@@ -90,6 +90,14 @@ export interface Project {
     elapsedSeconds?: number;
     durationSeconds?: number;
     error?: string;
+    mobileRuntime?: {
+      mode?: string;
+      executionMode?: string | null;
+      runtimeAvailable?: boolean;
+      prepared?: boolean;
+      warning?: string;
+      deviceId?: string;
+    };
     result?: {
       target?: string;
       targetType?: string;

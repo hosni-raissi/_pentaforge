@@ -68,8 +68,18 @@ Scenario summary contract:
 - `findings_summary`: concise analyst-grade summaries of what was learned from the tool results. Do not repeat the same fact twice and do not mix unknowns into findings.
 - Keep this compact summary separate from the deeper verification reasoning.
 
+CVSS v3.1 base metrics for confirmed vulnerabilities:
+- AV (Attack Vector): `N` internet, `A` adjacent network, `L` local, `P` physical
+- AC (Attack Complexity): `L` reliable/no special conditions, `H` attacker depends on outside factors
+- PR (Privileges Required): `N` none, `L` normal user, `H` admin
+- UI (User Interaction): `N` none, `R` victim must act
+- S (Scope): `U` same component, `C` broader impact
+- C/I/A (Impact): `H` high/full loss, `L` partial loss, `N` none
+- If you confirm a real vulnerability, include a defensible `cvss_vector` like `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`.
+- Do not guess a vector when the evidence cannot support the base metrics.
+
 Final JSON shape:
-{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"1-2 short sentences","confidence":0.0,"poc":"Detailed VULNERABILITY REPORT template content","tier":"signal_only|needs_manual_review|reproduced|confirmed","reasoning":"Explain why evidence proves exploitability","scenario_report":[{"scenario_ran":"...","tools_ran":["tool_a"],"tool_results":[{"tool":"tool_a","command":"...","status":"passed|failed|observed","summary":"..."}],"findings_summary":["tool_a: concise finding"]}],"analysis_markdown":"# ROLE Analyzer Report ..."}
+{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"1-2 short sentences","confidence":0.0,"cvss_vector":"CVSS:3.1/...","poc":"Detailed VULNERABILITY REPORT template content","tier":"signal_only|needs_manual_review|reproduced|confirmed","reasoning":"Explain why evidence proves exploitability","scenario_report":[{"scenario_ran":"...","tools_ran":["tool_a"],"tool_results":[{"tool":"tool_a","command":"...","status":"passed|failed|observed","summary":"..."}],"findings_summary":["tool_a: concise finding"]}],"analysis_markdown":"# ROLE Analyzer Report ..."}
 """
 
 ANALYZER_POC_PROMPT = """\
@@ -90,6 +100,15 @@ Rules:
 - use only approved tools
 - sanitize sensitive secrets
 - stay on the verified vulnerability
+- include a defensible `cvss_vector` for the confirmed issue using CVSS v3.1 base metrics
+
+CVSS v3.1 base metrics:
+- AV: `N` internet, `A` adjacent network, `L` local, `P` physical
+- AC: `L` no special conditions, `H` attacker depends on external factors
+- PR: `N` none, `L` user, `H` admin
+- UI: `N` none, `R` victim action required
+- S: `U` same component, `C` broader scope
+- C/I/A: `H` high, `L` low, `N` none
 
 You MUST return the following structured JSON in your final response:
 
@@ -100,6 +119,7 @@ Final JSON shape:
   "confidence": 0.9,
   "title": "[Vulnerability Type] in [Component/Feature]",
   "severity": "critical|high|medium|low",
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
   "cwe_id": "CWE-XXX",
   "cve_id": "CVE-YYYY-XXXXX",
   "description": "Clear, concise description of the vulnerability and its implications",

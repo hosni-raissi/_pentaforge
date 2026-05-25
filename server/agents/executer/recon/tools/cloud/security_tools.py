@@ -296,15 +296,6 @@ _RAW_CLOUD_RECON_TOOLS: dict[str, dict[str, object]] = {
         "note": "(WORDLIST:buckets) piped via stdin; json output filtered to stdout"
     },
     
-    "blobenum": {
-        "t": "storage",
-        "c": "azure_blob_discovery",
-        "u": "python3 blobenum.py -d TARGET -t 50 2>/dev/null | grep -E '^\\[\\+\\]|^\\[\\*\\]'",
-        "d": ["Azure Blob storage name brute-forcing", "Container enumeration", "Anonymous access testing"],
-        "tgt": ["azure_blobs", "storage_enum", "public_assets"],
-        "note": "Removed -o flag; stdout filtered for findings"
-    },
-    
     "gcs-bruter": {
         "t": "storage",
         "c": "gcs_bucket_discovery",

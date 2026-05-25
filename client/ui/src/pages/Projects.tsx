@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { type ChangeEvent, type DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/Button';
@@ -13,7 +13,7 @@ import { clsx } from 'clsx';
 import { 
   Plus, Trash2, Play, Square, FolderOpen, Share2, RefreshCcw, Pencil,
   Globe, Database, Shield, Network, Cpu, Smartphone, Cloud, Box, Code, Monitor, Server,
-  AlertCircle
+  AlertCircle, CheckCircle2, Upload
 } from 'lucide-react';
 import { format } from 'date-fns';
 import type { Project } from '../types';
@@ -21,6 +21,7 @@ import {
   listProjectTargetFieldsFromDesktop,
   listProjectTargetTypesFromDesktop,
   saveProjectToDesktop,
+  uploadMobileArtifactToDesktop,
   type ProjectTargetField,
   type ProjectTargetTypeOption,
 } from '../lib/projectBridge';
@@ -28,14 +29,14 @@ import {
 const FALLBACK_TARGET_TYPES: ProjectTargetTypeOption[] = [
   { value: 'web_app', label: 'Web Application' },
   { value: 'api', label: 'API' },
-  { value: 'mobile', label: 'Mobile App (Coming Soon)', disabled: true },
+  { value: 'mobile', label: 'Mobile App' },
   { value: 'infra', label: 'Infrastructure' },
   { value: 'network', label: 'Network' },
-  { value: 'iot', label: 'IoT (Coming Soon)', disabled: true },
+  { value: 'iot', label: 'IoT' },
   { value: 'linux_server', label: 'Linux Server' },
-  { value: 'cloud', label: 'Cloud (Coming Soon)', disabled: true },
-  { value: 'container', label: 'Container (Coming Soon)', disabled: true },
-  { value: 'repository', label: 'Repository (Coming Soon)', disabled: true },
+  { value: 'cloud', label: 'Cloud' },
+  { value: 'container', label: 'Container' },
+  { value: 'repository', label: 'Repository' },
 ];
 
 const FALLBACK_FIELD: ProjectTargetField = {
@@ -47,15 +48,39 @@ const FALLBACK_FIELD: ProjectTargetField = {
 };
 
 const PRIMARY_TARGET_KEYS = [
+  'file_path',
   'url',
   'base_url',
   'host',
   'target_ip',
   'gateway',
   'cidr',
+  'package_name',
   'repo_url',
   'targets.ip_address',
 ];
+
+const MOBILE_ARTIFACT_ACCEPT = '.apk,.aab,.ipa';
+
+function basenameFromPath(value: string): string {
+  const normalized = value.replace(/\\/g, '/');
+  const parts = normalized.split('/');
+  return parts[parts.length - 1] ?? value;
+}
+
+function inferMobileArtifactMetadata(filename: string): {
+  inputType?: string;
+  platform?: string;
+} {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.ipa')) {
+    return { inputType: 'ipa', platform: 'ios' };
+  }
+  if (lower.endsWith('.apk') || lower.endsWith('.aab')) {
+    return { inputType: 'apk', platform: 'android' };
+  }
+  return {};
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -92,6 +117,16 @@ function setNestedValue(payload: Record<string, unknown>, dottedKey: string, val
     }
     cursor = next;
   }
+}
+
+function getFieldDefaultValue(field: ProjectTargetField): string {
+  if (field.data_type === 'boolean') {
+    return 'false';
+  }
+  if (field.data_type === 'enum' && field.options.length > 0) {
+    return field.options[0] ?? '';
+  }
+  return '';
 }
 
 function formatProjectSaveError(error: unknown): string {
@@ -135,6 +170,9 @@ export default function Projects() {
     setRunning,
     runningProjectId,
     startingProjectId,
+    startingProjectMessage,
+    stoppingProjectId,
+    stoppingProjectMessage,
     stopScan,
     hydrateFromDatabase,
   } = useProjects();
@@ -150,6 +188,7 @@ export default function Projects() {
   const [fieldsError, setFieldsError] = useState<string>('');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
+  const [deleteError, setDeleteError] = useState('');
   const [customChecklistText, setCustomChecklistText] = useState('');
   const [customChecklistName, setCustomChecklistName] = useState('');
   const [customChecklistError, setCustomChecklistError] = useState('');
@@ -161,6 +200,11 @@ export default function Projects() {
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
   const [stopProjectId, setStopProjectId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [draftProjectId, setDraftProjectId] = useState<string>(() => crypto.randomUUID());
+  const [mobileArtifactUploading, setMobileArtifactUploading] = useState(false);
+  const [mobileArtifactError, setMobileArtifactError] = useState('');
+  const [mobileArtifactDragActive, setMobileArtifactDragActive] = useState(false);
+  const mobileArtifactInputRef = useRef<HTMLInputElement | null>(null);
 
   function formatShortDate(value: string): string {
     const parsed = new Date(value);
@@ -181,10 +225,9 @@ export default function Projects() {
       setTypesError('');
       try {
         const remote = await listProjectTargetTypesFromDesktop();
-        const restricted = ['mobile', 'iot', 'cloud', 'container', 'repository'];
-        const nextTypes = (remote.length > 0 ? remote : FALLBACK_TARGET_TYPES).map(type => ({
+        const nextTypes = (remote.length > 0 ? remote : FALLBACK_TARGET_TYPES).map((type) => ({
           ...type,
-          disabled: restricted.includes(type.value) || type.disabled
+          disabled: false,
         }));
 
         if (cancelled) {
@@ -192,10 +235,10 @@ export default function Projects() {
         }
         setTargetTypes(nextTypes);
         setForm((previous) => {
-          const hasCurrent = nextTypes.some((item) => item.value === previous.targetType && !item.disabled);
+          const hasCurrent = nextTypes.some((item) => item.value === previous.targetType);
           return {
             ...previous,
-            targetType: hasCurrent ? previous.targetType : (nextTypes.find(t => !t.disabled)?.value ?? ''),
+            targetType: hasCurrent ? previous.targetType : (nextTypes[0]?.value ?? ''),
           };
         });
       } catch {
@@ -241,8 +284,13 @@ export default function Projects() {
           const next: Record<string, string> = {};
           for (const field of nextFields) {
             const value = previous[field.key];
-            if (typeof value === 'string') {
+            if (typeof value === 'string' && value.length > 0) {
               next[field.key] = value;
+              continue;
+            }
+            const fallback = getFieldDefaultValue(field);
+            if (fallback) {
+              next[field.key] = fallback;
             }
           }
           return next;
@@ -281,10 +329,24 @@ export default function Projects() {
     if (!dialogOpen || credentialFields.length === 0) {
       return;
     }
-    setCredentialProfiles((previous) => (
-      previous.length > 0 ? previous : [{}]
-    ));
-  }, [dialogOpen, credentialFields.length]);
+    setCredentialProfiles((previous) => {
+      const baseProfiles = previous.length > 0 ? previous : [{}];
+      return baseProfiles.map((profile) => {
+        const next = { ...profile };
+        for (const field of credentialFields) {
+          const suffix = field.key.slice('credentials.'.length);
+          if ((next[suffix] ?? '').trim().length > 0) {
+            continue;
+          }
+          const fallback = getFieldDefaultValue(field);
+          if (fallback) {
+            next[suffix] = fallback;
+          }
+        }
+        return next;
+      });
+    });
+  }, [dialogOpen, credentialFields]);
 
   useEffect(() => {
     if (!dialogOpen || !pendingEditProject) {
@@ -295,7 +357,14 @@ export default function Projects() {
 
     for (const field of nonCredentialFields) {
       const value = getNestedValue(config, field.key);
-      nextTargetInfo[field.key] = typeof value === 'string' ? value : '';
+      if (typeof value === 'string' && value.length > 0) {
+        nextTargetInfo[field.key] = value;
+        continue;
+      }
+      const fallback = getFieldDefaultValue(field);
+      if (fallback) {
+        nextTargetInfo[field.key] = fallback;
+      }
     }
 
     const credentialSource = Array.isArray(config.credentials)
@@ -308,7 +377,14 @@ export default function Projects() {
         for (const field of credentialFields) {
           const suffix = field.key.slice('credentials.'.length);
           const value = getNestedValue(profile, suffix);
-          next[suffix] = typeof value === 'string' ? value : '';
+          if (typeof value === 'string' && value.length > 0) {
+            next[suffix] = value;
+            continue;
+          }
+          const fallback = getFieldDefaultValue(field);
+          if (fallback) {
+            next[suffix] = fallback;
+          }
         }
         return next;
       });
@@ -318,7 +394,14 @@ export default function Projects() {
       for (const field of credentialFields) {
         const suffix = field.key.slice('credentials.'.length);
         const value = getNestedValue(config, field.key);
-        fallbackProfile[suffix] = typeof value === 'string' ? value : '';
+        if (typeof value === 'string' && value.length > 0) {
+          fallbackProfile[suffix] = value;
+          continue;
+        }
+        const fallback = getFieldDefaultValue(field);
+        if (fallback) {
+          fallbackProfile[suffix] = fallback;
+        }
       }
       if (Object.values(fallbackProfile).some((value) => value.trim().length > 0)) {
         nextProfiles.push(fallbackProfile);
@@ -355,6 +438,7 @@ export default function Projects() {
   function resetProjectFormState() {
     setEditingProjectId(null);
     setPendingEditProject(null);
+    setDraftProjectId(crypto.randomUUID());
     setForm({
       name: '',
       targetType: targetTypes[0]?.value ?? '',
@@ -367,6 +451,9 @@ export default function Projects() {
     setCustomChecklistError('');
     setSubmitError('');
     setCreatingProject(false);
+    setMobileArtifactUploading(false);
+    setMobileArtifactError('');
+    setMobileArtifactDragActive(false);
   }
 
   function handleOpenCreateDialog() {
@@ -376,6 +463,7 @@ export default function Projects() {
 
   function handleOpenEditDialog(project: Project) {
     setEditingProjectId(project.id);
+    setDraftProjectId(project.id);
     setForm({
       name: project.name,
       targetType: project.targetType,
@@ -386,8 +474,60 @@ export default function Projects() {
     setCustomChecklistText(project.customChecklistText ?? '');
     setCustomChecklistName(project.customChecklistName ?? '');
     setCustomChecklistError('');
+    setMobileArtifactUploading(false);
+    setMobileArtifactError('');
+    setMobileArtifactDragActive(false);
     setPendingEditProject(project);
     setDialogOpen(true);
+  }
+
+  async function handleMobileArtifactSelected(file: File | null) {
+    if (!file || form.targetType !== 'mobile') {
+      return;
+    }
+
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith('.apk') && !lower.endsWith('.aab') && !lower.endsWith('.ipa')) {
+      setMobileArtifactError('Only .apk, .aab, or .ipa files are supported for mobile targets.');
+      return;
+    }
+
+    const projectId = editingProjectId ?? draftProjectId ?? crypto.randomUUID();
+    if (!editingProjectId && !draftProjectId) {
+      setDraftProjectId(projectId);
+    }
+
+    setMobileArtifactUploading(true);
+    setMobileArtifactError('');
+    try {
+      const uploaded = await uploadMobileArtifactToDesktop(projectId, file);
+      const inferred = inferMobileArtifactMetadata(file.name);
+      setTargetInfo((previous) => ({
+        ...previous,
+        file_path: uploaded.path,
+        ...(inferred.inputType ? { input_type: inferred.inputType } : {}),
+        ...(inferred.platform ? { platform: inferred.platform } : {}),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to upload mobile artifact.';
+      setMobileArtifactError(message);
+    } finally {
+      setMobileArtifactUploading(false);
+      setMobileArtifactDragActive(false);
+    }
+  }
+
+  function handleMobileArtifactInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const nextFile = event.target.files?.[0] ?? null;
+    void handleMobileArtifactSelected(nextFile);
+    event.currentTarget.value = '';
+  }
+
+  function handleMobileArtifactDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setMobileArtifactDragActive(false);
+    const nextFile = event.dataTransfer.files?.[0] ?? null;
+    void handleMobileArtifactSelected(nextFile);
   }
 
   async function handleChecklistFileSelected(file: File | null) {
@@ -457,9 +597,10 @@ export default function Projects() {
     setSubmitError('');
 
     const { primaryTarget, payload } = buildTargetConfigPayload();
+    const projectId = editingProjectId ?? draftProjectId ?? crypto.randomUUID();
 
     const projectPayload: Project = {
-      id: crypto.randomUUID(),
+      id: projectId,
       name: form.name,
       target: primaryTarget,
       targetType: form.targetType,
@@ -638,7 +779,14 @@ export default function Projects() {
                   <div className="flex items-center gap-2 shrink-0 ml-4">
                     <Badge variant={project.status} dot>{project.status}</Badge>
                     {startingProjectId === project.id && (
-                      <span className="text-sm text-text-muted">starting...</span>
+                      <span className="text-sm text-text-muted">
+                        {startingProjectMessage || 'starting...'}
+                      </span>
+                    )}
+                    {stoppingProjectId === project.id && (
+                      <span className="text-sm text-text-muted">
+                        {stoppingProjectMessage || 'stopping...'}
+                      </span>
                     )}
                     <span className="text-sm text-text-muted w-16 text-right">
                       {formatShortDate(project.updatedAt)}
@@ -646,11 +794,13 @@ export default function Projects() {
                     <div className="flex items-center gap-1 ml-2" onClick={(e) => e.stopPropagation()}>
                       {(() => {
                         const isStartingThisProject = startingProjectId === project.id;
+                        const isStoppingThisProject = stoppingProjectId === project.id;
                         const anotherProjectBusy = (
                           (!!runningProjectId && runningProjectId !== project.id)
                           || (!!startingProjectId && startingProjectId !== project.id)
+                          || (!!stoppingProjectId && stoppingProjectId !== project.id)
                         );
-                        const canStartProject = !anotherProjectBusy && !isStartingThisProject;
+                        const canStartProject = !anotherProjectBusy && !isStartingThisProject && !isStoppingThisProject;
 
                         return (
                           <>
@@ -690,6 +840,8 @@ export default function Projects() {
                                   setStopProjectId(project.id);
                                   setStopDialogOpen(true);
                                 }}
+                                loading={stoppingProjectId === project.id}
+                                disabled={stoppingProjectId === project.id}
                                 title="Stop scan"
                               >
                                 <Square size={12} />
@@ -777,24 +929,6 @@ export default function Projects() {
 
                 const isActive = form.targetType === type.value;
 
-                if (type.disabled) {
-                  return (
-                    <div
-                      key={type.value}
-                      className="group relative flex flex-col items-center justify-center p-2 rounded-xl border border-border/20 bg-surface-2/10 text-text-muted opacity-30 grayscale cursor-default gap-1.5 overflow-hidden"
-                    >
-                      <div className="p-1.5 rounded-lg bg-surface-3/30 text-text-muted/50">
-                        <Icon size={16} />
-                      </div>
-                      <div className="flex flex-col">
-                        <span className="text-[9px] font-black uppercase tracking-tight text-text-muted/40">
-                          {type.label.replace(' (Coming Soon)', '')}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                }
-
                 return (
                   <motion.button
                     key={type.value}
@@ -805,6 +939,8 @@ export default function Projects() {
                       setForm({ ...form, targetType: type.value });
                       setTargetInfo({});
                       setCredentialProfiles([{}]);
+                      setMobileArtifactError('');
+                      setMobileArtifactDragActive(false);
                     }}
                     className={clsx(
                       "group relative flex flex-col items-center justify-center p-2 rounded-xl border transition-all text-center gap-1.5 overflow-hidden",
@@ -833,7 +969,7 @@ export default function Projects() {
                         "text-[9px] font-black uppercase tracking-tight transition-colors",
                         isActive ? "text-pf-400" : "text-text-muted group-hover:text-text-primary"
                       )}>
-                        {type.label.replace(' (Coming Soon)', '')}
+                        {type.label}
                       </span>
                     </div>
                   </motion.button>
@@ -866,6 +1002,90 @@ export default function Projects() {
                       || field.key.includes('description')
                       || field.key.startsWith('endpoints.')
                     );
+
+                    if (form.targetType === 'mobile' && field.key === 'file_path') {
+                      const artifactPath = targetInfo[field.key] ?? '';
+                      const artifactName = artifactPath ? basenameFromPath(artifactPath) : '';
+                      return (
+                        <div key={field.key} className="md:col-span-2">
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-text-muted uppercase tracking-widest">
+                              {field.label}{field.required ? ' *' : ''}
+                            </label>
+                            <div
+                              onDragOver={(event) => {
+                                event.preventDefault();
+                                if (!mobileArtifactUploading) {
+                                  setMobileArtifactDragActive(true);
+                                }
+                              }}
+                              onDragLeave={(event) => {
+                                event.preventDefault();
+                                setMobileArtifactDragActive(false);
+                              }}
+                              onDrop={handleMobileArtifactDrop}
+                              className={clsx(
+                                'rounded-2xl border border-dashed p-4 transition-all',
+                                mobileArtifactDragActive
+                                  ? 'border-pf-500 bg-pf-500/8 shadow-[0_0_0_1px_rgba(var(--pf-500-rgb),0.2)]'
+                                  : 'border-border bg-surface-1/40 hover:border-pf-500/30 hover:bg-surface-1/70',
+                                mobileArtifactUploading && 'opacity-70',
+                              )}
+                            >
+                              <input
+                                ref={mobileArtifactInputRef}
+                                type="file"
+                                accept={MOBILE_ARTIFACT_ACCEPT}
+                                className="hidden"
+                                onChange={handleMobileArtifactInputChange}
+                              />
+                              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                                <div className="flex items-start gap-3">
+                                  <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-pf-500/12 text-pf-400">
+                                    <Upload size={18} />
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    <p className="text-sm font-semibold text-text-primary">
+                                      Drop an APK, AAB, or IPA here
+                                    </p>
+                                    <p className="text-sm text-text-muted">
+                                    The file is uploaded into the project sandbox and used directly during mobile scans.
+                                    </p>
+                                    {artifactName ? (
+                                      <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-sm text-emerald-300">
+                                        <CheckCircle2 size={14} />
+                                        <span>Uploaded:</span>
+                                        <span className="font-mono text-emerald-200">{artifactName}</span>
+                                      </div>
+                                    ) : (
+                                      <p className="text-sm text-text-muted">
+                                        No mobile artifact uploaded yet.
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="md"
+                                  className="min-w-[140px] self-start whitespace-nowrap rounded-xl border-pf-500/30 bg-pf-500/8 px-4 font-semibold text-pf-300 hover:bg-pf-500/14 md:self-center"
+                                  disabled={mobileArtifactUploading}
+                                  onClick={() => mobileArtifactInputRef.current?.click()}
+                                >
+                                  <Upload size={15} />
+                                  {mobileArtifactUploading ? 'Uploading...' : 'Browse Artifact'}
+                                </Button>
+                              </div>
+                            </div>
+                            {artifactPath ? (
+                              <p className="text-sm text-text-muted break-all">
+                                Sandbox path: <span className="font-mono">{artifactPath}</span>
+                              </p>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    }
 
                     if (field.data_type === 'enum') {
                       return (
@@ -1042,6 +1262,9 @@ export default function Projects() {
               </div>
             )}
             {fieldsError && <p className="mt-2 text-sm text-yellow-400">{fieldsError}</p>}
+            {mobileArtifactError ? (
+              <p className="mt-2 text-sm text-red-400">{mobileArtifactError}</p>
+            ) : null}
           </div>
 
           <Textarea
@@ -1131,6 +1354,7 @@ export default function Projects() {
                 || missingRequiredField
                 || typesLoading
                 || fieldsLoading
+                || mobileArtifactUploading
               }
             >
               {editingProjectId ? 'Save' : 'Create'}
@@ -1168,6 +1392,8 @@ export default function Projects() {
                 setStopDialogOpen(false);
                 void stopScan(stopProjectId, 'stop');
               }}
+              loading={stoppingProjectId === stopProjectId}
+              disabled={stoppingProjectId === stopProjectId}
             >
               Stop Scan
             </Button>
@@ -1181,6 +1407,8 @@ export default function Projects() {
                 setStopDialogOpen(false);
                 void stopScan(stopProjectId, 'cancel');
               }}
+              loading={stoppingProjectId === stopProjectId}
+              disabled={stoppingProjectId === stopProjectId}
             >
               Cancel Scan
             </Button>
@@ -1189,15 +1417,31 @@ export default function Projects() {
       </Dialog>
       <Dialog
         open={deleteDialogOpen}
-        onClose={() => setDeleteDialogOpen(false)}
+        onClose={() => {
+          if (deletingProjectId) {
+            return;
+          }
+          setDeleteDialogOpen(false);
+          setDeleteError('');
+        }}
         title="Delete Project"
         description={`Are you sure you want to delete project "${projectToDelete?.name}"? This will permanently remove all findings and scan history.`}
       >
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="space-y-3 pt-2">
+          {deleteError ? (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              {deleteError}
+            </div>
+          ) : null}
+          <div className="flex justify-end gap-2">
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setDeleteDialogOpen(false)}
+            onClick={() => {
+              setDeleteDialogOpen(false);
+              setDeleteError('');
+            }}
+            disabled={Boolean(deletingProjectId)}
           >
             Cancel
           </Button>
@@ -1207,11 +1451,19 @@ export default function Projects() {
             loading={deletingProjectId === projectToDelete?.id}
             onClick={async () => {
               if (projectToDelete) {
+                setDeleteError('');
                 setDeletingProjectId(projectToDelete.id);
                 try {
                   await removeProject(projectToDelete.id);
                   setDeleteDialogOpen(false);
                   setProjectToDelete(null);
+                  setDeleteError('');
+                } catch (error) {
+                  setDeleteError(
+                    error instanceof Error
+                      ? error.message
+                      : 'Failed to delete project. Please try again.',
+                  );
                 } finally {
                   setDeletingProjectId(null);
                 }
@@ -1220,6 +1472,7 @@ export default function Projects() {
           >
             Delete
           </Button>
+          </div>
         </div>
       </Dialog>
       </div>

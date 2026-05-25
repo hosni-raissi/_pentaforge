@@ -18,7 +18,6 @@ from .index import enabled_recon_module_names
 
 log = structlog.get_logger(__name__)
 
-# Intrusive checks moved to Exploit ownership.
 _RECON_EXCLUDED_MODULES = {
     "api.api_auth_test",
     "api.api_fuzzing",

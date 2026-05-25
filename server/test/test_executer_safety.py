@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import pytest
 
 from server.agents.executer.base import _structured_result_excerpt
 from server.agents.executer.run_custom_guard import (
     detect_recon_role_violation,
     detect_scope_violation,
 )
+from server.agents.tools.run_custom import RunCustomRequest
 from server.agents.executer.sandbox import build_sandbox_env, get_sandbox_root, resolve_sandbox_cwd
 from server.agents.executer.tool_safety import (
     get_run_custom_command_profile,
@@ -37,6 +39,23 @@ def test_scope_guard_blocks_mismatched_hosts_for_run_custom_targets() -> None:
 
     assert detect_scope_violation("curl", ["https://example.com/login"], active_target=active_target) is None
     assert detect_scope_violation("nmap", ["-sV", "evil.com"], active_target=active_target) is not None
+
+
+def test_run_custom_allows_regex_alternation_but_blocks_shell_pipe() -> None:
+    req = RunCustomRequest(
+        command="rg",
+        args=["-i", "api[_-]?key|password|secret|token", "/tmp/repo"],
+        reason="Search the repository for common secret patterns.",
+    )
+
+    assert req.args[1] == "api[_-]?key|password|secret|token"
+
+    with pytest.raises(ValueError, match="Dangerous shell token '\\|'"):
+        RunCustomRequest(
+            command="rg",
+            args=["-i", "secret", "|", "head"],
+            reason="This should still reject shell-style piping.",
+        )
 
 
 def test_tool_approval_policy_keeps_critical_execution_manual() -> None:

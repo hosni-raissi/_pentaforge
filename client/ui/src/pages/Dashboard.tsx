@@ -64,6 +64,7 @@ import {
   type ScanObservabilityMetrics,
   type ScanEventPayload,
 } from "@/lib/projectBridge";
+import { getProjectMobileRuntimeNotice } from "@/lib/mobileRuntime";
 import { cn } from "@/lib/utils";
 import { useProjects } from "@/stores/projects";
 import { useConfig } from "@/stores/config";
@@ -2201,6 +2202,9 @@ export default function Dashboard() {
   const updateProject = useProjects((state) => state.updateProject);
   const hydrateFromDatabase = useProjects((state) => state.hydrateFromDatabase);
   const startingProjectId = useProjects((state) => state.startingProjectId);
+  const startingProjectMessage = useProjects((state) => state.startingProjectMessage);
+  const stoppingProjectId = useProjects((state) => state.stoppingProjectId);
+  const stoppingProjectMessage = useProjects((state) => state.stoppingProjectMessage);
   const activeProjectId = activeProject?.id ?? null;
   const activeScanId = (() => {
     const scanMeta = isRecord(activeProject?.lastScan)
@@ -3416,7 +3420,7 @@ export default function Dashboard() {
       project.id !== activeProject?.id &&
       normalizeRunningStatus(project) === "running",
   );
-  const canRun = !isRunning && !isStarting && !hasAnotherRunningProject;
+  const canRun = !isRunning && !isStarting && stoppingProjectId !== activeProjectId && !hasAnotherRunningProject;
 
   const awaitingPlannerApproval = (() => {
     if (!activeProject) return false;
@@ -5569,6 +5573,8 @@ export default function Dashboard() {
     );
   }
 
+  const mobileRuntimeNotice = getProjectMobileRuntimeNotice(activeProject);
+
   return (
     <>
       <style>{`
@@ -5594,6 +5600,9 @@ export default function Dashboard() {
             isRunning={isRunning}
             canRun={canRun}
             isStarting={isStarting}
+            startingMessage={isStarting ? startingProjectMessage : null}
+            isStopping={stoppingProjectId === activeProject.id}
+            stoppingMessage={stoppingProjectId === activeProject.id ? stoppingProjectMessage : null}
             hasAnotherRunningProject={hasAnotherRunningProject}
             onStartScan={handleStartScanClick}
             onStopScan={() => setStopDialogOpen(true)}
@@ -5608,6 +5617,7 @@ export default function Dashboard() {
             updatedAt={activeProject.updatedAt}
             effectiveStatus={effectiveStatus}
             displayedPentestElapsed={displayedPentestElapsed}
+            runtimeNotice={mobileRuntimeNotice}
             onEditProject={handleOpenProjectEdit}
             formatDateTime={formatDateTime}
           />
@@ -6275,6 +6285,8 @@ export default function Dashboard() {
                 setStopDialogOpen(false);
                 void stopScan(activeProject.id, "pause");
               }}
+              loading={stoppingProjectId === activeProject.id}
+              disabled={stoppingProjectId === activeProject.id}
             >
               Pause Scan
             </Button>
@@ -6288,6 +6300,8 @@ export default function Dashboard() {
                 setLocallyAckedApprovalId(null);
                 void stopScan(activeProject.id, "cancel");
               }}
+              loading={stoppingProjectId === activeProject.id}
+              disabled={stoppingProjectId === activeProject.id}
             >
               Cancel Scan
             </Button>

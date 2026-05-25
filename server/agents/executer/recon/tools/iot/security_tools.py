@@ -59,18 +59,9 @@ _RAW_IOT_RECON_TOOLS: dict[str, dict[str, object]] = {
         "c": "historical_enum",
         "u": "gau TARGET 2>/dev/null | grep -iE 'api|admin|config|device' | unfurl -u keys 2>/dev/null | sort -u",
         "d": ["Wayback Machine harvesting", "hidden endpoint discovery", "parameter mining", "IoT API paths"],
-        "tgt": ["web", "api", "js_analysis", "iot_endpoints"],
-        "alt": "waybackurls TARGET | grep -iE 'api|device'"
+        "tgt": ["web", "api", "js_analysis", "iot_endpoints"]
     },
-    
-    "waybackurls": {
-        "t": "recon",
-        "c": "url_harvesting",
-        "u": "waybackurls TARGET 2>/dev/null | grep -iE 'admin|config|api|device' | sort -u",
-        "d": ["Archive.org URL extraction", "IoT admin panel discovery", "config endpoint mining"],
-        "tgt": ["web", "api", "iot_recon"]
-    },
-    
+
     "paramminer": {
         "t": "fuzz",
         "c": "header_param_discovery",
