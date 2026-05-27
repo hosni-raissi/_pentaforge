@@ -23,6 +23,8 @@ services:
       - backend_model_cache:/data/huggingface
       - backend_cache:/app/server/cache
       - backend_logs:/app/server/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health >/dev/null || exit 1"]
       interval: 20s
@@ -75,6 +77,8 @@ services:
       - sandbox_workspace:/data/sandbox
       - backend_cache:/app/server/cache
       - backend_logs:/app/server/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8010/health >/dev/null || exit 1"]
       interval: 20s

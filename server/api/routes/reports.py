@@ -771,7 +771,7 @@ async def export_report_download(project_id: str, request: ExportReportRequest) 
             "Pragma": "no-cache",
             "X-Archive-Format": safe_format,
         }
-        return Response(content=payload, media_type="application/pdf", headers=headers)
+        return Response(content=payload, media_type="application/octet-stream", headers=headers)
 
     archive_bytes = _build_protected_zip_bytes(
         inner_name=inner_name,

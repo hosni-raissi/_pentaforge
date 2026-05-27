@@ -297,14 +297,17 @@ export default function Reports() {
         setGenerating(false);
         stopStatusPolling();
 
-        // Auto-select based on preference or default to HTML
+        // Auto-select based on preference or default to HTML for each new report generation.
         const savedPref = localStorage.getItem(`pf_report_view_${project.id}`) as ReportFormat | null;
-        if (hasAutoSelected.current !== project.id) {
-          hasAutoSelected.current = project.id;
+        const selectionKey = `${project.id}:${s.generated_at ?? "ready"}`;
+        if (!viewFormat && hasAutoSelected.current !== selectionKey) {
+          hasAutoSelected.current = selectionKey;
           if (savedPref && s[savedPref]) {
             handleView(savedPref);
           } else if (s.html) {
             handleView("html");
+          } else if (s.markdown) {
+            handleView("markdown");
           }
         }
       } else if (!stillActive && !reportExists) {
@@ -313,7 +316,7 @@ export default function Reports() {
     } catch {
       // Silently ignore status fetch failures.
     }
-  }, [project?.id, stopStatusPolling]);
+  }, [project?.id, stopStatusPolling, viewFormat]);
 
   useEffect(() => {
     if (!project) {
@@ -427,6 +430,7 @@ export default function Reports() {
     setGenerating(true);
     setActiveRunStatus("pending");
     setError("");
+    hasAutoSelected.current = null;
     setStatus((prev) => (
       prev
         ? { ...prev, markdown: false, html: false, pdf: false, generated_at: null }

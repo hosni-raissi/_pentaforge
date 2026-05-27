@@ -9,7 +9,6 @@ Graph:
 from __future__ import annotations
 
 import asyncio
-import difflib
 import hashlib
 import inspect
 import json
@@ -2734,37 +2733,7 @@ class PlannerAgent:
     def _resolve_compatible_tool_name(
         self, tool_name: str
     ) -> tuple[str, bool]:
-        if tool_name in self._tools:
-            return tool_name, False
-
-        aliases = {
-            "searchweb": "search_web",
-            "websearch": "search_web",
-            "searchkb": "search_kb",
-            "kbsearch": "search_kb",
-            "getpage": "get_page",
-            "fetchpage": "get_page",
-            "readpage": "get_page",
-            "updateplan": "update_pentest_plan",
-            "saveplan": "update_pentest_plan",
-            "updatepentestplan": "update_pentest_plan",
-            "getplan": "get_pentest_plan",
-            "readplan": "get_pentest_plan",
-            "getpentestplan": "get_pentest_plan",
-            "targettypes": "get_target_types",
-            "gettargettypes": "get_target_types",
-            "addtargettype": "add_target_type",
-        }
-        token = _normalized_token(tool_name)
-        if token in aliases and aliases[token] in self._tools:
-            return aliases[token], True
-
-        close = difflib.get_close_matches(
-            tool_name, list(self._tools.keys()), n=1, cutoff=0.72
-        )
-        if close:
-            return close[0], True
-        return tool_name, False
+        return (tool_name, False) if tool_name in self._tools else (tool_name, False)
 
     def _repair_tool_args(
         self, tool_name: str, args: dict[str, Any]

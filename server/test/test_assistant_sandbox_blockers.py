@@ -72,7 +72,7 @@ def test_assistant_prompt_includes_real_sandbox_security_tools() -> None:
 
 
 def test_assistant_normalizes_legacy_sandbox_wordlist_paths() -> None:
-    assert AssistantAgent._normalize_run_custom_command("fuf") == "ffuf"
+    assert AssistantAgent._normalize_run_custom_command("fuf") == "fuf"
     assert AssistantAgent._prompt_is_direct_run_custom_request(
         "ffuf -u http://scanme.nmap.org/FUZZ -w wordlists/short.txt -ic -mc all -fc 404"
     ) is True

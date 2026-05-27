@@ -9,6 +9,10 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from server.api.dependencies import projects_store
+from server.api.routes.reports import (
+    _build_pdf_export_bytes,
+    _build_protected_zip_bytes,
+)
 
 router = APIRouter(tags=["share"])
 
@@ -21,6 +25,12 @@ class ShareLinkCreatePayload(BaseModel):
 
 class ShareLinkAccessPayload(BaseModel):
     password: str | None = None
+
+
+class SharedExportRequest(BaseModel):
+    format: str = Field(default="html")
+    password: str = Field(min_length=1, max_length=256)
+    access_password: str | None = None
 
 
 class ClientMessagePayload(BaseModel):
@@ -228,6 +238,9 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     .msg {{ padding: 0.75rem; border-radius: 8px; max-width: 85%; line-height: 1.4; font-size: 0.9rem; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }}
     .msg.client {{ background: var(--primary); color: white; align-self: flex-end; border-bottom-right-radius: 0; }}
     .msg.pentester {{ background: var(--surface-light); color: var(--text); align-self: flex-start; border-bottom-left-radius: 0; border: 1px solid var(--border); }}
+    .format-option[disabled] {{ opacity: 0.72; cursor: wait; }}
+    .format-option.is-busy {{ border-color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, var(--surface)); }}
+    .format-option.is-success {{ border-color: #10b981; background: rgba(16, 185, 129, 0.12); }}
     .chat-input {{
       padding: 1rem;
       border-top: 1px solid var(--border);
@@ -377,25 +390,35 @@ def shared_report_viewer(token: str) -> HTMLResponse:
   <div id="download-modal" class="modal-overlay">
     <div class="modal-card">
       <div class="modal-title">Download Report</div>
-      <p class="modal-desc">Choose your preferred format for the security report.</p>
+      <p class="modal-desc">Choose your preferred format and set an export password for the protected report.</p>
+      <div style="display: flex; flex-direction: column; gap: 0.5rem; margin: 1rem 0 1.25rem;">
+        <label for="download-password" style="font-size: 0.78rem; font-weight: 700; color: var(--text); letter-spacing: 0.04em; text-transform: uppercase;">Export Password</label>
+        <input
+          type="password"
+          id="download-password"
+          placeholder="Enter password for the downloaded file"
+          style="width: 100%; box-sizing: border-box; padding: 0.8rem 0.9rem; background: var(--surface-light); border: 1px solid var(--border); color: var(--text); border-radius: 8px;"
+        />
+        <div id="download-error" style="min-height: 1rem; font-size: 0.8rem; color: #ef4444;"></div>
+      </div>
       
-      <button class="format-option" onclick="downloadAs('html')">
+      <button id="download-html-btn" class="format-option" onclick="downloadAs('html')">
         <div class="format-icon">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
         </div>
         <div class="format-info">
-          <span class="format-name">Professional Report</span>
-          <span class="format-ext">Styled HTML Document (.html)</span>
+          <span class="format-name" data-default-name="Professional Report">Professional Report</span>
+          <span class="format-ext" data-default-desc="Password-protected HTML package (.html.zip)">Password-protected HTML package (.html.zip)</span>
         </div>
       </button>
       
-      <button class="format-option" onclick="downloadAs('pdf')">
+      <button id="download-pdf-btn" class="format-option" onclick="downloadAs('pdf')">
         <div class="format-icon">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M16 13a2 2 0 0 0-2-2H8v6h2a2 2 0 0 0 2-2v-2z"></path></svg>
         </div>
         <div class="format-info">
-          <span class="format-name">PDF Document</span>
-          <span class="format-ext">Print-ready PDF (.pdf)</span>
+          <span class="format-name" data-default-name="PDF Document">PDF Document</span>
+          <span class="format-ext" data-default-desc="Password-protected PDF (.pdf)">Password-protected PDF (.pdf)</span>
         </div>
       </button>
       
@@ -406,7 +429,6 @@ def shared_report_viewer(token: str) -> HTMLResponse:
   <div class="layout" id="portal-layout" style="display: none;">
     <div class="report-pane">
       <div class="report-toolbar">
-        <button id="btn-view-html" onclick="setView('html')" style="padding: 0.5rem 1rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 500;">Report View</button>
         
         <div class="report-toolbar-actions">
           <button onclick="downloadActive()" style="padding: 0.5rem 1.25rem; background: var(--primary); border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 8px;">
@@ -448,6 +470,7 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     const token = {token!r};
     const isPasswordProtected = {"true" if is_protected else "false"};
     let currentPassword = null;
+    let downloadInFlight = false;
     
     async function unlock() {{
       const pwdInput = document.getElementById('password');
@@ -492,7 +515,40 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     }}
 
     function closeDownloadModal() {{
+      if (downloadInFlight) return;
       document.getElementById('download-modal').style.display = 'none';
+      const errorNode = document.getElementById('download-error');
+      if (errorNode) errorNode.textContent = '';
+    }}
+
+    function setDownloadButtonState(format, state) {{
+      const buttons = {{
+        html: document.getElementById('download-html-btn'),
+        pdf: document.getElementById('download-pdf-btn'),
+      }};
+      Object.entries(buttons).forEach(([key, button]) => {{
+        if (!button) return;
+        const nameNode = button.querySelector('.format-name');
+        const descNode = button.querySelector('.format-ext');
+        const defaultName = nameNode?.dataset.defaultName || nameNode?.textContent || '';
+        const defaultDesc = descNode?.dataset.defaultDesc || descNode?.textContent || '';
+
+        button.disabled = state === 'busy';
+        button.classList.remove('is-busy', 'is-success');
+
+        if (state === 'busy' && key === format) {{
+          button.classList.add('is-busy');
+          if (nameNode) nameNode.textContent = 'Preparing...';
+          if (descNode) descNode.textContent = 'Building protected download';
+        }} else if (state === 'success' && key === format) {{
+          button.classList.add('is-success');
+          if (nameNode) nameNode.textContent = 'Saved';
+          if (descNode) descNode.textContent = 'Protected file downloaded successfully';
+        }} else {{
+          if (nameNode) nameNode.textContent = defaultName;
+          if (descNode) descNode.textContent = defaultDesc;
+        }}
+      }});
     }}
 
     // Auto-unlock or bind events
@@ -533,7 +589,8 @@ def shared_report_viewer(token: str) -> HTMLResponse:
     }}
 
     async function setView(format) {{
-      document.getElementById('btn-view-html').style.background = format === 'html' ? 'var(--primary)' : 'var(--surface-light)';
+      const btn = document.getElementById('btn-view-html');
+      if (btn) btn.style.background = format === 'html' ? 'var(--primary)' : 'var(--surface-light)';
       document.getElementById('report-frame').style.display = format === 'html' ? 'block' : 'none';
       
       if (format === 'html' && !htmlContent) {{
@@ -564,39 +621,82 @@ def shared_report_viewer(token: str) -> HTMLResponse:
 
     async function downloadActive() {{
       document.getElementById('download-modal').style.display = 'flex';
+      const passwordInput = document.getElementById('download-password');
+      const errorNode = document.getElementById('download-error');
+      if (errorNode) errorNode.textContent = '';
+      if (passwordInput) {{
+        passwordInput.value = '';
+        passwordInput.focus();
+      }}
     }}
 
     async function downloadAs(format) {{
-      closeDownloadModal();
-      
-      if (format === 'pdf') {{
-        const frame = document.getElementById('report-frame');
-        if (frame && frame.contentWindow) {{
-           frame.contentWindow.focus();
-           frame.contentWindow.print();
-        }}
+      if (downloadInFlight) return;
+      const passwordInput = document.getElementById('download-password');
+      const errorNode = document.getElementById('download-error');
+      const cleanPassword = passwordInput && typeof passwordInput.value === 'string'
+        ? passwordInput.value.trim()
+        : '';
+      if (!cleanPassword) {{
+        if (errorNode) errorNode.textContent = 'Enter an export password before downloading.';
+        if (passwordInput) passwordInput.focus();
         return;
       }}
+      if (errorNode) errorNode.textContent = '';
+      downloadInFlight = true;
+      setDownloadButtonState(format, 'busy');
 
-      let content = htmlContent;
-      if (!content) {{
-        // Fetch if not available
-        const res = await fetch(`/api/share/${{token}}/html`, {{ method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{password: currentPassword}}) }});
-        if (res.ok) {{
-          content = await res.text();
-          htmlContent = content;
+      try {{
+        const res = await fetch(`/api/share/${{token}}/reports/export`, {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            format,
+            password: cleanPassword,
+            access_password: currentPassword
+          }})
+        }});
+
+        if (!res.ok) {{
+          let message = 'Failed to download report.';
+          try {{
+            const payload = await res.json();
+            if (payload && payload.detail) {{
+              message = payload.detail;
+            }}
+          }} catch (_err) {{}}
+          if (errorNode) errorNode.textContent = message;
+          downloadInFlight = false;
+          setDownloadButtonState(format, 'idle');
+          return;
         }}
+
+        const blob = await res.blob();
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const filenameMatch = disposition.match(/filename="([^"]+)"/i);
+        const filename = filenameMatch
+          ? filenameMatch[1]
+          : (format === 'pdf' ? 'report.pdf' : `report.${{format}}.zip`);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        setDownloadButtonState(format, 'success');
+        window.setTimeout(() => {{
+          downloadInFlight = false;
+          setDownloadButtonState(format, 'idle');
+          closeDownloadModal();
+        }}, 1200);
+      }} catch (err) {{
+        if (errorNode) errorNode.textContent = `Download failed: ${{err?.message || 'unknown error'}}`;
+        downloadInFlight = false;
+        setDownloadButtonState(format, 'idle');
       }}
-      if (!content) return;
-      const blob = new Blob([content], {{ type: 'text/html' }});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `report.html`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
     }}
 
     let lastRefreshTrigger = null;
@@ -703,6 +803,77 @@ def get_shared_html_report(token: str, payload: ShareLinkAccessPayload) -> HTMLR
         return HTMLResponse(content=report["content"])
     except Exception as exc:
         _raise_share_access_http_error(exc)
+
+
+@router.post("/api/share/{token}/reports/export")
+def export_shared_report(token: str, request: SharedExportRequest) -> Response:
+    safe_format = str(request.format or "html").strip().lower()
+    if safe_format not in {"html", "markdown", "pdf"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported export format: {safe_format}")
+    password = str(request.password or "").strip()
+    if not password:
+        raise HTTPException(status_code=400, detail="Export password is required.")
+
+    try:
+        data = projects_store.access_share_link(token, password=(request.access_password or "").strip() or None)
+    except Exception as exc:
+        _raise_share_access_http_error(exc)
+
+    project_id = data["project"]["id"]
+    html_report = projects_store.get_report(project_id, format="html")
+    markdown_report = projects_store.get_report(project_id, format="markdown")
+    source_report = html_report if safe_format == "html" else markdown_report
+    if safe_format == "pdf":
+        source_report = markdown_report or html_report
+    if source_report is None:
+        raise HTTPException(status_code=404, detail=f"No source report found for {safe_format} export")
+
+    base_name = f"pentaforge-report-{project_id[:8]}"
+    if safe_format == "markdown":
+        inner_name = f"{base_name}.md"
+        payload = str(source_report["content"]).encode("utf-8")
+        archive_bytes = _build_protected_zip_bytes(
+            inner_name=inner_name,
+            payload=payload,
+            password=password,
+            encryption_method="ZipCrypto",
+        )
+        file_name = f"{inner_name}.zip"
+        media_type = "application/zip"
+        content = archive_bytes
+    elif safe_format == "html":
+        inner_name = f"{base_name}.html"
+        payload = str(source_report["content"]).encode("utf-8")
+        archive_bytes = _build_protected_zip_bytes(
+            inner_name=inner_name,
+            payload=payload,
+            password=password,
+            encryption_method="ZipCrypto",
+        )
+        file_name = f"{inner_name}.zip"
+        media_type = "application/zip"
+        content = archive_bytes
+    else:
+        pdf_bytes = _build_pdf_export_bytes(
+            project_id=project_id,
+            content=str(source_report["content"]),
+            source_format=str(source_report["format"]),
+        )
+        try:
+            from server.api.routes.reports import _encrypt_pdf_bytes
+            content = _encrypt_pdf_bytes(pdf_bytes, password)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to protect PDF export: {exc}") from exc
+        file_name = f"{base_name}.pdf"
+        media_type = "application/octet-stream"
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{file_name}"',
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+        "X-Archive-Format": safe_format,
+    }
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 @router.post("/api/share/{token}/messages")

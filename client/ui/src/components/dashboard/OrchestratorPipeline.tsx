@@ -385,7 +385,7 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
                             <code
                               title={activity.message}
                               key={`${activity.type}-${activity.at || index}-${activity.message}`}
-                              className="block overflow-hidden text-ellipsis whitespace-nowrap rounded-md border border-border/40 bg-surface-2/40 px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
+                              className="block overflow-hidden text-ellipsis whitespace-nowrap rounded-md border border-border/40 dark:border-border bg-surface-2/40 px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
                             >
                               {activity.message}
                             </code>

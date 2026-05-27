@@ -14,6 +14,7 @@ from server.agents.executer.run_custom_guard import (
     detect_scope_violation,
 )
 from server.agents.tools.run_custom import (
+    _rewrite_runtime_loopback_args,
     RunCustomRequest,
     _effective_command_cwd,
     redirect_default_tool_outputs,
@@ -124,20 +125,21 @@ def execute_run_custom(req: RunCustomRemoteRequest) -> dict[str, Any]:
         if policy_error:
             raise HTTPException(status_code=403, detail=f"Policy violation: {policy_error}")
 
-        full_command = " ".join([validated.command, *validated.args]).strip()
+        runtime_args = _rewrite_runtime_loopback_args(validated.command, validated.args)
+        full_command = " ".join([validated.command, *runtime_args]).strip()
         execution_cwd = _effective_command_cwd()
         stdout, stderr, return_code = safe_execute(
-            [validated.command, *validated.args],
+            [validated.command, *runtime_args],
             timeout=validated.timeout,
             extra_env=validated.env,
             cwd=execution_cwd,
             password=req.password,
         )
-        artifact_paths = collect_artifact_paths(validated.args, execution_cwd=execution_cwd)
+        artifact_paths = collect_artifact_paths(runtime_args, execution_cwd=execution_cwd)
         return {
             "success": return_code == 0,
             "command": validated.command,
-            "args": list(validated.args),
+            "args": list(runtime_args),
             "full_command": full_command,
             "stdout": stdout[:20000] if stdout else None,
             "stderr": stderr[:5000] if stderr else None,

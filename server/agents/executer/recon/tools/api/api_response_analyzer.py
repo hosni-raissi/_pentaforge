@@ -29,6 +29,8 @@ import requests
 import urllib3
 from pydantic import BaseModel, Field, field_validator
 
+from server.agents.executer.recon.tools.api._common import prepare_runtime_http_target
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
@@ -469,6 +471,7 @@ def analyze_api_response(
         return {"success": False, "target": target, "error": str(exc), "execution_time": 0.0}
 
     result = APIResponseAnalysisResult(success=True, target=req.target)
+    execution_target = prepare_runtime_http_target(req.target)
     merged_headers = merge_headers(req.headers)
 
     default_endpoints = [
@@ -501,7 +504,7 @@ def analyze_api_response(
     with ThreadPoolExecutor(max_workers=req.max_workers) as pool:
         futures = {
             pool.submit(
-                _probe_endpoint, req.target, ep,
+                _probe_endpoint, execution_target, ep,
                 merged_headers, req.timeout, req.probe_post
             ): ep
             for ep in test_endpoints

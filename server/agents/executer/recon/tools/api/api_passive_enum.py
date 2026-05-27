@@ -13,6 +13,10 @@ import requests
 from pydantic import BaseModel, Field, field_validator
 
 from server.agents.executer.recon.tools.api._common import extract_host
+from server.agents.executer.recon.tools.api._common import is_valid_http_target
+from server.agents.executer.recon.tools.api._common import normalize_http_target
+from server.agents.executer.recon.tools.api._common import prepare_runtime_http_target
+from server.agents.executer.recon.tools.api._common import remap_origin_url
 
 
 from server.agents.executer.recon.config import is_blocked_host
@@ -81,11 +85,7 @@ class PassiveEnumRequest(BaseModel):
         if is_blocked_host(host_lower):
             raise ValueError(f"Target '{v}' is blocked.")
 
-        domain = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"
-        bare = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$"
-        ip_http = r"^https?://(\d{1,3}\.){3}\d{1,3}"
-
-        if not (re.match(domain, cleaned) or re.match(bare, cleaned) or re.match(ip_http, cleaned)):
+        if not is_valid_http_target(cleaned):
             raise ValueError(f"Invalid target format: {v}")
         return cleaned
 
@@ -118,13 +118,6 @@ class PassiveEnumResult(BaseModel):
     llm_brief: dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
     execution_time: float = 0.0
-
-
-def _normalize_target(target: str) -> str:
-    cleaned = target.strip()
-    if not cleaned.startswith(("http://", "https://")):
-        cleaned = f"https://{cleaned}"
-    return cleaned.rstrip("/")
 
 
 def _same_origin(base: str, candidate: str) -> bool:
@@ -296,7 +289,8 @@ def api_passive_enum(
             execution_time=0.0,
         ).model_dump(exclude_none=True)
 
-    base = _normalize_target(req.target)
+    base = normalize_http_target(req.target)
+    execution_base = prepare_runtime_http_target(base)
     session = requests.Session()
     merged_headers = {"User-Agent": "PentaForge/PassiveEnum", "Accept": "*/*", **req.headers}
 
@@ -333,8 +327,9 @@ def api_passive_enum(
 
         try:
             t0 = time.time()
+            execution_url = remap_origin_url(url, from_base=base, to_base=execution_base)
             resp = session.get(
-                url,
+                execution_url,
                 headers=merged_headers,
                 timeout=req.timeout,
                 verify=False,

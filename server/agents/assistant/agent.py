@@ -137,11 +137,6 @@ _ASSISTANT_SANDBOX_PATH_REWRITES = {
     "/app/server/sandbox/share/wordlists/dns-fuzz-common.txt": "wordlists/dns-fuzz-common.txt",
     "/app/server/sandbox/share/seclists": "seclists",
 }
-_ASSISTANT_COMMAND_REWRITES = {
-    "fuf": "ffuf",
-}
-
-
 def _assistant_policy_error(
     command: str,
     args: list[str],
@@ -2077,10 +2072,7 @@ class AssistantAgent:
 
     @staticmethod
     def _normalize_run_custom_command(command: str) -> str:
-        normalized = str(command or "").strip()
-        if not normalized:
-            return ""
-        return _ASSISTANT_COMMAND_REWRITES.get(normalized.lower(), normalized)
+        return str(command or "").strip()
 
     @classmethod
     def _prompt_is_direct_run_custom_request(cls, prompt: str) -> bool:
@@ -2098,7 +2090,7 @@ class AssistantAgent:
             return False
         if command == "sudo" and len(parts) > 1:
             command = cls._normalize_run_custom_command(parts[1]).strip().lower()
-        return command in (_ASSISTANT_NETWORK_COMMANDS | set(_ASSISTANT_COMMAND_REWRITES.values()) | {"sudo"})
+        return command in (_ASSISTANT_NETWORK_COMMANDS | {"sudo"})
 
     @staticmethod
     def _normalize_run_custom_args(command: str, args: list[str]) -> list[str]:

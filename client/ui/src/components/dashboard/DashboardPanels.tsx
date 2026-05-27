@@ -113,19 +113,19 @@ function boardBoxKindLabel(kind: string | undefined): string {
 function boardBoxTone(emphasis: string | undefined) {
   if (emphasis === "primary") {
     return {
-      frame: "border-zinc-300 bg-white shadow-sm",
-      chip: "border-zinc-300 bg-zinc-50 text-zinc-900",
+      frame: "border-zinc-300 bg-white shadow-sm dark:border-border dark:bg-surface-1",
+      chip: "border-zinc-300 bg-zinc-50 text-zinc-900 dark:border-border/50 dark:bg-surface-2 dark:text-text-primary",
     };
   }
   if (emphasis === "muted") {
     return {
-      frame: "border-zinc-200 bg-zinc-50 shadow-none",
-      chip: "border-zinc-200 bg-white text-zinc-500",
+      frame: "border-zinc-200 bg-zinc-50 shadow-none dark:border-border/50 dark:bg-surface-0/50",
+      chip: "border-zinc-200 bg-white text-zinc-500 dark:border-border/30 dark:bg-surface-1 dark:text-text-muted",
     };
   }
   return {
-    frame: "border-zinc-200 bg-white shadow-sm",
-    chip: "border-zinc-200 bg-zinc-50 text-zinc-800",
+    frame: "border-zinc-200 bg-white shadow-sm dark:border-border dark:bg-surface-1",
+    chip: "border-zinc-200 bg-zinc-50 text-zinc-800 dark:border-border/50 dark:bg-surface-2 dark:text-text-primary",
   };
 }
 
@@ -354,7 +354,7 @@ export function DashboardTargetOverviewCard({
       </div>
 
       <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
-        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
+        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm dark:border-border">
           <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">
             Target
           </p>
@@ -362,7 +362,7 @@ export function DashboardTargetOverviewCard({
             {target}
           </p>
         </div>
-        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
+        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm dark:border-border">
           <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">
             Target Type
           </p>
@@ -370,7 +370,7 @@ export function DashboardTargetOverviewCard({
             {targetType.replaceAll("_", " ")}
           </p>
         </div>
-        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
+        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm dark:border-border">
           <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">
             Created
           </p>
@@ -381,7 +381,7 @@ export function DashboardTargetOverviewCard({
         <div
           className={`rounded-xl p-3 border shadow-sm transition-all duration-300 ${effectiveStatus === "running"
               ? "bg-pf-500/15 border-pf-500/30 ring-1 ring-pf-500/20"
-              : "bg-surface-0/40 border-border/40"
+              : "bg-surface-0/40 border-border/40 dark:border-border"
             }`}
         >
           <p
@@ -401,7 +401,7 @@ export function DashboardTargetOverviewCard({
             {effectiveStatus}
           </p>
         </div>
-        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm">
+        <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm dark:border-border">
           <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">
             Pentest Timer
           </p>
@@ -479,7 +479,7 @@ export function DashboardFindingsPanel({
             <div
               key={item.id}
               onClick={() => onSelectFinding(item)}
-              className="group cursor-pointer rounded-xl border border-border/60 bg-surface-1/40 p-4 space-y-3 transition-all duration-200 hover:bg-surface-1/60 hover:border-pf-500/30 hover:shadow-md active:scale-[0.99]"
+              className="group cursor-pointer rounded-xl border border-border/60 bg-surface-1/40 p-4 space-y-3 transition-all duration-200 hover:bg-surface-1/60 hover:border-pf-500/30 dark:hover:border-pf-500/30 dark:border-border hover:shadow-md active:scale-[0.99]"
             >
               <div className="flex items-start justify-between gap-3">
                 <h3 className="text-sm font-extrabold text-text-primary leading-tight flex-1 tracking-tight">
@@ -522,7 +522,7 @@ export function DashboardFindingsPanel({
                 {item.endpoint ? (
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] font-bold text-text-muted uppercase tracking-widest min-w-[50px]">Target</span>
-                    <span className="text-[11px] text-text-secondary truncate font-mono bg-surface-2/50 px-2 py-0.5 rounded border border-border/30">
+                    <span className="text-[11px] text-text-secondary truncate font-mono bg-surface-2/50 px-2 py-0.5 rounded border border-border/30 dark:border-border">
                       {item.endpoint}
                     </span>
                   </div>
@@ -535,7 +535,7 @@ export function DashboardFindingsPanel({
                 ) : null}
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-border/30">
+              <div className="flex items-center justify-between pt-2 border-t border-border/30 dark:border-border">
                 <div className="flex items-center gap-1.5">
                   <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-widest">
@@ -654,7 +654,7 @@ export function DashboardArchitecturePanel({
 
         <div className="hidden md:block">
           {hasBoardSpec ? (
-            <div className="h-[430px] overflow-auto rounded-xl border border-border/80 bg-white">
+            <div className="h-[430px] overflow-auto rounded-xl border border-border/80 bg-white dark:border-border">
               <div
                 className="relative"
                 style={{
@@ -778,7 +778,7 @@ export function DashboardArchitecturePanel({
               </div>
             </div>
           ) : (
-            <div className="relative h-[430px] overflow-hidden rounded-xl border border-border/70 bg-surface-0/55">
+            <div className="relative h-[430px] overflow-hidden rounded-xl border border-border/70 bg-surface-0/55 dark:border-border">
               <svg
                 className="pointer-events-none absolute inset-0 h-full w-full"
                 viewBox="0 0 100 100"
@@ -814,7 +814,7 @@ export function DashboardArchitecturePanel({
               {architectureDraft.hosts.map((host) => (
                 <div
                   key={host.id}
-                  className="absolute w-[230px] -translate-x-1/2 -translate-y-1/2 rounded-md border-2 border-black bg-white p-3 shadow-[8px_8px_0_0_rgba(15,23,42,0.12)]"
+                  className="absolute w-[230px] -translate-x-1/2 -translate-y-1/2 rounded-md border-2 border-border/40 bg-surface-0 dark:border-border dark:bg-surface-1 p-3 shadow-md"
                   style={{
                     left: `${host.x}%`,
                     top: `${host.y}%`,
@@ -823,13 +823,13 @@ export function DashboardArchitecturePanel({
                   <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-text-muted">
                     {architectureZoneLabel(host)}
                   </p>
-                  <p className="mt-2 text-sm font-black text-black">{host.name}</p>
+                  <p className="mt-2 text-sm font-black text-text-primary">{host.name}</p>
                   <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.16em] text-text-secondary">{host.role}</p>
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     {host.ports.map((port) => (
                       <span
                         key={`${host.id}-${port}`}
-                        className="rounded-sm border border-black px-1.5 py-0.5 font-mono text-[11px] font-semibold text-black"
+                        className="rounded-sm border border-border/50 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-text-primary"
                       >
                         {port}
                       </span>
@@ -837,7 +837,7 @@ export function DashboardArchitecturePanel({
                   </div>
                   <div className="mt-3 space-y-1">
                     {splitNoteIntoLines(host.note, 2).map((line, index) => (
-                      <p key={`${host.id}-line-${index}`} className="text-[12px] leading-5 text-black">
+                      <p key={`${host.id}-line-${index}`} className="text-[12px] leading-5 text-text-secondary">
                         {line}
                       </p>
                     ))}

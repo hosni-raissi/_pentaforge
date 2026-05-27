@@ -14,7 +14,7 @@ import re
 import shlex
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 from typing import Any, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -99,6 +99,97 @@ _WGET_BLOCKED_FLAGS  = {"--post-file",
                         "-K", "--backup-converted",
                         "--no-parent"}                       # mirroring/page save workflows
 
+_RUN_CUSTOM_URL_VALUE_FLAGS = {
+    "-u",
+    "--url",
+    "--target",
+    "--uri",
+    "-t",
+}
+_RUN_CUSTOM_HOST_VALUE_FLAGS = {
+    "-h",
+    "--host",
+    "--hostname",
+    "--connect",
+    "-connect",
+    "--server",
+    "--domain",
+}
+_RUN_CUSTOM_DATA_VALUE_FLAGS = {
+    "-d",
+    "--data",
+    "--data-raw",
+    "--data-binary",
+    "--data-urlencode",
+    "-H",
+    "--header",
+    "-b",
+    "--cookie",
+    "-c",
+    "--cookie-jar",
+    "-A",
+    "--user-agent",
+}
+
+
+def _in_container_runtime() -> bool:
+    flag = str(os.getenv("PENTAFORGE_CONTAINER_RUNTIME", "")).strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    return os.path.exists("/.dockerenv")
+
+
+def _rewrite_loopback_target_value(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw or not _in_container_runtime():
+        return raw
+    if "://" in raw:
+        parsed = urlsplit(raw)
+        host = str(parsed.hostname or "").strip().lower()
+        if host not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+            return raw
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        netloc = f"host.docker.internal{port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+    lowered = raw.lower()
+    if lowered in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return "host.docker.internal"
+    for prefix in ("localhost:", "127.0.0.1:", "0.0.0.0:"):
+        if lowered.startswith(prefix):
+            return f"host.docker.internal:{raw.split(':', 1)[1]}"
+    return raw
+
+
+def _rewrite_runtime_loopback_args(command: str, args: list[str]) -> list[str]:
+    if not _in_container_runtime():
+        return list(args)
+    rewritten: list[str] = []
+    skip_rewrite_for_next = False
+    rewrite_next = False
+    for raw_arg in args:
+        arg = str(raw_arg or "")
+        if rewrite_next:
+            rewritten.append(_rewrite_loopback_target_value(arg))
+            rewrite_next = False
+            continue
+        if skip_rewrite_for_next:
+            rewritten.append(arg)
+            skip_rewrite_for_next = False
+            continue
+        if arg in _RUN_CUSTOM_DATA_VALUE_FLAGS:
+            rewritten.append(arg)
+            skip_rewrite_for_next = True
+            continue
+        if arg in (_RUN_CUSTOM_URL_VALUE_FLAGS | _RUN_CUSTOM_HOST_VALUE_FLAGS):
+            rewritten.append(arg)
+            rewrite_next = True
+            continue
+        if arg.startswith(("http://", "https://", "ws://", "wss://")):
+            rewritten.append(_rewrite_loopback_target_value(arg))
+            continue
+        rewritten.append(arg)
+    return rewritten
 
 def _arg_contains_blocked_shell_token(arg: str) -> str | None:
     text = str(arg or "")
@@ -192,11 +283,6 @@ class RunCustomRequest(BaseModel):
                 "Specify the binary name only (e.g. 'nmap'), not a full path. "
                 "Use cwd to set the working directory."
             )
-        # Command aliasing (e.g. fuf -> ffuf)
-        if cmd.lower() == "fuf":
-            self.command = "ffuf"
-            cmd = "ffuf"
-
         lowered_cmd = cmd.lower()
         if lowered_cmd in BLOCKED_COMMANDS:
             raise ValueError(
@@ -983,8 +1069,10 @@ def run_custom(
             execution_time=round(time.time() - start, 2),
         ).model_dump()
 
+    runtime_args = _rewrite_runtime_loopback_args(req.command, req.args)
+
     # ── Build & audit-log command ─────────────────────────────
-    cmd = [req.command] + req.args
+    cmd = [req.command] + runtime_args
     full_command = " ".join(shlex.quote(x) for x in cmd)
 
     # ── Password handling ──────────────────────────────────────
@@ -1070,7 +1158,7 @@ def run_custom(
             cwd=execution_cwd,
             password=password,
         )
-        artifact_paths = collect_artifact_paths(req.args, execution_cwd=execution_cwd)
+        artifact_paths = collect_artifact_paths(runtime_args, execution_cwd=execution_cwd)
     append_audit_record(
         command=req.command,
         args=req.args,

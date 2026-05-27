@@ -21,12 +21,14 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 import structlog
 
 from server.db.projects import ProjectsStore
+from server.db.projects.config import projects_db_config
 from server.db.projects.project_rag import index_verified_finding
 from server.db.projects.runtime_cache import get_project_runtime_cache
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
@@ -1472,6 +1474,7 @@ def _extract_cve_candidates_from_text(*values: Any) -> list[str]:
 def _build_verified_finding_entry(
     *,
     target: str,
+    scan_id: str = "",
     item: dict[str, Any],
 ) -> dict[str, Any]:
     scenario = item.get("scenario", {}) if isinstance(item.get("scenario", {}), dict) else {}
@@ -1616,6 +1619,7 @@ def _build_verified_finding_entry(
 
     return {
         "id": str(uuid.uuid4()),
+        "scan_id": str(scan_id or "").strip(),
         "title": verify_summary or scenario_task or "Verified vulnerability",
         "severity": severity,
         "category": vuln_type,
@@ -1689,6 +1693,79 @@ def _write_project_findings_cache(
     with open(cache_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=True, indent=2)
     return cache_path
+
+
+def _cache_root() -> Path:
+    return (Path(__file__).resolve().parents[1] / "cache").resolve()
+
+
+def _projects_artifacts_root() -> Path:
+    db_path = Path(projects_db_config.projects_db_path).expanduser().resolve()
+    return db_path.parent / "artifacts"
+
+
+def _delete_project_uploaded_artifacts(project_id: str) -> int:
+    safe_project_id = str(project_id or "").strip()
+    if not safe_project_id:
+        return 0
+    project_root = _projects_artifacts_root() / safe_project_id
+    if not project_root.exists():
+        return 0
+    count = sum(1 for path in project_root.rglob("*") if path.is_file())
+    shutil.rmtree(project_root, ignore_errors=True)
+    return count
+
+
+def _delete_project_cache_artifacts(project_id: str) -> dict[str, int]:
+    safe_project_id = str(project_id or "").strip()
+    if not safe_project_id:
+        return {"project_runs_removed": 0, "project_findings_removed": 0}
+
+    get_project_runtime_cache().pop_json(f"project_findings:{safe_project_id}")
+
+    cache_root = _cache_root()
+    project_runs_root = cache_root / "project_runs"
+    project_findings_root = cache_root / "project_findings"
+    project_runs_removed = 0
+    project_findings_removed = 0
+
+    findings_path = project_findings_root / f"{safe_project_id}.json"
+    if findings_path.exists():
+        findings_path.unlink(missing_ok=True)
+        project_findings_removed += 1
+
+    if project_runs_root.exists():
+        for run_dir in project_runs_root.iterdir():
+            if not run_dir.is_dir():
+                continue
+            memory_json = run_dir / "system_memory" / "memory.json"
+            if not memory_json.exists():
+                continue
+            try:
+                payload = json.loads(memory_json.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            overview = payload.get("overview", {}) if isinstance(payload, dict) else {}
+            if str(overview.get("project_id", "")).strip() != safe_project_id:
+                continue
+            shutil.rmtree(run_dir, ignore_errors=True)
+            project_runs_removed += 1
+
+    return {
+        "project_runs_removed": project_runs_removed,
+        "project_findings_removed": project_findings_removed,
+    }
+
+
+def _purge_project_runtime_artifacts(project_id: str, *, project_payload: dict[str, Any] | None = None) -> dict[str, int]:
+    deleted_cache = _delete_project_cache_artifacts(project_id)
+    deleted_sandbox = delete_project_workspace(project_id, project_payload=project_payload)
+    uploaded_artifacts_removed = _delete_project_uploaded_artifacts(project_id)
+    return {
+        **deleted_cache,
+        **deleted_sandbox,
+        "uploaded_artifacts_removed": uploaded_artifacts_removed,
+    }
 
 
 def _slugify_cache_part(value: Any, *, max_len: int = 80) -> str:
@@ -5888,7 +5965,7 @@ class ScanOrchestratorService:
                 from server.agents.planner.tools.pentest_plan import reset_pentest_plan_state
 
                 reset_pentest_plan_state()
-                self._reset_project_runtime_state(project)
+                self._reset_project_runtime_state(project, clear_scan_artifacts=True)
                 project["scanProgress"] = 0
                 project["updatedAt"] = _utc_now_iso()
                 self._projects_store.upsert_project(project)
@@ -5900,6 +5977,16 @@ class ScanOrchestratorService:
                         project_id=project_key,
                         error=str(exc),
                     )
+                for report_format in ("markdown", "html", "pdf"):
+                    try:
+                        self._projects_store.delete_report(project_key, report_format)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "project_report_clear_failed",
+                            project_id=project_key,
+                            report_format=report_format,
+                            error=str(exc),
+                        )
             scan_id = str(uuid.uuid4())
             started_at = _utc_now_iso()
             approval_mode = str(project.get("approval_mode") or "custom").lower().strip()
@@ -6082,7 +6169,12 @@ class ScanOrchestratorService:
             raise LookupError("project not found")
         return self._projects_store.list_scan_event_cache(project_key, limit=limit)
 
-    def _reset_project_runtime_state(self, project: dict[str, Any]) -> None:
+    def _reset_project_runtime_state(
+        self,
+        project: dict[str, Any],
+        *,
+        clear_scan_artifacts: bool = False,
+    ) -> None:
         agents = project.get("agents")
         if isinstance(agents, list):
             for agent in agents:
@@ -6102,6 +6194,11 @@ class ScanOrchestratorService:
                 phase["progress"] = 0
                 phase["startedAt"] = ""
                 phase["completedAt"] = ""
+
+        if clear_scan_artifacts:
+            project["findings"] = []
+            project["findings_count"] = 0
+            project.pop("last_findings_updated", None)
 
     def stop_scan(self, project_id: str, *, mode: str = "pause") -> dict[str, Any]:
         project_key = str(project_id or "").strip()
@@ -6195,41 +6292,14 @@ class ScanOrchestratorService:
             }
 
         # cancel
-        self._runs[project_key] = {
-            "scan_id": scan_id,
-            "project_id": project_key,
-            "status": "idle",
-            "started_at": run_state.get("started_at"),
-            "updated_at": now_iso,
-            "finished_at": now_iso,
-            "error": "",
-            "awaiting_information_gathering_approval": False,
-            "awaiting_planner_approval": False,
-            "awaiting_tool_approval": False,
-            "pending_tool_approval": None,
-            "already_running": False,
-        }
-        project["status"] = "idle"
-        project["scanProgress"] = 0
-        project["updatedAt"] = now_iso
-        last_scan = project.get("lastScan")
-        if isinstance(last_scan, dict):
-            last_scan["awaitingToolApproval"] = False
-            last_scan["pendingToolApproval"] = None
-            project["lastScan"] = last_scan
-        project.pop("lastScan", None)
+        self._tasks.pop(project_key, None)
+        self._runs.pop(project_key, None)
+        reset_project = self._projects_store.reset_project_runtime_state(project_key)
+        cleanup_project = reset_project if isinstance(reset_project, dict) else project
         project.pop("contextWindows", None)
-        self._reset_project_runtime_state(project)
-        self._projects_store.upsert_project(project)
-        delete_project_workspace(project_key, project_payload=project)
-        try:
-            self._projects_store.clear_scan_event_cache(project_key)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "scan_event_cache_clear_failed",
-                project_id=project_key,
-                error=str(exc),
-            )
+        cleanup_project.pop("contextWindows", None)
+        self._projects_store.upsert_project(cleanup_project)
+        _purge_project_runtime_artifacts(project_key, project_payload=cleanup_project)
         self._emit_event(
             project_key,
             event="scan_cancelled",
@@ -6251,6 +6321,14 @@ class ScanOrchestratorService:
                 "status": "idle",
             },
         )
+        try:
+            self._projects_store.clear_scan_event_cache(project_key)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "scan_event_cache_clear_failed",
+                project_id=project_key,
+                error=str(exc),
+            )
         return {
             "ok": True,
             "project_id": project_key,
@@ -8346,6 +8424,7 @@ class ScanOrchestratorService:
                 for item in verify_results_organized["real_vulnerabilities"]:
                     finding_entry = _build_verified_finding_entry(
                         target=target,
+                        scan_id=scan_id,
                         item=item,
                     )
                     saved_finding = _upsert_project_finding(

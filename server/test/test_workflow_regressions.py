@@ -2205,8 +2205,6 @@ def test_report_export_builds_password_protected_archives(tmp_path, monkeypatch)
         assert extracted_pdf.read_bytes().startswith(b"%PDF-")
 
     asyncio.run(_run())
-
-
 def test_tool_approval_flow_persists_gate_state_and_emits_events(tmp_path) -> None:
     store = _make_store(tmp_path)
     persistence = ScanPersistenceService(store)

@@ -13,6 +13,9 @@ from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel, Field, field_validator
 from server.agents.executer.recon.tools.api._common import (
     extract_host,
+    is_valid_http_target,
+    normalize_http_target,
+    prepare_runtime_http_target,
 )
 from server.agents.executer.recon.config import is_blocked_host
 
@@ -46,13 +49,7 @@ class APIDiscoveryRequest(BaseModel):
         if is_blocked_host(host):
             raise ValueError(f"Target '{v}' is blocked")
 
-        domain_pattern = r"^https?://[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}"
-        bare_domain    = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$"
-        ip_with_scheme = r"^https?://(\d{1,3}\.){3}\d{1,3}"
-
-        if not (re.match(domain_pattern, cleaned) or
-                re.match(bare_domain, cleaned)    or
-                re.match(ip_with_scheme, cleaned)):
+        if not is_valid_http_target(cleaned):
             raise ValueError(f"Invalid target: {v}")
         return cleaned
 
@@ -1922,10 +1919,8 @@ def api_endpoint_discovery(
         ).model_dump()
 
     # Normalise target
-    target = req.target
-    if not target.startswith("http"):
-        target = f"https://{target}"
-    target = target.rstrip("/")
+    original_target = normalize_http_target(req.target)
+    target = prepare_runtime_http_target(original_target)
 
     all_endpoints:  list[APIEndpoint]  = []
     swagger_specs:  list[SwaggerSpec]  = []
@@ -2396,7 +2391,7 @@ def api_endpoint_discovery(
     return APIDiscoveryResult(
         success=len(unique_eps) > 0 or len(graphql_infos) > 0,
         tool=tool,
-        target=target,
+        target=original_target,
         command=command_str,
         total_endpoints=len(unique_eps),
         total_unique=len(unique_eps),
