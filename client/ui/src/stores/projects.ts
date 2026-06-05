@@ -57,6 +57,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function getLiveElapsedSeconds(lastScan: Project["lastScan"] | undefined, nowMs = Date.now()): number {
+  if (!lastScan) {
+    return 0;
+  }
+  const persisted =
+    typeof lastScan.elapsedSeconds === "number" && Number.isFinite(lastScan.elapsedSeconds)
+      ? Math.max(0, Math.floor(lastScan.elapsedSeconds))
+      : typeof lastScan.durationSeconds === "number" && Number.isFinite(lastScan.durationSeconds)
+        ? Math.max(0, Math.floor(lastScan.durationSeconds))
+        : 0;
+  const status = typeof lastScan.status === "string" ? lastScan.status.trim().toLowerCase() : "";
+  const startedAt = typeof lastScan.startedAt === "string" ? lastScan.startedAt.trim() : "";
+  if (status !== "running" || !startedAt) {
+    return persisted;
+  }
+  const parsed = new Date(startedAt);
+  if (Number.isNaN(parsed.getTime())) {
+    return persisted;
+  }
+  return Math.max(persisted, Math.floor((nowMs - parsed.getTime()) / 1000));
+}
+
 function isAndroidMobileArtifactProject(project: Project | null | undefined): boolean {
   if (!project) {
     return false;
@@ -308,10 +330,12 @@ export const useProjects = create<ProjectStore>()(
         }
 
         void (async () => {
-          try {
-            await saveProjectToDesktop(runningProject);
-          } catch (error) {
-            console.error('Failed to persist running project before scan start:', error);
+          if (!shouldResume) {
+            try {
+              await saveProjectToDesktop(runningProject);
+            } catch (error) {
+              console.error('Failed to persist running project before scan start:', error);
+            }
           }
 
           try {
@@ -347,48 +371,59 @@ export const useProjects = create<ProjectStore>()(
               )
                 ? responseStatus
                 : 'running';
+              const responseElapsedSeconds =
+                typeof response.elapsed_seconds === 'number'
+                && Number.isFinite(response.elapsed_seconds)
+                  ? Math.max(0, Math.floor(response.elapsed_seconds))
+                  : undefined;
               return {
                 projects: inner.projects.map((project) => (
                   project.id === id
-                    ? {
-                      ...project,
-                      status: nextStatus,
-                      updatedAt: nowIso,
-                      scanProgress: nextStatus === 'running'
-                        ? Math.max(project.scanProgress ?? 0, 5)
-                        : project.scanProgress,
-                      lastScan: nextStatus === 'running'
-                        ? {
-                          scanId: response.scan_id || project.lastScan?.scanId || '',
-                          status: 'running',
-                          startedAt: response.started_at ?? nowIso,
-                          finishedAt: undefined,
-                          elapsedSeconds: 0,
-                          durationSeconds: undefined,
-                          error: (
-                            typeof response.mobile_runtime?.warning === 'string' && response.mobile_runtime.warning.trim()
-                              ? response.mobile_runtime.warning.trim()
-                              : ''
-                          ),
-                          mobileRuntime: {
-                            mode: typeof response.mobile_runtime?.mode === 'string'
-                              ? response.mobile_runtime.mode
-                              : undefined,
-                            executionMode: typeof response.mobile_runtime?.execution_mode === 'string'
-                              ? response.mobile_runtime.execution_mode
-                              : 'static_only',
-                            runtimeAvailable: Boolean(response.mobile_runtime?.runtime_available),
-                            prepared: Boolean(response.mobile_runtime?.prepared),
-                            warning: typeof response.mobile_runtime?.warning === 'string'
-                              ? response.mobile_runtime.warning
-                              : '',
-                            deviceId: typeof response.mobile_runtime?.device_id === 'string'
-                              ? response.mobile_runtime.device_id
-                              : undefined,
-                          },
-                        }
-                        : project.lastScan,
-                    }
+                    ? (() => {
+                      const previousElapsed = getLiveElapsedSeconds(project.lastScan);
+                      return {
+                        ...project,
+                        status: nextStatus,
+                        updatedAt: nowIso,
+                        scanProgress: nextStatus === 'running'
+                          ? Math.max(project.scanProgress ?? 0, 5)
+                          : project.scanProgress,
+                        lastScan: nextStatus === 'running'
+                          ? {
+                            ...(shouldResume ? (project.lastScan ?? {}) : {}),
+                            scanId: response.scan_id || project.lastScan?.scanId || '',
+                            status: 'running',
+                            startedAt: response.started_at
+                              ?? (shouldResume ? project.lastScan?.startedAt : undefined)
+                              ?? nowIso,
+                            finishedAt: undefined,
+                            elapsedSeconds: responseElapsedSeconds ?? (shouldResume ? previousElapsed : 0),
+                            durationSeconds: undefined,
+                            error: (
+                              typeof response.mobile_runtime?.warning === 'string' && response.mobile_runtime.warning.trim()
+                                ? response.mobile_runtime.warning.trim()
+                                : ''
+                            ),
+                            mobileRuntime: {
+                              mode: typeof response.mobile_runtime?.mode === 'string'
+                                ? response.mobile_runtime.mode
+                                : undefined,
+                              executionMode: typeof response.mobile_runtime?.execution_mode === 'string'
+                                ? response.mobile_runtime.execution_mode
+                                : 'static_only',
+                              runtimeAvailable: Boolean(response.mobile_runtime?.runtime_available),
+                              prepared: Boolean(response.mobile_runtime?.prepared),
+                              warning: typeof response.mobile_runtime?.warning === 'string'
+                                ? response.mobile_runtime.warning
+                                : '',
+                              deviceId: typeof response.mobile_runtime?.device_id === 'string'
+                                ? response.mobile_runtime.device_id
+                                : undefined,
+                            },
+                          }
+                          : project.lastScan,
+                      };
+                    })()
                     : project
                 )),
               activeProjectId: id,
@@ -457,8 +492,9 @@ export const useProjects = create<ProjectStore>()(
           stoppingProjectMessage: stopMessage,
         }));
 
+        let stopResponse: Awaited<ReturnType<typeof stopProjectScanFromDesktop>> | null = null;
         try {
-          await stopProjectScanFromDesktop({ projectId: id, mode });
+          stopResponse = await stopProjectScanFromDesktop({ projectId: id, mode });
         } catch (error) {
           console.error('Failed to stop scan:', error);
         }
@@ -517,6 +553,11 @@ export const useProjects = create<ProjectStore>()(
         }
 
         const nowIso = new Date().toISOString();
+        const elapsedAtStop =
+          typeof stopResponse?.elapsed_seconds === 'number'
+          && Number.isFinite(stopResponse.elapsed_seconds)
+            ? Math.max(0, Math.floor(stopResponse.elapsed_seconds))
+            : getLiveElapsedSeconds(target.lastScan);
         const stoppedProject: Project = {
           ...target,
           status: 'stopped',
@@ -524,12 +565,10 @@ export const useProjects = create<ProjectStore>()(
           lastScan: {
             ...(target.lastScan ?? {}),
             status: 'stopped',
-            finishedAt: nowIso,
-            durationSeconds:
-              typeof target.lastScan?.elapsedSeconds === 'number'
-              && Number.isFinite(target.lastScan.elapsedSeconds)
-                ? target.lastScan.elapsedSeconds
-                : target.lastScan?.durationSeconds,
+            startedAt: stopResponse?.started_at ?? target.lastScan?.startedAt,
+            finishedAt: stopResponse?.finished_at ?? nowIso,
+            elapsedSeconds: elapsedAtStop,
+            durationSeconds: elapsedAtStop,
           },
         };
         set((inner) => ({

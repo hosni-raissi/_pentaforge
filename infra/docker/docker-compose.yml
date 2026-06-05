@@ -16,7 +16,7 @@ services:
       PENTAFORGE_RELOAD: "0"
       HF_HOME: /data/huggingface
       SENTENCE_TRANSFORMERS_HOME: /data/huggingface
-      SANDBOX_EXECUTOR_URL: http://tool-sandbox:8010
+      SANDBOX_EXECUTOR_URL: http://host.docker.internal:8010
     volumes:
       - backend_projects_data:/data/projects
       - backend_knowledge_data:/data/knowledge
@@ -60,6 +60,7 @@ services:
   tool-sandbox:
     restart: unless-stopped
     init: true
+    network_mode: "host"
     build:
       context: ../../
       dockerfile: infra/docker/sandbox.Dockerfile

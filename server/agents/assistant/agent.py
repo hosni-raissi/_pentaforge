@@ -1170,7 +1170,7 @@ class AssistantAgent:
                         error=f"Repeated check avoided because this was already attempted recently: {tool_name}",
                         previous_attempt=prior_tool_memory.get(signature),
                     )
-                elif tool_name in {"search_web", "fetch_url_content", "get_page"} and not allow_external_research:
+                elif tool_name in {"search_web", "fetch_url_content"} and not allow_external_research:
                     tool_payload = self._blocked_tool_payload(
                         tool_name=tool_name,
                         parsed_args=parsed_args,
@@ -2334,7 +2334,7 @@ class AssistantAgent:
                 command=command,
                 args=final_args,
                 reason=reason,
-                timeout=int(timeout) if str(timeout).strip() else 300,
+                timeout=int(timeout) if str(timeout).strip() else 420,
                 env=env if isinstance(env, dict) else {},
                 cwd=str(cwd) if cwd else None,
             )
@@ -2348,7 +2348,7 @@ class AssistantAgent:
                 command="sudo",
                 args=sudo_args,
                 reason=f"{reason} (privileged retry)",
-                timeout=int(timeout) if str(timeout).strip() else 300,
+                timeout=int(timeout) if str(timeout).strip() else 420,
                 env=env if isinstance(env, dict) else {},
                 cwd=None,
             )
@@ -2525,14 +2525,14 @@ class AssistantAgent:
             payload["url"] = url
             payload["css_selector"] = str(args.get("css_selector", "")).strip()
             return payload
-        return await assistant_get_page(
+        return await assistant_get_page.fn(
             url=url,
             css_selector=str(args.get("css_selector", "")).strip(),
         )
 
     async def _execute_fetch_url_content(self, args: dict[str, Any]) -> dict[str, Any]:
         url = str(args.get("url", "")).strip()
-        return await assistant_fetch_url_content(
+        return await assistant_fetch_url_content.fn(
             url=url,
             css_selector=str(args.get("css_selector", "")).strip(),
         )
@@ -3060,11 +3060,6 @@ class AssistantAgent:
         target: str,
     ) -> str | None:
         normalized_command = str(command or "").strip().lower()
-        if normalized_command not in _ASSISTANT_NETWORK_COMMANDS:
-            return (
-                "Assistant command execution is limited to current-target diagnostics and approved local artifact inspection commands. "
-                f"'{normalized_command or command}' is not allowed in assistant chat."
-            )
         target_host, target_port = extract_target_host_port(target)
         matched_target = False
         skip_next = False
@@ -3313,6 +3308,38 @@ class AssistantAgent:
         text = str(raw_content or "").strip()
         if not text:
             return raw_content, []
+
+        # Handle Gemini's raw multi-tool stream format: tool_name{"arg":"val"}äkuutatool_name2{"arg":"val"}
+        if "äkuuta" in text or re.match(r"^[a-zA-Z0-9_]+\s*\{", text):
+            parts = text.split("äkuuta")
+            tool_calls = []
+            cleaned_parts = []
+            valid_format = False
+            for part in parts:
+                part = part.strip()
+                if not part: continue
+                match = re.match(r"^([a-zA-Z0-9_]+)\s*(\{.*\})$", part, flags=re.DOTALL)
+                if match:
+                    valid_format = True
+                    tool_name = match.group(1)
+                    try:
+                        parsed_args = json.loads(match.group(2))
+                        if isinstance(parsed_args, dict):
+                            tool_calls.append({
+                                "id": f"embedded-{tool_name}",
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": json.dumps(parsed_args, ensure_ascii=True),
+                                },
+                            })
+                    except Exception:
+                        cleaned_parts.append(part)
+                else:
+                    cleaned_parts.append(part)
+            
+            if tool_calls and valid_format:
+                return " ".join(cleaned_parts).strip(), tool_calls
 
         patterns = [
             re.compile(

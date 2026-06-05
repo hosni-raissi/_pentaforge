@@ -990,6 +990,8 @@ class ProjectsStore:
             ]
         )
 
+        project.pop("checklist", None)
+        
         reset_project = {
             **project,
             "status": "idle",

@@ -812,9 +812,10 @@ in cybersecurity, surveying the principal use cases where machine learning and
 large language models have transformed defensive and offensive security practices.
 We then focus specifically on the penetration testing domain, describing the
 traditional lifecycle and the points where AI can intervene most effectively.
-Finally, we conduct a comparative analysis of existing automated penetration
+Next, we conduct a comparative analysis of existing automated penetration
 testing solutions, identifying the gap in the current landscape that motivates
-the design choices of PentaForge.
+the design choices of PentaForge. Finally, we present the LLM benchmarking
+methodology used to select the reasoning backbone of the platform.
 
 % ── Section 1 ─────────────────────────────────────────────────────────────
 \section{Artificial Intelligence in Cybersecurity}
@@ -887,18 +888,23 @@ capability is central to the design of PentaForge's Exploit and Report agents.
     \centering
     \caption{AI application domains in cybersecurity}
     \label{tab:ai_domains}
-    \renewcommand{\arraystretch}{1.3}
-    \begin{tabular}{lll}
-        \toprule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.25\textwidth}|p{0.36\textwidth}|p{0.28\textwidth}|}
+        \hline
         \textbf{Domain} & \textbf{AI Technique} & \textbf{Key Advantage} \\
-        \midrule
-        Intrusion Detection  & Anomaly detection, LSTM        & Real-time, zero-day   \\
-        Malware Analysis     & CNN, GNN, classification       & Signature-free        \\
-        Threat Intelligence  & NLP, NER, clustering           & Auto-correlation      \\
-        Automated Pentest    & LLM, multi-agent systems       & Scalability, speed    \\
-        SOAR                 & Reinforcement Learning         & Autonomous response   \\
-        SAST/DAST            & Transformers, RAG              & Fewer false positives \\
-        \bottomrule
+        \hline
+        Intrusion Detection & Anomaly detection, LSTM and behavioral baselining & Real-time detection of unknown attacks \\
+        \hline
+        Malware Analysis & CNN, GNN and supervised classification & Signature-free malware family recognition \\
+        \hline
+        Threat Intelligence & NLP, entity extraction and clustering & Automatic correlation of external intelligence \\
+        \hline
+        Automated Pentest & LLMs, tool-using agents and RAG & Scalable planning and evidence interpretation \\
+        \hline
+        SOAR & Reinforcement learning and playbook selection & Faster autonomous response to alerts \\
+        \hline
+        SAST/DAST & Transformers and retrieval-augmented analysis & Fewer false positives and better remediation context \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -981,19 +987,25 @@ non-technical stakeholders.
     \centering
     \caption{Estimated gains brought by AI to the pentest lifecycle}
     \label{tab:ai_gains}
-    \renewcommand{\arraystretch}{1.3}
-    \begin{tabular}{lll}
-        \toprule
-        \textbf{Phase}    & \textbf{AI Contribution}              & \textbf{Estimated Gain} \\
-        \midrule
-        Reconnaissance    & Multi-source OSINT automation         & $-70\%$ time            \\
-        Scanning          & Intelligent target prioritization     & $-50\%$ noise           \\
-        Exploitation      & Contextual payload generation         & $+40\%$ coverage        \\
-        Evidence          & Automatic capture and annotation      & $-80\%$ effort          \\
-        Classification    & AI false positive filtering           & $-60\%$ false positives \\
-        Reporting         & Automatic PDF/HTML/SARIF generation   & $-90\%$ time            \\
-        Retest            & Automatic replay and mutation         & $-85\%$ effort          \\
-        \bottomrule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.20\textwidth}|p{0.46\textwidth}|p{0.20\textwidth}|}
+        \hline
+        \textbf{Phase} & \textbf{AI Contribution} & \textbf{Estimated Gain} \\
+        \hline
+        Reconnaissance & Multi-source OSINT automation and target-context synthesis & $-70\%$ time \\
+        \hline
+        Scanning & Intelligent target prioritization and adaptive test selection & $-50\%$ noise \\
+        \hline
+        Exploitation & Contextual payload generation adapted to observed behavior & $+40\%$ coverage \\
+        \hline
+        Evidence & Automatic capture, normalization and annotation of proof & $-80\%$ effort \\
+        \hline
+        Classification & AI-assisted false-positive filtering and impact reasoning & $-60\%$ false positives \\
+        \hline
+        Reporting & Structured Markdown, HTML and protected export generation & $-90\%$ time \\
+        \hline
+        Retest & Automatic replay of prior evidence and payload mutation & $-85\%$ effort \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -1060,6 +1072,27 @@ persistent context and prioritized findings.
 on-premise deployment option, prohibitive cost for most organizations, and no
 open-source access for research or adaptation.
 
+\subsection{Shannon (Keygraph)}
+
+Shannon is an open-source, white-box AI pentester developed by Keygraph for
+web applications and APIs. It combines static source code analysis with live
+exploitation: it reads the application's source code to map attack vectors, then
+dispatches dedicated exploit agents --- running via Playwright browser automation
+--- to confirm each hypothesis with a working proof of concept. Shannon enforces
+a strict ``PoC or it didn't happen'' policy: no vulnerability is reported without
+a verified exploit, resulting in a 96.15\% success rate on the XBOW security
+benchmark (100/104 exploits).
+
+\textbf{Strengths:} parallel exploit agent architecture, automated PoC capture with
+full evidence chain, native false positive elimination through exploit verification,
+and an open-source core (Shannon Lite) extensible to CI/CD pipelines.
+
+\textbf{Limitations:} exclusively white-box --- requires access to source code,
+making it unsuitable for black-box or grey-box engagements; limited to web
+applications and APIs with no network, cloud, or infrastructure coverage; no
+human-in-the-loop control layer; no conversational interface for querying findings
+or reports; and dependent on external API inference with no on-premise LLM option.
+
 \subsection{Comparative Matrix}
 
 Table~\ref{tab:comparison} summarizes the coverage of each solution across the
@@ -1069,25 +1102,58 @@ criteria most relevant to PentaForge's design goals.
     \centering
     \caption{Comparative analysis of existing automated penetration testing solutions}
     \label{tab:comparison}
-    \renewcommand{\arraystretch}{1.4}
-    \begin{tabular}{lccccc}
-        \toprule
-        \textbf{Criterion}     & \textbf{PentestGPT} & \textbf{Burp AI} & \textbf{KaliGPT} & \textbf{NodeZero} & \textbf{PentaForge} \\
-        \midrule
-        Parallel agents        & \texttimes & \texttimes & \texttimes & \checkmark & \checkmark \\
-        Auto POC capture       & \texttimes & \checkmark & \texttimes & \checkmark & \checkmark \\
-        AI FP filtering        & \texttimes & \checkmark & \texttimes & \checkmark & \checkmark \\
-        Automated retest       & \texttimes & \texttimes & \texttimes & $\approx$  & \checkmark \\
-        RAG chatbot            & \texttimes & \texttimes & \texttimes & \texttimes & \checkmark \\
-        Explainability         & \texttimes & $\approx$  & \texttimes & $\approx$  & \checkmark \\
-        Multi-surface          & \checkmark & \texttimes & \checkmark & \checkmark & \checkmark \\
-        Open source            & \checkmark & \texttimes & \checkmark & \texttimes & \checkmark \\
-        On-premise             & \checkmark & $\approx$  & \checkmark & \texttimes & \checkmark \\
-        Kill Switch            & \texttimes & \texttimes & \texttimes & $\approx$  & \checkmark \\
-        Persistent World State & \texttimes & $\approx$  & \texttimes & \checkmark & \checkmark \\
-        \bottomrule
-        \multicolumn{6}{l}{\small \checkmark~Present \quad $\approx$~Partial \quad \texttimes~Absent}
-    \end{tabular}
+    \scriptsize
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.55}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{|p{0.32\textwidth}|c|c|c|c|c|}
+        \hline
+        \textbf{Criterion} & \textbf{PentestGPT} & \textbf{Burp AI} & \textbf{KaliGPT} & \textbf{NodeZero} & \textbf{Shannon} \\
+        \hline
+        \multicolumn{6}{|l|}{\textbf{Architecture}} \\
+        \hline
+        Multi-agent orchestration & \texttimes & \texttimes & \texttimes & \checkmark & \checkmark \\
+        \hline
+        Reasoning loop (plan $\rightarrow$ execute $\rightarrow$ parse) & \checkmark & $\approx$ & $\approx$ & \texttimes & \checkmark \\
+        \hline
+        Isolated execution sandbox & \texttimes & \texttimes & \texttimes & $\approx$ & \checkmark \\
+        \hline
+        Human-in-the-loop gates & \texttimes & \checkmark & \texttimes & $\approx$ & \texttimes \\
+        \hline
+        \multicolumn{6}{|l|}{\textbf{Vulnerability handling}} \\
+        \hline
+        Attack path / vuln chaining & \texttimes & \texttimes & \texttimes & \checkmark & $\approx$ \\
+        \hline
+        Impact-first prioritization (beyond CVSS) & \texttimes & \texttimes & \texttimes & \checkmark & \texttimes \\
+        \hline
+        AI-assisted false positive filtering & \texttimes & \checkmark & \texttimes & \checkmark & \checkmark \\
+        \hline
+        Automated retest after remediation & \texttimes & \texttimes & \texttimes & $\approx$ & \texttimes \\
+        \hline
+        \multicolumn{6}{|l|}{\textbf{Evidence \& reporting}} \\
+        \hline
+        Automatic PoC capture & \texttimes & \checkmark & \texttimes & \checkmark & \checkmark \\
+        \hline
+        Conversational agent (query findings, trigger tools \& interrogate reports) & \texttimes & \texttimes & \texttimes & \texttimes & \texttimes \\
+        \hline
+        Explainable evidence chain & \texttimes & $\approx$ & \texttimes & $\approx$ & \checkmark \\
+        \hline
+        \multicolumn{6}{|l|}{\textbf{Coverage \& deployment}} \\
+        \hline
+        Multi-surface (web, network, infra) & \checkmark & \texttimes & \checkmark & \checkmark & \texttimes \\
+        \hline
+        White-box (source code analysis) & \texttimes & \texttimes & \texttimes & \texttimes & \checkmark \\
+        \hline
+        Local LLM / on-premise deployment & \checkmark & $\approx$ & \checkmark & \texttimes & \texttimes \\
+        \hline
+        Open-source / adaptable & \checkmark & \texttimes & \checkmark & \texttimes & \checkmark \\
+        \hline
+        Operator kill switch \& approvals & \texttimes & \texttimes & \texttimes & $\approx$ & \texttimes \\
+        \hline
+        \multicolumn{6}{|l|}{\checkmark~Present \quad $\approx$~Partial \quad \texttimes~Absent} \\
+        \hline
+    \end{tabular}%
+    }
 \end{table}
 
 \subsection{Identified Gap and PentaForge's Position}
@@ -1102,13 +1168,157 @@ PentestGPT and KaliGPT are open-source but lack parallelism, persistence, and
 automation. Burp Suite AI offers strong false positive filtering but is limited
 to web applications and requires a commercial license. NodeZero delivers the most
 complete automation but is a closed, expensive SaaS with no customization or
-on-premise option.
+on-premise option. Shannon achieves high-confidence exploit verification through
+its white-box approach but is inherently limited to source-available targets and
+provides no human-in-the-loop control layer.
 
-PentaForge is designed to occupy the intersection of these two axes: the openness
-and customizability of PentestGPT with the automation depth of NodeZero, deployable
-entirely on-premise with no data leaving the engagement perimeter.
+PentaForge is designed to occupy the intersection of these axes: the openness
+and customizability of PentestGPT, the automation depth of NodeZero, the exploit
+verification rigor of Shannon, and the human-in-the-loop safety of Burp Suite AI
+--- deployable entirely on-premise with no data leaving the engagement perimeter.
 
 % ── Section 4 ─────────────────────────────────────────────────────────────
+\section{LLM Selection and Benchmarking}
+
+\subsection{Context and Selection Criteria}
+
+The reasoning backbone of PentaForge is a large language model responsible for
+strategic planning, tool-call generation, output parsing, and evidence
+interpretation. Selecting the appropriate model requires evaluating not only raw
+benchmark performance but also the operational constraints specific to an
+autonomous multi-agent pentest orchestrator.
+
+\subsubsection*{The Token Budget Problem}
+
+PentaForge's architecture imposes an unusually heavy token budget per agent call.
+Every agent in the system carries a persistent memory: the full engagement context
+accumulated since the beginning of the session, including prior tool outputs, parsed
+findings, intermediate reasoning chains, and the current attack plan state. This
+memory is injected into every prompt, meaning that as the engagement progresses,
+each individual API call grows larger --- not just in output, but primarily in input.
+
+A concrete estimate illustrates the scale of this constraint. A single agent call
+in PentaForge typically includes:
+
+\begin{itemize}
+    \item \textbf{System prompt and tool schemas:} $\sim$2{,}000--4{,}000 tokens
+    \item \textbf{Agent memory (accumulated findings and prior reasoning):} 5{,}000--20{,}000 tokens depending on session depth
+    \item \textbf{Current tool output being analyzed} (e.g., Nmap XML, SQLMap log, ffuf result): 3{,}000--15{,}000 tokens
+    \item \textbf{Model response (reasoning + structured tool call):} 1{,}000--5{,}000 tokens
+\end{itemize}
+
+A mid-session agent call therefore consumes between \textbf{11{,}000 and 44{,}000 tokens}.
+With four to six agents running in parallel --- each with its own memory and operating
+on different targets or attack vectors simultaneously --- the platform requires
+\textbf{44{,}000 to 264{,}000 tokens per minute} at peak load. Any model whose API
+imposes a TPM ceiling below this range will serialize what is architecturally
+designed to be concurrent, defeating the core value proposition of multi-agent
+parallelism.
+
+This token budget analysis makes \textbf{TPM the primary selection criterion},
+ahead of raw benchmark scores or cost per token. A model with slightly lower
+reasoning scores but sufficient throughput is strictly preferable to a higher-scoring
+model that bottlenecks the entire pipeline.
+
+The five evaluation criteria, listed in order of architectural priority, are:
+
+\begin{enumerate}
+    \item \textbf{Token throughput (TPM) --- critical:} must support peak parallel
+    agent load without queuing. The minimum viable TPM for PentaForge's four-agent
+    baseline configuration is $\sim$100{,}000 TPM; six-agent configurations require
+    $\sim$250{,}000 TPM or more.
+    \item \textbf{Context window --- critical:} must accommodate the full accumulated
+    agent memory without forcing lossy summarization. Sessions exceeding 50{,}000
+    tokens of context are expected in standard engagements.
+    \item \textbf{Tool / function calling reliability:} every agent action is
+    expressed as a structured tool call. Unreliable schema adherence breaks the
+    orchestration pipeline.
+    \item \textbf{Security reasoning:} the model must interpret vulnerability
+    descriptions, map them to MITRE ATT\&CK TTPs, and generate contextually
+    appropriate payloads.
+    \item \textbf{On-premise deployability:} privacy-sensitive engagements require
+    that no data leave the local environment.
+\end{enumerate}
+
+Three candidate models were evaluated: Mistral Large 3 (Mistral AI), Llama~3.3~70B
+(Meta, served via Groq), and Gemini~2.5~Flash (Google).
+
+\subsection{Benchmark Results}
+
+\begin{table}[H]
+    \centering
+    \caption{LLM benchmarking for PentaForge's reasoning backbone}
+    \label{tab:llm_bench}
+    \renewcommand{\arraystretch}{1.45}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{|p{0.30\textwidth}|c|c|c|}
+        \hline
+        \textbf{Criterion} & \textbf{Mistral Large 3} & \textbf{Llama 3.3 70B (Groq)} & \textbf{Gemini 2.5 Flash} \\
+        \hline
+        \multicolumn{4}{|l|}{\textbf{API rate limits (free tier)}} \\
+        \hline
+        Requests per minute (RPM) & $\sim$60 RPM (1 RPS) & 30 RPM & 15 RPM \\
+        \hline
+        Tokens per minute (TPM) & 500{,}000 TPM & 6{,}000 TPM & 1{,}000{,}000 TPM \\
+        \hline
+        Requests per day (RPD) & $\sim$1B tokens/month & 1{,}000 RPD & 1{,}500 RPD \\
+        \hline
+        \multicolumn{4}{|l|}{\textbf{Context \& output capacity}} \\
+        \hline
+        Max context window & 128K tokens & 128K tokens & \textbf{1M tokens} \\
+        \hline
+        Max output tokens per request & 128K & 128K & 65K output / 1M input \\
+        \hline
+        \multicolumn{4}{|l|}{\textbf{Reasoning \& security capabilities}} \\
+        \hline
+        General reasoning (MMLU) & 84\% & 86\% & $\sim$89\% \\
+        \hline
+        Code generation (HumanEval) & Strong & Good & \textbf{Best in class} \\
+        \hline
+        Security reasoning (CyberSecEval) & Moderate & Moderate & \textbf{Strong} \\
+        \hline
+        Tool / function calling & Native & Native & \textbf{Native + structured output} \\
+        \hline
+        Multimodal (screenshot / PoC analysis) & \texttimes & \texttimes & \checkmark \\
+        \hline
+        \multicolumn{4}{|l|}{\textbf{Deployment \& cost}} \\
+        \hline
+        On-premise / local deployment & \checkmark & \checkmark & \texttimes~(API only) \\
+        \hline
+        Open-weight & \checkmark & \checkmark & \texttimes~(proprietary) \\
+        \hline
+        Cost per 1M output tokens & $\sim$\$2.00 & $\sim$\$0.38 & $\sim$\$2.50 \\
+        \hline
+        Inference speed & Medium & Fast (LPU) & Fast \\
+        \hline
+    \end{tabular}%
+    }
+\end{table}
+
+\subsection{Analysis and Decision}
+
+PentaForge's multi-agent architecture imposes three non-negotiable requirements on its reasoning backbone: sufficient tokens per minute to sustain parallel agent execution without queuing, a context window large enough to hold each agent's accumulated memory throughout a full engagement session, and multimodal capability for native screenshot-based PoC validation. Secondary criteria include tool-calling reliability, security reasoning quality, and on-premise deployability for privacy-sensitive engagements. The three candidate models are evaluated against these criteria and ranked accordingly.
+
+
+\begin{table}[H]
+    \centering
+    \caption{LLM selection ranking summary}
+    \label{tab:llm_decision}
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|c|p{0.22\textwidth}|p{0.22\textwidth}|p{0.32\textwidth}|}
+        \hline
+        \textbf{Rank} & \textbf{Role} & \textbf{Model} & \textbf{Justification} \\
+        \hline
+        1st & Primary backbone & Gemini 2.5 Flash & 1M context, 1M TPM, multimodal, best reasoning \\
+        \hline
+        2nd & Short-session fallback & Mistral Large 3 & 500K TPM sufficient, but 128K context limits deep sessions \\
+        \hline
+        3rd & Privacy-only fallback & Llama 3.3 70B & On-premise via Ollama, open-weight, no data egress; 6K TPM limits to single-agent use only \\
+        \hline
+    \end{tabular}
+\end{table}
+
+% ── Section 5 ─────────────────────────────────────────────────────────────
 \section{Key Technologies Underpinning PentaForge}
 
 \subsection{Large Language Models and Chain-of-Thought Reasoning}
@@ -1174,11 +1384,19 @@ security teams with actionable guidance rather than a number to interpret.
 \addcontentsline{toc}{section}{Conclusion}
 
 This chapter has established the theoretical foundations of PentaForge by surveying
-the role of AI in cybersecurity, the state of automated penetration testing, and the
-limitations of existing solutions. The comparative analysis confirms that no current
-open-source tool combines parallel multi-agent execution, persistent engagement
-context, automated retest with bypass detection, full explainability, and a
-RAG-powered conversational interface in a single on-premise platform.
+the role of AI in cybersecurity, the state of automated penetration testing, the
+limitations of existing solutions, and the LLM selection rationale. The comparative
+analysis confirms that no current open-source tool combines parallel multi-agent
+execution, persistent engagement context, automated retest with bypass detection,
+full explainability, and a RAG-powered conversational interface in a single
+on-premise platform. The benchmarking study justifies the selection of
+Gemini~2.5~Flash as PentaForge's primary reasoning backbone --- driven primarily
+by its 1M token context window and 1{,}000{,}000 TPM throughput, which are
+prerequisites for true parallel agent orchestration with persistent memory.
+Mistral Large 3 ranks second as a viable fallback for shallow engagements where
+the 128K context ceiling is not reached. Llama~3.3~70B ranks third and is retained
+exclusively as a privacy fallback for air-gapped, single-agent deployments where
+data sovereignty outweighs throughput requirements.
 
 The technologies reviewed in the final section --- LLMs with Chain-of-Thought
 reasoning, Retrieval-Augmented Generation, multi-agent architectures, and SSVC
@@ -1231,26 +1449,17 @@ clearly separated in the current product workflow.
     \centering
     \caption{PentaForge actors and their responsibilities}
     \label{tab:actors}
-    \renewcommand{\arraystretch}{1.4}
-    \begin{tabular}{lll}
-        \toprule
-        \textbf{Actor}       & \textbf{Profile}            & \textbf{Rights and Responsibilities} \\
-        \midrule
-        Pentester            & Technical operator          & Creates projects, defines target     \\
-                             &                             & type and target metadata, launches   \\
-                             &                             & scans, approves sensitive actions,   \\
-                             &                             & reviews findings and exports reports \\
-        \midrule
-        Client               & External stakeholder        & Accesses a scoped delivery portal,   \\
-                             &                             & reviews reports, receives share      \\
-                             &                             & links, and exchanges messages with   \\
-                             &                             & the pentester                        \\
-        \midrule
-        Administrator        & Platform maintainer         & Manages target-type schemas,         \\
-                             &                             & information-gathering profiles,      \\
-                             &                             & LLM settings, Intel resources, and   \\
-                             &                             & deployment/runtime configuration     \\
-        \bottomrule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.18\textwidth}|p{0.23\textwidth}|p{0.49\textwidth}|}
+        \hline
+        \textbf{Actor} & \textbf{Profile} & \textbf{Rights and Responsibilities} \\
+        \hline
+        Pentester & Technical operator & Creates projects, defines the target type and metadata, launches scans, approves sensitive actions, reviews findings, regenerates reports and exports deliverables. \\
+        \hline
+        Client & External stakeholder & Accesses a scoped delivery portal, reviews professional reports, downloads protected exports and exchanges report feedback with the pentester. \\
+        \hline
+        Administrator & Platform maintainer & Manages target-type schemas, information-gathering profiles, LLM settings, Intel resources and deployment/runtime configuration. \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -1341,15 +1550,826 @@ the platform.
     Qdrant, and the dedicated tool sandbox.
 \end{itemize}
 
-\subsection{Use Case Diagram}
+\section{Detailed Functional Requirements}
 
-\begin{figure}[H]
+This section consolidates the functional requirements that guide the implementation of
+PentaForge. Requirements are grouped by module to make traceability easier.
+
+\begin{longtable}{|p{0.12\textwidth}|p{0.22\textwidth}|p{0.56\textwidth}|}
+\hline
+\textbf{ID} & \textbf{Module} & \textbf{Requirement} \\
+\hline
+\endfirsthead
+\hline
+\textbf{ID} & \textbf{Module} & \textbf{Requirement} \\
+\hline
+\endhead
+FR01 & Projects & The system shall allow the user to create a project with a name,
+target, and target type. \\
+\hline
+FR02 & Projects & The system shall persist project metadata independently from scan
+runtime state. \\
+\hline
+FR03 & Projects & The system shall delete all project-scoped data when the user deletes
+a project. \\
+\hline
+FR04 & Scan control & The system shall allow the user to start, stop, resume, and cancel
+scan execution. \\
+\hline
+FR05 & Scan control & The system shall stream scan progress to the UI using live events. \\
+\hline
+FR06 & Information gathering & The system shall collect safe passive and low-noise
+context before planning. \\
+\hline
+FR07 & Memory & The system shall store normalized observations in project memory. \\
+\hline
+FR08 & Planner & The system shall create a checklist adapted to the target type. \\
+\hline
+FR09 & Planner & The system shall create a plan from the saved checklist. \\
+\hline
+FR10 & Executer & The system shall route tool requests through a controlled execution
+layer. \\
+\hline
+FR11 & Executer & The system shall reject out-of-scope tool requests. \\
+\hline
+FR12 & Executer & The system shall reuse valid project-scoped tool results when the
+same command is requested again. \\
+\hline
+FR13 & Analyzer & The system shall classify evidence as verified, false positive,
+inconclusive, or informational. \\
+\hline
+FR14 & Analyzer & The system shall not save a verified vulnerability without sufficient
+project-scoped evidence. \\
+\hline
+FR15 & Reports & The system shall generate Markdown and HTML report variants. \\
+\hline
+FR16 & Reports & The system shall show the professional HTML report by default after
+generation or regeneration. \\
+\hline
+FR17 & Reports & The system shall list each verified finding in the risk summary table. \\
+\hline
+FR18 & Reports & The system shall generate a clear no-findings report when no verified
+finding exists. \\
+\hline
+FR19 & Export & The system shall generate password-protected PDF exports. \\
+\hline
+FR20 & Export & The system shall generate password-protected HTML packages. \\
+\hline
+FR21 & Share & The system shall allow the pentester to create a client share link. \\
+\hline
+FR22 & Share & The system shall allow the client to preview the shared report without
+accessing internal scan data. \\
+\hline
+FR23 & Assistant & The system shall allow the user to ask project-scoped questions. \\
+\hline
+FR24 & Assistant & The assistant shall not introduce unverified vulnerabilities into
+the report. \\
+\hline
+\caption{Functional requirements}
+\label{tab:functional_requirements}
+\end{longtable}
+
+\section{Detailed Non-Functional Requirements}
+
+\begin{longtable}{|p{0.12\textwidth}|p{0.22\textwidth}|p{0.56\textwidth}|}
+\hline
+\textbf{ID} & \textbf{Category} & \textbf{Requirement} \\
+\hline
+\endfirsthead
+\hline
+\textbf{ID} & \textbf{Category} & \textbf{Requirement} \\
+\hline
+\endhead
+NFR01 & Security & Tool execution shall be isolated from the desktop host through a
+sandbox service. \\
+\hline
+NFR02 & Security & The platform shall enforce target scope before execution. \\
+\hline
+NFR03 & Security & Reports shall not expose unrelated project data. \\
+\hline
+NFR04 & Security & Exported client deliverables shall be password protected. \\
+\hline
+NFR05 & Reliability & The platform shall resume from stable checkpoints after interruption. \\
+\hline
+NFR06 & Reliability & Incomplete unstable data shall be cleaned instead of reused. \\
+\hline
+NFR07 & Performance & The platform shall avoid repeated identical tool execution when a
+valid cached result exists. \\
+\hline
+NFR08 & Usability & The UI shall display clear running, waiting, completed, and error
+states. \\
+\hline
+NFR09 & Maintainability & The backend shall separate route handling, service logic,
+orchestration, and tool execution. \\
+\hline
+NFR10 & Extensibility & New target types and tools shall be added through routing and
+metadata rather than hardcoded report logic. \\
+\hline
+NFR11 & Auditability & Findings shall preserve evidence, commands, status, severity, and
+verification metadata. \\
+\hline
+NFR12 & Portability & The development stack shall run through Docker and the Tauri desktop
+application. \\
+\hline
+\caption{Non-functional requirements}
+\label{tab:nonfunctional_requirements}
+\end{longtable}
+
+\newpage
+\section{Requirements Traceability Matrix}
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.28\textwidth}|p{0.44\textwidth}|}
+\hline
+\textbf{Requirement} & \textbf{Design element} & \textbf{Validation artifact} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Requirement} & \textbf{Design element} & \textbf{Validation artifact} \\
+\hline
+\endhead
+Project creation & Backend project routes and project store & T01 functional test \\
+\hline
+Live scan execution & SSE event stream and scan orchestrator & T02 and T03 tests \\
+\hline
+Checklist creation & Planner agent and target-type metadata & T03 and checklist validation \\
+\hline
+Plan creation & Scenario scheduler and saved plan state & T04 and resume sequence \\
+\hline
+Sandboxed execution & Tool routing, sandbox client, execution guards & T05 and security
+control validation \\
+\hline
+Evidence classification & Analyzer chain and finding store & T06 and analyzer validation \\
+\hline
+Smart resume & Scan state model and resume policy & T07, T08, and T09 \\
+\hline
+Professional reporting & Report generator and HTML renderer & T10 and report quality
+validation \\
+\hline
+Protected downloads & Export service and password protection & T11 and T12 \\
+\hline
+Project deletion & Project cleanup service & T13 \\
+\hline
+No-findings report & Project-scoped report rules & T14 and report template rules \\
+\hline
+Cross-project isolation & Project identifier in stores and report filters & T15 \\
+\hline
+\caption{Traceability matrix}
+\label{tab:traceability_matrix}
+\end{longtable}
+
+\section{Detailed Conceptual Modelling}
+
+\section*{Introduction}
+\addcontentsline{toc}{section}{Introduction}
+
+The previous chapters presented the motivation, the state of the art, the high-level
+architecture, and the main implementation elements of PentaForge. This section extends
+that technical description with the modelling views that are normally expected in a
+complete engineering report: the global architecture diagram, the use-case model, the
+principal sequence diagrams, the execution activity model, and the data-flow model.
+
+The objective is not only to show the components of the application, but also to explain
+how they cooperate during realistic operational scenarios. PentaForge is not a simple
+scanner wrapped in a graphical interface. It is a project-oriented platform in which a
+desktop user interface, a backend API, a multi-agent runtime, an execution sandbox,
+persistent storage, and a report delivery mechanism must remain synchronized. For this
+reason, the design documentation needs to represent both structure and behavior.
+
+The modelling presented in this section follows four complementary perspectives:
+
+\begin{itemize}
+    \item \textbf{Structural perspective:} the main components, their responsibilities,
+    and their deployment boundaries.
+    \item \textbf{Functional perspective:} the actors of the system and the use cases
+    available to each actor.
+    \item \textbf{Behavioral perspective:} the sequence of interactions during scan
+    creation, scan execution, report generation, resumption, and client sharing.
+    \item \textbf{Operational perspective:} the state transitions, execution controls,
+    and persistence mechanisms that make the platform reliable after interruption.
+\end{itemize}
+
+Together, these views provide a complete engineering description of the project and
+clarify how the implemented modules support the end-to-end penetration testing workflow.
+
+\subsection{Global Architecture View}
+
+Figure~\ref{fig:extended_architecture} presents the global PentaForge architecture. The
+diagram separates the system into six major layers: the desktop user interface, the
+backend API, the scan runtime, the support agents, the execution layer, and the storage
+layer. This separation reflects the implementation strategy used in the project. The
+desktop interface remains responsible for operator interaction and visualization, while
+the backend API exposes project, scan, report, and assistant endpoints. The scan runtime
+coordinates deterministic steps and AI-driven agents. The execution layer isolates tool
+execution behind safety guards. Finally, the storage layer preserves project state,
+scan memory, vectorized knowledge, and short-lived coordination data.
+
+\clearpage
+\begin{figure}[p]
     \centering
-    % \includegraphics[width=0.85\textwidth]{use_case_diagram.png}
-    \caption{PentaForge use case diagram}
-    \label{fig:use_case}
+    % "Zoom" the whole figure by scaling slightly beyond the text block.
+    \makebox[\textwidth][c]{%
+        \includegraphics[
+            width=1.25\textwidth,
+            height=1.25\textheight,
+            keepaspectratio,
+            trim=60 80 60 80,
+            clip
+        ]{architecture-1.png}%
+    }
+    \caption{Global architecture of PentaForge}
+    \label{fig:extended_architecture}
 \end{figure}
+\clearpage
 
+\subsubsection{Architecture Responsibilities}
+
+The architecture is organized so that every component has a precise responsibility and
+does not need to understand the internal details of the other layers. This improves
+maintainability and reduces coupling. The desktop interface does not execute security
+tools directly. The backend API does not run arbitrary shell commands directly. The
+orchestrator does not permanently store every raw result by itself. The sandbox does
+not decide whether a finding is valid. Each concern is isolated in the part of the
+system that is best suited to handle it.
+
+\begin{longtable}{|p{0.20\textwidth}|p{0.32\textwidth}|p{0.38\textwidth}|}
+\hline
+\textbf{Layer} & \textbf{Main responsibility} & \textbf{Design rationale} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Layer} & \textbf{Main responsibility} & \textbf{Design rationale} \\
+\hline
+\endhead
+Desktop UI & Presents projects, scan progress, reports, and the assistant panel to
+the operator. & Keeps the operator in control while hiding low-level service
+complexity. It also provides fast feedback through live events. \\
+\hline
+Backend API & Exposes HTTP and SSE endpoints for project management, scan control,
+report generation, sharing, and assistant interactions. & Centralizes authentication,
+validation, rate limiting, and routing. It acts as the stable contract between the
+interface and the runtime. \\
+\hline
+Scan runtime & Coordinates the lifecycle of a penetration test: information gathering,
+memory building, checklist planning, execution, analysis, and reporting. & Encapsulates
+the business logic of the scan and provides a single place to reason about state and
+resumption. \\
+\hline
+Support agents & Provide assistant and architecture support. They answer questions,
+summarize project state, and help with planning or interpretation. & Separates
+interactive help from the scan execution loop, preventing the assistant from mutating
+project state without explicit workflow boundaries. \\
+\hline
+Execution layer & Routes tool requests, validates target scope, runs commands in the
+sandbox, and records structured results. & Prevents unsafe direct execution and keeps
+tool behavior auditable and reproducible. \\
+\hline
+Storage layer & Stores project metadata, scan state, Intel state, vector memory, Redis
+coordination data, and generated reports. & Makes the platform durable across restarts,
+supports resume logic, and enables historical analysis. \\
+\hline
+\caption{Architecture layer responsibilities}
+\label{tab:architecture_responsibilities}
+\end{longtable}
+
+\subsubsection{Component Coupling and Boundaries}
+
+The architecture intentionally avoids a monolithic scan function. Instead, the project
+is divided into explicit boundaries. The UI communicates with the backend only through
+HTTP and server-sent events. The backend delegates long-running activities to services.
+The orchestrator coordinates agents and deterministic nodes. The agents request tools
+through a routing layer, and the routing layer calls the sandbox service. Data is
+persisted through repositories and stores rather than through direct writes scattered
+throughout the runtime.
+
+This boundary-oriented design has three benefits. First, it enables observability:
+each layer can emit events and logs using the vocabulary of its own responsibility.
+Second, it improves safety: commands, targets, and scope checks are enforced before
+tool execution. Third, it makes resumption possible: because state is written at
+workflow boundaries, the platform can decide where to continue after an interruption.
+
+\subsection{Use-Case Model}
+
+The use-case model identifies the functional expectations of the platform from the
+point of view of its actors. PentaForge has three primary actors and two secondary
+actors. The primary actors are the pentester, the client, and the administrator or
+maintainer. The secondary actors are the AI assistant and the external target system.
+The AI assistant is not a human actor, but it participates in use cases by providing
+contextual explanations and recommendations. The target system is also not a user, but
+it is a boundary actor because most scan scenarios interact with it through controlled
+tools.
+
+\begin{longtable}{|p{0.24\textwidth}|p{0.66\textwidth}|}
+\hline
+\textbf{Actor} & \textbf{Associated use cases} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Actor} & \textbf{Associated use cases} \\
+\hline
+\endhead
+Pentester & Create project; configure scope; start scan; pause or stop scan; resume
+scan; review checklist; monitor live execution; validate findings; generate reports;
+download protected exports; create client share link; ask assistant questions. \\
+\hline
+Client & Open shared report; preview professional report; download protected PDF or
+HTML package; review executive summary, findings, remediation and attack path. \\
+\hline
+Administrator & Configure tool inventory; maintain sandbox image; manage global
+settings; review logs; update wordlists and payload collections; monitor system
+health. \\
+\hline
+AI Assistant & Explain scan status; summarize evidence; answer scope questions;
+support report interpretation; provide next-step recommendations without bypassing
+workflow rules. \\
+\hline
+Target System & Respond to reconnaissance, crawling, validation and safe exploit
+verification requests issued through approved tools. \\
+\hline
+\caption{Use-case matrix for PentaForge actors}
+\label{tab:use_case_matrix}
+\end{longtable}
+
+\subsubsection{Detailed Use-Case Specifications}
+
+The following tables describe the main use cases in a structured format. Each use case
+includes its objective, trigger, preconditions, main scenario, alternative scenario,
+and expected postconditions.
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.72\textwidth}|}
+\hline
+\textbf{Use case} & UC01 - Create a penetration testing project \\
+\hline
+\textbf{Primary actor} & Pentester \\
+\hline
+\textbf{Objective} & Register a target and create a durable project workspace in
+which scan data, findings, reports, and assistant conversations will be stored. \\
+\hline
+\textbf{Trigger} & The pentester selects the project creation action from the desktop
+interface. \\
+\hline
+\textbf{Preconditions} & The backend is reachable, the project store is available, and
+the target URL or host is syntactically valid. \\
+\hline
+\textbf{Main scenario} &
+The pentester enters the project name, target, and target type. The UI sends the
+creation request to the backend. The backend validates the target, normalizes metadata,
+creates a project identifier, initializes project storage, and returns the project to
+the UI. The UI redirects the pentester to the project workspace. \\
+\hline
+\textbf{Alternatives} & If the target is invalid, the backend rejects the request and
+the UI displays a clear validation message. If a project with the same name already
+exists, the platform allows the user to choose another name without overwriting data. \\
+\hline
+\textbf{Postconditions} & A project workspace exists and can receive scans, reports,
+and assistant messages. \\
+\hline
+\caption{Use case UC01}
+\label{tab:uc01}
+\end{longtable}
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.72\textwidth}|}
+\hline
+\textbf{Use case} & UC02 - Start a scan \\
+\hline
+\textbf{Primary actor} & Pentester \\
+\hline
+\textbf{Objective} & Launch the scan pipeline for the selected project and target. \\
+\hline
+\textbf{Trigger} & The pentester clicks the scan start action. \\
+\hline
+\textbf{Preconditions} & The project exists, the target is in scope, and no conflicting
+active scan is already running for the same project. \\
+\hline
+\textbf{Main scenario} &
+The UI sends a start request. The backend creates or resumes a scan task. The
+orchestrator initializes the scan state, emits an SSE event, executes deterministic
+information-gathering nodes, updates memory, creates a checklist, builds a plan, and
+then allows executer agents to process scenarios. The UI displays each stage as it
+progresses. \\
+\hline
+\textbf{Alternatives} & If a previous checkpoint exists, the orchestrator follows the
+resume policy. If no usable checkpoint exists, it discards incomplete transient data
+and starts a clean scan. \\
+\hline
+\textbf{Postconditions} & The scan has either progressed to execution, reached a paused
+state, or completed with saved findings and report artifacts. \\
+\hline
+\caption{Use case UC02}
+\label{tab:uc02}
+\end{longtable}
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.72\textwidth}|}
+\hline
+\textbf{Use case} & UC03 - Monitor live scan execution \\
+\hline
+\textbf{Primary actor} & Pentester \\
+\hline
+\textbf{Objective} & Observe the state of the planner, executer, analyzer, and report
+pipeline while the scan is running. \\
+\hline
+\textbf{Trigger} & The pentester opens the run page for a project with an active scan. \\
+\hline
+\textbf{Preconditions} & A scan task exists and the event stream endpoint is reachable. \\
+\hline
+\textbf{Main scenario} &
+The UI subscribes to the scan event stream. The backend sends stage changes, progress
+updates, scenario activity, findings, and warnings. The UI updates the orchestrator
+pipeline, execution notes, and verified findings panel without a full page reload. \\
+\hline
+\textbf{Alternatives} & If the event stream disconnects, the UI reconnects and fetches
+the latest persisted state. If the backend has restarted, the UI displays the last
+known state and waits for the resume decision. \\
+\hline
+\textbf{Postconditions} & The pentester has a real-time and auditable view of scan
+activity. \\
+\hline
+\caption{Use case UC03}
+\label{tab:uc03}
+\end{longtable}
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.72\textwidth}|}
+\hline
+\textbf{Use case} & UC04 - Resume an interrupted scan \\
+\hline
+\textbf{Primary actor} & Pentester \\
+\hline
+\textbf{Objective} & Continue useful work after the application was closed or the
+backend was interrupted. \\
+\hline
+\textbf{Trigger} & The pentester reopens the application and starts or resumes the
+project scan. \\
+\hline
+\textbf{Preconditions} & A project exists and may contain partial scan data. \\
+\hline
+\textbf{Main scenario} &
+The orchestrator inspects project state. If the checklist was completed but the plan
+was not created, it creates the plan and continues. If the plan exists, completed
+scenarios remain completed. Scenarios marked as running are reset to pending and
+executed again from the executer stage. If no checklist exists, incomplete scan data is
+removed and a clean scan begins. \\
+\hline
+\textbf{Alternatives} & If persisted data is corrupt or inconsistent, the system keeps
+the project metadata but removes the incomplete scan run and starts from scratch. \\
+\hline
+\textbf{Postconditions} & The scan continues from the safest meaningful checkpoint
+without duplicating completed work unnecessarily. \\
+\hline
+\caption{Use case UC04}
+\label{tab:uc04}
+\end{longtable}
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.72\textwidth}|}
+\hline
+\textbf{Use case} & UC05 - Generate a professional report \\
+\hline
+\textbf{Primary actor} & Pentester \\
+\hline
+\textbf{Objective} & Convert saved findings, evidence, historical activity, and
+scope information into a client-facing report. \\
+\hline
+\textbf{Trigger} & The pentester clicks the report generation or regeneration action. \\
+\hline
+\textbf{Preconditions} & The project exists and has enough scan state to describe the
+assessment. Verified findings may or may not exist. \\
+\hline
+\textbf{Main scenario} &
+The backend loads project-scoped findings and analyzer history, builds a report prompt
+from sanitized data, asks the report model to organize the content, stores Markdown and
+HTML report variants, and returns the generated report metadata. If there are no
+verified vulnerabilities, the report clearly states that no verified findings were
+saved and presents methodology, coverage, limitations, and evidence-based historical
+activity without inventing vulnerabilities. \\
+\hline
+\textbf{Alternatives} & If report generation fails, the previous report remains
+available. If the scan is still running, the report marks itself as a point-in-time
+assessment. \\
+\hline
+\textbf{Postconditions} & Markdown and professional HTML report variants are available
+for preview and export. \\
+\hline
+\caption{Use case UC05}
+\label{tab:uc05}
+\end{longtable}
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.72\textwidth}|}
+\hline
+\textbf{Use case} & UC06 - Share a protected report with a client \\
+\hline
+\textbf{Primary actor} & Pentester \\
+\hline
+\textbf{Objective} & Provide the client with controlled access to the professional
+report and password-protected downloads. \\
+\hline
+\textbf{Trigger} & The pentester creates or opens a share link. \\
+\hline
+\textbf{Preconditions} & A report exists and the share route is enabled. \\
+\hline
+\textbf{Main scenario} &
+The backend creates a share token linked to the project report. The client opens the
+share page and previews the report. When the client downloads PDF or HTML, the backend
+generates protected artifacts using the configured password policy. The browser
+receives the resulting file with a download disposition. \\
+\hline
+\textbf{Alternatives} & If the report has not been generated, the share page displays a
+clear unavailable state. If the password-protected export fails, the UI keeps the
+client on the page and displays an error. \\
+\hline
+\textbf{Postconditions} & The client receives a deliverable report without direct
+access to internal project logs or tool traces. \\
+\hline
+\caption{Use case UC06}
+\label{tab:uc06}
+\end{longtable}
+
+\subsection{Sequence Diagrams}
+
+The following textual sequence diagrams describe the temporal order of interactions
+between the main components. They are written as engineering sequence tables to keep
+the document independent from external diagram packages while preserving the semantics
+of UML sequence diagrams.
+
+\subsubsection{Sequence 1: Project Scan Launch}
+
+\begin{longtable}{|p{0.07\textwidth}|p{0.22\textwidth}|p{0.22\textwidth}|p{0.38\textwidth}|}
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endhead
+1 & Pentester & Desktop UI & Selects the project and starts the scan. \\
+\hline
+2 & Desktop UI & Backend API & Sends scan start request with project identifier. \\
+\hline
+3 & Backend API & Project store & Loads project metadata, target, target type, and latest scan state. \\
+\hline
+4 & Backend API & Scan orchestrator & Creates a new scan task or resumes the current task. \\
+\hline
+5 & Scan orchestrator & Event stream & Emits the initial running status to the UI. \\
+\hline
+6 & Scan orchestrator & Information gathering node & Executes passive and low-noise target discovery. \\
+\hline
+7 & Information gathering node & Intel state store & Saves normalized observations and coverage notes. \\
+\hline
+8 & Scan orchestrator & Brain builder & Builds the project context used by planning and analysis. \\
+\hline
+9 & Brain builder & Qdrant vector store & Stores or updates retrievable semantic context. \\
+\hline
+10 & Scan orchestrator & Planner agent & Requests a checklist and execution plan based on target type and evidence. \\
+\hline
+11 & Planner agent & Project store & Saves checklist items, priorities, and scenario identifiers. \\
+\hline
+12 & Scan orchestrator & Recon and exploit executers & Dispatches pending scenarios to the execution layer. \\
+\hline
+13 & Executers & Tool routing service & Request approved tools with target, arguments, and scope metadata. \\
+\hline
+14 & Tool routing service & Sandbox client & Sends validated command or structured tool request. \\
+\hline
+15 & Sandbox service & Executers & Returns raw output, exit status, and normalized snippets. \\
+\hline
+16 & Executers & Analyzer & Forward evidence for classification and verification. \\
+\hline
+17 & Analyzer & Project store & Saves verified findings, false positives, and inconclusive evidence. \\
+\hline
+18 & Backend API & Desktop UI & Streams progress, findings, and completion events. \\
+\hline
+\caption{Sequence diagram for scan launch}
+\label{tab:seq_scan_launch}
+\end{longtable}
+
+\subsubsection{Sequence 2: Resume After Application Stop}
+
+\begin{longtable}{|p{0.07\textwidth}|p{0.22\textwidth}|p{0.22\textwidth}|p{0.38\textwidth}|}
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endhead
+1 & Pentester & Desktop UI & Reopens the application and enters the project. \\
+\hline
+2 & Desktop UI & Backend API & Requests project state and latest scan status. \\
+\hline
+3 & Backend API & Project store & Loads scan checkpoints, checklist state, plan state, and scenario states. \\
+\hline
+4 & Backend API & Scan orchestrator & Requests resume decision for the project. \\
+\hline
+5 & Scan orchestrator & Resume policy & Classifies the checkpoint as pre-checklist, post-checklist, post-plan, or completed. \\
+\hline
+6 & Resume policy & Project store & Removes incomplete transient data if no checklist was created. \\
+\hline
+7 & Resume policy & Planner agent & Creates the missing plan if checklist exists but plan does not. \\
+\hline
+8 & Resume policy & Scenario scheduler & Keeps completed scenarios completed and resets running scenarios to pending. \\
+\hline
+9 & Scenario scheduler & Executer agents & Restarts only the scenarios that were not safely completed. \\
+\hline
+10 & Executer agents & Tool result cache & Reuses previous identical command output when command, target, arguments, and tool version match. \\
+\hline
+11 & Analyzer & Project store & Updates findings and records newly verified evidence. \\
+\hline
+12 & Backend API & Desktop UI & Streams resumed execution status to the operator. \\
+\hline
+\caption{Sequence diagram for smart scan resumption}
+\label{tab:seq_resume}
+\end{longtable}
+
+\subsubsection{Sequence 3: Report Generation}
+
+\begin{longtable}{|p{0.07\textwidth}|p{0.22\textwidth}|p{0.22\textwidth}|p{0.38\textwidth}|}
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endhead
+1 & Pentester & Reports page & Requests report generation or regeneration. \\
+\hline
+2 & Reports page & Backend API & Sends report generation request for the selected project. \\
+\hline
+3 & Backend API & Project store & Loads scope, findings, analyzer history, scan status, and prior reports. \\
+\hline
+4 & Backend API & Report generator & Builds a deterministic report context limited to this project. \\
+\hline
+5 & Report generator & LLM service & Requests organization, executive wording, and remediation phrasing. \\
+\hline
+6 & LLM service & Report generator & Returns structured Markdown content without inventing unverified vulnerabilities. \\
+\hline
+7 & Report generator & HTML renderer & Converts Markdown into professional client-facing HTML. \\
+\hline
+8 & Report generator & Project store & Saves Markdown, HTML, generation time, and report metadata. \\
+\hline
+9 & Backend API & Reports page & Returns generated report variants. \\
+\hline
+10 & Reports page & Pentester & Displays professional HTML by default and allows Markdown preview. \\
+\hline
+\caption{Sequence diagram for report generation}
+\label{tab:seq_report_generation}
+\end{longtable}
+
+\subsubsection{Sequence 4: Protected Client Download}
+
+\begin{longtable}{|p{0.07\textwidth}|p{0.22\textwidth}|p{0.22\textwidth}|p{0.38\textwidth}|}
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Step} & \textbf{Sender} & \textbf{Receiver} & \textbf{Message / responsibility} \\
+\hline
+\endhead
+1 & Client & Share page & Opens the shared report link. \\
+\hline
+2 & Share page & Backend API & Requests public report preview using the share token. \\
+\hline
+3 & Backend API & Project store & Loads only the report data authorized for sharing. \\
+\hline
+4 & Backend API & Share page & Returns rendered report preview. \\
+\hline
+5 & Client & Share page & Chooses PDF or HTML download. \\
+\hline
+6 & Share page & Export endpoint & Requests password-protected artifact for the selected format. \\
+\hline
+7 & Export endpoint & Report export service & Generates protected PDF or ZIP package according to policy. \\
+\hline
+8 & Report export service & Backend API & Returns file bytes and download metadata. \\
+\hline
+9 & Backend API & Browser & Sends attachment response with appropriate filename and content type. \\
+\hline
+10 & Browser & Client & Downloads the file. Opening the protected artifact requires the password. \\
+\hline
+\caption{Sequence diagram for protected client download}
+\label{tab:seq_client_download}
+\end{longtable}
+
+\subsection{Execution Activity Model}
+
+The scan activity model describes the end-to-end control flow from project creation to
+report delivery. It also identifies the conditions under which the scan can pause,
+resume, or restart safely.
+
+\begin{longtable}{|p{0.07\textwidth}|p{0.28\textwidth}|p{0.55\textwidth}|}
+\hline
+\textbf{Step} & \textbf{Activity} & \textbf{Resulting transition} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Step} & \textbf{Activity} & \textbf{Resulting transition} \\
+\hline
+\endhead
+1 & Create project & Validate target and initialize project state. \\
+\hline
+2 & Start scan & Create scan run and open event stream. \\
+\hline
+3 & Information gathering & Collect passive and safe active context. \\
+\hline
+4 & Build memory & Normalize observations and prepare project context. \\
+\hline
+5 & Create checklist & Select target-type scenarios and priorities. \\
+\hline
+6 & Create plan & Convert checklist into executable scenario batches. \\
+\hline
+7 & Execute scenario & Route approved tools through sandbox with scope guard. \\
+\hline
+8 & Analyze evidence & Classify evidence as verified, false positive, inconclusive or informational. \\
+\hline
+9 & Update memory & Persist findings and observations for later cycles. \\
+\hline
+10 & Repeat or stop & Continue until all planned scenarios are completed, paused or cancelled. \\
+\hline
+11 & Generate report & Produce client-facing Markdown, HTML and protected exports. \\
+\hline
+\caption{Activity model of the scan lifecycle}
+\label{tab:activity_scan}
+\end{longtable}
+
+\subsubsection{Activity Control Points}
+
+The workflow contains several control points that are important for reliability:
+
+\begin{itemize}
+    \item \textbf{Before checklist creation:} the scan has not yet produced a stable
+    plan. If the application stops here, the safest behavior is to remove incomplete
+    transient scan data and start a clean run.
+    \item \textbf{After checklist creation but before plan creation:} the scan has
+    produced a useful checklist. On resume, the platform should keep the checklist and
+    create the missing plan.
+    \item \textbf{After plan creation:} the scan has stable scenario identifiers. On
+    resume, completed scenarios should remain completed, pending scenarios should remain
+    pending, and running scenarios should be reset to pending.
+    \item \textbf{After analyzer verification:} verified findings are durable project
+    records and must not be deleted by a normal resume.
+    \item \textbf{After report generation:} generated reports remain available until a
+    new generation replaces them.
+\end{itemize}
+
+\subsection{Data-Flow Model}
+
+The data-flow model clarifies how raw tool output becomes a client-facing report. This
+transformation is central to PentaForge because raw command output is rarely suitable
+for direct delivery. It must be parsed, normalized, validated, summarized, and
+presented.
+
+\begin{longtable}{|p{0.16\textwidth}|p{0.24\textwidth}|p{0.26\textwidth}|p{0.24\textwidth}|}
+\hline
+\textbf{Stage} & \textbf{Input} & \textbf{Transformation} & \textbf{Output} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Stage} & \textbf{Input} & \textbf{Transformation} & \textbf{Output} \\
+\hline
+\endhead
+Target registration & User-provided URL, host, and target type & Normalization,
+validation, and project metadata creation & Project record and scope definition \\
+\hline
+Information gathering & Target and safe discovery tools & Passive collection, header
+inspection, route discovery, technology fingerprinting & Structured observations and
+coverage notes \\
+\hline
+Memory preparation & Observations and project metadata & Deduplication, summarization,
+semantic indexing, and state persistence & Project memory and retrievable context \\
+\hline
+Planning & Target type, memory, checklist templates, and findings history & Scenario
+selection, prioritization, grouping, and plan creation & Executable checklist and
+scenario plan \\
+\hline
+Execution & Scenario, tool request, scope metadata & Routing, policy checks, sandboxed
+execution, and result capture & Raw output, exit code, normalized snippets \\
+\hline
+Analysis & Raw output, scenario intent, prior evidence & Classification, false-positive
+filtering, confirmation, severity estimation & Verified finding, false positive,
+inconclusive note, or informational record \\
+\hline
+Reporting & Findings, history, scope, limitations, methodology & Client-facing writing,
+table generation, remediation phrasing, attack path construction & Markdown report,
+HTML report, protected PDF or ZIP exports \\
+\hline
+\caption{Data-flow model from target input to report output}
+\label{tab:data_flow}
+\end{longtable}
+
+\section*{Conclusion}
+\addcontentsline{toc}{section}{Conclusion}
+
+This section transformed the implemented architecture into a set of formal design
+views. The global architecture view explained the separation between the desktop UI,
+backend API, scan runtime, support agents, execution layer, and storage layer. The
+use-case model identified the main actors and their responsibilities. The sequence
+diagrams described the temporal behavior of scan launch, resume, report generation,
+and protected client downloads. Finally, the activity and data-flow models explained
+how raw technical observations become verified findings and client-facing reports.
+
+These modelling views are important because they show that PentaForge is not only a
+working prototype. It is a structured software system with explicit boundaries,
+reliable state transitions, and documented interactions between components.
+
+\newpage
 % ── Section 2 ─────────────────────────────────────────────────────────────
 \section{Global Platform Architecture}
 
@@ -1425,17 +2445,21 @@ match the real implementation rather than a generic enterprise reference model.
     \centering
     \caption{Storage strategy by database and use case}
     \label{tab:storage}
-    \renewcommand{\arraystretch}{1.4}
-    \begin{tabular}{lll}
-        \toprule
-        \textbf{Database} & \textbf{Usage}                        & \textbf{Justification} \\
-        \midrule
-        SQLite Projects Store & Projects, reports, share links, events & Simple local persistence with a unified schema \\
-        Redis             & Hot state, coordination, caching       & Low-latency coordination and short-lived state \\
-        Qdrant            & Vector retrieval and knowledge search  & Domain-oriented semantic retrieval \\
-        Intel State Store & Intel refresh state and update timing  & Explicit tracking of refresh cadence \\
-        Filesystem        & Cache, logs, artifacts, exports        & Natural fit for generated files and operator evidence \\
-        \bottomrule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.23\textwidth}|p{0.34\textwidth}|p{0.33\textwidth}|}
+        \hline
+        \textbf{Store} & \textbf{Usage} & \textbf{Justification} \\
+        \hline
+        SQLite Projects Store & Projects, reports, share links, scan events and generated report metadata & Simple local persistence with a unified project-centric schema. \\
+        \hline
+        Redis & Hot state, runtime coordination and short-lived cache records & Low-latency coordination without making temporary state the durable source of truth. \\
+        \hline
+        Qdrant & Vector retrieval, project knowledge and domain search & Dedicated semantic retrieval engine for agent context and assistant answers. \\
+        \hline
+        Intel State Store & Intel refresh state, update timing and source freshness & Explicit tracking of refresh cadence and knowledge update status. \\
+        \hline
+        Filesystem & Cache, logs, generated artifacts, exports and sandbox workspaces & Natural fit for binary artifacts, report packages and operational evidence files. \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -1547,18 +2571,21 @@ the planner, and the reporting service.
     \centering
     \caption{Analyzer decision flow and resulting actions}
     \label{tab:ssvc}
-    \renewcommand{\arraystretch}{1.4}
-    \begin{tabular}{llll}
-        \toprule
-        \textbf{Input}    & \textbf{Source}        & \textbf{Evaluation}      & \textbf{Result} \\
-        \midrule
-        Tool output       & Recon / Exploit path   & Evidence assessment      & finding / info / retry \\
-        Project memory    & Stored context         & Correlation              & memory update / dedupe \\
-        Verified finding  & Analyzer enrichment    & CVSS preparation         & score / vector / severity \\
-        Batch summaries   & Planner handoff        & Follow-up planning input & continue / reprioritize \\
-        \midrule
-        \multicolumn{3}{l}{\textbf{Final Routing}}                           & Memory / Planner / Report \\
-        \bottomrule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.20\textwidth}|p{0.23\textwidth}|p{0.26\textwidth}|p{0.21\textwidth}|}
+        \hline
+        \textbf{Input} & \textbf{Source} & \textbf{Evaluation} & \textbf{Result} \\
+        \hline
+        Tool output & Recon or exploit execution path & Evidence assessment, parser normalization and proof quality check & Finding, informational note, retry or false positive \\
+        \hline
+        Project memory & Stored target context and prior scenario history & Correlation, deduplication and relevance scoring & Memory update or skipped duplicate \\
+        \hline
+        Verified finding & Analyzer enrichment path & CVSS preparation, impact phrasing and remediation alignment & Score, vector, severity and report-ready detail \\
+        \hline
+        Batch summaries & Planner handoff after execution cycles & Follow-up planning and priority adjustment & Continue, reprioritize or finish \\
+        \hline
+        \multicolumn{3}{|p{0.69\textwidth}|}{\textbf{Final routing}} & Memory, planner and report generator \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -1586,19 +2613,386 @@ store.
     \centering
     \caption{Domain vector indexes and their primary knowledge sources}
     \label{tab:vector_indexes}
-    \renewcommand{\arraystretch}{1.3}
-    \begin{tabular}{lll}
-        \toprule
-        \textbf{Index}           & \textbf{Domain}         & \textbf{Primary Sources} \\
-        \midrule
-        Shared knowledge         & Cross-domain            & Built-in security guidance and common references \\
-        Target-type resources    & Web/API/Infra/etc.      & Curated Intel resources per target category \\
-        Project findings         & Project-specific        & Verified finding summaries and saved evidence \\
-        Report context           & Delivery and narrative  & Generated reports and operator-facing summaries \\
-        \bottomrule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.25\textwidth}|p{0.22\textwidth}|p{0.43\textwidth}|}
+        \hline
+        \textbf{Index} & \textbf{Domain} & \textbf{Primary Sources} \\
+        \hline
+        Shared knowledge & Cross-domain & Built-in security guidance, common methodology references and reusable security concepts. \\
+        \hline
+        Target-type resources & Web, API, infrastructure and other target categories & Curated Intel resources aligned with the selected target type. \\
+        \hline
+        Project findings & Project-specific & Verified finding summaries, saved evidence and analyzer outputs. \\
+        \hline
+        Report context & Delivery and narrative & Generated reports, operator-facing summaries and client-facing remediation language. \\
+        \hline
     \end{tabular}
 \end{table}
 
+\section{Persistence, Resumption, and Execution Reliability}
+
+\section*{Introduction}
+\addcontentsline{toc}{section}{Introduction}
+
+Automated penetration testing workflows can be long-running and expensive. A scan may
+take several minutes or several hours depending on the target type, the number of
+scenarios, the response time of the target, the tool inventory, and the number of
+verification steps required by the analyzer. For this reason, a platform such as
+PentaForge must not treat interruption as an exceptional disaster. Interruption is a
+normal operational condition: the user may close the desktop application, the backend
+may be restarted after a code update, Docker may be stopped, or the scan may be paused
+while the operator reviews intermediate evidence.
+
+This section describes the persistence and resume strategy required to make scan
+execution reliable. It also documents the command de-duplication strategy used to avoid
+repeating the same expensive tool execution with the same target and arguments when a
+valid previous result already exists.
+
+\subsection{Persistence Objectives}
+
+The persistence layer must satisfy several objectives at the same time. It must preserve
+useful evidence, avoid keeping corrupted transient state, prevent cross-project data
+leakage, and allow the platform to continue from the correct step after interruption.
+These requirements are summarized in Table~\ref{tab:persistence_objectives}.
+
+\begin{longtable}{|p{0.22\textwidth}|p{0.68\textwidth}|}
+\hline
+\textbf{Objective} & \textbf{Explanation} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Objective} & \textbf{Explanation} \\
+\hline
+\endhead
+Durability & Important project state must survive application closure, backend restart,
+and Docker container restart. This includes project metadata, scan checkpoints,
+checklists, plans, verified findings, analyzer history, and reports. \\
+\hline
+Isolation & Data from one project must not be used as findings for another project,
+even if both projects share the same target URL. Historical context may only be used
+when it belongs to the same project or is explicitly marked as general knowledge. \\
+\hline
+Recoverability & After an interruption, the orchestrator must decide whether to resume,
+repair, or restart. The decision must be deterministic and based on saved checkpoints. \\
+\hline
+Idempotence & Replaying a safe step should not duplicate findings, report entries, or
+execution records. The system should be able to retry without corrupting the project. \\
+\hline
+Auditability & The platform must preserve enough information to explain why a finding
+was saved, why a scenario was skipped, and which commands or tools contributed to a
+conclusion. \\
+\hline
+Minimal exposure & Client-facing reports must not expose internal debugging logs,
+agent prompts, raw tool noise, or unrelated project data. \\
+\hline
+\caption{Persistence objectives}
+\label{tab:persistence_objectives}
+\end{longtable}
+
+\subsection{Scan State Model}
+
+The scan state model is the backbone of the resume strategy. A scan is not simply
+``running'' or ``stopped''. It passes through several meaningful states, and each state
+has a different recovery behavior.
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.30\textwidth}|p{0.42\textwidth}|}
+\hline
+\textbf{State} & \textbf{Meaning} & \textbf{Resume behavior} \\
+\hline
+\endfirsthead
+\hline
+\textbf{State} & \textbf{Meaning} & \textbf{Resume behavior} \\
+\hline
+\endhead
+initialized & Project exists but the scan has not produced stable scan artifacts. &
+Start from scratch. No checklist or plan should be assumed. \\
+\hline
+gathering & Information-gathering nodes are running or partially completed. & If no
+checklist exists, remove incomplete current scan data and restart from the first stable
+node. \\
+\hline
+memory\_built & Initial context exists, but the checklist may not be complete. & If the
+checklist is missing, restart from clean scan state. If the checklist exists, continue
+to planning. \\
+\hline
+checklist\_ready & Checklist exists and is saved, but plan creation has not finished. &
+Keep the checklist, create the plan, and continue execution. \\
+\hline
+plan\_ready & Plan exists with stable scenario identifiers. & Resume scenario execution.
+Completed scenarios remain completed. Running scenarios are reset to pending. \\
+\hline
+executing & One or more scenarios are in progress. & Reload plan, mark interrupted
+running scenarios as pending, reuse valid cached tool results where possible, and
+continue. \\
+\hline
+analyzing & Evidence is being classified or verified. & Re-run the analyzer for
+interrupted records unless the finding was already saved as verified or false positive. \\
+\hline
+reporting & Report artifacts are being generated. & Keep previous completed report if
+available. If generation was interrupted, regenerate from saved project data. \\
+\hline
+completed & All planned scenarios are completed or intentionally skipped. & Do not
+restart automatically. Allow report generation and manual rescan. \\
+\hline
+cancelled & User explicitly cancelled the scan. & Clean current scan execution data
+according to cancellation policy. Preserve project metadata and finalized reports unless
+the project itself is deleted. \\
+\hline
+\caption{Scan state model and resume behavior}
+\label{tab:scan_state_model}
+\end{longtable}
+
+\subsection{Smart Resume Policy}
+
+The resume policy must distinguish between three situations: a normal stop, an explicit
+cancel, and a project deletion. A normal stop means the user closed the application or
+the service was interrupted. In this case, the platform should recover useful work. An
+explicit cancel means the user does not want the current run to continue. In this case,
+the current scan runtime data should be cleaned. A project deletion is stronger: it
+should remove the full project data, including findings, reports, history, share links,
+and scan state.
+
+\subsubsection{Resume Rules}
+
+\begin{enumerate}
+    \item If the project has no saved checklist, the current incomplete scan data is
+    considered unstable and is removed. A new scan starts from scratch.
+    \item If the checklist exists but the plan does not exist, the checklist is kept.
+    The planner creates the plan and the scan continues.
+    \item If the plan exists, completed scenarios remain completed. Pending scenarios
+    remain pending. Running scenarios are considered interrupted and are moved back to
+    pending.
+    \item If a scenario has a saved verified finding, that finding is not deleted by a
+    normal resume.
+    \item If a scenario has only raw interrupted evidence, the analyzer may reprocess
+    it if the evidence is complete. Otherwise the executer should rerun the scenario.
+    \item If report generation was interrupted, the report is regenerated from durable
+    saved findings and project history.
+\end{enumerate}
+
+\subsubsection{Resume Decision Table}
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.22\textwidth}|p{0.22\textwidth}|p{0.28\textwidth}|}
+\hline
+\textbf{Checkpoint} & \textbf{Checklist} & \textbf{Plan} & \textbf{Action} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Checkpoint} & \textbf{Checklist} & \textbf{Plan} & \textbf{Action} \\
+\hline
+\endhead
+No stable checkpoint & Missing & Missing & Delete incomplete current scan data and
+start from information gathering. \\
+\hline
+Information gathering completed partially & Missing & Missing & Delete current scan
+data because no stable checklist exists. \\
+\hline
+Checklist completed & Present & Missing & Keep checklist, create plan, continue. \\
+\hline
+Plan created & Present & Present & Resume execution from pending scenarios. \\
+\hline
+Scenario interrupted & Present & Present & Reset interrupted scenario to pending and
+execute again from executer. \\
+\hline
+Scenario completed & Present & Present & Keep result and do not execute again unless
+manual rescan is requested. \\
+\hline
+Report interrupted & Present & Present & Regenerate report from saved project data. \\
+\hline
+\caption{Resume decision table}
+\label{tab:resume_decision_table}
+\end{longtable}
+
+\subsection{Command De-Duplication and Result Reuse}
+
+During agentic execution, the same command can be proposed more than once. This can
+happen because the planner revisits a target surface, because an exploit scenario asks
+for confirmation, because an interrupted scan resumes, or because two scenarios share a
+tooling step. Repeating identical commands wastes time and can create noisy behavior
+against the target. PentaForge therefore needs a result reuse mechanism.
+
+\subsubsection{Cache Key Definition}
+
+A cached tool result is reusable only when the execution context is equivalent. The
+cache key should include:
+
+\begin{itemize}
+    \item Project identifier.
+    \item Scan identifier or stable scan family identifier.
+    \item Target normalized URL or host.
+    \item Tool name.
+    \item Tool version when available.
+    \item Normalized arguments.
+    \item Environment profile, such as sandbox image version.
+    \item Scope policy version.
+    \item Timeout class and relevant execution flags.
+\end{itemize}
+
+The project identifier is essential. Without it, a result from one project could be
+reused in another project that happens to use the same target. That would violate the
+project-scoped evidence model. Reuse must optimize execution, not contaminate evidence.
+
+\subsubsection{Reuse Eligibility}
+
+\begin{longtable}{|p{0.22\textwidth}|p{0.26\textwidth}|p{0.42\textwidth}|}
+\hline
+\textbf{Condition} & \textbf{Reusable?} & \textbf{Reason} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Condition} & \textbf{Reusable?} & \textbf{Reason} \\
+\hline
+\endhead
+Same project, same target, same tool, same normalized arguments, successful result &
+Yes & The result represents the same observation in the same project context. \\
+\hline
+Same target but different project & No & Findings and evidence must remain
+project-scoped. \\
+\hline
+Same command but different target type & Usually no & Target-type routing can change
+interpretation and safety constraints. \\
+\hline
+Same command but previous result timed out & Conditional & It can be reused for a short
+time as evidence of timeout, but security conclusions should not rely on it alone. \\
+\hline
+Previous result failed because tool was not installed & Conditional & It can be reused
+only until the sandbox image or tool inventory changes. \\
+\hline
+Previous result contains dynamic data & Conditional & Reuse depends on TTL and
+scenario type. Freshness is required for volatile checks. \\
+\hline
+Previous result contributed to a verified finding & Yes for evidence, no for retest &
+The old evidence can explain the finding, but retesting remediation requires a fresh
+execution. \\
+\hline
+\caption{Tool result reuse eligibility}
+\label{tab:reuse_eligibility}
+\end{longtable}
+
+\subsubsection{Executor Cache Algorithm}
+
+The executor cache algorithm can be expressed as follows:
+
+\begin{enumerate}
+    \item Normalize the requested tool name and arguments.
+    \item Validate that the target is in scope.
+    \item Build the cache key from project, scan, target, tool, arguments, and sandbox
+    profile.
+    \item Search the project-scoped tool result store for a valid result.
+    \item If a valid result exists and freshness rules allow reuse, return the cached
+    result with a flag indicating that it was reused.
+    \item If no valid result exists, run the tool through the sandbox client.
+    \item Store the result with raw output, normalized output, exit code, timing,
+    command metadata, and scope metadata.
+    \item Return the new result to the executer and analyzer.
+\end{enumerate}
+
+This algorithm prevents unnecessary repetition without turning the cache into a source
+of false confidence. The analyzer still needs to evaluate the evidence, and the report
+must distinguish between fresh validation and reused historical evidence when that
+distinction matters.
+
+\subsection{Cancellation and Deletion Policies}
+
+PentaForge must clearly distinguish between pausing, stopping, cancelling, and deleting.
+These actions have different meanings for the user and must produce different data
+effects.
+
+\begin{longtable}{|p{0.18\textwidth}|p{0.32\textwidth}|p{0.40\textwidth}|}
+\hline
+\textbf{Action} & \textbf{User intent} & \textbf{Data effect} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Action} & \textbf{User intent} & \textbf{Data effect} \\
+\hline
+\endhead
+Stop application & The user closes the app or interrupts the local runtime. & Preserve
+durable scan checkpoints and resume intelligently on next launch. \\
+\hline
+Pause scan & The user wants to temporarily suspend execution. & Preserve current plan
+and scenario states. Running work may finish or move to a paused state depending on
+implementation. \\
+\hline
+Cancel scan & The user does not want the current run to continue. & Stop active workers
+and clean current run data that is not finalized. Keep project metadata and previous
+final reports. \\
+\hline
+Delete project & The user wants to remove the project. & Delete project metadata,
+scan state, findings, analyzer history, reports, share links, cached tool results, and
+project-scoped vector entries. \\
+\hline
+\caption{Stop, pause, cancel, and delete semantics}
+\label{tab:cancel_delete_policy}
+\end{longtable}
+
+\subsection{Project-Scoped Evidence Isolation}
+
+Evidence isolation is a critical design principle. A penetration testing report must
+represent the current project, not the model's memory, not another project with the
+same target, and not generic vulnerability knowledge. This is especially important for
+automated report generation. If no verified vulnerability exists in a project, the
+report must not invent findings. It should instead describe the scope, methodology,
+coverage, limitations, and historical execution records that belong to the project.
+
+The isolation rule can be summarized as follows:
+
+\begin{quote}
+Only project-scoped saved findings may appear as verified vulnerabilities in the
+project report. Analyzer history can support methodology, limitations, and coverage
+descriptions, but it cannot become a verified finding unless it passed the project's
+verification pipeline.
+\end{quote}
+
+This rule protects client trust. It prevents a report from claiming remote code
+execution, authentication bypass, or sensitive data exposure when the current project
+has not actually saved verified evidence for those issues.
+
+\subsection{Reliability Risks and Mitigations}
+
+\begin{longtable}{|p{0.22\textwidth}|p{0.30\textwidth}|p{0.38\textwidth}|}
+\hline
+\textbf{Risk} & \textbf{Consequence} & \textbf{Mitigation} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Risk} & \textbf{Consequence} & \textbf{Mitigation} \\
+\hline
+\endhead
+Repeated identical commands & Longer scans, noisy target traffic, duplicated logs &
+Project-scoped tool result cache with normalized command keys. \\
+\hline
+Interrupted scenario marked as completed & Missed coverage and false confidence &
+Use explicit scenario states and reset running states to pending on resume. \\
+\hline
+Checklist missing after stop & Resume from unstable context & Clean incomplete scan
+data and restart from scratch. \\
+\hline
+Report uses unrelated findings & Incorrect client deliverable & Enforce project-scoped
+report inputs and reject model-generated claims that lack saved evidence. \\
+\hline
+Delete behaves like pause & Sensitive data remains after user expects removal & Project
+deletion must remove all project-scoped data, reports, history, and share links. \\
+\hline
+Tool inventory changes after cached failure & Old failure hides newly available tool &
+Include sandbox image or tool inventory version in the cache key. \\
+\hline
+\caption{Reliability risks and mitigations}
+\label{tab:reliability_risks}
+\end{longtable}
+
+\section*{Conclusion}
+\addcontentsline{toc}{section}{Conclusion}
+
+This section defined the persistence and reliability strategy required by PentaForge.
+The central idea is that scan state must be meaningful enough to support intelligent
+resumption. If the checklist does not exist, the scan should restart cleanly. If the
+checklist exists but the plan is missing, the plan should be created. If the plan
+exists, completed scenarios must remain completed while interrupted scenarios restart
+from the executer stage. In parallel, command de-duplication reduces unnecessary tool
+execution while preserving project-scoped evidence isolation.
+
+\newpage
 % ── Section 4 ─────────────────────────────────────────────────────────────
 \section{Technical Stack}
 
@@ -1608,21 +3002,29 @@ store.
     \centering
     \caption{Backend and infrastructure technology choices}
     \label{tab:backend_stack}
-    \renewcommand{\arraystretch}{1.4}
-    \begin{tabular}{lll}
-        \toprule
-        \textbf{Technology}      & \textbf{Discarded Alternative} & \textbf{Reason for Choice} \\
-        \midrule
-        FastAPI                  & Flask / Django                 & Clear async API structure and typed route contracts \\
-        Pydantic                 & Manual validation              & Schema-driven request and state validation \\
-        SQLite Projects Store    & Flat files only                & Simple local persistence for project-centric workflows \\
-        Redis                    & In-process cache only          & Explicit low-latency coordination and cache boundary \\
-        Qdrant                   & Ad-hoc embedding files         & Dedicated vector retrieval engine for semantically indexed data \\
-        Docker Compose           & Manual service startup         & Reproducible multi-service local deployment \\
-        Uvicorn                  & Custom server wiring           & Lightweight ASGI runtime for FastAPI services \\
-        Structlog                & Plain print debugging          & Structured operational logging across services \\
-        7-Zip / sandbox tooling  & Unprotected local execution    & Protected export packaging and isolated command tooling \\
-        \bottomrule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.22\textwidth}|p{0.24\textwidth}|p{0.44\textwidth}|}
+        \hline
+        \textbf{Technology} & \textbf{Discarded Alternative} & \textbf{Reason for Choice} \\
+        \hline
+        FastAPI & Flask / Django & Clear async API structure, typed route contracts and strong compatibility with SSE workflows. \\
+        \hline
+        Pydantic & Manual validation & Schema-driven request and state validation for target configuration, scan requests and tool payloads. \\
+        \hline
+        SQLite Projects Store & Flat files only & Simple local persistence for project-centric workflows without requiring a remote database. \\
+        \hline
+        Redis & In-process cache only & Explicit low-latency coordination and cache boundary for runtime state. \\
+        \hline
+        Qdrant & Ad-hoc embedding files & Dedicated vector retrieval engine for semantically indexed data and RAG context. \\
+        \hline
+        Docker Compose & Manual service startup & Reproducible multi-service local deployment for backend, frontend, Redis, Qdrant and sandbox. \\
+        \hline
+        Uvicorn & Custom server wiring & Lightweight ASGI runtime suitable for FastAPI services. \\
+        \hline
+        Structlog & Plain print debugging & Structured operational logging across backend services and scan execution. \\
+        \hline
+        7-Zip / sandbox tooling & Unprotected local execution & Protected export packaging and isolated command tooling. \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -1636,22 +3038,31 @@ runtime footprint associated with a full browser-engine desktop shell.
     \centering
     \caption{Frontend technology choices}
     \label{tab:frontend_stack}
-    \renewcommand{\arraystretch}{1.4}
-    \begin{tabular}{lll}
-        \toprule
-        \textbf{Technology}  & \textbf{Category}        & \textbf{Role} \\
-        \midrule
-        React 19             & UI framework             & Component model, concurrent rendering \\
-        Vite                 & Build tool               & Sub-second HMR, optimized bundles \\
-        Tailwind CSS         & Styling                  & Utility-first, dark mode support \\
-        shadcn/ui            & Component library        & Accessible primitives \\
-        TanStack Query       & Server state             & HTTP data synchronization and caching \\
-        Zustand              & Client state             & Active project, UI session, and local operator state \\
-        Recharts             & Data visualization       & CVSS distribution, scan progress \\
-        React Flow           & Diagram rendering        & Flow and architecture visualization \\
-        XTerm.js             & Terminal emulator        & Embedded terminal and execution logs \\
-        Tauri                & Desktop packaging        & Native shell around the web frontend \\
-        \bottomrule
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.22\textwidth}|p{0.24\textwidth}|p{0.44\textwidth}|}
+        \hline
+        \textbf{Technology} & \textbf{Category} & \textbf{Role} \\
+        \hline
+        React 19 & UI framework & Component model and responsive operator interface. \\
+        \hline
+        Vite & Build tool & Fast development server, optimized bundles and desktop-friendly frontend workflow. \\
+        \hline
+        Tailwind CSS & Styling & Utility-first styling, consistent spacing and dark/light theme support. \\
+        \hline
+        shadcn/ui & Component library & Accessible primitives for forms, dialogs, cards and report controls. \\
+        \hline
+        TanStack Query & Server state & HTTP data synchronization, caching and refresh behavior. \\
+        \hline
+        Zustand & Client state & Active project, UI session and local operator state. \\
+        \hline
+        Recharts & Data visualization & Scan progress, finding distributions and dashboard metrics. \\
+        \hline
+        React Flow & Diagram rendering & Flow and architecture visualization inside the desktop UI. \\
+        \hline
+        XTerm.js & Terminal emulator & Embedded terminal-style execution logs. \\
+        \hline
+        Tauri & Desktop packaging & Native shell around the web frontend with a smaller footprint than Electron. \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -1659,20 +3070,35 @@ runtime footprint associated with a full browser-engine desktop shell.
 
 \begin{table}[H]
     \centering
-    \caption{Hardware prerequisites for PentaForge deployment}
-    \label{tab:hardware}
-    \renewcommand{\arraystretch}{1.4}
-    \begin{tabular}{lll}
-        \toprule
-        \textbf{Component} & \textbf{Minimum}    & \textbf{Recommended} \\
-        \midrule
-        OS                 & Ubuntu 22.04+       & Ubuntu 22.04 LTS \\
-        CPU                & 4 cores             & 8+ cores for smoother multi-service execution \\
-        RAM                & 8 GB                & 16 GB or more for UI, backend, vectors, and sandbox tooling \\
-        Storage            & 50 GB SSD           & 200+ GB SSD for artifacts, caches, and Docker volumes \\
-        GPU                & Optional            & Useful only when local model workflows are enabled \\
-        Network            & Stable internet     & Required for package installation, remote LLMs, and live target access \\
-        \bottomrule
+    \caption{Hardware and system prerequisites for PentaForge deployment}
+    \label{tab:hardware_prerequisites}
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.22\textwidth}|p{0.28\textwidth}|p{0.40\textwidth}|}
+        \hline
+        \textbf{Component} & \textbf{Minimum} & \textbf{Recommended} \\
+        \hline
+        Operating system & Linux host with Docker support, preferably Ubuntu 22.04
+        LTS or newer. & Ubuntu 22.04/24.04 LTS with Docker Engine and Docker Compose
+        for stable backend, sandbox, Redis, Qdrant, and frontend execution. \\
+        \hline
+        CPU & 4 CPU cores. & 8 CPU cores or more for smoother concurrent execution
+        of the FastAPI backend, sandbox tools, Qdrant vector search, and desktop UI. \\
+        \hline
+        RAM & 8 GB. & 16 GB or more, especially when running the embedding model,
+        backend, sandbox, Redis, Qdrant, and frontend at the same time. \\
+        \hline
+        Storage & 50 GB SSD. & 100--200 GB SSD for Docker images, Python
+        dependencies, model cache, scan artifacts, logs, reports, and sandbox
+        workspaces. \\
+        \hline
+        GPU & Not required. & Optional only for future local LLM or accelerated
+        embedding workflows. The current Docker deployment uses CPU-compatible
+        PyTorch and remote or configured LLM providers. \\
+        \hline
+        Network & Internet connection for initial setup and target reachability. &
+        Stable internet access for Docker image pulls, Python package installation,
+        remote LLM calls, vulnerability intelligence updates, and live target access. \\
+        \hline
     \end{tabular}
 \end{table}
 
@@ -1784,6 +3210,56 @@ behavior. The desktop application relies on \textbf{React 19}, \textbf{Vite},
 For retrieval and coordination, the project uses \textbf{Qdrant} and \textbf{Redis}.
 For secure remote tool execution, the platform uses a dedicated sandbox service that
 hosts the command lane separately from the backend API process.
+
+\section{Application Setup and Deployment Time}
+
+The application was designed to be deployed locally through a reproducible
+Docker-based workflow. This choice reduces the number of manual configuration steps
+required from the developer or operator, because the main services are started as a
+coherent stack: the FastAPI backend, the frontend service, Redis, Qdrant, and the
+dedicated tool sandbox. The desktop interface is then launched from the client
+workspace and communicates with the backend over the local API.
+
+The setup process follows five main steps. First, the project source code is obtained
+from the repository. Second, environment variables and provider keys are configured
+when remote LLM services are used. Third, Docker images are built for the backend,
+frontend, and sandbox services. Fourth, the Docker stack is started and the backend
+health endpoint is checked. Finally, the Tauri desktop application is launched from
+the frontend workspace.
+
+\begin{table}[H]
+    \centering
+    \caption{Estimated setup and launch time for PentaForge}
+    \label{tab:setup_time}
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.32\textwidth}|p{0.22\textwidth}|p{0.36\textwidth}|}
+        \hline
+        \textbf{Operation} & \textbf{Estimated Time} & \textbf{Notes} \\
+        \hline
+        First Docker image build & 20--45 minutes & Depends on internet speed,
+        Docker cache state, Python dependencies, and security tooling downloads. \\
+        \hline
+        Sandbox image preparation & 10--30 minutes & Required to prepare the isolated
+        execution environment and its security tool dependencies. \\
+        \hline
+        Local embedding model cache & 5--15 minutes & Needed on the first run when
+        the sentence-transformer model is downloaded and cached. It runs on CPU in the
+        current deployment. \\
+        \hline
+        Normal Docker stack startup & 1--3 minutes & Uses existing images and volumes
+        to start the backend, frontend, Redis, Qdrant, and sandbox services. \\
+        \hline
+        Desktop UI launch & Less than 1 minute & The Tauri interface starts after the
+        backend health check succeeds. \\
+        \hline
+    \end{tabular}
+\end{table}
+
+In practice, the first installation is the longest phase because Docker must build
+images and download dependencies. Subsequent launches are significantly faster because
+Docker layers, Python packages, model files, project volumes, and service caches are
+reused. This makes the platform suitable for repeated local testing during development
+and for controlled demonstrations of the complete workflow.
 
 % ── Section 2 ─────────────────────────────────────────────────────────────
 \section{Implementation of Core Components}
@@ -2101,6 +3577,683 @@ artifact.
     \caption{Generated finding detail showing evidence capture and SSVC decision}
     \label{fig:ui_report}
 \end{figure}
+
+
+
+
+
+
+
+
+\section{Validation, Evaluation, and Discussion}
+
+\section*{Introduction}
+\addcontentsline{toc}{section}{Introduction}
+
+Validation is necessary to demonstrate that PentaForge satisfies its functional and
+non-functional requirements. The platform combines several complex concerns: user
+interaction, asynchronous scan orchestration, AI planning, sandboxed tool execution,
+evidence classification, reporting, sharing, and protected downloads. Testing only one
+of these dimensions would not be sufficient. The validation approach therefore covers
+functional behavior, workflow continuity, security controls, report quality, and user
+experience.
+
+\subsection{Validation Strategy}
+
+The validation strategy is based on five axes:
+
+\begin{itemize}
+    \item \textbf{Functional validation:} verifies that each main use case works as
+    expected.
+    \item \textbf{Workflow validation:} verifies that scan states, resume behavior, and
+    scenario transitions are correct.
+    \item \textbf{Security validation:} verifies scope enforcement, sandbox routing,
+    download protection, and project data isolation.
+    \item \textbf{Report validation:} verifies that the generated report is professional,
+    complete, project-scoped, and free from invented vulnerabilities.
+    \item \textbf{Usability validation:} verifies that the user can understand scan
+    status, preview reports, and download deliverables without hidden steps.
+\end{itemize}
+
+\subsection{Functional Test Matrix}
+
+\begin{longtable}{|p{0.08\textwidth}|p{0.24\textwidth}|p{0.28\textwidth}|p{0.30\textwidth}|}
+\hline
+\textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance criterion} \\
+\hline
+\endfirsthead
+\hline
+\textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance criterion} \\
+\hline
+\endhead
+T01 & Create a web application project & Project appears in the projects list and
+opens correctly. & Project metadata is persisted and target is displayed consistently. \\
+\hline
+T02 & Start a scan on a valid target & Pipeline enters running state and emits live
+updates. & UI shows planner, executer, analyzer, timer, and latest messages. \\
+\hline
+T03 & Generate checklist & Checklist is created from target type and project context. &
+Checklist items are saved and remain available after refresh. \\
+\hline
+T04 & Generate plan after checklist & Plan is created from checklist items. & Scenario
+identifiers are stable and visible in stored state. \\
+\hline
+T05 & Execute scenario & Tool request is routed through the sandbox. & Raw output,
+exit code, and normalized result are stored. \\
+\hline
+T06 & Analyze evidence & Evidence is classified correctly. & Verified findings require
+deterministic evidence, while noise remains informational or inconclusive. \\
+\hline
+T07 & Stop and resume before checklist & Incomplete scan starts from scratch. & No
+unstable partial data is reused as completed work. \\
+\hline
+T08 & Stop after checklist before plan & Plan is created on resume. & Checklist is
+preserved and execution continues. \\
+\hline
+T09 & Stop during scenario execution & Running scenario restarts from executer. &
+Completed scenarios are not repeated unless manually requested. \\
+\hline
+T10 & Regenerate report & Professional HTML preview is selected by default. & Report
+cards show generated status and preview opens without requiring extra selection. \\
+\hline
+T11 & Download protected PDF & PDF download is password protected. & Opening the
+downloaded file requires the configured password. \\
+\hline
+T12 & Download protected HTML package & HTML export is packaged and protected. & The
+downloaded package behaves consistently with the pentester and client share flows. \\
+\hline
+T13 & Delete project & All project data is removed. & Findings, history, reports,
+share links, and project-scoped cache entries are deleted. \\
+\hline
+T14 & Generate report with no findings & Report states no verified findings. & It
+includes methodology, coverage, limitations, and project history without invented
+vulnerabilities. \\
+\hline
+T15 & Same target in two projects & Reports remain project-scoped. & Findings from one
+project do not appear in another project unless generated there. \\
+\hline
+\caption{Functional test matrix}
+\label{tab:functional_test_matrix}
+\end{longtable}
+
+\subsection{Workflow Validation}
+
+Workflow validation focuses on the orchestration logic. A successful workflow is not
+defined only by reaching the end of a scan. It must also handle partial progress,
+operator interruptions, failed tools, inconclusive evidence, and report regeneration.
+
+\subsubsection{Checklist and Plan Validation}
+
+The checklist is the first stable scan artifact. Before it exists, the scan does not
+have a reliable map of intended work. After it exists, the platform has a project-level
+description of what should be tested. The plan is the second stable artifact. It turns
+the checklist into scenario batches and execution steps. Validating these artifacts is
+therefore essential.
+
+\begin{longtable}{|p{0.22\textwidth}|p{0.30\textwidth}|p{0.38\textwidth}|}
+\hline
+\textbf{Artifact} & \textbf{Validation point} & \textbf{Reason} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Artifact} & \textbf{Validation point} & \textbf{Reason} \\
+\hline
+\endhead
+Checklist & Contains target-relevant items & Prevents generic or irrelevant scan
+behavior. \\
+\hline
+Checklist & Saved before plan creation & Allows resume after interruption between
+checklist and planning. \\
+\hline
+Plan & Uses stable scenario identifiers & Enables idempotent resume and accurate
+progress tracking. \\
+\hline
+Plan & Marks scenario status explicitly & Allows completed, pending, running, failed,
+and skipped states to be handled differently. \\
+\hline
+Plan & Links scenarios to evidence records & Allows report generation to explain how a
+finding was produced. \\
+\hline
+\caption{Checklist and plan validation}
+\label{tab:checklist_plan_validation}
+\end{longtable}
+
+\subsubsection{Analyzer Validation}
+
+The analyzer is responsible for turning evidence into conclusions. It must be
+conservative. A failed command, a missing tool, a model suggestion, or a generic payload
+recommendation is not a verified vulnerability. A verified finding requires evidence
+that demonstrates the security impact on the target.
+
+The analyzer validation criteria are:
+
+\begin{itemize}
+    \item A finding must reference an affected asset or endpoint.
+    \item Evidence must come from the current project.
+    \item Severity must match demonstrated impact.
+    \item Inconclusive results must remain inconclusive.
+    \item False positives must not appear in the risk table.
+    \item Informational observations may appear in methodology or appendix sections,
+    but not as verified vulnerabilities.
+\end{itemize}
+
+\subsection{Report Quality Validation}
+
+The report is the final deliverable for the client. Its quality directly influences
+trust in the platform. A good report must be readable, evidence-based, structured, and
+professional. It must avoid internal implementation noise such as raw agent logs,
+debug messages, or repetitive tool failures unless those details are necessary in an
+appendix.
+
+\begin{longtable}{|p{0.24\textwidth}|p{0.30\textwidth}|p{0.36\textwidth}|}
+\hline
+\textbf{Quality criterion} & \textbf{Expected behavior} & \textbf{Validation method} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Quality criterion} & \textbf{Expected behavior} & \textbf{Validation method} \\
+\hline
+\endhead
+Executive clarity & The executive summary explains risk in business language. & Review
+summary for concise risk, scope, and remediation urgency. \\
+\hline
+Finding completeness & Each finding includes severity, asset, description, evidence,
+impact, and remediation. & Check all verified findings against the report template. \\
+\hline
+Risk table format & The table lists each vulnerability, not only severity counts. &
+Confirm columns: number, finding, severity, CVSS, confidence, status. \\
+\hline
+No hallucinated findings & The report does not invent vulnerabilities when none were
+saved. & Compare report findings with project-scoped saved findings. \\
+\hline
+No internal noise & Client report does not expose agent debug traces or repetitive
+tool errors. & Inspect report appendix and remove internal implementation messages. \\
+\hline
+Download protection & Exported PDF and HTML packages are password protected. & Open
+downloaded artifacts and confirm password prompt. \\
+\hline
+Default preview & Professional HTML is shown by default after regeneration. & Regenerate
+report and confirm the preview panel opens the HTML report. \\
+\hline
+\caption{Report quality validation}
+\label{tab:report_quality_validation}
+\end{longtable}
+
+\subsection{Security Control Validation}
+
+PentaForge is a security platform, so the platform itself must enforce strong safety
+boundaries. The most important controls are scope validation, sandboxed execution,
+report data isolation, and protected report delivery.
+
+\begin{longtable}{|p{0.20\textwidth}|p{0.30\textwidth}|p{0.40\textwidth}|}
+\hline
+\textbf{Control} & \textbf{Threat addressed} & \textbf{Validation expectation} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Control} & \textbf{Threat addressed} & \textbf{Validation expectation} \\
+\hline
+\endhead
+Scope validation & Tool execution outside authorized target & Commands targeting
+out-of-scope hosts are rejected before sandbox execution. \\
+\hline
+Sandbox isolation & Local system compromise through tool execution & Tools run in a
+controlled containerized environment with limited access. \\
+\hline
+Tool routing & Uncontrolled arbitrary command execution & Agent requests pass through
+approved routing and policy checks. \\
+\hline
+Project isolation & Cross-project evidence leakage & Reports and findings load only
+records associated with the current project. \\
+\hline
+Download protection & Unauthorized reading of exported report files & Exported PDF and
+HTML artifacts require a password when opened. \\
+\hline
+Share token & Unauthorized report access & Client pages require a valid share token
+and expose only report content, not internal scan state. \\
+\hline
+\caption{Security control validation}
+\label{tab:security_control_validation}
+\end{longtable}
+
+\subsection{Performance and Scalability Discussion}
+
+The performance of PentaForge depends on the interaction between the orchestrator, the
+tool execution layer, the analyzer, and the storage layer. The most expensive
+operations are usually external network checks, web crawling, brute-force style
+enumeration, and repeated analysis of large raw outputs. The design addresses these
+costs in several ways.
+
+First, target-type routing helps avoid irrelevant tools. An API target does not require
+the same default path as a network infrastructure target or a web application target.
+Second, result reuse prevents the same command from being executed repeatedly when a
+valid project-scoped result already exists. Third, the analyzer can summarize evidence
+instead of sending very large raw logs to the model. Fourth, SSE allows the UI to remain
+responsive even when the backend is running long tasks. Finally, report generation is
+decoupled from scan execution so that the operator can regenerate the report without
+rerunning all tools.
+
+\begin{longtable}{|p{0.24\textwidth}|p{0.32\textwidth}|p{0.34\textwidth}|}
+\hline
+\textbf{Bottleneck} & \textbf{Effect} & \textbf{Optimization} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Bottleneck} & \textbf{Effect} & \textbf{Optimization} \\
+\hline
+\endhead
+Repeated commands & Increased scan duration and duplicate target traffic & Use
+project-scoped command cache. \\
+\hline
+Large raw outputs & Slow analyzer and report prompts & Store raw evidence but pass
+normalized snippets to reasoning steps. \\
+\hline
+Long-running scans & UI appears blocked if progress is not streamed & Use server-sent
+events and persistent progress state. \\
+\hline
+Tool installation gaps & Failed scenarios and noisy logs & Maintain sandbox image and
+tool inventory checks. \\
+\hline
+Report regeneration & User waits for formatting and export tasks & Save report
+artifacts and regenerate only when requested. \\
+\hline
+\caption{Performance bottlenecks and optimizations}
+\label{tab:performance_bottlenecks}
+\end{longtable}
+
+\subsection{Limitations}
+
+The current implementation demonstrates the viability of the architecture but also
+reveals limitations that should be addressed in future iterations.
+
+\begin{itemize}
+    \item Some security tools may be absent from the sandbox image or may produce
+    unstructured output that is difficult to parse.
+    \item Some target types require authenticated credentials to reach meaningful
+    attack surfaces.
+    \item Fully autonomous exploitation must remain constrained by scope and safety
+    policies.
+    \item Report generation quality depends on the quality of saved evidence.
+    \item Resume behavior requires strict state discipline; any missing checkpoint can
+    lead to conservative restarts.
+    \item PDF generation and password protection must be tested on the same platform
+    used for delivery because browser preview behavior can differ from downloaded file
+    behavior.
+\end{itemize}
+
+\subsection{Future Improvements}
+
+Future work can improve PentaForge in several directions:
+
+\begin{itemize}
+    \item Add a visual state inspector for scan checkpoints and scenario status.
+    \item Implement a dedicated tool-result cache dashboard for repeated commands.
+    \item Add stronger authenticated testing workflows with secure credential storage.
+    \item Add role-based access control for multi-user deployments.
+    \item Improve report customization with templates for executive, technical, and
+    remediation-focused audiences.
+    \item Add more deterministic parsers for common tools to reduce model dependency.
+    \item Add automated retest workflows that compare old evidence with fresh
+    remediation checks.
+\end{itemize}
+
+\section*{Conclusion}
+\addcontentsline{toc}{section}{Conclusion}
+
+This section presented a validation and evaluation view of PentaForge. The validation
+strategy covers functional behavior, workflow continuity, security controls, report
+quality, and usability. The test matrix provides concrete acceptance criteria for the
+main platform features. The discussion also identified performance bottlenecks,
+limitations, and future improvements. Overall, the evaluation confirms that PentaForge
+has been designed not only as an AI demonstration, but as a software platform with
+clear operational expectations.
+
+\newpage
+\section{Report Delivery Rules}
+
+The generated professional penetration testing report follows a client-facing structure. It must
+avoid internal platform noise and focus on security value. The recommended structure is:
+
+\begin{enumerate}
+    \item Executive Summary.
+    \item Scope.
+    \item Risk Summary Table.
+    \item Findings.
+    \item False Positives.
+    \item Attack Path.
+    \item Appendix.
+\end{enumerate}
+
+\section*{Risk Summary Table Rule}
+\addcontentsline{toc}{section}{Risk Summary Table Rule}
+
+The risk summary table must list each vulnerability individually. It should not replace
+the table with severity counts. The table columns are:
+
+\begin{itemize}
+    \item Number.
+    \item Finding title.
+    \item Severity.
+    \item CVSS score or N/A.
+    \item Confidence.
+    \item Status.
+\end{itemize}
+
+\section*{No-Findings Rule}
+\addcontentsline{toc}{section}{No-Findings Rule}
+
+If no verified vulnerabilities were saved for the project, the report must say so
+clearly. It may include methodology, scope, coverage, limitations, and historical
+execution notes from the same project. It must not invent vulnerabilities from general
+model knowledge, unrelated projects, or generic examples.
+
+\section*{Client-Facing Language Rule}
+\addcontentsline{toc}{section}{Client-Facing Language Rule}
+
+The report is delivered to the client, so it should not contain implementation details
+such as raw agent routing names, repeated internal failures, prompt fragments, or tool
+inventory debugging. Technical details are acceptable only when they support a finding
+or clarify a limitation.
+
+\section*{Evidence Rule}
+\addcontentsline{toc}{section}{Evidence Rule}
+
+Each verified finding must include evidence that demonstrates the issue. Evidence can
+include an HTTP response, a command result, a screenshot, a reproduced payload, a header,
+or a deterministic tool output. A model statement is not evidence by itself.
+
+\newpage
+\section{User Manual Summary}
+
+\section*{Creating a Project}
+\addcontentsline{toc}{section}{Creating a Project}
+
+The user creates a project by entering a project name, selecting the target type, and
+providing the target URL or host. The platform initializes a workspace where scan
+state, findings, reports, and assistant messages will be stored.
+
+\section*{Launching a Scan}
+\addcontentsline{toc}{section}{Launching a Scan}
+
+From the run page, the user starts the scan. The platform displays the pipeline with
+planner, executer, and analyzer stages. The timer indicates elapsed assessment time.
+The user can monitor live events in the execution notes and confirmed vulnerabilities
+panel.
+
+\section*{Stopping and Resuming}
+\addcontentsline{toc}{section}{Stopping and Resuming}
+
+If the application is stopped normally, the user can reopen the project and resume the
+scan. The platform evaluates saved checkpoints and continues from the safest meaningful
+point. If no stable checklist exists, the current incomplete data is cleaned and a new
+scan begins. If the checklist exists, planning continues. If the plan exists, completed
+scenarios remain completed and interrupted scenarios restart from execution.
+
+\section*{Generating a Report}
+\addcontentsline{toc}{section}{Generating a Report}
+
+The report page allows the user to generate or regenerate the report. After generation,
+the professional HTML preview should open by default. The Markdown variant remains
+available for technical review or editing.
+
+\section*{Downloading and Sharing}
+\addcontentsline{toc}{section}{Downloading and Sharing}
+
+The user can download protected report artifacts and create a client share link. The
+client share page presents the professional report and allows protected downloads
+without exposing internal project data.
+
+\newpage
+\section{Scenario Catalogue}
+
+This section documents representative scan scenarios that can be handled by the
+PentaForge orchestration model. The catalogue is not a list of hardcoded report
+findings. It is a planning catalogue: each scenario describes an investigation path
+that may or may not produce a verified vulnerability depending on the evidence collected
+for the current project.
+
+\begin{longtable}{|p{0.08\textwidth}|p{0.20\textwidth}|p{0.30\textwidth}|p{0.32\textwidth}|}
+\hline
+\textbf{ID} & \textbf{Scenario} & \textbf{Objective} & \textbf{Verification expectation} \\
+\hline
+\endfirsthead
+\hline
+\textbf{ID} & \textbf{Scenario} & \textbf{Objective} & \textbf{Verification expectation} \\
+\hline
+\endhead
+SC01 & Header security review & Identify missing or weak browser security headers. &
+A finding is saved only if the missing header creates a meaningful risk in context. \\
+\hline
+SC02 & CORS assessment & Detect permissive cross-origin policies. & A finding requires
+unsafe origin reflection or wildcard behavior with sensitive responses. \\
+\hline
+SC03 & Cookie security review & Check session cookies for missing flags. & A finding
+requires a session or authentication cookie lacking appropriate protections. \\
+\hline
+SC04 & Public documentation exposure & Locate Swagger, OpenAPI, GraphQL, WSDL, or
+debug documentation. & A finding requires public exposure of sensitive API structure
+or operations. \\
+\hline
+SC05 & Reflected XSS testing & Test reflected parameters for executable script
+injection. & A finding requires a payload reflected in executable context or strong
+browser-executable proof. \\
+\hline
+SC06 & SQL injection testing & Probe parameters for SQL error leakage or behavioral
+injection. & A finding requires deterministic database error, timing behavior, or data
+access proof. \\
+\hline
+SC07 & File upload assessment & Check upload endpoints for dangerous file handling. &
+A finding requires unsafe extension handling, executable upload, path traversal, or
+server-side processing impact. \\
+\hline
+SC08 & Authentication bypass & Test login, token, and authorization assumptions. & A
+finding requires unauthorized access, token forgery, session reuse, or privilege
+change proof. \\
+\hline
+SC09 & BOLA or IDOR & Test object identifiers for unauthorized access. & A finding
+requires access to another object without permission. \\
+\hline
+SC10 & BFLA & Test privileged functions from anonymous or low-privilege contexts. & A
+finding requires execution of a restricted function without proper authorization. \\
+\hline
+SC11 & Excessive data exposure & Inspect responses for sensitive fields. & A finding
+requires exposed secrets, credentials, personal data, or internal records. \\
+\hline
+SC12 & SSRF & Test URL or host parameters for server-side requests. & A finding requires
+in-band evidence or out-of-band callback from the target. \\
+\hline
+SC13 & Version disclosure & Identify exposed server or framework versions. & A finding
+requires a vulnerable version or a disclosure that materially improves attack
+feasibility. \\
+\hline
+SC14 & Exposed version control & Search for accessible Git, SVN, Mercurial, or Bazaar
+artifacts. & A finding requires readable repository metadata or source disclosure. \\
+\hline
+SC15 & Directory listing & Check exposed directories for index listings. & A finding
+requires unauthenticated directory enumeration containing meaningful files. \\
+\hline
+SC16 & Request smuggling probe & Test conflicting transfer and length headers safely. &
+A finding requires differential behavior or confirmed desynchronization evidence. \\
+\hline
+SC17 & Rate limiting review & Check whether sensitive actions are throttled. & A finding
+requires an abuse-relevant endpoint without effective throttling. \\
+\hline
+SC18 & Secrets in JavaScript & Analyze client-side scripts for keys and tokens. & A
+finding requires a real secret or sensitive endpoint reference, not a false positive
+pattern. \\
+\hline
+SC19 & Default credentials & Test known admin panels when discovered. & A finding
+requires successful authentication or a confirmed default credential condition. \\
+\hline
+SC20 & Transport security & Review TLS, redirects, and HSTS posture. & A finding
+requires insecure transport behavior that exposes users or credentials. \\
+\hline
+\caption{Representative scenario catalogue}
+\label{tab:scenario_catalogue}
+\end{longtable}
+
+\section*{Scenario Selection Principles}
+\addcontentsline{toc}{section}{Scenario Selection Principles}
+
+The planner should not execute every scenario blindly. Scenario selection depends on
+target type, observed technologies, reachable routes, available credentials, and safety
+constraints. For example, an API target should prioritize endpoint discovery,
+authorization testing, schema review, and response analysis. A classic web application
+target should prioritize crawling, parameter discovery, XSS, injection, session
+security, and upload handling. Infrastructure targets should prioritize service
+fingerprinting, configuration exposure, and protocol-specific checks.
+
+The scenario catalogue therefore acts as a controlled vocabulary for planning. It helps
+the platform choose relevant work while keeping the final report evidence-based.
+
+\newpage
+\section{Deployment and Operations Runbook}
+
+This section summarizes the operational runbook for developing and running PentaForge
+locally. It focuses on the deployment structure rather than command details, because
+the exact commands can evolve with scripts and Docker configuration.
+
+\subsection*{Local Deployment Overview}
+\addcontentsline{toc}{subsection}{Local Deployment Overview}
+
+The local deployment uses Docker services for the backend, frontend support services,
+Redis, Qdrant, and the sandbox. The Tauri desktop application is launched from the
+client workspace and communicates with the backend over localhost. This design gives
+the developer a realistic environment while keeping service dependencies reproducible.
+
+\begin{longtable}{|p{0.20\textwidth}|p{0.28\textwidth}|p{0.42\textwidth}|}
+\hline
+\textbf{Service} & \textbf{Role} & \textbf{Operational notes} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Service} & \textbf{Role} & \textbf{Operational notes} \\
+\hline
+\endhead
+Backend container & Runs the FastAPI application and scan services. & Must be rebuilt
+when backend code or Python dependencies change. \\
+\hline
+Frontend service & Serves the web UI during desktop development. & Used by Tauri during
+development mode. \\
+\hline
+Redis & Provides short-lived coordination and cache support. & Should be treated as
+runtime support, not as the only durable project store. \\
+\hline
+Qdrant & Stores vectorized project and knowledge context. & Project-scoped entries
+must be removable when a project is deleted. \\
+\hline
+Tool sandbox & Executes approved tools in an isolated environment. & Must contain the
+expected tool inventory and payload resources. \\
+\hline
+Desktop app & Provides the operator interface. & Should remain responsive through
+server-sent events and backend state refreshes. \\
+\hline
+\caption{Local deployment services}
+\label{tab:deployment_services}
+\end{longtable}
+
+\subsection*{Operational Checks}
+\addcontentsline{toc}{subsection}{Operational Checks}
+
+Before running an assessment, the operator or developer should check that:
+
+\begin{itemize}
+    \item The backend health endpoint is reachable.
+    \item Redis and Qdrant containers are healthy.
+    \item The sandbox service is healthy.
+    \item The embedding model or local knowledge dependency is warmed if required.
+    \item The desktop UI can load projects and reports.
+    \item The selected target is authorized and in scope.
+    \item The report export dependencies are available.
+\end{itemize}
+
+\subsection*{Failure Handling}
+\addcontentsline{toc}{subsection}{Failure Handling}
+
+Common operational failures include Docker image build failures, registry connectivity
+problems, missing sandbox tools, unavailable target services, and interrupted desktop
+sessions. The platform should surface these failures in a way that helps the user take
+action. For example, a Docker registry timeout is not a scan failure. A missing tool is
+not a target vulnerability. A connection refused response from a localhost API target
+means the target service is not reachable from the sandbox or backend context.
+
+\begin{longtable}{|p{0.24\textwidth}|p{0.30\textwidth}|p{0.36\textwidth}|}
+\hline
+\textbf{Failure} & \textbf{Interpretation} & \textbf{Recommended action} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Failure} & \textbf{Interpretation} & \textbf{Recommended action} \\
+\hline
+\endhead
+Docker registry timeout & Network or DNS issue during image metadata retrieval. &
+Retry with existing images or restore network connectivity before rebuilding. \\
+\hline
+Tool not installed & Sandbox inventory does not include the requested command. &
+Install the missing tool or update routing to use an available agent tool. \\
+\hline
+Connection refused & Target is down or not reachable from the execution environment. &
+Validate target service, port binding, container networking, and target URL. \\
+\hline
+Scope violation & Tool request targets an unauthorized host or path. & Correct the
+scenario target or update scope only if the assessment authorization allows it. \\
+\hline
+Report export failure & PDF or ZIP protection dependency failed. & Keep previous report
+artifacts and retry export after dependency check. \\
+\hline
+\caption{Operational failure handling}
+\label{tab:failure_handling}
+\end{longtable}
+
+\newpage
+\section{Safety and Ethics Policy}
+
+PentaForge automates penetration testing activity. This requires a clear safety and
+ethics policy. Automation can improve coverage and consistency, but it can also amplify
+mistakes if scope, authorization, and evidence rules are not enforced.
+
+\subsection*{Authorization}
+\addcontentsline{toc}{subsection}{Authorization}
+
+Every assessment must be performed only against targets for which explicit
+authorization exists. The platform should treat target scope as a first-class object.
+Tools must not execute against external domains, IP addresses, or ports that are not
+part of the authorized scope. If a passive source reveals additional subdomains or
+historical URLs, those assets should be treated as leads, not as automatic permission
+to test.
+
+\subsection*{Least Intrusive Testing}
+\addcontentsline{toc}{subsection}{Least Intrusive Testing}
+
+The default workflow should favor passive and low-noise checks before active probing.
+Potentially disruptive checks should require stronger justification, explicit scope,
+or operator confirmation. The goal of a professional penetration test is to demonstrate
+risk with sufficient evidence, not to damage the target or create unnecessary traffic.
+
+\subsection*{Evidence Integrity}
+\addcontentsline{toc}{subsection}{Evidence Integrity}
+
+Evidence must be accurate, project-scoped, and reproducible. A generated report should
+never claim that a vulnerability exists only because a model knows that such a
+vulnerability is common. A verified finding must be backed by collected evidence from
+the current project. Inconclusive evidence must remain inconclusive.
+
+\subsection*{Client Confidentiality}
+\addcontentsline{toc}{subsection}{Client Confidentiality}
+
+Reports can contain sensitive information about systems, vulnerabilities, credentials,
+or business processes. Exported reports must be protected, share links must expose only
+authorized report content, and deleted projects must remove associated project data.
+Internal debugging information should not be included in client deliverables.
+
+\subsection*{Human Oversight}
+\addcontentsline{toc}{subsection}{Human Oversight}
+
+The platform supports the pentester, but it does not remove professional responsibility.
+The operator remains responsible for confirming scope, interpreting impact, deciding
+whether an exploit is safe, validating report content, and communicating remediation
+priorities to the client. AI assistance should improve productivity and consistency,
+not replace expert judgment.
 
 \section*{Conclusion}
 \addcontentsline{toc}{section}{Conclusion}

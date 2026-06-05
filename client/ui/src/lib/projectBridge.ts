@@ -55,6 +55,7 @@ export interface StartScanResponse {
   started_at: string | null;
   updated_at: string | null;
   finished_at: string | null;
+  elapsed_seconds?: number | null;
   error: string;
   already_running: boolean;
   mobile_runtime?: {
@@ -414,13 +415,15 @@ function normalizeProjectRow(value: unknown): Project | null {
   const now = new Date().toISOString();
   const createdAt = toValidTimestamp(row.createdAt, now);
   const updatedAt = toValidTimestamp(row.updatedAt, createdAt);
-  const status = (
-    row.status === "idle"
-    || row.status === "running"
-    || row.status === "stopped"
-    || row.status === "completed"
-    || row.status === "error"
-  ) ? row.status : "idle";
+  const status = row.status === "paused"
+    ? "stopped"
+    : (
+      row.status === "idle"
+      || row.status === "running"
+      || row.status === "stopped"
+      || row.status === "completed"
+      || row.status === "error"
+    ) ? row.status : "idle";
 
   return {
     id: row.id,
@@ -824,7 +827,15 @@ export async function startProjectScanFromDesktop(
 
 export async function stopProjectScanFromDesktop(
   request: StopScanRequest,
-): Promise<{ ok: boolean; status?: string; project_id?: string; scan_id?: string }> {
+): Promise<{
+  ok: boolean;
+  status?: string;
+  project_id?: string;
+  scan_id?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  elapsed_seconds?: number | null;
+}> {
   if (!supportsDesktopProjectBridge()) {
     throw new Error("desktop project bridge is disabled");
   }

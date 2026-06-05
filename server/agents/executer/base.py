@@ -1497,35 +1497,23 @@ class BaseExecuterAgent:
         args: dict[str, Any],
         scenario_id: str,
     ) -> str:
-        semantic_tool_names = {
-            "js_source_code_analyzer",
-            "http_probe",
-            "api_passive_enum",
-            "api_endpoint_discovery",
-            "api_response_analyzer",
-            "api_service_recon",
-            "passive_web_recon",
-            "session_token_analysis",
-            "websocket_recon",
-        }
-        if tool_name.strip().lower() in semantic_tool_names:
-            normalized_target = str(
-                args.get("target")
-                or args.get("url")
-                or args.get("endpoint")
-                or args.get("host")
-                or ""
-            ).strip().lower()
-            if normalized_target:
-                return (
-                    f"{scenario_id.strip().lower()}::"
-                    f"{tool_name.strip().lower()}::semantic::{normalized_target}"
-                )
+        normalized_tool_name = tool_name.strip().lower()
+        semantic_args = dict(args or {})
+        if normalized_tool_name == "run_custom":
+            semantic_args = {
+                "command": str(semantic_args.get("command", "")).strip().lower(),
+                "args": semantic_args.get("args", []),
+                "env": semantic_args.get("env", {}),
+                "cwd": str(semantic_args.get("cwd", "")).strip(),
+            }
+        else:
+            semantic_args.pop("timeout", None)
+            semantic_args.pop("compact_output", None)
         try:
-            args_blob = json.dumps(args, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            args_blob = json.dumps(semantic_args, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         except TypeError:
-            args_blob = repr(args)
-        return f"{scenario_id.strip().lower()}::{tool_name.strip().lower()}::{args_blob}"
+            args_blob = repr(semantic_args)
+        return f"{normalized_tool_name}::{args_blob}"
 
     def _recover_tool_invocation(
         self,
@@ -1745,24 +1733,41 @@ class BaseExecuterAgent:
                 args=args,
                 scenario_id=scenario_id,
             )
-            if invocation_signature in seen_invocations:
-                result = json.dumps(
-                    {
-                        "success": False,
-                        "error": (
-                            "Duplicate tool invocation suppressed. "
-                            "Use a different tool or materially different arguments."
-                        ),
-                        "role": self._role,
-                        "tool": tool_name,
-                        "scenario_id": scenario_id,
-                    },
-                    ensure_ascii=True,
-                )
-                self._cb.on_warn(
-                    f"[{self._role}] duplicate tool call suppressed"
-                    f"{f' [{scenario_id}]' if scenario_id else ''}: {tool_name}"
-                )
+            from server.agents.executer.global_cache import GlobalToolCache
+            global_cache = GlobalToolCache(self._project_cache_dir, self._role)
+            is_blocked, block_reason = global_cache.check_or_lock_signature(
+                invocation_signature, tool_name, args, scenario_id
+            )
+
+            if invocation_signature in seen_invocations or is_blocked:
+                cached_entry = global_cache.get_completed_result(invocation_signature)
+                if cached_entry is not None and str(cached_entry.get("result", "")).strip():
+                    result = str(cached_entry.get("result", "")).strip()
+                    self._cb.on_step(
+                        f"[{self._role}] reused cached tool result"
+                        f"{f' [{scenario_id}]' if scenario_id else ''}: {tool_name}"
+                    )
+                    cached_result = True
+                else:
+                    error_msg = block_reason if is_blocked else (
+                        "Duplicate tool invocation is already present in this executor round."
+                    )
+                    result = json.dumps(
+                        {
+                            "success": False,
+                            "error": error_msg,
+                            "role": self._role,
+                            "tool": tool_name,
+                            "scenario_id": scenario_id,
+                            "cached_result": False,
+                        },
+                        ensure_ascii=True,
+                    )
+                    self._cb.on_warn(
+                        f"[{self._role}] duplicate tool call suppressed"
+                        f"{f' [{scenario_id}]' if scenario_id else ''}: {tool_name}"
+                    )
+                    cached_result = False
                 tool_messages.append(
                     {
                         "role": "tool",
@@ -1778,6 +1783,7 @@ class BaseExecuterAgent:
                         "args": args,
                         "scenario_id": scenario_id,
                         "result": result,
+                        "cached_result": cached_result,
                         "discovered_target_types": [],
                         "approval_required": False,
                     },
@@ -1813,6 +1819,7 @@ class BaseExecuterAgent:
                             f"[{self._role}] blocked pending user approval: {tool_name}"
                         )
                         halted_for_approval = True
+                        global_cache.unlock_and_fail(invocation_signature)
                     else:
                         self._cb.on_step(
                             f"[{self._role}] user approved tool: {tool_name}"
@@ -1861,6 +1868,16 @@ class BaseExecuterAgent:
                             _executer_tool_context.reset(tool_context_token)
                             _executer_callback_context.reset(callback_token)
                         result = _compact_tool_result_payload(str(raw_result or ""))
+                        
+                        from server.agents.tool_output_parsers import summarize_tool_output
+                        try:
+                            parsed_payload = json.loads(result) if result.startswith('{') else result
+                        except Exception:
+                            parsed_payload = result
+                        parsed_data = summarize_tool_output(parsed_payload)
+                        observations = parsed_data.get("observations", [])
+                        short_summary = " ".join(observations[:2])
+                        global_cache.unlock_and_update(invocation_signature, short_summary, result)
                         done_message = (
                             f"[{self._role}] "
                             f"{f'[{scenario_id}] ' if scenario_id else ''}"
@@ -1892,6 +1909,7 @@ class BaseExecuterAgent:
                             error=repr(exc),
                         )
                         result = f"Error executing {tool_name}: {exc}"
+                        global_cache.unlock_and_fail(invocation_signature)
                         self._cb.on_warn(f"[{self._role}] tool error: {exc}")
 
             for discovered in extract_discovered_target_types(result):
@@ -1912,6 +1930,7 @@ class BaseExecuterAgent:
                     "args": args,
                     "scenario_id": scenario_id,
                     "result": result,
+                    "cached_result": False,
                     "safety_profile": (
                         get_run_custom_command_profile(
                             str(args.get("command", "")).strip().lower(),
@@ -2274,6 +2293,11 @@ class BaseExecuterAgent:
         warmup_batch_mode = "Warmup scenario batch" in self._current_user_message
 
         system_prompt = self._system_prompt
+        from server.agents.executer.global_cache import GlobalToolCache
+        global_cache = GlobalToolCache(self._project_cache_dir, self._role)
+        past_memory = global_cache.get_cache_summary()
+        if past_memory:
+            system_prompt += f"\n\n=== PAST COMPLETED ACTIONS (DO NOT REPEAT) ===\nThese actions have already been completed by you or other workers. Use this to focus entirely on the current scenario and avoid running identical tools on the same targets:\n{past_memory}\n==============================================\n"
         if _needs_nothink(self._model_name):
             system_prompt = "/nothink\n" + system_prompt
 

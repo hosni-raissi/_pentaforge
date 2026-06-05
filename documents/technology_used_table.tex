@@ -1,0 +1,38 @@
+\begin{table}[H]
+    \centering
+    \caption{Technologies used in PentaForge}
+    \label{tab:technologies_used}
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.25\textwidth}|p{0.25\textwidth}|p{0.40\textwidth}|}
+        \hline
+        \textbf{Technology} & \textbf{Use in the Project} & \textbf{Reason for Use} \\
+        \hline
+        FastAPI & Backend API & Builds fast, typed, asynchronous routes for projects,
+        scans, reports, assistant features, and scan supervision. \\
+        \hline
+        React & User interface & Creates an interactive dashboard for project
+        management, scan monitoring, reports, and assistant conversations. \\
+        \hline
+        Tauri & Desktop application & Packages the frontend as a lightweight desktop
+        application with less resource usage than Electron. \\
+        \hline
+        Docker Compose & Deployment & Runs the backend, frontend, Redis, Qdrant, and
+        sandbox services in a reproducible local environment. \\
+        \hline
+        Redis & Runtime cache & Manages short-lived state, coordination data, and
+        cache information during long-running scans. \\
+        \hline
+        Qdrant & Vector database & Stores embeddings used by the RAG layer for
+        project memory, assistant answers, and planner context. \\
+        \hline
+        SQLite & Project database & Stores local project data such as scan state,
+        findings, reports, share links, and metadata. \\
+        \hline
+        Large Language Models & AI agents & Support checklist generation, planning,
+        evidence interpretation, assistant answers, and report drafting. \\
+        \hline
+        Python security tools & Execution layer & Provide the command-line tooling
+        used by reconnaissance, exploitation, analysis, and sandboxed execution. \\
+        \hline
+    \end{tabular}
+\end{table}

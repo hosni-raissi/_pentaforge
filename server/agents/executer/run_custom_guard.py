@@ -149,7 +149,13 @@ def extract_network_targets(command: str, args: list[str]) -> list[str]:
             continue
         
         # Ignore common local file extensions to avoid false-positive scope violations
-        if token.lower().endswith((".txt", ".json", ".log", ".xml", ".csv", ".bak", ".html", ".js")):
+        ignored_extensions = (
+            ".txt", ".json", ".log", ".xml", ".csv", ".bak", ".html", ".js", ".dic",
+            ".zip", ".tar.gz", ".gz", ".pdf", ".png", ".jpg", ".jpeg", ".sqlite", ".db",
+            ".yaml", ".yml", ".sh", ".php", ".asp", ".aspx", ".jsp", ".exe", ".dll",
+            ".bin", ".py", ".md", ".conf", ".ini",
+        )
+        if token.lower().endswith(ignored_extensions):
             continue
 
         if _HOSTISH_RE.fullmatch(token):

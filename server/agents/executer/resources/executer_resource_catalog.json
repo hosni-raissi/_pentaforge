@@ -122,6 +122,11 @@
   ],
   "seclists": [
     {
+      "name": "common_web_content",
+      "path": "server/share/seclists/Discovery/Web-Content/common.txt",
+      "role": "Common web content discovery list for directory and file brute-forcing."
+    },
+    {
       "name": "usernames_top_shortlist",
       "path": "server/share/seclists/Usernames/top-usernames-shortlist.txt",
       "role": "Short username shortlist for focused auth checks."

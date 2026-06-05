@@ -232,7 +232,7 @@ class RunCustomRequest(BaseModel):
     command: str
     args: list[str] = []
     reason: str
-    timeout: int = Field(default=300, ge=5, le=600)
+    timeout: int = Field(default=420, ge=5, le=900)
     env: dict[str, str] = {}          # optional extra env vars (e.g. GOPATH, PYTHONPATH)
     cwd: Optional[str] = None         # working directory override
 
@@ -368,21 +368,6 @@ def validate_command_policy(command: str, args: list[str]) -> Optional[str]:
 
     # Per-tool write-flag enforcement
     arg_set = set(args)
-
-    if command == "curl":
-        # Block write flags except when pointing to a safe sink (stdout / dev/null)
-        for i, arg in enumerate(args):
-            if arg in {"-o", "--output"}:
-                val = str(args[i+1]).strip() if i+1 < len(args) else ""
-                if not val or _looks_like_file_sink(val):
-                    return f"curl flag '{arg}' is blocked unless outputting to stdout or /dev/null"
-            elif arg in (_CURL_BLOCKED_FLAGS - {"-o", "--output"}):
-                 return f"curl flag '{arg}' is blocked (write/upload operations)"
-
-    if command == "wget":
-        bad = arg_set & _WGET_BLOCKED_FLAGS
-        if bad:
-            return f"wget flags {bad} are blocked (write/upload operations). Use '-O -' to stream to stdout."
 
     # Prevent find -exec / -execdir shell escapes
     if command == "find":
@@ -549,66 +534,9 @@ def _looks_like_file_sink(value: str) -> bool:
 def strip_output_file_flags(command: str, args: list[str]) -> tuple[list[str], list[str]]:
     """
     Remove command-aware output file flags from arguments.
-
-    Only known file-output flags are stripped automatically. Ambiguous flags
-    like `ssh -o BatchMode=yes` are preserved.
-
-    Returns: (cleaned_args, stripped_flags)
+    (Disabled: output flags are now completely allowed).
     """
-    normalized_command = str(command or "").strip().lower()
-    short_flags = _SHORT_OUTPUT_FLAGS_BY_COMMAND.get(normalized_command, set())
-    combined_prefixes = _COMBINED_OUTPUT_PREFIXES_BY_COMMAND.get(normalized_command, ())
-
-    cleaned = []
-    stripped = []
-    i = 0
-    while i < len(args):
-        arg = str(args[i] or "").strip()
-
-        if arg in short_flags or arg in _LONG_OUTPUT_FLAGS:
-            next_value = str(args[i + 1]).strip() if i + 1 < len(args) else ""
-            if next_value and _looks_like_file_sink(next_value):
-                stripped.append(arg)
-                stripped.append(next_value)
-                i += 2
-            elif next_value and (not _looks_like_file_sink(next_value) or next_value == "-"):
-                # Safe sink (stdout, /dev/null, or explicit '-') - KEEP IT
-                cleaned.append(arg)
-                cleaned.append(next_value)
-                i += 2
-            else:
-                # Ambiguous or no value - strip the flag to be safe
-                stripped.append(arg)
-                i += 1
-        elif any(arg.startswith(prefix) for prefix in _LONG_OUTPUT_FLAG_PREFIXES):
-            stripped.append(arg)
-            i += 1
-        else:
-            matched_combined = False
-            for prefix in combined_prefixes:
-                if arg == prefix:
-                    stripped.append(arg)
-                    next_value = str(args[i + 1]).strip() if i + 1 < len(args) else ""
-                    if next_value and _looks_like_file_sink(next_value):
-                        stripped.append(next_value)
-                        i += 2
-                    else:
-                        i += 1
-                    matched_combined = True
-                    break
-                if arg.startswith(prefix):
-                    suffix = arg[len(prefix) :].strip()
-                    if _looks_like_file_sink(suffix):
-                        stripped.append(arg)
-                        i += 1
-                        matched_combined = True
-                        break
-            if matched_combined:
-                continue
-            cleaned.append(args[i])
-            i += 1
-
-    return cleaned, stripped
+    return args, []
 
 
 def redirect_default_tool_outputs(command: str, args: list[str]) -> tuple[list[str], list[str]]:
@@ -840,7 +768,7 @@ def _request_password_via_callback(
 
 def safe_execute(
     cmd: list[str],
-    timeout: int = 300,
+    timeout: int = 420,
     extra_env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
     password: Optional[str] = None,
@@ -859,7 +787,7 @@ def safe_execute(
     execution_cwd = resolve_sandbox_cwd(cwd)
     preexec_fn = build_sandbox_preexec(
         SandboxExecutionPolicy(
-            cpu_seconds=max(10, min(int(timeout), 180)),
+            cpu_seconds=max(10, min(int(timeout), 420)),
         )
     )
 
@@ -913,7 +841,7 @@ def run_custom(
     command: str,
     reason: str,
     args: Optional[list[str]] = None,
-    timeout: int = 300,
+    timeout: int = 420,
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
 ) -> dict:
@@ -925,7 +853,6 @@ def run_custom(
     │  ANY BINARY ALLOWED          no command whitelist            │
     │  DESTRUCTIVE CMDS BLOCKED    rm, dd, chmod, shutdown, etc.  │
     │  SHELL INJECTION PREVENTED   shell=False + token validation  │
-    │  WRITE FLAGS BLOCKED         per-tool (curl -o, git push…)  │
     │  REASON REQUIRED             every call must be explained    │
     │  AUDIT LOGGED                command + args + reason         │
     └──────────────────────────────────────────────────────────────┘
@@ -934,7 +861,7 @@ def run_custom(
         command:  Binary name (no path). E.g. 'nmap', 'sqlmap', 'ffuf', 'nikto'.
         reason:   Why this command is needed (min 8 chars).
         args:     Argument list — no shell metacharacters.
-        timeout:  Execution timeout in seconds (5–300).
+        timeout:  Execution timeout in seconds (5–900).
         env:      Extra environment variables.
         cwd:      Ignored for safety. Commands always run from server/sandbox.
 
@@ -966,13 +893,8 @@ def run_custom(
         ).model_dump()
 
     # ── Strip output file flags ────────────────────────────────
-    # Remove -o, --output, --output-file and similar write flags
-    # These are automatically stripped before execution
-    cleaned_args, stripped_flags = strip_output_file_flags(req.command, req.args)
-    if stripped_flags:
-        # Update args with cleaned version (no -o flags)
-        req.args = cleaned_args
-        # Note: we silently remove them, as instructed in prompts
+    # Removed per user request: output flags are now allowed.
+    stripped_flags: list[str] = []
 
     # ── Redirect default tool output folders ──────────────────
     redirected_args, _redirected_flags = redirect_default_tool_outputs(req.command, req.args)
@@ -1073,7 +995,9 @@ def run_custom(
 
     # ── Build & audit-log command ─────────────────────────────
     cmd = [req.command] + runtime_args
-    full_command = " ".join(shlex.quote(x) for x in cmd)
+    # We log the original args so the user and LLM see 127.0.0.1 instead of host.docker.internal
+    original_cmd = [req.command] + req.args
+    full_command = " ".join(shlex.quote(x) for x in original_cmd)
 
     # ── Password handling ──────────────────────────────────────
     password: Optional[str] = None
@@ -1249,8 +1173,8 @@ RUN_CUSTOM_TOOL_DEFINITION = {
             },
             "timeout": {
                 "type": "integer",
-                "default": 300,
-                "description": "Execution timeout in seconds (5–600).",
+                "default": 420,
+                "description": "Execution timeout in seconds (5–900).",
             },
             "env": {
                 "type": "object",

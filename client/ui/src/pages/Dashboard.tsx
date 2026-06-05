@@ -1063,6 +1063,9 @@ function toProjectStatus(value: unknown): ProjectStatus | null {
   if (typeof value !== "string") {
     return null;
   }
+  if (value.trim().toLowerCase() === "paused") {
+    return "stopped";
+  }
   return PROJECT_STATUSES.includes(value as ProjectStatus)
     ? (value as ProjectStatus)
     : null;
@@ -1080,6 +1083,9 @@ function normalizeRunningStatus(project: {
     typeof lastScan?.status === "string"
       ? lastScan.status.trim().toLowerCase()
       : "";
+  if (lastScanStatus === "paused") {
+    return "stopped";
+  }
   if (
     lastScanStatus === "completed" ||
     lastScanStatus === "stopped" ||
@@ -2212,7 +2218,22 @@ export default function Dashboard() {
       : null;
     return typeof scanMeta?.scanId === "string" ? scanMeta.scanId.trim() : "";
   })();
-  const shouldStreamScanEvents = Boolean(activeProjectId && activeScanId);
+  const activeLastScanStatus = (() => {
+    const scanMeta = isRecord(activeProject?.lastScan)
+      ? activeProject?.lastScan
+      : null;
+    return typeof scanMeta?.status === "string" ? scanMeta.status.trim().toLowerCase() : "";
+  })();
+  const shouldStreamScanEvents = Boolean(
+    activeProjectId &&
+    activeScanId &&
+    (
+      activeProject?.status === "running" ||
+      activeLastScanStatus === "running" ||
+      activeLastScanStatus === "awaiting_planner_approval" ||
+      activeLastScanStatus === "awaiting_information_gathering_approval"
+    ),
+  );
 
   const [insightTab, setInsightTab] = useState<InsightTab>("checklist");
   const [isInsightFullscreen, setIsInsightFullscreen] = useState(false);
@@ -2430,6 +2451,40 @@ export default function Dashboard() {
     (event: ScanEventPayload) => {
       if (!activeProjectId) {
         return;
+      }
+      if (event.event === "scan_started") {
+        const isSavedPlanResume = isRecord(event.data.resume_plan);
+        if (!isSavedPlanResume) {
+          seenEventKeysRef.current.clear();
+          setScanEvents([]);
+          setStreamLogs([]);
+          const activeProject = useProjects
+            .getState()
+            .projects.find((project) => project.id === activeProjectId);
+          if (activeProject) {
+            const currentPayload = isRecord(activeProject.payload) ? { ...activeProject.payload } : {};
+            delete currentPayload[FINDINGS_HISTORY_KEY];
+            delete currentPayload[LEGACY_FINDINGS_HISTORY_KEY];
+            updateProject(
+              activeProjectId,
+              {
+                findings: [],
+                payload: Object.keys(currentPayload).length > 0 ? currentPayload : undefined,
+                lastScan: {
+                  scanId: event.scan_id,
+                  status: "running",
+                  startedAt: event.timestamp,
+                  finishedAt: undefined,
+                  elapsedSeconds: 0,
+                  durationSeconds: undefined,
+                  error: "",
+                  result: undefined,
+                },
+              } as any,
+              { persist: false },
+            );
+          }
+        }
       }
       const key = eventDedupKey(event);
       if (seenEventKeysRef.current.has(key)) {
@@ -4771,7 +4826,11 @@ export default function Dashboard() {
   };
 
   const checklistBlocks = displayChecklist?.checklist ?? [];
-  const isChecklistSaving = checklistActionKey !== null;
+  const isPlanRunningOrDone =
+    Boolean((activeProject?.lastScan as any)?.result?.planner) ||
+    scanEvents.some((e) => e.event === "planner_started" || e.event === "planner_complete" || e.event === "planner_approval_received") ||
+    (activeProject?.phases ?? []).some((p) => p.status !== "pending");
+  const isChecklistSaving = checklistActionKey !== null || isPlanRunningOrDone;
   const selectedAddPhase = (() => {
     if (checklistBlocks.length === 0) {
       return "0";

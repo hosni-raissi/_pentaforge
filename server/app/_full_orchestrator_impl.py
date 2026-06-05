@@ -20,7 +20,7 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -3348,6 +3348,20 @@ def _compute_scan_elapsed_seconds(scan_meta: dict[str, Any]) -> int:
     return elapsed_seconds
 
 
+def _started_at_for_elapsed(now_iso: str, elapsed_seconds: int) -> str:
+    """Return a start timestamp that preserves accumulated scan runtime on resume."""
+    elapsed = max(0, int(elapsed_seconds or 0))
+    if elapsed <= 0:
+        return now_iso
+    try:
+        now = datetime.fromisoformat(str(now_iso).replace("Z", "+00:00"))
+    except ValueError:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now - timedelta(seconds=elapsed)).isoformat()
+
+
 def _extract_target(project: dict[str, Any]) -> str:
     primary = project.get("target")
     if isinstance(primary, str) and primary.strip():
@@ -4935,6 +4949,59 @@ def _count_total_scenarios(plan_data: dict[str, Any]) -> int:
     return total
 
 
+def _extract_saved_plan_from_last_scan(last_scan: Any) -> dict[str, Any]:
+    if not isinstance(last_scan, dict):
+        return {}
+
+    result = last_scan.get("result")
+    if isinstance(result, dict):
+        planner = result.get("planner")
+        if isinstance(planner, dict):
+            plan_data = planner.get("plan_data")
+            if isinstance(plan_data, dict) and _count_total_scenarios(plan_data) > 0:
+                return deepcopy(plan_data)
+
+    # Legacy compatibility: older planner code also reads/writes lastScan.plan.
+    legacy_plan = last_scan.get("plan")
+    if isinstance(legacy_plan, dict) and _count_total_scenarios(legacy_plan) > 0:
+        return deepcopy(legacy_plan)
+
+    return {}
+
+
+def _prepare_plan_for_resume(plan_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+    """Use the saved plan as resume source and rerun only unfinished scenarios."""
+
+    resumed_plan = deepcopy(plan_data) if isinstance(plan_data, dict) else {}
+    stats = {
+        "total": _count_total_scenarios(resumed_plan),
+        "completed": 0,
+        "reset_to_pending": 0,
+        "pending": 0,
+    }
+    for scenario in _iter_plan_scenarios(resumed_plan):
+        status = str(scenario.get("status", "")).strip().lower()
+        is_completed = bool(scenario.get("done", False)) or status in {
+            "completed",
+            "complete",
+            "done",
+        }
+        scenario["active_slot"] = None
+        if is_completed:
+            scenario["done"] = True
+            scenario["status"] = "completed"
+            stats["completed"] += 1
+            continue
+
+        scenario["done"] = False
+        if status in {"working", "running", "in_progress", "in progress", "active", "executing"}:
+            stats["reset_to_pending"] += 1
+        scenario["status"] = "not yet"
+        stats["pending"] += 1
+
+    return _ensure_execution_slots(resumed_plan), stats
+
+
 def _fallback_methods_for_checklist_item(
     phase_name: str,
     item_name: str,
@@ -5961,6 +6028,36 @@ class ScanOrchestratorService:
                 current["already_running"] = True
                 return current
 
+            resume_result: dict[str, Any] = {}
+            resume_plan_data: dict[str, Any] = {}
+            resume_plan_stats: dict[str, int] = {}
+            resume_elapsed_seconds = 0
+
+            # SAFE RESUME LOGIC
+            # The saved plan is the first stable checkpoint. If no plan exists,
+            # discard incomplete runtime data and start from scratch.
+            if resume:
+                last_scan = project.get("lastScan")
+                saved_plan = _extract_saved_plan_from_last_scan(last_scan)
+                if saved_plan:
+                    resume_plan_data, resume_plan_stats = _prepare_plan_for_resume(saved_plan)
+                    resume_result = deepcopy(last_scan.get("result", {})) if isinstance(last_scan, dict) else {}
+                    resume_elapsed_seconds = _compute_scan_elapsed_seconds(
+                        last_scan if isinstance(last_scan, dict) else {}
+                    )
+                    planner_payload = resume_result.get("planner")
+                    if not isinstance(planner_payload, dict):
+                        planner_payload = {}
+                    planner_payload["plan_data"] = resume_plan_data
+                    planner_payload["resume"] = {
+                        "source": "saved_plan",
+                        "stats": resume_plan_stats,
+                    }
+                    resume_result["planner"] = planner_payload
+                else:
+                    resume = False
+                    resume_result = {}
+
             if not resume:
                 from server.agents.planner.tools.pentest_plan import reset_pentest_plan_state
 
@@ -5968,7 +6065,22 @@ class ScanOrchestratorService:
                 self._reset_project_runtime_state(project, clear_scan_artifacts=True)
                 project["scanProgress"] = 0
                 project["updatedAt"] = _utc_now_iso()
-                self._projects_store.upsert_project(project)
+                write_payload = getattr(self._projects_store, "_write_project_payload", None)
+                if callable(write_payload):
+                    write_payload(project)
+                else:  # pragma: no cover - compatibility with alternate stores
+                    self._projects_store.upsert_project(project)
+                
+                try:
+                    from server.api.routes.projects import _delete_project_runtime_artifacts
+                    _delete_project_runtime_artifacts(project_key, project_payload=project)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning(
+                        "runtime_artifacts_clear_failed",
+                        project_id=project_key,
+                        error=str(exc),
+                    )
+                
                 try:
                     self._projects_store.clear_scan_event_cache(project_key)
                 except Exception as exc:  # pragma: no cover - defensive
@@ -5988,16 +6100,18 @@ class ScanOrchestratorService:
                             error=str(exc),
                         )
             scan_id = str(uuid.uuid4())
-            started_at = _utc_now_iso()
+            now_iso = _utc_now_iso()
+            started_at = _started_at_for_elapsed(now_iso, resume_elapsed_seconds) if resume else now_iso
             approval_mode = str(project.get("approval_mode") or "custom").lower().strip()
             run_state = {
                 "scan_id": scan_id,
                 "project_id": project_key,
                 "status": "running",
                 "started_at": started_at,
-                "updated_at": started_at,
+                "updated_at": now_iso,
                 "finished_at": None,
                 "error": "",
+                "elapsed_seconds": resume_elapsed_seconds,
                 "approval_mode": approval_mode,
                 "awaiting_information_gathering_approval": False,
                 "awaiting_planner_approval": False,
@@ -6014,6 +6128,13 @@ class ScanOrchestratorService:
                     "scanId": scan_id,
                     "status": "running",
                     "startedAt": started_at,
+                    "elapsedSeconds": resume_elapsed_seconds,
+                    # Preserve the previous stable checkpoint for _run_scan().
+                    # _merge_scan_metadata intentionally drops old result data
+                    # when a new scan id is written, so resume must carry the saved
+                    # plan forward explicitly.
+                    **({"plan": resume_plan_data} if resume_plan_data else {}),
+                    **({"result": resume_result} if resume_result else {}),
                 },
             )
             self._emit_event(
@@ -6027,6 +6148,9 @@ class ScanOrchestratorService:
                     "target_type": effective_target_type,
                     "status": "running",
                     "scan_progress": 5,
+                    "elapsed_seconds": resume_elapsed_seconds,
+                    "started_at": started_at,
+                    **({"resume_plan": resume_plan_stats} if resume_plan_stats else {}),
                 },
             )
 
@@ -6038,6 +6162,7 @@ class ScanOrchestratorService:
                     target_type=effective_target_type,
                     started_at=started_at,
                     info=info_payload,
+                    resume=resume,
                 ),
                 name=f"scan_orchestrator_{project_key}",
             )
@@ -6199,6 +6324,24 @@ class ScanOrchestratorService:
             project["findings"] = []
             project["findings_count"] = 0
             project.pop("last_findings_updated", None)
+            project.pop("checklist", None)
+            project.pop("plannerStaticPlan", None)
+            payload = project.get("payload")
+            if isinstance(payload, dict):
+                for key in (
+                    FINDINGS_HISTORY_KEY,
+                    LEGACY_FINDINGS_HISTORY_KEY,
+                    "targetInfoGathering",
+                    "target_info_gathering",
+                    "information_gathering",
+                    "planner",
+                    "warmup",
+                ):
+                    payload.pop(key, None)
+                if payload:
+                    project["payload"] = payload
+                else:
+                    project.pop("payload", None)
 
     def stop_scan(self, project_id: str, *, mode: str = "pause") -> dict[str, Any]:
         project_key = str(project_id or "").strip()
@@ -6251,16 +6394,18 @@ class ScanOrchestratorService:
             last_scan_meta = dict(last_scan) if isinstance(last_scan, dict) else {}
             last_scan_meta["awaitingToolApproval"] = False
             last_scan_meta["pendingToolApproval"] = None
+            paused_scan_meta = {
+                **last_scan_meta,
+                "scanId": scan_id,
+                "status": "paused",
+                "finishedAt": last_scan_meta.get("finishedAt") or now_iso,
+            }
+            paused_elapsed_seconds = _compute_scan_elapsed_seconds(paused_scan_meta)
             self._persist_project_status(
                 project_key,
                 status="paused",
                 scan_progress=int(project.get("scanProgress", 0) or 0),
-                scan_meta={
-                    **last_scan_meta,
-                    "scanId": scan_id,
-                    "status": "paused",
-                    "finishedAt": last_scan_meta.get("finishedAt") or now_iso,
-                },
+                scan_meta=paused_scan_meta,
             )
             self._emit_event(
                 project_key,
@@ -6268,7 +6413,12 @@ class ScanOrchestratorService:
                 scan_id=scan_id,
                 level="warn",
                 message="Scan paused by user.",
-                data={"status": "paused"},
+                data={
+                    "status": "paused",
+                    "elapsed_seconds": paused_elapsed_seconds,
+                    "started_at": paused_scan_meta.get("startedAt"),
+                    "finished_at": paused_scan_meta.get("finishedAt"),
+                },
             )
             self._emit_event(
                 project_key,
@@ -6289,6 +6439,8 @@ class ScanOrchestratorService:
                 "scan_id": scan_id,
                 "status": "paused",
                 "finished_at": now_iso,
+                "elapsed_seconds": paused_elapsed_seconds,
+                "started_at": paused_scan_meta.get("startedAt"),
             }
 
         # cancel
@@ -9066,6 +9218,7 @@ class ScanOrchestratorService:
         target_type: str,
         started_at: str,
         info: str,
+        resume: bool = False,
     ) -> None:
         logger.info(
             "scan_orchestrator_start",
@@ -9447,60 +9600,93 @@ class ScanOrchestratorService:
                 info=info,
                 target_memory=target_memory,
             )
-            self._emit_event(
-                project_id,
-                event="planner_checklist_started",
-                scan_id=scan_id,
-                level="info",
-                message="Planner [start] generating prioritized checklist from grouped information gathering, target info, and any user checklist input.",
-                data={
-                    "stage": "planner",
-                    "kind": "checklist_start",
-                    "warmup_summary_count": 0,
-                    "warmup_cache_path": "",
-                    "project_cache_dir": project_cache_dir,
-                },
-            )
-            from server.agents.planner.agent import PlannerAgent
+            
+            existing_checklist = {}
+            existing_summary = ""
+            existing_plan_data: dict[str, Any] = {}
+            if resume and isinstance(project, dict):
+                last_scan = project.get("lastScan", {}) or {}
+                existing_plan_data = _extract_saved_plan_from_last_scan(last_scan)
+                last_result = last_scan.get("result", {}) or {}
+                last_intel = last_result.get("intel", {}) or {}
+                existing_checklist = last_intel.get("checklist", {}) or {}
+                existing_summary = last_intel.get("summary", "") or ""
 
-            checklist_callback = PrintCallback(
-                enabled=print_steps,
-                on_log=lambda level, message: self._emit_planner_callback_event(
-                    project_id=project_id,
+            if resume and existing_plan_data:
+                intel_checklist = existing_checklist
+                intel_summary = existing_summary
+                intel_status = "complete"
+                info = synthesis_info
+                self._emit_event(
+                    project_id,
+                    event="planner_checklist_started",
                     scan_id=scan_id,
-                    level=level,
-                    raw_message=message,
-                ),
-            )
-            checklist_input = _build_planner_checklist_message(
-                target=target,
-                target_type=target_type,
-                scope=scope_text,
-                info=synthesis_info,
-                target_info_profile=target_info_profile,
-                target_memory=target_memory,
-                custom_checklist_text=custom_checklist_text,
-                current_checklist={},
-            )
-            async with PlannerAgent(
-                callback=checklist_callback,
-                project_id=project_id,
-                projects_store=self._projects_store,
-                vector_store=self._vector_store,
-            ) as checklist_planner:
-                planner_checklist_result = await checklist_planner.generate_checklist(
-                    checklist_input,
-                    current_checklist={},
-                    target_type=target_type,
+                    level="info",
+                    message="Planner [skip] Resuming with saved plan checkpoint.",
+                    data={
+                        "stage": "planner",
+                        "kind": "checklist_start",
+                        "resume_source": "saved_plan",
+                        "scenario_count": _count_total_scenarios(existing_plan_data),
+                        "warmup_summary_count": 0,
+                        "project_cache_dir": project_cache_dir,
+                    },
                 )
-            intel_summary = planner_checklist_result.summary
-            intel_status = planner_checklist_result.status
-            intel_checklist = (
-                planner_checklist_result.checklist
-                if isinstance(planner_checklist_result.checklist, dict)
-                else {}
-            )
-            info = synthesis_info
+            else:
+                self._emit_event(
+                    project_id,
+                    event="planner_checklist_started",
+                    scan_id=scan_id,
+                    level="info",
+                    message="Planner [start] generating prioritized checklist from grouped information gathering, target info, and any user checklist input.",
+                    data={
+                        "stage": "planner",
+                        "kind": "checklist_start",
+                        "warmup_summary_count": 0,
+                        "warmup_cache_path": "",
+                        "project_cache_dir": project_cache_dir,
+                    },
+                )
+                from server.agents.planner.agent import PlannerAgent
+    
+                checklist_callback = PrintCallback(
+                    enabled=print_steps,
+                    on_log=lambda level, message: self._emit_planner_callback_event(
+                        project_id=project_id,
+                        scan_id=scan_id,
+                        level=level,
+                        raw_message=message,
+                    ),
+                )
+                checklist_input = _build_planner_checklist_message(
+                    target=target,
+                    target_type=target_type,
+                    scope=scope_text,
+                    info=synthesis_info,
+                    target_info_profile=target_info_profile,
+                    target_memory=target_memory,
+                    custom_checklist_text=custom_checklist_text,
+                    current_checklist={},
+                )
+                async with PlannerAgent(
+                    callback=checklist_callback,
+                    project_id=project_id,
+                    projects_store=self._projects_store,
+                    vector_store=self._vector_store,
+                ) as checklist_planner:
+                    planner_checklist_result = await checklist_planner.generate_checklist(
+                        checklist_input,
+                        current_checklist={},
+                        target_type=target_type,
+                    )
+                intel_summary = planner_checklist_result.summary
+                intel_status = planner_checklist_result.status
+                intel_checklist = (
+                    planner_checklist_result.checklist
+                    if isinstance(planner_checklist_result.checklist, dict)
+                    else {}
+                )
+                info = synthesis_info
         except asyncio.CancelledError:
             current = self._runs.get(project_id, {})
             if str(current.get("status")) in {"paused", "idle"}:
@@ -9581,13 +9767,14 @@ class ScanOrchestratorService:
         project = self._projects_store.get_project(project_id)
         approval_mode = str(project.get("approval_mode") or "custom").lower().strip() if project else "custom"
         
+        gate = None
         run_state = self._runs.get(project_id)
         if isinstance(run_state, dict):
             # Sync run_state
             run_state["approval_mode"] = approval_mode
             
-            if approval_mode == "auto":
-                logger.info("planner_auto_approved", project_id=project_id)
+            if approval_mode == "auto" or resume:
+                logger.info("planner_auto_approved_or_resumed", project_id=project_id)
                 gate = None
             else:
                 run_state["awaiting_planner_approval"] = True
@@ -9712,42 +9899,68 @@ class ScanOrchestratorService:
             target_memory=target_memory,
             warmup_summaries=warmup_summaries,
         )
-        self._emit_event(
-            project_id,
-            event="planner_started",
-            scan_id=scan_id,
-            level="info",
-            message="Planner [start] agent started to build pentest plan.",
-            data={"stage": "planner", "status": "running", "kind": "start"},
-        )
+        existing_plan = {}
+        if resume and isinstance(project, dict):
+            last_scan = project.get("lastScan", {}) or {}
+            existing_plan = _extract_saved_plan_from_last_scan(last_scan)
 
         try:
-            from server.agents.planner.agent import PlannerAgent
+            from server.agents.planner.agent import PlannerAgent, PlannerResult
 
-            planner_callback = PrintCallback(
-                enabled=print_steps,
-                on_log=lambda level, message: self._emit_planner_callback_event(
-                    project_id=project_id,
+            if resume and existing_plan and existing_plan.get("phases"):
+                self._emit_event(
+                    project_id,
+                    event="planner_started",
                     scan_id=scan_id,
-                    level=level,
-                    raw_message=message,
-                ),
-            )
-            async with PlannerAgent(
-                callback=planner_callback,
-                project_id=project_id,
-                projects_store=self._projects_store,
-                vector_store=self._vector_store,
-            ) as planner_agent:
-                planner_result = await planner_agent.run(
-                    planner_input,
-                    is_loop=False,
-                    intel_checklist=intel_checklist,
-                    plan_mode="full",
+                    level="info",
+                    message="Planner [skip] Resuming with previously generated plan.",
+                    data={"stage": "planner", "status": "running", "kind": "start"},
                 )
-                # Plan data is maintained in pentest_plan module and retrieved via import
-                from server.agents.planner.tools.pentest_plan import _current_plan
-                plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
+                plan_data, resume_plan_stats = _prepare_plan_for_resume(existing_plan)
+                _sync_plan_data_into_planner_state(plan_data)
+                planner_result = PlannerResult(
+                    summary=(
+                        "Resumed from saved plan checkpoint "
+                        f"({resume_plan_stats.get('completed', 0)} completed, "
+                        f"{resume_plan_stats.get('pending', 0)} pending)."
+                    ),
+                    scenarios=[],
+                    needs=[],
+                    action_plan={"resume": {"source": "saved_plan", "stats": resume_plan_stats}},
+                )
+            else:
+                self._emit_event(
+                    project_id,
+                    event="planner_started",
+                    scan_id=scan_id,
+                    level="info",
+                    message="Planner [start] agent started to build pentest plan.",
+                    data={"stage": "planner", "status": "running", "kind": "start"},
+                )
+                planner_callback = PrintCallback(
+                    enabled=print_steps,
+                    on_log=lambda level, message: self._emit_planner_callback_event(
+                        project_id=project_id,
+                        scan_id=scan_id,
+                        level=level,
+                        raw_message=message,
+                    ),
+                )
+                async with PlannerAgent(
+                    callback=planner_callback,
+                    project_id=project_id,
+                    projects_store=self._projects_store,
+                    vector_store=self._vector_store,
+                ) as planner_agent:
+                    planner_result = await planner_agent.run(
+                        planner_input,
+                        is_loop=False,
+                        intel_checklist=intel_checklist,
+                        plan_mode="full",
+                    )
+                    # Plan data is maintained in pentest_plan module and retrieved via import
+                    from server.agents.planner.tools.pentest_plan import _current_plan
+                    plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
                 # Sanitize plan: remove any forbidden agents (verify, retest, perceptor)
                 plan_data = _sanitize_plan_remove_forbidden_agents(plan_data)
                 plan_data, pruned_blocked_count = _prune_plan_blocked_route_scenarios(
@@ -9940,6 +10153,51 @@ class ScanOrchestratorService:
                 "needs": planner_result.needs,
                 "action_plan": planner_result.action_plan,
                 "plan_data": plan_data,
+            },
+        )
+
+        self._persist_project_status(
+            project_id,
+            status="running",
+            scan_progress=75,
+            scan_meta={
+                "scanId": scan_id,
+                "status": "running",
+                "startedAt": started_at,
+                "finishedAt": None,
+                "error": "",
+                "awaitingPlannerApproval": False,
+                "plan": plan_data,
+                "result": {
+                    "target": target,
+                    "targetType": target_type,
+                    "intel": {
+                        "status": intel_status,
+                        "summary": intel_summary,
+                        "stats": intel_stats,
+                        "checklist": intel_checklist,
+                    },
+                    "plannerStaticPlan": static_recon_plan,
+                    "targetInfoProfile": target_info_profile,
+                    "targetMemory": target_memory.get("paths", {}),
+                    "targetInfoGathering": target_info_gathering_result,
+                    "warmup": {
+                        "status": "skipped",
+                        "plan": warmup_plan_data,
+                        "summaries": warmup_summaries,
+                    },
+                    "planner": {
+                        "summary": str(planner_result.summary),
+                        "scenarios": list(planner_result.scenarios),
+                        "needs": list(planner_result.needs),
+                        "action_plan": (
+                            dict(planner_result.action_plan)
+                            if isinstance(planner_result.action_plan, dict)
+                            else {}
+                        ),
+                        "plan_data": plan_data,
+                    },
+                },
             },
         )
 
@@ -10216,6 +10474,7 @@ class ScanOrchestratorService:
                 "startedAt": started_at,
                 "finishedAt": finished_at,
                 "error": "",
+                "plan": plan_data,
                 "result": {
                     "target": target,
                     "targetType": target_type,

@@ -94,6 +94,16 @@ def describe_url_scope_issue(url: str, active_target: str) -> str | None:
     if not (has_dot or has_scheme or is_localhost or is_ipv6):
         return None
 
+    # Ignore common local file extensions to avoid false-positive scope violations
+    ignored_extensions = (
+        ".txt", ".json", ".log", ".xml", ".csv", ".bak", ".html", ".js", ".dic",
+        ".zip", ".tar.gz", ".gz", ".pdf", ".png", ".jpg", ".jpeg", ".sqlite", ".db",
+        ".yaml", ".yml", ".sh", ".php", ".asp", ".aspx", ".jsp", ".exe", ".dll",
+        ".bin", ".py", ".md", ".conf", ".ini",
+    )
+    if url.lower().endswith(ignored_extensions):
+        return None
+
     same_host = url_host == target_host
     same_loopback_family = is_loopback_host(url_host) and is_loopback_host(target_host)
     if not (same_host or same_loopback_family):

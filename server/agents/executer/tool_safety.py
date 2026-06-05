@@ -203,6 +203,8 @@ def requires_approval_for_execution(
 
     if clean_role == "exploit":
         return True
+    if clean_tool_name == "run_custom":
+        return True
     if clean_tool_name == "run_python":
         return True
     if clean_mode != "auto":

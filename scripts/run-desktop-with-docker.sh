@@ -10,7 +10,7 @@ BACKEND_HASH_FILE="$STATE_DIR/backend-bootstrap.sha256"
 SANDBOX_HASH_FILE="$STATE_DIR/sandbox-bootstrap.sha256"
 SANDBOX_TOOLS_HASH_FILE="$STATE_DIR/sandbox-tools-bootstrap.sha256"
 COMPOSE_ARGS=(up -d --remove-orphans)
-# Default behavior: rebuild backend and sandbox app layers on every launch.
+# Default behavior: rely on Docker's native layer caching to "copy what changed"
 FORCE_BUILD_BACKEND=1
 FORCE_BUILD_SANDBOX=1
 FORCE_BUILD_SANDBOX_TOOLS=0
@@ -23,19 +23,15 @@ LAST_BUILD_FAILURE_LOG=""
 
 for arg in "$@"; do
   case "$arg" in
-    --build)
-      FORCE_BUILD_BACKEND=1
-      FORCE_BUILD_SANDBOX=1
+    --skip-backend)
+      FORCE_BUILD_BACKEND=0
       ;;
-    --build-backend)
-      FORCE_BUILD_BACKEND=1
-      ;;
-    --build-sandbox)
-      FORCE_BUILD_SANDBOX=1
+    --skip-sandbox)
+      FORCE_BUILD_SANDBOX=0
       ;;
     --reinstall-sandbox-tools|--build-sandbox-tools)
-      FORCE_BUILD_SANDBOX=1
       FORCE_BUILD_SANDBOX_TOOLS=1
+      FORCE_BUILD_SANDBOX=1
       ;;
   esac
 done
@@ -168,89 +164,14 @@ run_build_with_fallback() {
 
 trap handle_interrupt INT TERM
 
-compute_backend_hash() {
-  sha256sum \
-    "$ROOT_DIR/infra/docker/backend.Dockerfile" \
-    "$ROOT_DIR/server/requirements.txt" \
-    "$ROOT_DIR/server/scripts/warm_embedding_model.py" \
-    "$ROOT_DIR/server/db/knowledge/storage/embedding.py" \
-    "$ROOT_DIR/server/agents/assistant/agent.py" \
-    "$ROOT_DIR/server/agents/assistant/prompts.py" \
-    "$ROOT_DIR/server/agents/assistant/security_tools.py" \
-    "$ROOT_DIR/server/agents/tools/run_custom.py" \
-    "$ROOT_DIR/server/nodes/intel/config.py" \
-    "$ROOT_DIR/server/nodes/intel/helpers.py" \
-    "$ROOT_DIR/server/db/knowledge/config/sources.py" \
-    "$ROOT_DIR/server/db/knowledge/sources/github_extractor.py" \
-    "$ROOT_DIR/server/sandbox_service/app.py" | sha256sum | awk '{print $1}'
-}
-
-compute_sandbox_hash() {
-  sha256sum \
-    "$ROOT_DIR/infra/docker/sandbox.Dockerfile" \
-    "$ROOT_DIR/server/requirements.txt" \
-    "$ROOT_DIR/server/agents/tools/run_custom.py" \
-    "$ROOT_DIR/server/agents/executer/sandbox.py" \
-    "$ROOT_DIR/server/sandbox_service/app.py" \
-    "$ROOT_DIR/server/sandbox/share/wordlists/short.txt" \
-    "$ROOT_DIR/server/sandbox/share/wordlists/medium.txt" \
-    "$ROOT_DIR/server/sandbox/share/wordlists/large.txt" \
-    "$ROOT_DIR/server/sandbox/share/wordlists/dns-fuzz-common.txt" \
-    "$ROOT_DIR/server/sandbox/share/wordlists/rockyou.txt" | sha256sum | awk '{print $1}'
-}
-
-compute_sandbox_tools_hash() {
-  sha256sum \
-    "$ROOT_DIR/infra/docker/sandbox-tools.Dockerfile" \
-    "$ROOT_DIR/infra/docker/install-sandbox-tools.sh" | sha256sum | awk '{print $1}'
-}
-
-mkdir -p "$STATE_DIR"
-CURRENT_BACKEND_HASH="$(compute_backend_hash)"
-PREVIOUS_BACKEND_HASH=""
-if [[ -f "$BACKEND_HASH_FILE" ]]; then
-  PREVIOUS_BACKEND_HASH="$(<"$BACKEND_HASH_FILE")"
-fi
-
-CURRENT_SANDBOX_HASH="$(compute_sandbox_hash)"
-PREVIOUS_SANDBOX_HASH=""
-if [[ -f "$SANDBOX_HASH_FILE" ]]; then
-  PREVIOUS_SANDBOX_HASH="$(<"$SANDBOX_HASH_FILE")"
-fi
-
-CURRENT_SANDBOX_TOOLS_HASH="$(compute_sandbox_tools_hash)"
-PREVIOUS_SANDBOX_TOOLS_HASH=""
-if [[ -f "$SANDBOX_TOOLS_HASH_FILE" ]]; then
-  PREVIOUS_SANDBOX_TOOLS_HASH="$(<"$SANDBOX_TOOLS_HASH_FILE")"
-fi
-
-if [[ "$CURRENT_BACKEND_HASH" != "$PREVIOUS_BACKEND_HASH" ]]; then
-  FORCE_BUILD_BACKEND=1
-fi
-
-SANDBOX_CHANGED=0
-if [[ "$CURRENT_SANDBOX_HASH" != "$PREVIOUS_SANDBOX_HASH" ]]; then
-  SANDBOX_CHANGED=1
-fi
-
-SANDBOX_TOOLS_CHANGED=0
-if [[ "$CURRENT_SANDBOX_TOOLS_HASH" != "$PREVIOUS_SANDBOX_TOOLS_HASH" ]]; then
-  SANDBOX_TOOLS_CHANGED=1
-fi
-
-if [[ "$FORCE_BUILD_SANDBOX_TOOLS" == "1" ]]; then
-  FORCE_BUILD_SANDBOX=1
-fi
-
 if [[ "$FORCE_BUILD_BACKEND" == "1" ]]; then
   echo "[1/5] Rebuilding backend image..."
   run_build_with_fallback \
     "Backend image build" \
     "docker-backend:latest" \
     docker compose "${COMPOSE_PROFILE_ARGS[@]}" -f "$COMPOSE_FILE" build backend
-  printf '%s\n' "$CURRENT_BACKEND_HASH" > "$BACKEND_HASH_FILE"
 else
-  echo "[1/5] Reusing current backend image..."
+  echo "[1/5] Skipping backend image build..."
 fi
 
 if ! docker image inspect docker-tool-sandbox-base:latest >/dev/null 2>&1; then
@@ -263,13 +184,8 @@ if [[ "$FORCE_BUILD_SANDBOX_TOOLS" == "1" ]]; then
     "Sandbox tools base image build" \
     "docker-tool-sandbox-base:latest" \
     docker build -f "$ROOT_DIR/infra/docker/sandbox-tools.Dockerfile" -t docker-tool-sandbox-base:latest "$ROOT_DIR"
-  printf '%s\n' "$CURRENT_SANDBOX_TOOLS_HASH" > "$SANDBOX_TOOLS_HASH_FILE"
-elif [[ "$SANDBOX_TOOLS_CHANGED" == "1" ]]; then
-  echo "[1a/5] Sandbox tools definition changed, but reusing the current tools base image."
-  echo "        Run './scripts/run-desktop-with-docker.sh --reinstall-sandbox-tools' when you want to rebuild security tools."
-  printf '%s\n' "$CURRENT_SANDBOX_TOOLS_HASH" > "$SANDBOX_TOOLS_HASH_FILE"
 else
-  echo "[1a/5] Reusing current sandbox tools base image..."
+  echo "[1a/5] Skipping sandbox tools base image build..."
 fi
 
 if [[ "$FORCE_BUILD_SANDBOX" == "1" ]]; then
@@ -278,12 +194,8 @@ if [[ "$FORCE_BUILD_SANDBOX" == "1" ]]; then
     "Sandbox image build" \
     "docker-tool-sandbox:latest" \
     docker compose "${COMPOSE_PROFILE_ARGS[@]}" -f "$COMPOSE_FILE" build tool-sandbox
-  printf '%s\n' "$CURRENT_SANDBOX_HASH" > "$SANDBOX_HASH_FILE"
-elif [[ "$SANDBOX_CHANGED" == "1" ]]; then
-  echo "[1b/5] Sandbox bootstrap files changed, but reusing the current sandbox image."
-  echo "        Run './scripts/run-desktop-with-docker.sh --build-sandbox' when you want to rebuild the sandbox app layer."
 else
-  echo "[1b/5] Reusing current sandbox image..."
+  echo "[1b/5] Skipping sandbox image build..."
 fi
 
 echo "[2/5] Starting Docker backend stack..."
