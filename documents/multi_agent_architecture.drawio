@@ -1,0 +1,140 @@
+<mxfile host="Electron" modified="2026-06-07T14:00:00.000Z" agent="Mozilla/5.0" type="device">
+  <diagram id="multi_agent" name="Multi-Agent Architecture">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Graph State / Context -->
+        <mxCell id="graph_state" value="Shared Graph State&#10;(Context, Target Info, Scan Plan, Messages)" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="50" y="200" width="160" height="400" as="geometry" />
+        </mxCell>
+
+        <!-- User / Trigger -->
+        <mxCell id="trigger" value="Scan Task Trigger" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="353" y="40" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Scan Orchestrator -->
+        <mxCell id="agent_supervisor" value="&lt;b&gt;Scan Orchestrator&lt;/b&gt;&#10;Reviews state, decides next steps, routes to specialized agents." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="313" y="160" width="200" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Planner Agent -->
+        <mxCell id="agent_planner" value="&lt;b&gt;Planner Agent&lt;/b&gt;&#10;Generates strategy, chain-of-thought planning, formulates tool calls." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="313" y="290" width="200" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Executer Agent -->
+        <mxCell id="agent_executer" value="&lt;b&gt;Executer Node&lt;/b&gt;&#10;Validates commands, runs in Sandbox, captures stdout/stderr." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="313" y="420" width="200" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Sandbox -->
+        <mxCell id="sandbox" value="&lt;b&gt;Tool Sandbox&lt;/b&gt;&#10;(Docker/Subprocess)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="600" y="420" width="120" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Analyzer Agent -->
+        <mxCell id="agent_analyzer" value="&lt;b&gt;Analyzer Agent&lt;/b&gt;&#10;Parses raw output, applies SSVC, structures findings, mitigates false positives." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="313" y="550" width="200" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Assistant Agent -->
+        <mxCell id="agent_assistant" value="&lt;b&gt;Assistant Agent&lt;/b&gt;&#10;(Parallel asynchronous querying by user)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;borderStyle=dashed;" vertex="1" parent="1">
+          <mxGeometry x="600" y="160" width="160" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- End State -->
+        <mxCell id="end_state" value="Scan Complete" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="353" y="730" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Data flow edges -->
+        <mxCell id="e_1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="trigger" target="agent_supervisor">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="e_2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="agent_supervisor" target="agent_planner">
+          <mxGeometry relative="1" as="geometry" />
+          <mxCell value="Route to Planner" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_2">
+            <mxGeometry x="-0.2" y="0" relative="1" as="geometry">
+              <mxPoint as="offset" />
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+
+        <mxCell id="e_3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="agent_planner" target="agent_executer">
+          <mxGeometry relative="1" as="geometry" />
+          <mxCell value="Tool Calls" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_3">
+            <mxGeometry x="-0.2" y="0" relative="1" as="geometry">
+              <mxPoint as="offset" />
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+
+        <mxCell id="e_4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;startArrow=classic;" edge="1" parent="1" source="agent_executer" target="sandbox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="agent_executer" target="agent_analyzer">
+          <mxGeometry relative="1" as="geometry" />
+          <mxCell value="Raw Tool Output" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_5">
+            <mxGeometry x="-0.2" y="0" relative="1" as="geometry">
+              <mxPoint as="offset" />
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+
+        <mxCell id="e_6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.25;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent_analyzer" target="agent_supervisor">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="280" y="590" />
+              <mxPoint x="280" y="240" />
+              <mxPoint x="363" y="240" />
+            </Array>
+          </mxGeometry>
+          <mxCell value="Structured Finding" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_6">
+            <mxGeometry x="-0.2" y="0" relative="1" as="geometry">
+              <mxPoint as="offset" />
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+
+        <mxCell id="e_7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent_supervisor" target="end_state">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="540" y="200" />
+              <mxPoint x="540" y="760" />
+            </Array>
+          </mxGeometry>
+          <mxCell value="Task Satisfied" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_7">
+            <mxGeometry x="-0.2" y="0" relative="1" as="geometry">
+              <mxPoint as="offset" />
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+
+        <!-- State updating edges (dashed) -->
+        <mxCell id="e_s1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;strokeColor=#999999;exitX=0;exitY=0.25;exitDx=0;exitDy=0;entryX=1;entryY=0.1;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent_supervisor" target="graph_state">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_s2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;strokeColor=#999999;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.35;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent_planner" target="graph_state">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_s3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;strokeColor=#999999;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=1;entryY=0.8;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent_analyzer" target="graph_state">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_s4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;strokeColor=#999999;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent_assistant" target="graph_state">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="680" y="100" />
+              <mxPoint x="130" y="100" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

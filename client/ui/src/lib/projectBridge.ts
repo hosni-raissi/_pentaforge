@@ -521,6 +521,47 @@ function apiBaseUrl(): string {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function dispatchLLMRequiredBlock(message?: string, settingsPath = "/settings"): void {
+  window.dispatchEvent(new CustomEvent("pentaforge:llm-required", {
+    detail: {
+      message: message?.trim() || "Add an active LLM profile in Settings before starting this action.",
+      settingsPath,
+    },
+  }));
+}
+
+function extractHTTPErrorDetail(body: string): { code?: string; message?: string; settingsPath?: string } {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const detail = isRecord(parsed) ? parsed.detail : null;
+    if (isRecord(detail)) {
+      return {
+        code: typeof detail.code === "string" ? detail.code : undefined,
+        message: typeof detail.message === "string" ? detail.message : undefined,
+        settingsPath: typeof detail.settings_path === "string" ? detail.settings_path : undefined,
+      };
+    }
+    if (typeof detail === "string") {
+      return { message: detail };
+    }
+  } catch {
+    // Keep the original HTTP error when the response is not structured JSON.
+  }
+  return {};
+}
+
+function buildHTTPError(response: Response, body: string): Error {
+  const detail = extractHTTPErrorDetail(body);
+  if (response.status === 409 && detail.code === "llm_profile_required") {
+    dispatchLLMRequiredBlock(detail.message, detail.settingsPath);
+  }
+  return new Error(`${response.status} ${response.statusText}: ${body}`);
+}
+
 async function requestJson<T>(
   path: string,
   init?: RequestInit,
@@ -552,7 +593,7 @@ async function requestJson<T>(
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`${response.status} ${response.statusText}: ${body}`);
+      throw buildHTTPError(response, body);
     }
     return (await response.json()) as T;
   } finally {
@@ -610,7 +651,7 @@ async function requestBlob(
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`${response.status} ${response.statusText}: ${body}`);
+      throw buildHTTPError(response, body);
     }
     return response;
   } finally {
@@ -643,7 +684,7 @@ export async function testLLMConfigFromDesktop(profile: LLMProfile): Promise<{ o
   return await requestJson<{ ok: boolean; message: string }>("/api/settings/test-llm", {
     method: "POST",
     body: JSON.stringify(profile),
-  });
+  }, 45000);
 }
 
 export async function fetchSystemSettingsFromDesktop(): Promise<SystemSettings> {
@@ -1290,10 +1331,6 @@ export async function createProjectShareLinkFromDesktop(
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function toInformationGatheringProfileBlock(value: unknown): InformationGatheringProfileBlock | null {
   if (!isRecord(value)) {
     return null;
@@ -1578,7 +1615,7 @@ export async function askAIAssistStreamFromDesktop(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`${response.status} ${response.statusText}: ${text}`);
+    throw buildHTTPError(response, text);
   }
 
   const reader = response.body?.getReader();

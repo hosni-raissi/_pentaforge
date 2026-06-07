@@ -116,7 +116,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "ollama": {
         "model": "qwen3:4b",
-        "api_url": "http://localhost:11434/v1",
+        "api_url": "http://host.docker.internal:11434/v1",
         "max_tokens": 8192,
     },
     "nvidia": {
@@ -137,6 +137,20 @@ def _env_first(*keys: str, default: str = "") -> str:
 
 def _provider_defaults(provider: str) -> dict[str, Any]:
     return _PROVIDER_DEFAULTS.get(provider, _PROVIDER_DEFAULTS["cerebras"])
+
+
+def _rewrite_local_url(url: str) -> str:
+    """Rewrite localhost/127.0.0.1 URLs to host.docker.internal for Docker compatibility."""
+    if not url:
+        return url
+    url = url.strip()
+    import re as _re
+    return _re.sub(
+        r'(https?://)(?:localhost|127\.0\.0\.1)',
+        r'\1host.docker.internal',
+        url,
+        count=1,
+    )
 
 
 def _agent_role_token(agent_role: str | None) -> str:
@@ -197,10 +211,11 @@ class LLMConfig:
     @classmethod
     def local(cls) -> LLMConfig:
         """Load local (Ollama) configuration."""
+        raw_url = os.getenv("LOCAL_LLM_API_URL", "http://host.docker.internal:11434/v1")
         return cls(
             provider="ollama",
             model=os.getenv("LOCAL_LLM_MODEL", "qwen3:4b"),
-            api_url=os.getenv("LOCAL_LLM_API_URL", "http://localhost:11434/v1"),
+            api_url=_rewrite_local_url(raw_url),
             api_key="",
             temperature=float(os.getenv("LOCAL_LLM_TEMPERATURE", "0.7")),
             max_tokens=int(os.getenv("LOCAL_LLM_MAX_TOKENS", "8192")),
@@ -241,10 +256,11 @@ def get_config() -> LLMConfig:
     
     if active_profiles:
         p = active_profiles[0]
+        raw_url = p.get("api_url") or _provider_defaults(p["provider"])["api_url"]
         return LLMConfig(
             provider=p["provider"],
             model=p["model"],
-            api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+            api_url=_rewrite_local_url(raw_url),
             api_key=p.get("api_key", ""),
         )
     
@@ -273,7 +289,7 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
                 return LLMConfig(
                     provider=p["provider"],
                     model=p["model"],
-                    api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+                    api_url=_rewrite_local_url(p.get("api_url") or _provider_defaults(p["provider"])["api_url"]),
                     api_key=p.get("api_key", ""),
                 )
         
@@ -283,7 +299,7 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
                 return LLMConfig(
                     provider=p["provider"],
                     model=p["model"],
-                    api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+                    api_url=_rewrite_local_url(p.get("api_url") or _provider_defaults(p["provider"])["api_url"]),
                     api_key=p.get("api_key", ""),
                 )
         
@@ -292,7 +308,7 @@ def get_public_agent_config(agent_role: str | None = None) -> LLMConfig:
         return LLMConfig(
             provider=p["provider"],
             model=p["model"],
-            api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+            api_url=_rewrite_local_url(p.get("api_url") or _provider_defaults(p["provider"])["api_url"]),
             api_key=p.get("api_key", ""),
         )
 
@@ -392,7 +408,7 @@ def get_backup_llm_config() -> LLMConfig | None:
             return LLMConfig(
                 provider=p["provider"],
                 model=p["model"],
-                api_url=p.get("api_url") or _provider_defaults(p["provider"])["api_url"],
+                api_url=_rewrite_local_url(p.get("api_url") or _provider_defaults(p["provider"])["api_url"]),
                 api_key=p.get("api_key", ""),
                 temperature=0.2,
                 max_tokens=4000,
@@ -752,62 +768,36 @@ class LLMClient:
                 )
 
             # Retry provider-side transient failures before failing over.
-            retries = 0
+            backup_config = get_backup_llm_config()
+            has_backup = backup_config is not None and backup_config.provider != self._provider and max_retries > 0
+
+            if max_retries == 0:
+                delays = []
+            else:
+                delays = [10, 30, 60] if not has_backup else [10, 60]
+                
+            max_attempts = len(delays) + 1
+            
             resp = None
-            while retries <= max_retries:
+            attempt = 0
+            
+            while attempt < max_attempts:
                 try:
                     resp = await self._http.post("/chat/completions", json=payload)
                     if not _is_transient_llm_status(resp.status_code):
                         break
-
-                    wait_raw = float(resp.headers.get("retry-after", 2 ** (retries + 1)))
-                    wait = min(wait_raw, 30.0)
-                    logger.warning(
-                        "llm_transient_http_retry",
-                        provider=self._provider,
-                        status=resp.status_code,
-                        retry=retries,
-                        wait=wait,
-                    )
-                    if retries >= max_retries:
-                        break
-                    await asyncio.sleep(wait)
+                        
                 except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout, httpx.ReadError) as exc:
-                    retries += 1
-                    if retries > max_retries:
-                        logger.error("llm_connection_failed_max_retries", provider=self._provider, error=repr(exc))
-                        raise
-                    wait = 2 ** retries
-                    logger.warning(
-                        "llm_connection_retry",
-                        provider=self._provider,
-                        retry=retries,
-                        wait=wait,
-                        error=repr(exc),
-                    )
-                    await asyncio.sleep(wait)
-
-                retries += 1
-
-            if resp is None:
-                raise RuntimeError("LLM request failed: No response received")
-
-            if resp.status_code >= 400 and resp.status_code != 429:
-                logger.error(
-                    "llm_api_error",
-                    provider=self._provider,
-                    status=resp.status_code,
-                    body=resp.text[:500],
-                )
-
-            if _is_transient_llm_status(resp.status_code):
-                backup_config = get_backup_llm_config()
-                if backup_config and backup_config.provider != self._provider:
+                    logger.warning("llm_connection_error", provider=self._provider, error=repr(exc))
+                    resp = None
+                    
+                # Transient error status or connection exception
+                if has_backup:
                     logger.warning(
                         "llm_transient_fallback",
                         original_provider=self._provider,
                         backup_provider=backup_config.provider,
-                        status=resp.status_code,
+                        status=resp.status_code if resp else "timeout",
                     )
                     try:
                         async with LLMClient(backup_config, client_name=f"{self._client_name}_fallback") as fallback_llm:
@@ -817,16 +807,41 @@ class LLMClient:
                                 temperature=temperature,
                                 max_tokens=max_tokens,
                                 use_config_max_tokens=use_config_max_tokens,
-                                max_retries=1,
+                                max_retries=0,
                             )
-                    except Exception as exc:
+                    except Exception as fallback_exc:
                         logger.error(
                             "llm_transient_fallback_failed",
                             original_provider=self._provider,
                             backup_provider=backup_config.provider,
-                            status=resp.status_code,
-                            error=repr(exc),
+                            error=repr(fallback_exc),
                         )
+                
+                if attempt >= max_attempts - 1:
+                    break
+                    
+                wait = delays[attempt]
+                status_log = resp.status_code if resp else "timeout"
+                logger.warning(
+                    "llm_rate_limit_wait",
+                    provider=self._provider,
+                    status=status_log,
+                    wait=wait,
+                    attempt=attempt+1,
+                )
+                await asyncio.sleep(wait)
+                attempt += 1
+
+            if resp is None:
+                raise RuntimeError("LLM request failed: No response received after retries")
+
+            if resp.status_code >= 400 and resp.status_code != 429:
+                logger.error(
+                    "llm_api_error",
+                    provider=self._provider,
+                    status=resp.status_code,
+                    body=resp.text[:500],
+                )
 
             resp.raise_for_status()
             data = resp.json()

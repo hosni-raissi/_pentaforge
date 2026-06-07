@@ -1,0 +1,133 @@
+<mxfile host="Electron" modified="2026-06-07T12:00:00.000Z" agent="Mozilla/5.0" type="device">
+  <diagram id="use_case_diagram" name="Use Case Diagram">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <mxCell id="boundary" value="PentaForge" style="shape=umlFrame;whiteSpace=wrap;html=1;width=100;height=30;boundedLbl=1;verticalAlign=middle;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="250" y="50" width="700" height="900" as="geometry" />
+        </mxCell>
+
+        <!-- Actors -->
+        <mxCell id="actor_pentester" value="Pentester" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="250" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="actor_admin" value="Administrator" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="700" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="actor_client" value="Client" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="150" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="actor_assistant" value="AI Assistant" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="450" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="actor_target" value="Target System" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="750" width="30" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Use Cases Pentester -->
+        <mxCell id="uc_create_project" value="Create Project" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="80" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_config_scope" value="Configure Scope" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="80" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="uc_scan_control" value="Start Scan" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="150" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_pause_scan" value="Pause/Stop Scan" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="150" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="uc_monitor" value="Monitor Live Execution" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="220" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_review" value="Review &amp; Validate Findings" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="290" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_report" value="Generate Reports" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="360" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_share" value="Create Share Link" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="360" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="uc_ask_ai" value="Ask Assistant Questions" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="450" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Use Cases Admin -->
+        <mxCell id="uc_tools" value="Configure Tools &amp; Sandbox" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="650" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_settings" value="Manage Global Settings" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="720" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_health" value="Monitor System Health" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="790" width="160" height="40" as="geometry" />
+        </mxCell>
+        
+        <!-- Use Cases Client -->
+        <mxCell id="uc_client_report" value="Open Shared Report" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="800" y="150" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Use Cases AI Assistant -->
+        <mxCell id="uc_ai_explain" value="Explain Scan Status" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="450" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Use Cases Target System -->
+        <mxCell id="uc_target_respond" value="Respond to Scan Requests" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="700" y="750" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Edges Pentester -->
+        <mxCell id="e_pt_1" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_create_project"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_pt_2" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_scan_control"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_pt_3" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_monitor"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_pt_4" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_review"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_pt_5" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_report"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_pt_7" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_ask_ai"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Includes and Extends -->
+        <mxCell id="rel_1" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" edge="1" parent="1" source="uc_create_project" target="uc_config_scope">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel_1_lbl" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rel_1"><mxGeometry x="0" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry></mxCell>
+        
+        <mxCell id="rel_2" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" edge="1" parent="1" source="uc_pause_scan" target="uc_scan_control">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel_2_lbl" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rel_2"><mxGeometry x="0" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry></mxCell>
+
+        <mxCell id="rel_3" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" edge="1" parent="1" source="uc_share" target="uc_report">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel_3_lbl" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rel_3"><mxGeometry x="0" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry></mxCell>
+
+        <mxCell id="rel_4" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" edge="1" parent="1" source="uc_ask_ai" target="uc_ai_explain">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel_4_lbl" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rel_4"><mxGeometry x="0" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry></mxCell>
+
+        <!-- Edges Admin -->
+        <mxCell id="e_ad_1" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_admin" target="uc_tools"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_ad_2" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_admin" target="uc_settings"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_ad_3" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_admin" target="uc_health"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Edges Client -->
+        <mxCell id="e_cl_1" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_client" target="uc_client_report"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Edges AI Assistant -->
+        <mxCell id="e_ai_1" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_assistant" target="uc_ai_explain"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Edges Target System -->
+        <mxCell id="e_tg_1" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_target" target="uc_target_respond"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

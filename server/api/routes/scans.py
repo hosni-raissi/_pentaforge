@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from server.api.dependencies import projects_store, scan_orchestrator
+from server.api.routes.settings import has_saved_usable_llm_profile, llm_required_response
 from server.app.mobile_runtime import prepare_mobile_runtime_for_project, stop_mobile_runtime_for_project
 
 router = APIRouter(tags=["scans"])
@@ -112,6 +113,9 @@ def _prepare_mobile_runtime_if_required(project_id: str) -> dict[str, Any]:
 @router.post("/api/scans/start")
 async def start_scan(payload: StartScanPayload) -> dict[str, Any]:
     try:
+        if not has_saved_usable_llm_profile():
+            raise HTTPException(status_code=409, detail=llm_required_response())
+
         mobile_runtime = _prepare_mobile_runtime_if_required(payload.project_id)
         result = await scan_orchestrator.start_scan(
             payload.project_id,
@@ -128,6 +132,8 @@ async def start_scan(payload: StartScanPayload) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to start scan: {exc}") from exc
 

@@ -1,0 +1,45 @@
+<mxfile host="Electron" modified="2026-06-07T10:00:00.000Z" agent="Mozilla/5.0" type="device">
+  <diagram id="uc_project" name="Project and Scope Management">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="boundary" value="Project &amp; Scope Management" style="shape=umlFrame;whiteSpace=wrap;html=1;width=200;height=30;boundedLbl=1;verticalAlign=middle;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="250" y="80" width="500" height="420" as="geometry" />
+        </mxCell>
+
+        <mxCell id="actor_pentester" value="Pentester" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="240" width="30" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="uc_create" value="Create Project" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="300" y="150" width="160" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_select" value="Select Target Category" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="100" width="160" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_info" value="Provide Target Information" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="200" width="160" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="uc_profile" value="Edit Reconnaissance Profiles" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="300" y="320" width="160" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_1" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_create"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e_4" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" edge="1" parent="1" source="actor_pentester" target="uc_profile"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="e_inc1" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" edge="1" parent="1" source="uc_create" target="uc_select">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_inc1_lbl" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_inc1"><mxGeometry x="0" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry></mxCell>
+
+        <mxCell id="e_inc2" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" edge="1" parent="1" source="uc_create" target="uc_info">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_inc2_lbl" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_inc2"><mxGeometry x="0" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

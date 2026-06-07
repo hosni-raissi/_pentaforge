@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 from server.agents.report.report_generator import generate_report
 from server.api.dependencies import projects_store
+from server.api.routes.settings import has_saved_usable_llm_profile, llm_required_response
 
 router = APIRouter(tags=["reports"])
 logger = structlog.get_logger(__name__)
@@ -630,6 +631,9 @@ async def _generate_project_report_task(project_id: str, run_id: str) -> None:
 @router.post("/api/projects/{project_id}/reports/generate")
 async def generate_project_report(project_id: str) -> GenerateReportResponse:
     """Start pentest report generation as a durable background run."""
+    if not has_saved_usable_llm_profile():
+        raise HTTPException(status_code=409, detail=llm_required_response())
+
     project = projects_store.get_project(project_id)
     if not isinstance(project, dict):
         raise HTTPException(status_code=404, detail="Project not found")

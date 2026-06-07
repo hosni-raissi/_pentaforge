@@ -1,0 +1,61 @@
+<mxGraphModel dx="1445" dy="795" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="boundary" parent="1" style="shape=umlFrame;whiteSpace=wrap;html=1;width=220;height=30;boundedLbl=1;verticalAlign=middle;align=left;spacingLeft=5;" value="Assistant and Execution Support" vertex="1">
+      <mxGeometry height="420" width="500" x="280" y="40" as="geometry" />
+    </mxCell>
+    <mxCell id="actor_pentester" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" value="Pentester" vertex="1">
+      <mxGeometry height="60" width="30" x="100" y="220" as="geometry" />
+    </mxCell>
+    <mxCell id="actor_sandbox" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" value="Sandbox Service" vertex="1">
+      <mxGeometry height="60" width="30" x="850" y="320" as="geometry" />
+    </mxCell>
+    <mxCell id="uc_query" parent="1" style="ellipse;whiteSpace=wrap;html=1;" value="Query AI Assistant" vertex="1">
+      <mxGeometry height="50" width="180" x="300" y="110" as="geometry" />
+    </mxCell>
+    <mxCell id="uc_arch" parent="1" style="ellipse;whiteSpace=wrap;html=1;" value="Generate Arch Synthesis" vertex="1">
+      <mxGeometry height="50" width="180" x="300" y="200" as="geometry" />
+    </mxCell>
+    <mxCell id="uc_exec" parent="1" style="ellipse;whiteSpace=wrap;html=1;" value="Request Controlled Execution" vertex="1">
+      <mxGeometry height="50" width="180" x="300" y="290" as="geometry" />
+    </mxCell>
+    <mxCell id="uc_isolate" parent="1" style="ellipse;whiteSpace=wrap;html=1;" value="Isolate Execution in Sandbox" vertex="1">
+      <mxGeometry height="50" width="180" x="580" y="240" as="geometry" />
+    </mxCell>
+    <mxCell id="uc_enforce" parent="1" style="ellipse;whiteSpace=wrap;html=1;" value="Enforce Scope Checks" vertex="1">
+      <mxGeometry height="50" width="180" x="580" y="340" as="geometry" />
+    </mxCell>
+    <mxCell id="e_1" edge="1" parent="1" source="actor_pentester" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" target="uc_query">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e_2" edge="1" parent="1" source="actor_pentester" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" target="uc_arch">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e_3" edge="1" parent="1" source="actor_pentester" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" target="uc_exec">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e_4" edge="1" parent="1" source="actor_sandbox" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" target="uc_isolate">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e_5" edge="1" parent="1" source="actor_sandbox" style="edgeStyle=none;html=1;endArrow=none;endFill=0;" target="uc_enforce">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e_inc1" edge="1" parent="1" source="uc_exec" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" target="uc_isolate">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e_inc1_lbl" connectable="0" parent="e_inc1" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;" vertex="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e_inc2" edge="1" parent="1" source="uc_exec" style="edgeStyle=none;html=1;endArrow=open;endFill=0;dashed=1;" target="uc_enforce">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e_inc2_lbl" connectable="0" parent="e_inc2" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;" vertex="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint as="offset" />
+      </mxGeometry>
+    </mxCell>
+  </root>
+</mxGraphModel>

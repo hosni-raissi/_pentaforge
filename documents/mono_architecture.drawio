@@ -1,0 +1,64 @@
+<mxfile host="Electron" modified="2026-06-06T23:50:00.000Z" agent="Mozilla/5.0" type="device">
+  <diagram id="mono_arch" name="Monolithic Architecture">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Presentation Layer -->
+        <mxCell id="layer_presentation" value="Presentation Layer" style="swimlane;whiteSpace=wrap;html=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="50" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="ui_react" value="React Web Interface" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="layer_presentation">
+          <mxGeometry x="150" y="40" width="200" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Application Layer -->
+        <mxCell id="layer_application" value="Application Layer (FastAPI Monolith)" style="swimlane;whiteSpace=wrap;html=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="200" width="500" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="mod_security" value="Auth &amp; Security" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="layer_application">
+          <mxGeometry x="30" y="50" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="mod_projects" value="Project Management" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="layer_application">
+          <mxGeometry x="190" y="50" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="mod_reports" value="Reporting Engine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="layer_application">
+          <mxGeometry x="350" y="50" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="mod_orchestrator" value="Scan Orchestrator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="layer_application">
+          <mxGeometry x="110" y="110" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="mod_agent_engine" value="Multi-Agent Engine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="layer_application">
+          <mxGeometry x="270" y="110" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="mod_data_access" value="Data Access / ORM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="layer_application">
+          <mxGeometry x="190" y="180" width="120" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Persistence Layer -->
+        <mxCell id="layer_persistence" value="Persistence Layer" style="swimlane;whiteSpace=wrap;html=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="500" width="500" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="db_sqlite" value="SQLite&#10;(Relational)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#fff;" vertex="1" parent="layer_persistence">
+          <mxGeometry x="80" y="50" width="80" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="db_redis" value="Redis&#10;(Cache/Queue)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#fff;" vertex="1" parent="layer_persistence">
+          <mxGeometry x="210" y="50" width="80" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="db_qdrant" value="Qdrant&#10;(Vector)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#fff;" vertex="1" parent="layer_persistence">
+          <mxGeometry x="340" y="50" width="80" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Connections -->
+        <mxCell id="e_m1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;startArrow=classic;" edge="1" parent="1" source="layer_presentation" target="layer_application">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_m2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;startArrow=classic;" edge="1" parent="1" source="layer_application" target="layer_persistence">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

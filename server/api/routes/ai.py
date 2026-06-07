@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from server.agents.architect.agent import ArchitectAgent
 from server.agents.assistant import AssistantAgent
 from server.api.dependencies import projects_store, scan_orchestrator
+from server.api.routes.settings import has_saved_usable_llm_profile, llm_required_response
 from server.layers.safety.prompt_guard import PromptInjectionGuard
 from server.nodes.system_memory import (
     build_system_memory_prompt_block as build_target_memory_prompt_block,
@@ -36,6 +37,11 @@ _ASSISTANT_RUN_TTL_SECONDS = 60 * 60
 _KEEPALIVE_INTERVAL_SECONDS = 15.0
 _architect_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
 _architect_refresh_lock = asyncio.Lock()
+
+
+def _ensure_llm_profile_configured() -> None:
+    if not has_saved_usable_llm_profile():
+        raise HTTPException(status_code=409, detail=llm_required_response())
 
 
 def _ensure_project_payload(project: dict[str, Any]) -> dict[str, Any]:
@@ -780,6 +786,7 @@ async def _subscribe_run_events(run: AssistantRun, request: Request):
 
 @router.post("/api/ai/assist/stream")
 async def ai_assist_stream(payload: AIAssistPayload, request: Request) -> StreamingResponse:
+    _ensure_llm_profile_configured()
     prompt = payload.prompt.strip()
     request_id = str(payload.request_id or "").strip()
     if not prompt and not request_id:
@@ -909,6 +916,7 @@ class ArchitectSynthesizePayload(BaseModel):
 
 @router.post("/api/ai/architect/synthesize")
 async def ai_architect_synthesize(payload: ArchitectSynthesizePayload) -> dict[str, Any]:
+    _ensure_llm_profile_configured()
     project_id = payload.project_id
     project = projects_store.get_project(project_id)
     if not project:
@@ -941,6 +949,7 @@ async def ai_architect_synthesize(payload: ArchitectSynthesizePayload) -> dict[s
 
 @router.post("/api/ai/assist")
 async def ai_assist(payload: AIAssistPayload) -> dict[str, object]:
+    _ensure_llm_profile_configured()
     prompt = payload.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
@@ -1101,6 +1110,7 @@ class AICompressPayload(BaseModel):
 
 @router.post("/api/ai/assist/compress")
 async def ai_compress_history(payload: AICompressPayload) -> dict[str, str]:
+    _ensure_llm_profile_configured()
     if str(payload.context or "").strip():
         context = await _assistant_agent.compress_working_memory(payload.context)
         return {"context": context}

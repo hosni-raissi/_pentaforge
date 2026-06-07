@@ -1,0 +1,197 @@
+<mxfile host="Electron" modified="2026-06-07T13:00:00.000Z" agent="Mozilla/5.0" type="device">
+  <diagram id="logical_architecture" name="Logical Architecture">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- User / UI -->
+        <mxCell id="user_ui" value="Desktop UI&#10;(React, Dashboard, Reports, Projects, Assistant)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="40" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- API Gateway -->
+        <mxCell id="api_gateway" value="FastAPI App&#10;(Middleware, CORS, Safety, Rate Limit)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="160" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Routes -->
+        <mxCell id="routes_scan" value="Scan &amp; Project Routes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="200" y="260" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="routes_ai" value="AI Routes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="440" y="260" width="160" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Orchestrator -->
+        <mxCell id="orchestrator" value="ScanOrchestrator Service" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="340" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Storage Layer (Left Swimlane) -->
+        <mxCell id="storage_layer" value="Storage Layer" style="swimlane;whiteSpace=wrap;html=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="400" width="140" height="380" as="geometry" />
+        </mxCell>
+        <mxCell id="store_redis" value="Redis Cache" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#fff;" vertex="1" parent="storage_layer">
+          <mxGeometry x="20" y="50" width="100" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="store_intel" value="Intel State Store" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#fff;" vertex="1" parent="storage_layer">
+          <mxGeometry x="20" y="130" width="100" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="store_qdrant" value="Qdrant Vector" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#fff;" vertex="1" parent="storage_layer">
+          <mxGeometry x="20" y="210" width="100" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="store_projects" value="Projects Store" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#fff;" vertex="1" parent="storage_layer">
+          <mxGeometry x="20" y="290" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Main Scan Runtime (Center Swimlane) -->
+        <mxCell id="runtime_layer" value="Main Scan Runtime" style="swimlane;whiteSpace=wrap;html=1;startSize=30;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="220" y="430" width="360" height="450" as="geometry" />
+        </mxCell>
+        <mxCell id="node_gather" value="Information Gathering &amp; Intel" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="runtime_layer">
+          <mxGeometry x="40" y="50" width="280" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="node_memory" value="System Memory &amp; Brain Builder" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="runtime_layer">
+          <mxGeometry x="40" y="110" width="280" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_planner" value="Planner Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="runtime_layer">
+          <mxGeometry x="130" y="180" width="100" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_recon" value="Recon Executer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="runtime_layer">
+          <mxGeometry x="40" y="250" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_exploit" value="Exploit Executer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="runtime_layer">
+          <mxGeometry x="210" y="250" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_analyzer" value="Analyzer Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="runtime_layer">
+          <mxGeometry x="40" y="320" width="280" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="node_report" value="Report Generator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="runtime_layer">
+          <mxGeometry x="40" y="390" width="280" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Support Agents (Right Swimlane) -->
+        <mxCell id="support_layer" value="Support Agents" style="swimlane;whiteSpace=wrap;html=1;startSize=30;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="620" y="430" width="160" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_assistant" value="Assistant Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="support_layer">
+          <mxGeometry x="20" y="50" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="agent_architect" value="Architect Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="support_layer">
+          <mxGeometry x="20" y="120" width="120" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Execution Layer (Bottom Swimlane) -->
+        <mxCell id="exec_layer" value="Execution Layer" style="swimlane;whiteSpace=wrap;html=1;startSize=30;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="260" y="910" width="280" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="exec_router" value="Tools Routing &amp; Catalogs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="exec_layer">
+          <mxGeometry x="40" y="50" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="exec_client" value="Sandbox Client" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="exec_layer">
+          <mxGeometry x="40" y="110" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="exec_service" value="Sandbox Service&#10;(Execution Guards, Scope, Policy)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;" vertex="1" parent="exec_layer">
+          <mxGeometry x="40" y="170" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <!-- User to Gateway -->
+        <mxCell id="e_user_api" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="user_ui" target="api_gateway">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl_user_api" value="HTTP + SSE" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="e_user_api">
+          <mxGeometry x="0" y="0" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <!-- Gateway to Routes -->
+        <mxCell id="e_api_rscan" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="api_gateway" target="routes_scan">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_api_rai" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="api_gateway" target="routes_ai">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Routes to Core -->
+        <mxCell id="e_rscan_orch" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="routes_scan" target="orchestrator">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_rai_assist" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="routes_ai" target="agent_assistant">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_rai_arch" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="routes_ai" target="agent_architect">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Orchestrator to Runtime -->
+        <mxCell id="e_orch_gather" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="orchestrator" target="node_gather">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Runtime Flow -->
+        <mxCell id="e_gather_mem" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="runtime_layer" source="node_gather" target="node_memory">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mem_plan" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="runtime_layer" source="node_memory" target="agent_planner">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_plan_recon" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="runtime_layer" source="agent_planner" target="agent_recon">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_plan_exp" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="runtime_layer" source="agent_planner" target="agent_exploit">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_recon_ana" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="runtime_layer" source="agent_recon" target="agent_analyzer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_exp_ana" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="runtime_layer" source="agent_exploit" target="agent_analyzer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ana_rep" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="runtime_layer" source="agent_analyzer" target="node_report">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Executers to Execution Layer -->
+        <mxCell id="e_recon_exec" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="agent_recon" target="exec_router">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="200" y="690"/><mxPoint x="200" y="930"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_exp_exec" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="1" source="agent_exploit" target="exec_router">
+          <mxGeometry relative="1" as="geometry">
+             <Array as="points"><mxPoint x="580" y="690"/><mxPoint x="580" y="930"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_router_client" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="exec_layer" source="exec_router" target="exec_client">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_client_svc" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;" edge="1" parent="exec_layer" source="exec_client" target="exec_service">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Storage Links -->
+        <mxCell id="e_orch_redis" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;" edge="1" parent="1" source="orchestrator" target="store_redis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_gather_intel" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;" edge="1" parent="1" source="node_gather" target="store_intel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ana_intel" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;" edge="1" parent="1" source="agent_analyzer" target="store_intel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_assist_qdrant" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;" edge="1" parent="1" source="agent_assistant" target="store_qdrant">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="680" y="625"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_api_proj" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=classic;dashed=1;" edge="1" parent="1" source="api_gateway" target="store_projects">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="110" y="190"/></Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

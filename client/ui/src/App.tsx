@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
+import { Dialog } from "@/components/ui/Dialog";
 import Dashboard from "@/pages/Dashboard";
 import Projects from "@/pages/Projects";
 import Reports from "@/pages/Reports";
@@ -159,6 +160,21 @@ function WebLoginGate({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
+  const navigate = useNavigate();
+  const [llmBlockMessage, setLlmBlockMessage] = useState("");
+
+  useEffect(() => {
+    const handleLLMRequired = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      setLlmBlockMessage(
+        detail?.message?.trim()
+          || "Add an active LLM profile in Settings before starting a scan.",
+      );
+    };
+    window.addEventListener("pentaforge:llm-required", handleLLMRequired);
+    return () => window.removeEventListener("pentaforge:llm-required", handleLLMRequired);
+  }, []);
+
   return (
     <WebLoginGate>
       <Routes>
@@ -171,6 +187,29 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
         </Route>
       </Routes>
+      <Dialog
+        open={Boolean(llmBlockMessage)}
+        onClose={() => setLlmBlockMessage("")}
+        title="LLM Profile Required"
+        description="PentaForge needs a saved LLM profile before it can plan or run a scan."
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-text-muted">{llmBlockMessage}</p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setLlmBlockMessage("")}>
+              Close
+            </Button>
+            <Button
+              onClick={() => {
+                setLlmBlockMessage("");
+                navigate("/settings");
+              }}
+            >
+              Open Settings
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </WebLoginGate>
   );
 }

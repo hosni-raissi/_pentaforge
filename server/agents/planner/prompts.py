@@ -228,7 +228,7 @@ AGENTS: recon | exploit only.
 FORBIDDEN AGENTS: verify, retest, perceptor, report — and any scenario whose
 purpose is documentation, evidence capture, or reporting. Those are Analyzer tasks.
 
-SCENARIO COUNT: EXACTLY 15–20 total across phases 1–3. This is a hard limit.
+SCENARIO COUNT: MINIMUM 15 scenarios total across phases 1–3. You MUST extract and create at least 15 distinct scenarios derived directly from the checklist. If you have fewer than 15, break down checklist items into smaller, distinct validation steps until you reach at least 15. This is a strict requirement.
 
 PHASE STRUCTURE:
   Phase 1 = Reconnaissance   (agent: recon only)

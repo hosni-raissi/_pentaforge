@@ -318,60 +318,12 @@ export default function Settings() {
   }, [config, llmProfiles, llmMode]);
   
   const redistributeLLMRoles = (profiles: LLMProfile[]): LLMProfile[] => {
-    const count = profiles.length;
-    if (count === 0) return [];
-
-    const rolesByCount: Record<number, string[][]> = {
-      1: [
-        ["architect", "assistant", "backup", "exploit", "recon", "planner", "reporting", "memory", "analyser"]
-      ],
-      2: [
-        ["architect", "memory", "recon", "analyser"],
-        ["backup", "assistant", "exploit", "planner", "reporting"]
-      ],
-      3: [
-        ["architect", "memory", "analyser"],
-        ["exploit", "planner", "reporting"],
-        ["recon", "backup", "assistant"]
-      ],
-      4: [
-        ["architect", "memory", "analyser"],
-        ["planner", "reporting"],
-        ["recon", "assistant"],
-        ["exploit", "backup"]
-      ],
-      5: [
-        ["memory", "analyser"],
-        ["planner", "reporting"],
-        ["recon"],
-        ["exploit", "backup"],
-        ["assistant", "architect"]
-      ],
-      6: [
-        ["memory", "analyser"],
-        ["planner", "reporting"],
-        ["recon"],
-        ["exploit"],
-        ["assistant", "architect"],
-        ["backup"]
-      ],
-      7: [
-        ["memory", "analyser"],
-        ["planner", "reporting"],
-        ["recon"],
-        ["exploit"],
-        ["assistant"],
-        ["backup"],
-        ["architect"]
-      ]
-    };
-
-    const map = rolesByCount[count] || rolesByCount[7];
-
-    return profiles.map((p, idx) => {
-      const roles = map[idx] || [];
-      return { ...p, roles };
-    });
+    if (profiles.length === 0) return [];
+    // Simple: first = primary (handles everything), second = backup (failover only)
+    return profiles.map((p, idx) => ({
+      ...p,
+      roles: idx === 0 ? ["primary"] : ["backup"],
+    }));
   };
 
   const handleEditProfile = (id: string) => {
@@ -406,7 +358,7 @@ export default function Settings() {
 
   const handleResetToDefaults = async () => {
     const confirmed = window.confirm(
-      "This will wipe all custom LLM profiles and reload the defaults from server/core/config.py. Continue?"
+      "This will remove all saved LLM profiles. PentaForge will block scans until a profile is added again. Continue?"
     );
     if (!confirmed) return;
 
@@ -419,7 +371,7 @@ export default function Settings() {
       if (remote.privacy_gate !== config.privacyGate) {
         config.updateConfig({ privacyGate: remote.privacy_gate });
       }
-      alert("Settings reset to defaults successfully.");
+      alert("LLM profiles cleared.");
     } catch (err) {
       console.error("Failed to reset settings:", err);
       alert("Failed to reset settings: " + (err instanceof Error ? err.message : String(err)));
@@ -775,7 +727,7 @@ export default function Settings() {
                         className="h-8 text-[10px] font-black uppercase tracking-widest px-3"
                       >
                         <RefreshCcw size={12} className="mr-2" />
-                        Reset to Defaults
+                        Clear Profiles
                       </Button>
                     </div>
 
@@ -832,11 +784,23 @@ export default function Settings() {
                                     {profile.model}
                                   </p>
                                   <div className="flex flex-wrap gap-1 mt-2">
-                                    {profile.roles?.map(r => (
-                                      <span key={r} className="text-[8px] px-2 py-0.5 rounded-full bg-pf-500/10 text-pf-400 border border-pf-500/20 font-black uppercase tracking-tighter">
-                                        {r}
+                                    <span className={`text-[9px] px-2.5 py-0.5 rounded-full font-black uppercase tracking-wider ${
+                                      idx === 0
+                                        ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
+                                        : 'bg-amber-500/15 text-amber-400 border border-amber-500/25'
+                                    }`}>
+                                      {idx === 0 ? '⚡ Primary' : '🛡 Backup'}
+                                    </span>
+                                    {idx === 0 && (
+                                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-surface-2 text-text-muted border border-border">
+                                        All agents
                                       </span>
-                                    ))}
+                                    )}
+                                    {idx === 1 && (
+                                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-surface-2 text-text-muted border border-border">
+                                        Failover only
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -968,6 +932,11 @@ export default function Settings() {
                           <Button
                             className="flex-1"
                             onClick={async () => {
+                              if (!editingProfileId && llmProfiles.length >= 2) {
+                                alert("You can only add a maximum of two LLM profiles (Primary and Backup).");
+                                return;
+                              }
+
                               const newProfile: LLMProfile = {
                                 id: editingProfileId || `profile_${Date.now()}`,
                                 name: profileName || `${profileProvider} - ${profileModel}`,
@@ -984,7 +953,8 @@ export default function Settings() {
                               try {
                                 const test = await testLLMConfigFromDesktop(newProfile);
                                 if (!test.ok) {
-                                  if (!window.confirm(`Connection test failed: ${test.message}. Save anyway?`)) return;
+                                  alert(`Profile is not valid: ${test.message}`);
+                                  return;
                                 }
 
                                 const exists = llmProfiles.some(p => p.id !== newProfile.id && p.provider === newProfile.provider && p.model === newProfile.model && p.api_url === newProfile.api_url);
@@ -1015,7 +985,7 @@ export default function Settings() {
                             }}
                             loading={llmSaveLoading}
                           >
-                            {editingProfileId ? "Update Profile" : "Add Profile"}
+                            {llmSaveLoading ? "Testing..." : (editingProfileId ? "Update Profile" : "Add Profile")}
                           </Button>
                           {editingProfileId && (
                             <Button variant="ghost" onClick={() => setEditingProfileId(null)}>Cancel</Button>
@@ -1027,43 +997,28 @@ export default function Settings() {
                     <Card className="bg-surface-2/50 border-pf-500/10 p-4">
                       <h4 className="text-[10px] font-bold text-pf-400 uppercase tracking-widest mb-3 flex items-center gap-2">
                         <Bot size={12} />
-                        Dynamic Load Balancing Logic
+                        Failover Strategy
                       </h4>
                       <div className="space-y-3">
                         {llmProfiles.length === 0 && (
-                          <p className="text-[11px] text-text-muted italic">Configure profiles to enable specialized task distribution.</p>
+                          <p className="text-[11px] text-text-muted italic">Add a profile to get started.</p>
                         )}
                         {llmProfiles.length === 1 && (
-                          <div className="p-2 rounded bg-pf-500/5 border border-pf-500/10">
-                            <p className="text-[11px] text-text-secondary font-medium">Single Model Mode</p>
-                            <p className="text-[10px] text-text-muted mt-1">This profile will handle planning, analysis, reporting, and all tool execution.</p>
+                          <div className="p-2.5 rounded-lg bg-pf-500/5 border border-pf-500/10">
+                            <p className="text-[11px] text-text-secondary font-bold">⚡ Single LLM Mode</p>
+                            <p className="text-[10px] text-text-muted mt-1">This model handles all agents: planning, recon, exploit, analysis, and reporting.</p>
+                            <p className="text-[10px] text-text-muted mt-1">On failure: retry at <span className="font-mono text-pf-400">10s → 30s → 60s</span>, then stop with error.</p>
                           </div>
                         )}
                         {llmProfiles.length === 2 && (
                           <div className="space-y-2">
-                            <div className="p-2 rounded bg-pf-500/5 border border-pf-500/10">
-                              <p className="text-[11px] text-text-secondary font-medium">1. Brain (High reasoning)</p>
-                              <p className="text-[10px] text-text-muted mt-1">Information Gathering, Planning, and Final Reporting.</p>
+                            <div className="p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/15">
+                              <p className="text-[11px] text-text-secondary font-bold">⚡ Primary — All Agents</p>
+                              <p className="text-[10px] text-text-muted mt-1">Handles every task. If it fails, instantly switches to backup.</p>
                             </div>
-                            <div className="p-2 rounded bg-surface-2 border border-border">
-                              <p className="text-[11px] text-text-secondary font-medium">2. Muscle (High speed)</p>
-                              <p className="text-[10px] text-text-muted mt-1">Execution of all individual reconnaissance and security tools.</p>
-                            </div>
-                          </div>
-                        )}
-                        {llmProfiles.length >= 3 && (
-                          <div className="space-y-2">
-                            <div className="p-2 rounded bg-pf-500/5 border border-pf-500/10">
-                              <p className="text-[11px] text-text-secondary font-medium">1. Strategic Layer</p>
-                              <p className="text-[10px] text-text-muted mt-1">Scenario generation and reconnaissance planning.</p>
-                            </div>
-                            <div className="p-2 rounded bg-surface-2 border border-border">
-                              <p className="text-[11px] text-text-secondary font-medium">2. Analytical Layer</p>
-                              <p className="text-[10px] text-text-muted mt-1">Data synthesis, vulnerability analysis, and reporting.</p>
-                            </div>
-                            <div className="p-2 rounded bg-surface-2 border border-border">
-                              <p className="text-[11px] text-text-secondary font-medium">3. Execution Layer</p>
-                              <p className="text-[10px] text-text-muted mt-1">Distributed tool handling and autonomous task execution.</p>
+                            <div className="p-2.5 rounded-lg bg-amber-500/5 border border-amber-500/15">
+                              <p className="text-[11px] text-text-secondary font-bold">🛡 Backup — Failover Only</p>
+                              <p className="text-[10px] text-text-muted mt-1">Used only when primary is unreachable or rate-limited. Retries at <span className="font-mono text-pf-400">10s → 60s</span>, then stops.</p>
                             </div>
                           </div>
                         )}

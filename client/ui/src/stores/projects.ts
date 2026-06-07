@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import type { Project, ProjectStatus } from '../types';
 import {
   deleteProjectFromDesktop,
+  fetchSystemSettingsFromDesktop,
   listProjectsFromDesktop,
   resetProjectRuntimeStateFromDesktop,
   saveProjectToDesktop,
@@ -34,6 +35,7 @@ interface ProjectStore {
 }
 
 type PersistedProjectStore = Pick<ProjectStore, 'activeProjectId'>;
+const LLM_REQUIRED_MESSAGE = 'Add an active LLM profile in Settings before starting a scan.';
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -55,6 +57,33 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function hasUsableSavedLLMProfile(settings: Awaited<ReturnType<typeof fetchSystemSettingsFromDesktop>>): boolean {
+  const mode = String(settings.llm_mode || "public").trim().toLowerCase();
+  return (settings.llm_profiles || []).some((profile) => {
+    if (!profile.is_active) {
+      return false;
+    }
+    const provider = String(profile.provider || "").trim().toLowerCase();
+    const model = String(profile.model || "").trim();
+    if (!provider || !model) {
+      return false;
+    }
+    if (mode === "local" || provider === "ollama" || provider === "local") {
+      return true;
+    }
+    return Boolean(String(profile.api_key || "").trim());
+  });
+}
+
+function notifyLLMProfileRequired(message = LLM_REQUIRED_MESSAGE): void {
+  window.dispatchEvent(new CustomEvent("pentaforge:llm-required", {
+    detail: {
+      message,
+      settingsPath: "/settings",
+    },
+  }));
 }
 
 function getLiveElapsedSeconds(lastScan: Project["lastScan"] | undefined, nowMs = Date.now()): number {
@@ -328,8 +357,60 @@ export const useProjects = create<ProjectStore>()(
           }));
           return;
         }
+        const projectBeforeStart = state.projects.find((project) => project.id === id);
 
         void (async () => {
+          if (shouldTriggerScan && supportsDesktopProjectBridge()) {
+            set((inner) => inner.startingProjectId === id
+              ? { startingProjectMessage: 'Checking LLM settings…' }
+              : {});
+            try {
+              const settings = await fetchSystemSettingsFromDesktop();
+              if (!hasUsableSavedLLMProfile(settings)) {
+                notifyLLMProfileRequired();
+                set((inner) => ({
+                  projects: inner.projects.map((project) => (
+                    project.id === id
+                      ? {
+                        ...(projectBeforeStart ?? project),
+                        lastScan: {
+                          ...((projectBeforeStart ?? project).lastScan ?? {}),
+                          error: LLM_REQUIRED_MESSAGE,
+                        },
+                      }
+                      : project
+                  )),
+                  runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
+                  startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
+                  startingProjectMessage: inner.startingProjectId === id ? null : inner.startingProjectMessage,
+                }));
+                return;
+              }
+            } catch (error) {
+              const message = error instanceof Error
+                ? error.message
+                : 'Unable to verify LLM settings before scan start.';
+              notifyLLMProfileRequired(message);
+              set((inner) => ({
+                projects: inner.projects.map((project) => (
+                  project.id === id
+                    ? {
+                      ...(projectBeforeStart ?? project),
+                      lastScan: {
+                        ...((projectBeforeStart ?? project).lastScan ?? {}),
+                        error: message,
+                      },
+                    }
+                    : project
+                )),
+                runningProjectId: inner.runningProjectId === id ? null : inner.runningProjectId,
+                startingProjectId: inner.startingProjectId === id ? null : inner.startingProjectId,
+                startingProjectMessage: inner.startingProjectId === id ? null : inner.startingProjectMessage,
+              }));
+              return;
+            }
+          }
+
           if (!shouldResume) {
             try {
               await saveProjectToDesktop(runningProject);
