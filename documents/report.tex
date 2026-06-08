@@ -2233,6 +2233,50 @@ ports required by its consumers.
     \label{tab:physical_services}
 \end{table}
 
+\subsection{Sequence Diagrams}
+
+This section details the dynamic interactions between the components of the PentaForge platform during critical operational workflows.
+
+\subsubsection{SD1: Project Scan Launch}
+This sequence diagram illustrates the initial phase of an engagement, from project creation in the desktop UI to the initialization of the scan orchestrator and the emission of live events.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{sd1_project_scan_launch.png}
+    \caption{Sequence Diagram: Project Scan Launch}
+    \label{fig:sd1_launch}
+\end{figure}
+
+\subsubsection{SD2: Resume After Interruption}
+This sequence demonstrates the platform's smart resume capability. It details how the backend recovers the persisted scan state and continues from the exact checkpoint after a restart or interruption.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{sd2_resume_after_interruption.png}
+    \caption{Sequence Diagram: Resume After Interruption}
+    \label{fig:sd2_resume}
+\end{figure}
+
+\subsubsection{SD3: Report Generation}
+This sequence outlines the workflow for transforming analyzed evidence and findings into a professional report. It details the interaction between the Report Generator node, the storage layer, and the UI.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{sd3_report_generation.png}
+    \caption{Sequence Diagram: Report Generation}
+    \label{fig:sd3_report}
+\end{figure}
+
+\subsubsection{SD4: Protected Client Download}
+This sequence describes the secure delivery path, showing how a client requests a report via a share link, authenticates with a password, and securely downloads the packaged HTML or PDF report.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{sd4_protected_client_download.png}
+    \caption{Sequence Diagram: Protected Client Download}
+    \label{fig:sd4_download}
+\end{figure}
+
 \subsection{Storage Layer}
 
 \begin{table}[H]

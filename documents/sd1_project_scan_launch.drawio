@@ -1,0 +1,82 @@
+<mxfile host="Electron" modified="2026-06-08T00:00:00.000Z" agent="Mozilla/5.0" type="device">
+  <diagram id="sd1" name="Project Scan Launch">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="ui" value="Desktop UI" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="api" value="Backend API" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="orchestrator" value="Scan Orchestrator" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="storage" value="Storage Layer" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="700" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="msg1" value="POST /api/projects" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="150" y="100" as="sourcePoint" />
+            <mxPoint x="350" y="100" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg2" value="Save Metadata" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="350" y="120" as="sourcePoint" />
+            <mxPoint x="750" y="120" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg3" value="HTTP 201 Created" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="350" y="150" as="sourcePoint" />
+            <mxPoint x="150" y="150" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg4" value="POST /api/scans/start" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="150" y="200" as="sourcePoint" />
+            <mxPoint x="350" y="200" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg5" value="Initialize Scan State" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="350" y="220" as="sourcePoint" />
+            <mxPoint x="550" y="220" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg6" value="Persist Status" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="550" y="240" as="sourcePoint" />
+            <mxPoint x="750" y="240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg7" value="HTTP 200 OK (Scan ID)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="350" y="270" as="sourcePoint" />
+            <mxPoint x="150" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg8" value="GET /api/scans/stream (SSE)" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="150" y="320" as="sourcePoint" />
+            <mxPoint x="350" y="320" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg9" value="Emit Live Event" style="html=1;verticalAlign=bottom;endArrow=block;dashed=1;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="550" y="350" as="sourcePoint" />
+            <mxPoint x="350" y="350" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg10" value="SSE Payload" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="350" y="370" as="sourcePoint" />
+            <mxPoint x="150" y="370" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

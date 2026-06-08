@@ -1,0 +1,75 @@
+<mxfile host="Electron" modified="2026-06-08T00:00:00.000Z" agent="Mozilla/5.0" type="device">
+  <diagram id="sd2" name="Resume After Interruption">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="api" value="Backend API" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="orchestrator" value="Scan Orchestrator" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="storage" value="Storage Layer" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="runner" value="Phase Runner" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="700" y="40" width="100" height="400" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="msg1" value="Restart Command" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="40" y="100" as="sourcePoint" />
+            <mxPoint x="150" y="100" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg2" value="Fetch Active Scans" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="150" y="120" as="sourcePoint" />
+            <mxPoint x="550" y="120" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg3" value="Return Pending Scan State" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="550" y="150" as="sourcePoint" />
+            <mxPoint x="150" y="150" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg4" value="Re-initiate Orchestrator" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="150" y="180" as="sourcePoint" />
+            <mxPoint x="350" y="180" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg5" value="Evaluate Checkpoint" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="350" y="210" as="sourcePoint" />
+            <mxPoint x="360" y="240" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="390" y="210" />
+              <mxPoint x="390" y="240" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg6" value="Resume from Checklist / Plan" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="350" y="280" as="sourcePoint" />
+            <mxPoint x="750" y="280" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="msg7" value="Resume Execution" style="html=1;verticalAlign=bottom;endArrow=block;" edge="1" parent="1">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="750" y="320" as="sourcePoint" />
+            <mxPoint x="760" y="350" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="790" y="320" />
+              <mxPoint x="790" y="350" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

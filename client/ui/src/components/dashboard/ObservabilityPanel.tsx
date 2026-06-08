@@ -118,7 +118,7 @@ export function ObservabilityPanel({ timeline, metrics }: ObservabilityPanelProp
       </div>
 
       <div className="overflow-hidden rounded-xl border border-border/60 bg-surface-0/35 dark:border-border">
-        <div className="grid grid-cols-[90px_100px_110px_1fr] gap-2 border-b border-border/60 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted dark:border-border">
+        <div className="grid grid-cols-[90px_160px_140px_1fr] gap-2 border-b border-border/60 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted dark:border-border">
           <span>Time</span>
           <span>Phase</span>
           <span>Reason</span>
@@ -136,27 +136,27 @@ export function ObservabilityPanel({ timeline, metrics }: ObservabilityPanelProp
             [...timeline].reverse().map((item) => (
               <div
                 key={item.id}
-                className="grid grid-cols-[90px_100px_110px_1fr] gap-2 border-b border-border/40 px-3 py-2 text-sm last:border-b-0 dark:border-border"
+                className="grid grid-cols-[90px_160px_140px_1fr] gap-2 border-b border-border/40 px-3 py-2 text-sm last:border-b-0 dark:border-border"
               >
-                <div className="space-y-1">
-                  <p className="font-mono text-text-muted">{formatTimelineTime(item.at)}</p>
-                  <Badge variant={levelVariant(item.level)} className="text-[10px]">
+                <div className="space-y-1 min-w-0">
+                  <p className="font-mono text-text-muted truncate">{formatTimelineTime(item.at)}</p>
+                  <Badge variant={levelVariant(item.level)} className="text-[10px] truncate max-w-full block">
                     {item.kind === "tool_audit" ? "audit" : item.level}
                   </Badge>
                 </div>
-                <div className="space-y-1">
-                  <p className="font-medium text-text-primary">{item.phase || "system"}</p>
-                  <p className="font-mono text-[11px] text-text-muted">
+                <div className="space-y-1 min-w-0">
+                  <p className="font-medium text-text-primary truncate" title={item.phase || "system"}>{item.phase || "system"}</p>
+                  <p className="font-mono text-[11px] text-text-muted truncate" title={item.cycle ? `cycle ${item.cycle}` : item.agent || "n/a"}>
                     {item.cycle ? `cycle ${item.cycle}` : item.agent || "n/a"}
                   </p>
                 </div>
-                <div className="space-y-1">
-                  <p className="text-text-primary">{item.reason_code || "n/a"}</p>
-                  <p className="font-mono text-[11px] text-text-muted">
+                <div className="space-y-1 min-w-0">
+                  <p className="text-text-primary truncate" title={item.reason_code || "n/a"}>{item.reason_code || "n/a"}</p>
+                  <p className="font-mono text-[11px] text-text-muted truncate" title={item.tool || item.scenario_id || item.approval_id || "n/a"}>
                     {item.tool || item.scenario_id || item.approval_id || "n/a"}
                   </p>
                 </div>
-                <div className="space-y-1">
+                <div className="space-y-1 min-w-0">
                   <p className="text-text-secondary">{item.message}</p>
                   <p className="font-mono text-[11px] text-text-muted">
                     evt={item.id.slice(0, 12)}
