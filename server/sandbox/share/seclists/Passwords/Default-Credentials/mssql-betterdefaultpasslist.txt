@@ -1,9 +1,0 @@
-sa:sa
-sa:password
-sa:Password123
-sa:admin
-sa:123456
-administrator:administrator
-admin:admin
-sql:sql
-sqladmin:sqladmin

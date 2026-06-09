@@ -53,7 +53,7 @@ from server.nodes.system_memory import (
     system_memory_dir as _system_memory_dir_external,
     system_memory_paths as _system_memory_paths_external,
 )
-from server.agents.architect.agent import ArchitectAgent
+from server.nodes.architect.agent import ArchitectAgent
 from server.tools.session.session_manager import SessionContext, SessionManager
 from server.utils.target_scope import normalize_target_scope
 
@@ -6652,44 +6652,46 @@ class ScanOrchestratorService:
             event=asyncio.Event(),
         )
         project_pending = self._tool_approval_events.setdefault(project_key, {})
+        is_first = len(project_pending) == 0
         project_pending[approval_id] = pending
 
-        run_state = self._runs.get(project_key)
-        if isinstance(run_state, dict):
-            run_state["awaiting_tool_approval"] = True
-            run_state["pending_tool_approval"] = {
-                "approval_id": approval_id,
-                "scan_id": pending.scan_id,
-                "role": pending.role,
-                "tool_name": pending.tool_name,
-                "call_id": pending.call_id,
-                "args": pending.args,
-            }
-            run_state["updated_at"] = _utc_now_iso()
-            self._runs[project_key] = run_state
+        if is_first:
+            run_state = self._runs.get(project_key)
+            if isinstance(run_state, dict):
+                run_state["awaiting_tool_approval"] = True
+                run_state["pending_tool_approval"] = {
+                    "approval_id": approval_id,
+                    "scan_id": pending.scan_id,
+                    "role": pending.role,
+                    "tool_name": pending.tool_name,
+                    "call_id": pending.call_id,
+                    "args": pending.args,
+                }
+                run_state["updated_at"] = _utc_now_iso()
+                self._runs[project_key] = run_state
 
-        self._emit_event(
-            project_key,
-            event="executer_tool_waiting_approval",
-            scan_id=pending.scan_id,
-            level="warn",
-            message=(
-                f"{display_prefix} [waiting approval] {pending.role} requested "
-                f"tool '{pending.tool_name}': {_render_tool_command(pending.tool_name, pending.args)}. Approve or skip."
-            ),
-            data={
-                "stage": "executer",
-                "kind": "waiting_tool_approval",
-                "awaiting_user_approval": True,
-                "approval_id": approval_id,
-                "role": pending.role,
-                "tool_name": pending.tool_name,
-                "call_id": pending.call_id,
-                "args": pending.args,
-                "rendered_command": _render_tool_command(pending.tool_name, pending.args),
-                "preview": str(pending.args.get("code", pending.args.get("command", ""))).strip()[:2000],
-            },
-        )
+            self._emit_event(
+                project_key,
+                event="executer_tool_waiting_approval",
+                scan_id=pending.scan_id,
+                level="warn",
+                message=(
+                    f"{display_prefix} [waiting approval] {pending.role} requested "
+                    f"tool '{pending.tool_name}': {_render_tool_command(pending.tool_name, pending.args)}. Approve or skip."
+                ),
+                data={
+                    "stage": "executer",
+                    "kind": "waiting_tool_approval",
+                    "awaiting_user_approval": True,
+                    "approval_id": approval_id,
+                    "role": pending.role,
+                    "tool_name": pending.tool_name,
+                    "call_id": pending.call_id,
+                    "args": pending.args,
+                    "rendered_command": _render_tool_command(pending.tool_name, pending.args),
+                    "preview": str(pending.args.get("code", pending.args.get("command", ""))).strip()[:2000],
+                },
+            )
 
         # Tools with long execution times need longer approval timeouts
         # Tool-specific timeouts: hydra/nuclei/sqlmap can take 10-20+ minutes
@@ -6712,6 +6714,14 @@ class ScanOrchestratorService:
             next_heartbeat = start_time + HEARTBEAT_INTERVAL
 
             while not pending.event.is_set():
+                # Pause timeout if we are waiting in queue (not the active approval)
+                if project_pending:
+                    active_id = next(iter(project_pending.keys()))
+                    if active_id != approval_id:
+                        await asyncio.sleep(1.0)
+                        start_time = time.time()
+                        next_heartbeat = start_time + HEARTBEAT_INTERVAL
+                        continue
                 remaining = APPROVAL_TIMEOUT - (time.time() - start_time)
                 if remaining <= 0:
                     raise asyncio.TimeoutError()
@@ -6823,6 +6833,32 @@ class ScanOrchestratorService:
                 "call_id": pending.call_id,
             },
         )
+
+        if project_pending:
+            next_id, next_pending = next(iter(project_pending.items()))
+            self._emit_event(
+                project_key,
+                event="executer_tool_waiting_approval",
+                scan_id=next_pending.scan_id,
+                level="warn",
+                message=(
+                    f"{display_prefix} [waiting approval] {next_pending.role} requested "
+                    f"tool '{next_pending.tool_name}': {_render_tool_command(next_pending.tool_name, next_pending.args)}. Approve or skip."
+                ),
+                data={
+                    "stage": "executer",
+                    "kind": "waiting_tool_approval",
+                    "awaiting_user_approval": True,
+                    "approval_id": next_id,
+                    "role": next_pending.role,
+                    "tool_name": next_pending.tool_name,
+                    "call_id": next_pending.call_id,
+                    "args": next_pending.args,
+                    "rendered_command": _render_tool_command(next_pending.tool_name, next_pending.args),
+                    "preview": str(next_pending.args.get("code", next_pending.args.get("command", ""))).strip()[:2000],
+                },
+            )
+
         return approved
 
     async def approve_executer_tool(

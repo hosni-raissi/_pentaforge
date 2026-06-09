@@ -109,7 +109,6 @@ _BLOCKED_MODULES = frozenset({
     # Low-level / dangerous
     "ctypes", "cffi",
     "resource", "signal",
-    "shutil",                           # filesystem manipulation
     "webbrowser",
     # Pip bootstrapping
     "ensurepip", "pip",
@@ -127,11 +126,6 @@ _BLOCKED_CODE_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bos\s*\.\s*exec[a-z]+\s*\(",   re.I),
     re.compile(r"\bos\s*\.\s*spawn[a-z]+\s*\(",  re.I),
     re.compile(r"\bos\s*\.\s*fork\s*\(",         re.I),
-    # Filesystem mutation
-    re.compile(r"\bos\s*\.\s*remove\s*\(",       re.I),
-    re.compile(r"\bos\s*\.\s*unlink\s*\(",       re.I),
-    re.compile(r"\bos\s*\.\s*rmdir\s*\(",        re.I),
-    re.compile(r"\bos\s*\.\s*rename\s*\(",       re.I),
     re.compile(r"\bos\s*\.\s*kill\s*\(",         re.I),
     # Dynamic eval/exec
     re.compile(r"\beval\s*\(",                   re.I),
@@ -150,13 +144,10 @@ _BLOCKED_OS_ATTRS = frozenset({
     "spawnl", "spawnle", "spawnlp", "spawnlpe",
     "spawnv", "spawnve", "spawnvp", "spawnvpe",
     "fork", "forkpty", "kill", "killpg",
-    "remove", "unlink", "rmdir", "rename", "renames", "replace",
-    "mkdir", "makedirs", "symlink", "link", "chmod", "chown",
-    "truncate", "write",
 })
 
 # ── open() modes that are forbidden ───────────────────────────────────
-_BLOCKED_OPEN_MODES = frozenset({"w", "a", "x", "wb", "ab", "xb", "w+", "a+", "x+"})
+_BLOCKED_OPEN_MODES = frozenset()
 
 # Import → pip package mapping
 _IMPORT_TO_PACKAGE: dict[str, str] = {

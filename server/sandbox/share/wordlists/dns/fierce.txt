@@ -1,6 +1,0 @@
-www
-mail
-ns1
-ns2
-ftp
-smtp

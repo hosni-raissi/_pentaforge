@@ -20,6 +20,7 @@
 \usepackage{enumitem}
 \usepackage{fancyhdr}
 \usepackage[most]{tcolorbox}
+\usepackage{subcaption}
 
 % ── Default page style: footer only (line + page number right) ─────────────
 \pagestyle{fancy}
@@ -115,10 +116,8 @@
 
     \vspace{0.1cm}
 
-    \begin{flushleft}
     {\large \textit{Theme :}\par}
-    \end{flushleft}
-
+   
     {\Large \textbf{\guillemotleft~AI-Powered Automated Penetration Testing~\guillemotright}\par}
 
     \vspace{1cm}
@@ -1472,64 +1471,236 @@ capacity planning uncertainty for production deployments.
 % ── Section 5 ─────────────────────────────────────────────────────────────
 \section{Key Technologies Underpinning PentaForge}
 
-\subsection{Large Language Models and Chain-of-Thought Reasoning}
+This section examines the four foundational technologies that collectively
+enable the design of PentaForge. For each technology, we compare the
+available approaches, justify the design choice retained, and identify the
+specific limitations that motivated it. This comparative grounding
+distinguishes the choices made in PentaForge from simpler alternatives and
+clarifies why each technology is necessary rather than merely convenient.
 
-Large Language Models (LLMs) are transformer-based neural networks trained on
-large text corpora that have demonstrated remarkable capabilities in code generation,
-reasoning, and structured output production. For penetration testing, LLMs provide
-the strategic reasoning layer --- the ability to read a target profile, consult a
-knowledge base, and produce a structured attack plan with explicit dependency chains
-and fallback strategies.
+\subsection{Large Language Models and Reasoning Strategies}
 
-Chain-of-Thought (CoT) prompting enables the LLM to reason step-by-step before
-producing its output, significantly improving the quality and coherence of generated
-attack plans for novel or complex targets. PentaForge's Planner uses CoT reasoning
-in its Slow Path for engagements that fall outside standard PTES templates.
+\subsubsection{Approaches Compared}
 
-\subsection{Retrieval-Augmented Generation}
+Three families of AI-driven reasoning are applicable to automated penetration
+testing: rule-based expert systems, classical machine learning classifiers,
+and large language model (LLM) reasoning.
 
-Retrieval-Augmented Generation (RAG) addresses a fundamental limitation of LLMs:
-their knowledge is frozen at training time. In a cybersecurity context where new
-CVEs are published daily and attack techniques evolve continuously, a frozen model
-is a liability.
+\begin{table}[H]
+    \centering
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.22\textwidth}|p{0.36\textwidth}|p{0.30\textwidth}|}
+        \hline
+        \textbf{Approach} & \textbf{Capability} & \textbf{Limiting Factor} \\
+        \hline
+        Rule-based expert systems & Deterministic, auditable, fast on known
+        patterns & Cannot generalize to novel targets or
+        unknown vulnerability classes \\
+        \hline
+        Classical ML classifiers & Strong on structured tabular data and
+        known malware families & Require labeled training data; brittle on
+        out-of-distribution inputs \\
+        \hline
+        LLMs with Chain-of-Thought & Generalize across targets, generate
+        structured attack plans, interpret raw tool output, produce
+        remediation language & Higher inference cost; require careful
+        prompt design to avoid hallucination \\
+        \hline
+    \end{tabular}
+    \caption{Comparison of AI reasoning approaches for penetration testing}
+    \label{tab:llm_approaches}
+\end{table}
 
-RAG decouples knowledge from model weights. When an agent needs domain-specific
-guidance --- exploit techniques for a specific CVE, WAF bypass patterns for a
-detected technology, or compliance mappings for a finding --- it performs a vector
-similarity search over a continuously updated knowledge base (Qdrant in
-PentaForge) and injects the retrieved context directly into the prompt. This
-ensures the platform's knowledge is always current without requiring model
-retraining.
+\subsubsection{Choice and Rationale}
 
-\subsection{Multi-Agent Systems}
+PentaForge adopts LLMs with Chain-of-Thought (CoT) prompting as its
+reasoning backbone. Rule-based systems are unsuitable because each
+engagement surface is different: a web application target, a cloud
+environment, and an IoT device each require distinct attack reasoning that
+no static ruleset can cover exhaustively. Classical classifiers are likewise
+insufficient because they depend on labeled historical data and cannot
+produce structured, multi-step attack plans from a natural language target
+description.
 
-A multi-agent system (MAS) is an architecture in which multiple autonomous agents,
-each with a specialized role and capability set, collaborate to achieve a goal that
-no single agent could accomplish alone. In the penetration testing domain, this
-specialization is natural: reconnaissance, exploitation, verification, and reporting
-require fundamentally different tool sets, reasoning strategies, and output formats.
+LLMs with CoT prompting address both limitations. By reasoning
+step-by-step before producing output, they generate coherent attack plans
+for novel or complex targets where no prior labeled example exists.
+PentaForge's Planner agent uses this capability explicitly: for engagements
+that fall outside standard PTES templates, the Slow Path activates CoT
+reasoning to derive a target-specific scenario sequence rather than falling
+back to a generic checklist.
 
-The key properties of an effective MAS for penetration testing are: agent
-parallelism (multiple agents working simultaneously on independent targets),
-shared state (a common knowledge base that all agents read from and write to),
-fault isolation (a crashed agent does not block the entire pipeline), and
-orchestration (a coordinator that resolves dependencies and sequences tasks
-based on current knowledge).
+The key tradeoff accepted here is inference cost and hallucination risk.
+PentaForge mitigates the latter through its Verification tier in the
+Analyzer, which requires structured evidence before any finding is promoted
+to verified status, preventing CoT-generated hypotheses from reaching the
+report unchecked.
 
-\subsection{SSVC --- Stakeholder-Specific Vulnerability Categorization}
+\subsection{Knowledge Currency: RAG versus Fine-Tuning versus Static
+Prompting}
 
-The Common Vulnerability Scoring System (CVSS) provides a severity score for
-vulnerabilities in isolation, without regard to the specific environment in which
-they exist. A CVSS 9.8 vulnerability on an air-gapped test server is far less
-urgent than a CVSS 6.5 vulnerability on an internet-facing payment API.
+\subsubsection{Approaches Compared}
 
-SSVC (Stakeholder-Specific Vulnerability Categorization), developed by CISA and
-Carnegie Mellon University, addresses this limitation by incorporating four
-contextual dimensions into the prioritization decision: exploitation state (from
-NVD and CISA KEV), technical impact (from CVSS), automatable exploitation
-likelihood (from EPSS), and mission prevalence (from the asset inventory). The
-output is a decision --- ACT, ATTEND, or TRACK --- rather than a score, providing
-security teams with actionable guidance rather than a number to interpret.
+Three strategies exist for keeping a language model current with evolving
+security knowledge: periodic fine-tuning on new vulnerability data,
+embedding domain knowledge in static system prompts, and
+Retrieval-Augmented Generation (RAG).
+
+\begin{table}[H]
+    \centering
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.22\textwidth}|p{0.36\textwidth}|p{0.30\textwidth}|}
+        \hline
+        \textbf{Approach} & \textbf{Capability} & \textbf{Limiting Factor} \\
+        \hline
+        Periodic fine-tuning & Deeply integrates new knowledge into model
+        weights & Expensive, slow, and requires curated labeled datasets;
+        knowledge becomes stale between runs \\
+        \hline
+        Static system prompts & Zero infrastructure overhead; immediate to
+        update & Context window fills quickly; cannot scale to the breadth
+        of CVE and TTP knowledge required \\
+        \hline
+        RAG with vector retrieval & Decouples knowledge from model weights;
+        retrieves only what is relevant per query; continuously updatable
+        without retraining & Retrieval quality depends on embedding model
+        and chunking strategy \\
+        \hline
+    \end{tabular}
+    \caption{Comparison of knowledge-currency strategies for LLM-based systems}
+    \label{tab:rag_approaches}
+\end{table}
+
+\subsubsection{Choice and Rationale}
+
+PentaForge adopts RAG with a Qdrant vector database as its knowledge
+currency mechanism. Fine-tuning is ruled out because new CVEs are published
+daily and retraining a model on that cadence is operationally and
+financially unsustainable. Static system prompts are insufficient because
+the breadth of CVE entries, WAF bypass patterns, MITRE ATT\&CK TTPs, and
+target-type-specific guidance far exceeds what can be held in a context
+window without crowding out engagement-specific reasoning.
+
+RAG decouples knowledge from model weights, injecting only the retrieved
+context that is semantically relevant to the current query. This means the
+platform's security intelligence remains current through continuous index
+updates without touching the underlying model. The tradeoff accepted is
+that retrieval quality depends on the embedding model and chunking strategy.
+PentaForge addresses this by maintaining per-domain vector indexes ---
+shared knowledge, target-type resources, project findings, and report
+context --- so that retrieval remains focused and relevance scores remain
+meaningful.
+
+\subsection{Agent Coordination: Single Agent versus Multi-Agent Architectures}
+
+\subsubsection{Approaches Compared}
+
+Two dominant architectures exist for LLM-driven task automation: a single
+monolithic agent that handles all phases of a task, and a multi-agent
+system (MAS) where specialized agents collaborate through a shared state.
+
+\begin{table}[H]
+    \centering
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.22\textwidth}|p{0.36\textwidth}|p{0.30\textwidth}|}
+        \hline
+        \textbf{Approach} & \textbf{Capability} & \textbf{Limiting Factor} \\
+        \hline
+        Single monolithic agent & Simpler to implement and debug; lower
+        coordination overhead & Context window saturates quickly on long
+        engagements; a single failure halts the entire pipeline; no
+        specialization \\
+        \hline
+        Multi-agent system & Specialized agents per phase; parallel execution
+        on independent targets; fault isolation; shared state enables
+        cross-agent memory & Higher design complexity; requires explicit
+        orchestration and shared-state discipline \\
+        \hline
+    \end{tabular}
+    \caption{Comparison of single-agent versus multi-agent coordination strategies}
+    \label{tab:mas_approaches}
+\end{table}
+
+\subsubsection{Choice and Rationale}
+
+PentaForge adopts a multi-agent architecture. The penetration testing
+lifecycle is not a single uniform task: reconnaissance, exploitation,
+verification, and reporting each require different tool sets, reasoning
+strategies, and output formats. A single monolithic agent would need to
+hold the full context of all phases simultaneously, saturating its context
+window during deep engagements and making failure recovery structurally
+difficult.
+
+The MAS approach allows each agent to operate within a focused context
+window, receive only the memory projections relevant to its phase, and
+fail independently without blocking the rest of the pipeline. PentestGPT,
+the closest open-source alternative, uses a three-module reasoning loop
+within a single agent and explicitly suffers from context saturation on
+long sessions~\cite{pentestgpt2023}. NodeZero demonstrates that a MAS
+approach can deliver end-to-end automation at commercial scale, confirming
+that the architecture is viable for the domain.
+
+The tradeoff accepted is coordination complexity. PentaForge addresses
+this through its centralized Scan Orchestrator, which resolves
+inter-agent dependencies, sequences phase transitions, and persists shared
+state so that each agent always reads from a consistent engagement
+snapshot.
+
+\subsection{Vulnerability Prioritization: CVSS versus SSVC}
+
+\subsubsection{Approaches Compared}
+
+Two dominant frameworks govern vulnerability prioritization in security
+assessments: the Common Vulnerability Scoring System (CVSS) and
+Stakeholder-Specific Vulnerability Categorization (SSVC).
+
+\begin{table}[H]
+    \centering
+    \renewcommand{\arraystretch}{1.35}
+    \begin{tabular}{|p{0.22\textwidth}|p{0.36\textwidth}|p{0.30\textwidth}|}
+        \hline
+        \textbf{Framework} & \textbf{Capability} & \textbf{Limiting Factor} \\
+        \hline
+        CVSS & Universally recognized; provides a standardized numeric
+        severity score; widely supported by scanners and reporting tools &
+        Context-free: assigns the same score regardless of the deployment
+        environment, exploitability status, or mission criticality of the
+        affected asset \\
+        \hline
+        SSVC & Incorporates exploitation state, technical impact,
+        automatable exploitation likelihood, and mission prevalence;
+        produces an actionable decision (ACT, ATTEND, TRACK) rather than
+        a score & Less widely known; requires enrichment data from NVD,
+        CISA KEV, and EPSS \\
+        \hline
+    \end{tabular}
+    \caption{Comparison of CVSS and SSVC vulnerability prioritization frameworks}
+    \label{tab:ssvc_approaches}
+\end{table}
+
+\subsubsection{Choice and Rationale}
+
+PentaForge retains CVSS scores for compatibility with industry reporting
+standards, but adopts SSVC as its primary prioritization mechanism in the
+Analyzer. The limitation of CVSS is well-documented in practice: a
+CVSS~9.8 vulnerability on an air-gapped test server is operationally less
+urgent than a CVSS~6.5 vulnerability on an internet-facing payment API.
+Providing a single number without deployment context misleads triage and
+wastes remediation resources.
+
+SSVC, developed by CISA and Carnegie Mellon University, addresses this
+directly. By incorporating four contextual dimensions --- exploitation
+state from NVD and CISA KEV, technical impact from CVSS, automatable
+exploitation likelihood from EPSS, and mission prevalence from the asset
+inventory --- it produces an actionable decision rather than a score.
+The output (ACT, ATTEND, or TRACK) tells the security team what to do,
+not merely how severe a number is.
+
+The tradeoff accepted is that SSVC requires enrichment data from external
+sources. PentaForge addresses this through its Intel Agent, which
+continuously refreshes NVD, CISA KEV, and EPSS data into the RAG knowledge
+base so that the Analyzer's SSVC decision tree always operates on current
+exploitation intelligence.
 
 \section{Conclusion}
 
@@ -1582,14 +1753,15 @@ the implemented project. The objective is not to describe a hypothetical platfor
 but to formalize the current product structure, its actors, the responsibilities of
 each subsystem, and the technical rationale behind its organization. We first
 identify the actors and requirements that shape the platform, then present the
-product backlog that organizes deliverable work. We then present the global
-architecture in its monolithic, logical, and physical views, detail the multi-agent
-execution loop together with the support services that surround it, and conclude
-with the technical stack retained for the desktop client, backend services, storage
-layer, and sandboxed execution path.
+product backlog that bridges those requirements into a prioritized delivery plan.
+We then present the global architecture in its monolithic, logical, and physical
+views, detail the multi-agent execution loop together with the support services
+that surround it, and conclude with the technical stack retained for the desktop
+client, backend services, storage layer, and sandboxed execution path.
 
 % ── Section 1 ─────────────────────────────────────────────────────────────
 \section{Requirements Analysis}
+\label{sec:requirements}
 
 \subsection{Platform Actors}
 
@@ -1621,16 +1793,67 @@ clearly separated in the current product workflow.
 \end{table}
 
 % ─────────────────────────────────────────────────────────────────────────
+\subsection{Use-Case Diagram}
+
+The use-case model identifies the functional expectations of the platform from the
+point of view of its actors. PentaForge has three primary actors and two secondary
+actors. The primary actors are the pentester, the client, and the administrator.
+The secondary actors are the AI assistant and the external target system.
+
+\begin{longtable}{|p{0.24\textwidth}|p{0.66\textwidth}|}
+\hline
+\textbf{Actor} & \textbf{Associated use cases} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Actor} & \textbf{Associated use cases} \\
+\hline
+\endhead
+Pentester & Create project; configure scope; start scan; pause or stop scan; resume
+scan; review checklist; monitor live execution; validate findings; generate reports;
+download protected exports; create client share link; ask assistant questions. \\
+\hline
+Client & Open shared report; preview professional report; download protected PDF or
+HTML package; review executive summary, findings, remediation and attack path. \\
+\hline
+Administrator & Configure tool inventory; maintain sandbox image; manage global
+settings; review logs; update wordlists and payload collections; monitor system
+health. \\
+\hline
+AI Assistant & Explain scan status; summarize evidence; answer scope questions;
+support report interpretation; provide next-step recommendations without bypassing
+workflow rules. \\
+\hline
+Target System & Respond to reconnaissance, crawling, validation and safe exploit
+verification requests issued through approved tools. \\
+\hline
+\caption{Use-case matrix for PentaForge actors}
+\label{tab:use_case_matrix}
+\end{longtable}
+
+The following diagram provides a global overview of all interactions between
+the platform actors and the system. The four functional groups identified in
+the subsequent sections each correspond to a specific zone of this diagram.
+
+\begin{figure}[H]
+    \centering
+    \makebox[\textwidth][c]{%
+        \includegraphics[width=1.2\textwidth]{use_case_diagram.png}%
+    }
+    \caption{Global use-case diagram of PentaForge}
+    \label{fig:use_case_diagram}
+\end{figure}
+
+% ─────────────────────────────────────────────────────────────────────────
 \subsection{Functional Requirements}
 
 The functional requirements define the concrete capabilities currently expected
 from PentaForge. They are organized around four major operational
 responsibilities of the platform. Each group is presented with its scope
 description, the list of requirements it covers, and a dedicated use case
-diagram that illustrates the interactions between the platform actors and the
-system for that functional domain.
+diagram that zooms into the interactions relevant to that functional domain.
 
-% ── 3.1.2.1 ───────────────────────────────────────────────────────────────
+% ── 3.1.3.1 ───────────────────────────────────────────────────────────────
 \subsubsection{Project and Scope Management}
 
 This group covers the creation, configuration, and lifecycle management of
@@ -1658,7 +1881,7 @@ throughout the assessment.
     \label{fig:uc_project_scope}
 \end{figure}
 
-% ── 3.1.2.2 ───────────────────────────────────────────────────────────────
+% ── 3.1.3.2 ───────────────────────────────────────────────────────────────
 \subsubsection{Supervised Scan Orchestration}
 
 This group defines the runtime behavior of a scan engagement. It covers how
@@ -1692,7 +1915,7 @@ command authorization.
     \label{fig:uc_scan_orchestration}
 \end{figure}
 
-% ── 3.1.2.3 ───────────────────────────────────────────────────────────────
+% ── 3.1.3.3 ───────────────────────────────────────────────────────────────
 \subsubsection{Analysis, Reporting, and Delivery}
 
 This group covers the post-execution path: how findings are classified and
@@ -1719,7 +1942,7 @@ delivery links.
     \label{fig:uc_analysis_reporting}
 \end{figure}
 
-% ── 3.1.2.4 ───────────────────────────────────────────────────────────────
+% ── 3.1.3.4 ───────────────────────────────────────────────────────────────
 \subsubsection{Assistant and Execution Support}
 
 This group defines the interactive and execution support capabilities of the
@@ -1841,6 +2064,7 @@ vulnerabilities into the report. \\
 \caption{Functional requirements}
 \label{tab:functional_requirements}
 \end{longtable}
+
 % ─────────────────────────────────────────────────────────────────────────
 \subsection{Non-Functional Requirements}
 
@@ -1928,58 +2152,23 @@ Tauri desktop application. \\
 \caption{Non-functional requirements}
 \label{tab:nonfunctional_requirements}
 \end{longtable}
-\subsection{Use-Case Diagram}
 
-The use-case model identifies the functional expectations of the platform from the
-point of view of its actors. PentaForge has three primary actors and two secondary
-actors. The primary actors are the pentester, the client, and the administrator.
-The secondary actors are the AI assistant and the external target system.
+The requirements defined in this section --- functional, non-functional, and
+actor-oriented --- collectively specify the contract that PentaForge must
+fulfill. The following section translates these requirements into a
+prioritized delivery plan through the product backlog.
 
-\begin{longtable}{|p{0.24\textwidth}|p{0.66\textwidth}|}
-\hline
-\textbf{Actor} & \textbf{Associated use cases} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Actor} & \textbf{Associated use cases} \\
-\hline
-\endhead
-Pentester & Create project; configure scope; start scan; pause or stop scan; resume
-scan; review checklist; monitor live execution; validate findings; generate reports;
-download protected exports; create client share link; ask assistant questions. \\
-\hline
-Client & Open shared report; preview professional report; download protected PDF or
-HTML package; review executive summary, findings, remediation and attack path. \\
-\hline
-Administrator & Configure tool inventory; maintain sandbox image; manage global
-settings; review logs; update wordlists and payload collections; monitor system
-health. \\
-\hline
-AI Assistant & Explain scan status; summarize evidence; answer scope questions;
-support report interpretation; provide next-step recommendations without bypassing
-workflow rules. \\
-\hline
-Target System & Respond to reconnaissance, crawling, validation and safe exploit
-verification requests issued through approved tools. \\
-\hline
-\caption{Use-case matrix for PentaForge actors}
-\label{tab:use_case_matrix}
-\end{longtable}
+% ── Section 2 ─────────────────────────────────────────────────────────────
+\section{Product Backlog}
 
-\begin{figure}[H]
-    \centering
-    \makebox[\textwidth][c]{%
-        \includegraphics[width=1.3\textwidth]{use_case_diagram.png}%
-    }
-    \caption{Use-case diagram of PentaForge}
-    \label{fig:use_case_diagram}
-\end{figure}
-
-\subsection{Product Backlog}
-
-The product backlog organizes the deliverable work into prioritized user stories
-distributed across the seven sprints of the project. Each item carries a priority
-level (High, Medium, Low) and its target sprint.
+The product backlog translates the functional and non-functional requirements
+defined in Section~\ref{sec:requirements} into a set of prioritized,
+deliverable user stories. Each story is assigned to a specific sprint,
+establishing the concrete execution contract between the requirements
+analysis and the architectural design that follows. The backlog is organized
+chronologically across the seven sprints of the project; each item carries
+a priority level (High, Medium, or Low) reflecting its criticality to the
+platform's core mission.
 
 \begin{longtable}{|p{0.06\textwidth}|p{0.38\textwidth}|p{0.14\textwidth}|p{0.12\textwidth}|p{0.12\textwidth}|}
 \hline
@@ -2056,7 +2245,7 @@ full platform so that setup is reproducible. & DevOps & High & S6 \\
 \label{tab:product_backlog}
 \end{longtable}
 
-% ── Section 2 ─────────────────────────────────────────────────────────────
+% ── Section 3 ─────────────────────────────────────────────────────────────
 \section{Global Platform Architecture}
 
 \subsection{Conceptual Architecture}
@@ -2077,7 +2266,7 @@ coherent across restarts and long-running engagements.
 \begin{figure}[H]
     \centering
     \makebox[\textwidth][c]{%
-        \includegraphics[width=1.2\textwidth]{concept_architecture.png}%
+        \includegraphics[width=1.1\textwidth]{concept_architecture.png}%
     }
     \caption{Conceptual architecture of PentaForge}
     \label{fig:concept_arch}
@@ -2121,24 +2310,24 @@ internal layers are decomposed in the logical and physical architectures that fo
 
 \subsection{Logical Architecture}
 
-The logical architecture describes how the internal components of PentaForge 
-relate and communicate, independently of where they are deployed. It separates 
+The logical architecture describes how the internal components of PentaForge
+relate and communicate, independently of where they are deployed. It separates
 the system into six functional layers whose responsibilities do not overlap.
 
-The six layers are organized from the operator-facing interface down to the 
-persistence substrate. The \textbf{Desktop UI} layer presents projects, scan 
-progress, and reports to the operator. The \textbf{Backend API} layer exposes 
-HTTP and SSE endpoints and acts as the stable contract between the interface 
-and the runtime. The \textbf{Scan Runtime} layer encapsulates the full 
-penetration test lifecycle, from information gathering and memory building to 
-execution, analysis, and reporting. The \textbf{Support Agents} layer provides 
-the assistant and architecture synthesis paths separately from the hot scan 
-loop. The \textbf{Execution Layer} routes tool requests through scope 
-validation and the sandbox before recording structured results. Finally, the 
-\textbf{Storage Layer} makes the platform durable across restarts by persisting 
+The six layers are organized from the operator-facing interface down to the
+persistence substrate. The \textbf{Desktop UI} layer presents projects, scan
+progress, and reports to the operator. The \textbf{Backend API} layer exposes
+HTTP and SSE endpoints and acts as the stable contract between the interface
+and the runtime. The \textbf{Scan Runtime} layer encapsulates the full
+penetration test lifecycle, from information gathering and memory building to
+execution, analysis, and reporting. The \textbf{Support Agents} layer provides
+the assistant and architecture synthesis paths separately from the hot scan
+loop. The \textbf{Execution Layer} routes tool requests through scope
+validation and the sandbox before recording structured results. Finally, the
+\textbf{Storage Layer} makes the platform durable across restarts by persisting
 project metadata, scan state, vector memory, and generated artifacts.
 
-Figure~\ref{fig:logical_arch} illustrates these six layers and their 
+Figure~\ref{fig:logical_arch} illustrates these six layers and their
 communication paths.
 
 \begin{figure}[H]
@@ -2189,6 +2378,7 @@ restarts and supports resume logic. \\
 \caption{Logical architecture layer responsibilities}
 \label{tab:architecture_responsibilities}
 \end{longtable}
+
 \subsection{Physical Architecture}
 
 The physical architecture describes how PentaForge is deployed as a set of
@@ -2199,7 +2389,7 @@ ports required by its consumers.
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{physical_architecture.png}
-        \caption{Physical deployment architecture of PentaForge}
+    \caption{Physical deployment architecture of PentaForge}
     \label{fig:physical_arch}
 \end{figure}
 
@@ -2235,44 +2425,68 @@ ports required by its consumers.
 
 \subsection{Sequence Diagrams}
 
-This section details the dynamic interactions between the components of the PentaForge platform during critical operational workflows.
+Sequence diagrams capture the temporal dimension of PentaForge's architecture
+that static structural views cannot express. While the logical and physical
+architectures presented in the previous sections describe \textit{what} exists
+and \textit{where} it runs, sequence diagrams answer \textit{how} components
+collaborate under real operational conditions: which service initiates a
+transaction, what data crosses each boundary, and in what order state
+transitions occur. The four diagrams below were selected because they each
+exercise a distinct and critical path through the platform --- scan initiation,
+failure recovery, report production, and secure client delivery --- collectively
+covering the full engagement lifecycle from the operator's first action to the
+client's final download.
 
 \subsubsection{SD1: Project Scan Launch}
-This sequence diagram illustrates the initial phase of an engagement, from project creation in the desktop UI to the initialization of the scan orchestrator and the emission of live events.
+
+This sequence diagram illustrates the initial phase of an engagement, from
+project creation in the desktop UI to the initialization of the scan
+orchestrator and the emission of live events.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{sd1_project_scan_launch.png}
+    \includegraphics[width=1\textwidth]{sd1_project_scan_launch.png}
     \caption{Sequence Diagram: Project Scan Launch}
     \label{fig:sd1_launch}
 \end{figure}
 
 \subsubsection{SD2: Resume After Interruption}
-This sequence demonstrates the platform's smart resume capability. It details how the backend recovers the persisted scan state and continues from the exact checkpoint after a restart or interruption.
+
+This sequence demonstrates the platform's smart resume capability. It details
+how the backend recovers the persisted scan state and continues from the exact
+checkpoint after a restart or interruption.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{sd2_resume_after_interruption.png}
+    \includegraphics[width=1\textwidth]{sd2_resume_after_interruption.png}
     \caption{Sequence Diagram: Resume After Interruption}
     \label{fig:sd2_resume}
 \end{figure}
 
 \subsubsection{SD3: Report Generation}
-This sequence outlines the workflow for transforming analyzed evidence and findings into a professional report. It details the interaction between the Report Generator node, the storage layer, and the UI.
+
+This sequence outlines the workflow for transforming analyzed evidence and findings into a professional report. It details the interaction between the Report Generator node, the storage layer, and the UI. To ensure maximum flexibility, the platform automatically generates the report in two distinct formats: a polished HTML version for client delivery and a raw Markdown version for technical review. The operator retains full control over the output, with the ability to manually edit the Markdown content directly within the interface to refine the narrative or adjust recommendations. Furthermore, the report can be dynamically regenerated at any time to seamlessly incorporate newly verified findings without disrupting the ongoing engagement.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{sd3_report_generation.png}
+    \includegraphics[width=1\textwidth]{sd3_report_generation.png}
     \caption{Sequence Diagram: Report Generation}
     \label{fig:sd3_report}
 \end{figure}
 
 \subsubsection{SD4: Protected Client Download}
-This sequence describes the secure delivery path, showing how a client requests a report via a share link, authenticates with a password, and securely downloads the packaged HTML or PDF report.
 
+
+The client delivery path is deliberately constrained: the share token encodes
+only the report identifier, giving the client access to the scoped portal
+with no visibility into scan controls, agent outputs, or project metadata.
+The exported deliverable is either a password-protected PDF encrypted at
+the document level, or an AES-256 ZIP archive produced via 7-Zip. In both
+cases, the password is set by the pentester at export time, never stored by
+the platform, and communicated to the client out-of-band.
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{sd4_protected_client_download.png}
+    \includegraphics[width=1\textwidth]{sd4_protected_client_download.png}
     \caption{Sequence Diagram: Protected Client Download}
     \label{fig:sd4_download}
 \end{figure}
@@ -2305,11 +2519,11 @@ This sequence describes the secure delivery path, showing how a client requests 
         operational evidence files. \\
         \hline
     \end{tabular}
-        \caption{Storage strategy by database and use case}
+    \caption{Storage strategy by database and use case}
     \label{tab:storage}
 \end{table}
 
-% ── Section 3 ─────────────────────────────────────────────────────────────
+% ── Section 4 ─────────────────────────────────────────────────────────────
 \section{Deep Multi-Agent System Architecture}
 
 \subsection{Architecture Overview}
@@ -2317,7 +2531,7 @@ This sequence describes the secure delivery path, showing how a client requests 
 \begin{figure}[H]
     \centering
     \includegraphics[width=\textwidth]{multi_agent_architecture.png}
-        \caption{Complete multi-agent architecture of PentaForge}
+    \caption{Complete multi-agent architecture of PentaForge}
     \label{fig:multi_agent}
 \end{figure}
 
@@ -2366,13 +2580,7 @@ into plan payloads and scenario batches.
 
 \subsection{Executor Agents}
 
-\textbf{Recon Executer} and \textbf{Exploit Executer} are the two operational
-agents that constitute the hot execution lane. They qualify as true agents in the
-formal sense: each one runs an LLM reasoning loop, has access to a scoped tool
-catalog, and calls tools autonomously via the sandbox client. Both are
-target-type aware, meaning they receive only the tooling relevant to the current
-engagement surface and are not permitted to invoke tools outside their assigned
-catalog.
+\textbf{Recon Executer} and \textbf{Exploit Executer} are the two operational agents that constitute the hot execution lane. They qualify as true agents in the formal sense: each one runs an LLM reasoning loop, has access to a scoped tool catalog, and calls tools autonomously via the sandbox client. Both are target-type aware, meaning they receive only the tooling relevant to the current engagement surface and are not permitted to invoke tools outside their assigned catalog. Furthermore, each agent maintains a localized short-term memory that tracks the tools executed in previous cycles along with a concise summary of their findings. This memory mechanism prevents redundant operations by allowing the agent to intelligently skip re-running a tool if the required information has already been acquired.
 
 \subsection{Analyzer}
 
@@ -2388,6 +2596,7 @@ decision tree, and enriching valid findings with CVSS scores. It systematically
 assesses evidence quality, classifies the result (e.g., ACT, ATTEND, or false
 positive), and decides whether the verified finding should update project memory,
 trigger a follow-up planner scenario, or be finalized for the reporting path.
+
 \subsection{Report Generator Node}
 
 The Report Generator is an \textbf{LLM-backed node}, not an agent. It performs
@@ -2439,7 +2648,7 @@ with LLM inference rather than an agent that acts autonomously.
         planner and report generator \\
         \hline
     \end{tabular}
-        \caption{Analyzer decision flow and resulting actions}
+    \caption{Analyzer decision flow and resulting actions}
     \label{tab:ssvc}
 \end{table}
 
@@ -2469,10 +2678,8 @@ with LLM inference rather than an agent that acts autonomously.
     \label{tab:vector_indexes}
 \end{table}
 
-% ── Section 4 ─────────────────────────────────────────────────────────────
+% ── Section 5 ─────────────────────────────────────────────────────────────
 \section{Technical Stack and Technology Choices}
-
-\subsection{Choix et Exigences Technologiques}
 
 The technology choices for PentaForge were driven by four guiding principles:
 local deployability without cloud dependency, asynchronous performance suitable
@@ -2519,7 +2726,7 @@ one discarded alternative.
         packaging and isolated command tooling. \\
         \hline
     \end{tabular}
-        \caption{Backend and infrastructure technology choices}
+    \caption{Backend and infrastructure technology choices}
     \label{tab:backend_stack}
 \end{table}
 
@@ -2562,7 +2769,7 @@ one discarded alternative.
         smaller footprint than Electron. \\
         \hline
     \end{tabular}
-        \caption{Frontend technology choices}
+    \caption{Frontend technology choices}
     \label{tab:frontend_stack}
 \end{table}
 
@@ -2596,7 +2803,7 @@ one discarded alternative.
         calls, and live target access. \\
         \hline
     \end{tabular}
-        \caption{Hardware and system prerequisites for PentaForge deployment}
+    \caption{Hardware and system prerequisites for PentaForge deployment}
     \label{tab:hardware_prerequisites}
 \end{table}
 
@@ -2613,7 +2820,8 @@ The sanitization pipeline orchestrated by the PrivacyGate operates as follows:
 \begin{enumerate}
     \item \textbf{Interception \& Pattern Matching:} The PrivacyGate intercepts the
     raw prompt and identifies sensitive engagement context (e.g., target IP addresses,
-    API keys, session tokens, or credentials) using deterministic filters and entropy checks.
+    API keys, session tokens, or credentials) using deterministic filters and entropy
+    checks.
     \item \textbf{Masking \& State Mapping:} Identified sensitive values are replaced
     with generic placeholders (e.g., \texttt{[REDACTED\_TOKEN\_1]}). The mapping
     between the original value and the placeholder is securely held in the platform's
@@ -2633,17 +2841,19 @@ compliance requirements.
 
 \section{Conclusion}
 
-This chapter has translated the theoretical foundations of Chapter 2 into a concrete
-specification and architectural design for PentaForge. The requirements analysis
-formalized what the platform must do and under what constraints, and the product
-backlog organized that work into prioritized deliverable items. The three
-architectural views --- monolithic, logical, and physical --- established the
-structural boundaries from a single deployable unit down to individual containers
-and their network relationships. The deep multi-agent design detailed the role and
-interaction of each specialized component, from Intel preparation and memory
-construction to analyzer feedback and durable recovery paths. Finally, the technical
-stack justification demonstrated that every technology choice was made deliberately
-against evaluated alternatives.
+This chapter has translated the theoretical foundations of Chapter 2 into a
+concrete specification and architectural design for PentaForge. The requirements
+analysis formalized what the platform must do and under what constraints. The
+product backlog then operationalized those requirements into a prioritized,
+sprint-organized delivery plan, establishing the execution contract before any
+design decision was made. The three architectural views --- monolithic, logical,
+and physical --- established the structural boundaries from a single deployable
+unit down to individual containers and their network relationships. The deep
+multi-agent design detailed the role and interaction of each specialized
+component, from Intel preparation and memory construction to analyzer feedback
+and durable recovery paths. Finally, the technical stack justification
+demonstrated that every technology choice was made deliberately against evaluated
+alternatives.
 
 The following chapter presents the concrete implementation of this architecture ---
 the working platform, its agent orchestration cycle in action, and the results
@@ -2651,7 +2861,6 @@ produced on a real test environment.
 
 % ── Restore default page style ─────────────────────────────────────────────
 \pagestyle{fancy}
-
 % ==================== CHAPTER 4 ====================
 \newpage
 \pagestyle{chapterfour}
@@ -2740,8 +2949,6 @@ the frontend workspace.
 
 \begin{table}[H]
     \centering
-    \caption{Estimated setup and launch time for PentaForge}
-    \label{tab:setup_time}
     \renewcommand{\arraystretch}{1.35}
     \begin{tabular}{|p{0.32\textwidth}|p{0.22\textwidth}|p{0.36\textwidth}|}
         \hline
@@ -2764,6 +2971,8 @@ the frontend workspace.
         backend health check succeeds. \\
         \hline
     \end{tabular}
+     \caption{Estimated setup and launch time for PentaForge}
+    \label{tab:setup_time}
 \end{table}
 
 In practice, the first installation is the longest phase because Docker must build
@@ -2773,261 +2982,123 @@ reused. This makes the platform suitable for repeated local testing during devel
 and for controlled demonstrations of the complete workflow.
 
 % ── Section 3 ─────────────────────────────────────────────────────────────
-\section{Sprint Realizations}
+\section{Iterative Implementation and Sprint Realizations}
 
-PentaForge was developed iteratively across seven sprints following the Scrum
-methodology introduced in Chapter 1. This section documents the concrete increment
-delivered in each sprint: the backlog items completed, the key technical decisions
-made, and the working artifact produced at the end of the iteration. Each sprint
-table constitutes the formal sprint review record for that iteration.
+PentaForge was developed iteratively across seven sprints following the Scrum methodology introduced in Chapter 1. Rather than presenting the platform as a single monolithic block, this section details the chronological construction of the system. For each sprint, we present the selected backlog objectives, the specific architectural decisions required for that increment, and the concrete deliverables produced at the end of the iteration.
 
+% ================= SPRINT 0 =================
 \subsection{Sprint 0 --- Research and Technical Bootcamp (Weeks 1--4)}
 
-Sprint 0 was a preparation sprint with no deployable code increment. Its objective
-was to build the technical and domain knowledge required to begin Sprint 1 with
-confidence.
+\subsubsection{Sprint Backlog}
+Sprint 0 was a preparation sprint with no deployable code increment. Its objective was to build the technical and domain knowledge required to begin active development with confidence. The primary tasks included a technical bootcamp on LLM integration into offensive security workflows, a comparative analysis of existing AI-assisted penetration testing solutions, and hands-on practice with core tools (Nmap, Burp Suite, ffuf, SQLMap).
 
-\begin{longtable}{|p{0.28\textwidth}|p{0.62\textwidth}|}
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endhead
-Goal & Establish the technical foundation required to design and implement
-PentaForge. \\
-\hline
-Backlog items & Technical bootcamp on LLM integration into offensive security
-workflows; research and comparative analysis of existing AI-assisted penetration
-testing solutions; study of PTES and MITRE ATT\&CK standards; hands-on practice
-with Nmap, Burp Suite, ffuf, and SQLMap. \\
-\hline
-Key decisions & Confirmed Scrum as the development methodology; selected FastAPI
-and Tauri as the core technology pair; identified the three candidate LLMs for
-benchmarking; drafted the initial product backlog. \\
-\hline
-Increment produced & Technical knowledge base, comparative analysis document,
-initial architecture sketch, and product backlog. \\
-\hline
-\caption{Sprint 0 review}
-\label{tab:sprint0}
-\end{longtable}
+\subsubsection{Design \& Decisions}
+During this phase, Scrum was confirmed as the development methodology. The core technology pair of FastAPI and Tauri was selected. Additionally, the three candidate LLMs (Gemini, Mistral, Qwen) were identified for benchmarking.
 
+\subsubsection{Implementation \& Deliverables}
+This sprint delivered the foundational technical knowledge base, the comparative analysis document (detailed in Chapter 2), the initial architecture sketch, and the formal product backlog.
+
+% ================= SPRINT 1 =================
 \subsection{Sprint 1 --- Core Architecture and Persistence Infrastructure (Weeks 5--6)}
 
-Sprint 1 established the foundational infrastructure of the platform. At the end of
-this sprint, the backend was reachable, the storage stack was operational, and the
-LLM gateway could route inference calls to multiple providers.
+\subsubsection{Sprint Backlog}
+The objective of this first active sprint was to establish the foundational infrastructure of the platform.
+\begin{itemize}
+    \item \textbf{US01 \& US02:} Implement project creation and persistent project state.
+    \item \textbf{US03:} Build a unified LLM gateway to route inference calls.
+    \item \textbf{US04:} Set up the vector knowledge base for RAG ingestion.
+\end{itemize}
 
-\begin{longtable}{|p{0.28\textwidth}|p{0.62\textwidth}|}
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endhead
-Goal & Deploy a working backend with persistence, LLM routing, and RAG ingestion. \\
-\hline
-Backlog items & US01, US02, US03, US04 --- project creation, persistent project
-state, unified LLM gateway, and vector knowledge base. \\
-\hline
-Key decisions & SQLite chosen for project persistence over flat files; Qdrant chosen
-over ad-hoc embedding files for vector retrieval; Redis introduced for runtime
-coordination; the \texttt{LLMClient} gateway abstracted provider selection from
-agent code. \\
-\hline
-Increment produced & FastAPI backend with health endpoint; SQLite projects store;
-Redis and Qdrant containers running via Docker Compose; \texttt{LLMClient} supporting
-Ollama and Mistral; Intel Agent for document embedding and RAG ingestion. \\
-\hline
-\caption{Sprint 1 review}
-\label{tab:sprint1}
-\end{longtable}
+\subsubsection{Design \& Decisions}
+To maintain a lightweight local deployment, SQLite was chosen for project persistence over flat files, while Qdrant was selected for vector retrieval. Redis was introduced specifically for hot runtime coordination. A critical architectural decision was made to abstract provider selection from the agent code by creating the \texttt{LLMClient} gateway.
 
+\subsubsection{Implementation \& Deliverables}
+The sprint delivered a running FastAPI backend with a health endpoint, the SQLite projects store, and Redis/Qdrant containers running via Docker Compose. The \texttt{LLMClient} was implemented to support Ollama and Mistral, alongside an Intel Agent capable of document embedding.
+
+% ================= SPRINT 2 =================
 \subsection{Sprint 2 --- Planning Engine and Orchestration (Weeks 7--8)}
 
-Sprint 2 introduced the autonomous planning capability of the platform. At the end of
-this sprint, the platform could receive a target, generate a structured attack
-checklist, convert it into an executable plan, and begin sequencing agent tasks
-through the orchestrator.
+\subsubsection{Sprint Backlog}
+With persistence active, Sprint 2 introduced the autonomous planning capabilities.
+\begin{itemize}
+    \item \textbf{US05:} Generate step-by-step, PTES-aligned attack plans.
+    \item \textbf{US06:} Build the asynchronous scan orchestrator.
+    \item \textbf{US07:} Develop the Architect agent.
+\end{itemize}
 
-\begin{longtable}{|p{0.28\textwidth}|p{0.62\textwidth}|}
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endhead
-Goal & Deliver a working Planner agent and a centralized scan orchestrator. \\
-\hline
-Backlog items & US05, US06, US07 --- step-by-step attack plan, asynchronous
-orchestrator, and architect agent. \\
-\hline
-Key decisions & Checklist and plan separated as two distinct persistence artifacts
-to enable the smart resume logic; orchestrator implemented as a layered service
-flow rather than a monolithic script; Architect agent kept as an LLM-backed node
-rather than a full agent to avoid unnecessary reasoning loops. \\
-\hline
-Increment produced & Planner agent generating PTES-aligned checklists and scenario
-plans; centralized Scan Orchestrator coordinating persistence, event, approval, and
-runner services; Architect node producing structured payload and code suggestions. \\
-\hline
-\caption{Sprint 2 review}
-\label{tab:sprint2}
-\end{longtable}
+\subsubsection{Design \& Decisions}
+A major engineering choice was made to separate the "Checklist" and the "Plan" into two distinct persistence artifacts to enable smart resume logic. The orchestrator was designed as a layered service flow rather than a monolithic script. The Architect was deliberately kept as an LLM-backed node rather than a full agent to avoid unnecessary and expensive reasoning loops.
 
+\subsubsection{Implementation \& Deliverables}
+This increment produced the Planner agent, the centralized Scan Orchestrator (coordinating persistence, events, and runners), and the Architect node responsible for producing structured payloads and code suggestions.
+
+% ================= SPRINT 3 =================
 \subsection{Sprint 3 --- Execution Layer and Tool Sandbox (Weeks 9--10)}
 
-Sprint 3 delivered the sandboxed execution infrastructure. At the end of this sprint,
-agents could dispatch approved tool commands to an isolated container, receive
-structured results, and have those results normalized and stored for the analyzer.
+\subsubsection{Sprint Backlog}
+Sprint 3 delivered the sandboxed execution infrastructure, allowing the AI to safely interact with the target environment.
+\begin{itemize}
+    \item \textbf{US08:} Build an isolated tool sandbox.
+    \item \textbf{US09:} Implement automated tool output parsing.
+    \item \textbf{US10:} Enforce execution scope.
+\end{itemize}
 
-\begin{longtable}{|p{0.28\textwidth}|p{0.62\textwidth}|}
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endhead
-Goal & Deliver a working Executer agent and an isolated tool sandbox with scope
-enforcement. \\
-\hline
-Backlog items & US08, US09, US10 --- isolated sandbox, automated tool output
-parsing, and scope enforcement. \\
-\hline
-Key decisions & Sandbox exposed as a separate HTTP service rather than a library
-call to preserve the control/execution plane separation; \texttt{run\_custom}
-guardrails implemented as a dedicated guard module classifying tools, detecting
-role violations, and validating network scope; tool result cache introduced with
-a project-scoped key to prevent repeated identical executions. \\
-\hline
-Increment produced & Docker-based tool sandbox service with \texttt{run\_custom}
-and \texttt{run\_python} routes; Recon Executer and Exploit Executer agents with
-scoped tool catalogs; automated output parsers for Nmap, ffuf, SQLMap, and
-Nikto; project-scoped tool result cache. \\
-\hline
-\caption{Sprint 3 review}
-\label{tab:sprint3}
-\end{longtable}
+\subsubsection{Design \& Decisions}
+To preserve the separation between the control plane and execution plane, the Sandbox was exposed as a completely separate HTTP service rather than a direct library call. \texttt{run\_custom} guardrails were implemented to classify tools, detect role violations, and validate network scope. A project-scoped tool result cache was introduced to prevent repeated identical executions.
 
+\subsubsection{Implementation \& Deliverables}
+The sprint delivered the Docker-based tool sandbox service (with \texttt{run\_custom} and \texttt{run\_python} routes), the Recon and Exploit Executer agents, automated output parsers for core tools (Nmap, ffuf, SQLMap, Nikto), and the project-scoped tool result cache.
+
+% ================= SPRINT 4 =================
 \subsection{Sprint 4 --- Analysis and Reporting Agents (Weeks 11--12)}
 
-Sprint 4 closed the scan loop by delivering the Analyzer and Report Generator. At
-the end of this sprint, tool outputs could be classified, enriched with CVSS and
-SSVC data, and compiled into a professional Markdown and HTML report.
+\subsubsection{Sprint Backlog}
+Sprint 4 closed the active scan loop by delivering the intelligence filter and reporting capabilities.
+\begin{itemize}
+    \item \textbf{US11:} Filter false positives via an Analyzer agent.
+    \item \textbf{US12:} Generate professional Markdown and HTML reports.
+    \item \textbf{US13:} Implement a prompt injection guard.
+\end{itemize}
 
-\begin{longtable}{|p{0.28\textwidth}|p{0.62\textwidth}|}
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endhead
-Goal & Deliver a working Analyzer agent and a Report Generator node producing
-professional deliverables. \\
-\hline
-Backlog items & US11, US12, US13 --- false positive filtering analyzer, professional
-report generator, and prompt injection guard. \\
-\hline
-Key decisions & Analyzer implemented with dual LLM runners (Verification and PoC
-Generation) to separate the classification concern from the evidence synthesis
-concern; SSVC decision tree integrated into the analyzer enrichment path;
-Report Generator kept as a single one-shot LLM call node rather than an agent;
-Prompt Injection Guard implemented as middleware on the prompt construction path. \\
-\hline
-Increment produced & Analyzer agent with CVSS enrichment and SSVC classification;
-Report Generator producing Markdown and HTML variants; Prompt Injection Guard
-sanitizing tool outputs before LLM transmission; project-scoped finding store
-with verified, false positive, inconclusive, and informational states. \\
-\hline
-\caption{Sprint 4 review}
-\label{tab:sprint4}
-\end{longtable}
+\subsubsection{Design \& Decisions}
+The Analyzer was architected with dual LLM runners (Verification and PoC Generation) to separate classification concerns from evidence synthesis. The SSVC decision tree was integrated into the enrichment path instead of relying solely on context-free CVSS scores. The Prompt Injection Guard was implemented as middleware on the prompt construction path.
 
+\subsubsection{Implementation \& Deliverables}
+Delivered the Analyzer agent with CVSS/SSVC enrichment, a Report Generator producing professional deliverables, the Prompt Injection Guard, and a project-scoped finding store supporting multiple states (verified, false positive, inconclusive, informational).
+
+% ================= SPRINT 5 =================
 \subsection{Sprint 5 --- Interface Layer and Human-in-the-Loop (Weeks 13--14)}
 
-Sprint 5 delivered the operator-facing desktop application and the human-in-the-loop
-control layer. At the end of this sprint, a pentester could manage projects, monitor
-live scan execution, approve sensitive actions, and query findings through the
-assistant chatbot from a native desktop interface.
+\subsubsection{Sprint Backlog}
+Sprint 5 delivered the operator-facing desktop application and the critical control layers.
+\begin{itemize}
+    \item \textbf{US14:} Build the desktop UI.
+    \item \textbf{US15:} Implement Human-in-the-Loop (HITL) approval gates.
+    \item \textbf{US16:} Develop the context-aware AI assistant.
+\end{itemize}
 
-\begin{longtable}{|p{0.28\textwidth}|p{0.62\textwidth}|}
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endhead
-Goal & Deliver a working desktop UI with live observability, HITL approval gates,
-and an AI assistant. \\
-\hline
-Backlog items & US14, US15, US16 --- desktop UI, human-in-the-loop approval gates,
-and context-aware assistant. \\
-\hline
-Key decisions & Tauri chosen over Electron for its smaller runtime footprint;
-Server-Sent Events adopted for scan observability instead of polling to preserve
-real-time responsiveness; HITL approval gates implemented as persisted approval
-states resolved by the operator before the orchestrator proceeds; Assistant agent
-given access to project memory and sandbox for controlled execution support. \\
-\hline
-Increment produced & React 19 and Tauri desktop application with Projects, Dashboard,
-Scan, Reports, and Settings pages; SSE-based live scan event stream; HITL approval
-banners for planner changes, sensitive tools, and password-dependent actions;
-Assistant agent with RAG-backed project context and natural language query support. \\
-\hline
-\caption{Sprint 5 review}
-\label{tab:sprint5}
-\end{longtable}
+\subsubsection{Design \& Decisions}
+Tauri was chosen over Electron to minimize the runtime footprint. Server-Sent Events (SSE) were adopted over standard polling to preserve real-time scan observability. HITL approval gates were modeled as persisted approval states that halt the orchestrator until operator resolution.
 
+\subsubsection{Implementation \& Deliverables}
+The release of the React 19 and Tauri desktop application (Projects, Dashboard, Scan, Reports). This included the SSE-based live event stream, HITL approval banners for sensitive actions, and an Assistant agent featuring RAG-backed project context.
+
+% ================= SPRINT 6 =================
 \subsection{Sprint 6 --- Integration, Hardening, and Packaging (Weeks 15--16)}
 
-Sprint 6 validated the full end-to-end platform, hardened its resilience mechanisms,
-and packaged it for reproducible single-command deployment. At the end of this sprint,
-PentaForge was deployable as a complete platform from a single Docker Compose command.
+\subsubsection{Sprint Backlog}
+The final sprint focused on validating the full end-to-end platform, hardening resilience, and preparing the deployment package.
+\begin{itemize}
+    \item \textbf{US17 \& US18:} Implement smart scan resume and password-protected exports.
+    \item \textbf{US19:} Create a client share link portal.
+    \item \textbf{US20:} Package the platform via Docker Compose.
+\end{itemize}
 
-\begin{longtable}{|p{0.28\textwidth}|p{0.62\textwidth}|}
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Attribute} & \textbf{Details} \\
-\hline
-\endhead
-Goal & Validate the complete scan chain, harden resilience, and package the platform
-for single-command deployment. \\
-\hline
-Backlog items & US17, US18, US19, US20 --- smart resume, password-protected exports,
-client share link, and Docker Compose packaging. \\
-\hline
-Key decisions & Smart resume policy formalized as a decision table with six
-checkpoint states; scan state model extended with explicit initialized, gathering,
-checklist\_ready, plan\_ready, executing, and completed states; LLM rate-limiting
-resilience implemented with exponential backoff; password-protected PDF and HTML
-exports added via 7-Zip integration; client share tokens scoped to report content
-only, excluding internal scan state. \\
-\hline
-Increment produced & Smart scan resume with checkpoint-based recovery; end-to-end
-validation against local lab targets; password-protected PDF and HTML export
-packages; client-facing scoped share portal; Docker Compose stack deploying all
-six services from a single command with shell-script initialization support. \\
-\hline
-\caption{Sprint 6 review}
-\label{tab:sprint6}
-\end{longtable}
+\subsubsection{Design \& Decisions}
+The smart resume policy was formalized into a strict state machine with explicit checkpoints (initialized, gathering, checklist\_ready, plan\_ready, executing, completed). LLM rate-limiting resilience was hardened using exponential backoff. To ensure security during delivery, client share tokens were scoped exclusively to report content, completely isolating internal scan states.
 
+\subsubsection{Implementation \& Deliverables}
+Delivered the final checkpoint-based smart resume logic, password-protected PDF/HTML export packages (via 7-Zip integration), the client-facing scoped share portal, and the final Docker Compose stack deploying all six platform services from a single command.
 % ── Section 4 ─────────────────────────────────────────────────────────────
 \section{Implementation of Core Components}
 
@@ -3064,35 +3135,50 @@ knowledge, and the filesystem for generated artifacts such as reports, caches, a
 logs. The persistence layer is therefore not a passive archive; it is an active part
 of the runtime behavior of the platform.
 
-\subsection{Scan Orchestration Services}
+\subsection{Scan Orchestration with LangGraph}
 
-The core orchestration of the implemented platform is not a single procedural script
-but a layered service flow. At the API level, scan requests are accepted through the
-\texttt{/api/scans/start} route. The request is delegated to the scan orchestrator,
-which coordinates a persistence service, an event service, an approval service, a
-phase runner, and a lifecycle service. This decomposition gives the platform a
+The core orchestration of the implemented platform is built on
+\textbf{LangGraph}~\cite{langgraph}, a graph-based agent orchestration framework
+that models the scan lifecycle as a directed state machine. Rather than a single
+procedural script, the scan runtime is expressed as a graph of nodes and conditional
+edges, where each node encapsulates a phase of the engagement --- Intel preparation,
+memory construction, planning, execution, analysis, and reporting --- and each edge
+encodes the transition condition that determines whether the pipeline advances,
+retries, or halts.
+
+LangGraph was selected over a plain service orchestrator for three reasons specific
+to PentaForge's requirements. First, its state-machine model maps directly onto the
+smart resume logic: because each node persists its output before transitioning,
+an interrupted scan can be resumed from the last completed node without replaying
+earlier phases. Second, its conditional routing allows the orchestrator to branch
+dynamically based on analyzer output --- for example, looping back to the planner
+when a verified finding opens a new attack path, or escalating to a human approval
+gate before a sensitive tool is dispatched. Third, its native support for
+asynchronous node execution allows the Recon Executer and Exploit Executer to
+progress independently on separate scenario branches without requiring manual
+threading coordination.
+
+At the API level, scan requests are accepted through the \texttt{/api/scans/start}
+route. The request is handed to the LangGraph scan graph, which coordinates a
+persistence service, an event service, an approval service, a phase runner, and a
+lifecycle service through its node sequence. This decomposition gives the platform a
 well-defined execution contract: every scan starts as a persisted runtime state and
-evolves through explicit phase transitions.
-
-The lifecycle service is responsible for initiating and supervising the active scan
-task. It registers the scan as running, persists metadata such as the active target
-and target type, and publishes an initial event to the frontend. It then delegates
-phase execution to the runner service, which starts with the Intel phase and then
-continues with warmup reconnaissance.
+evolves through explicit, auditable phase transitions.
 
 \begin{figure}[H]
     \centering
-    % \includegraphics[width=0.75\textwidth]{langgraph_flow.png}
-    \caption{Service-based scan flow demonstrating the progression of a run}
+    \includegraphics[width=0.85\textwidth]{langgraph_flow.png}
+    \caption{LangGraph-based scan state machine showing the node sequence
+    and conditional transitions across the PentaForge execution lifecycle}
     \label{fig:langgraph_flow}
 \end{figure}
 
-Operationally, the runner service constructs worker callbacks for the recon lane,
+Operationally, the runner node constructs worker callbacks for the recon lane,
 opens analyzer context where needed, and emits structured scan events that are later
 consumed by the SSE route. This implementation choice is particularly important from
 an engineering standpoint: the frontend is never forced to poll opaque backend state.
 Instead, it subscribes to a live stream of scan events that reflect the actual
-runtime progression of the platform.
+node-by-node progression of the LangGraph execution.
 
 \subsection{Live Observability with Server-Sent Events}
 
@@ -3141,13 +3227,10 @@ This implementation is especially visible in two areas:
     \item \textbf{Evidence enrichment:} verified findings are enriched with CVSS
     information and SSVC decisions before reaching the report generator.
     \item \textbf{Planner handoff:} analyzer results are aggregated and handed back
-    into the planning path so that the next execution cycle is based on evidence
-    rather than assumptions.
+    into the LangGraph planning node so that the next execution cycle is based on
+    evidence rather than assumptions, closing the feedback loop within the state
+    machine.
 \end{itemize}
-
-The architectural value of this implementation is therefore twofold: it transforms
-tool outputs into durable knowledge, and it closes the loop between execution and
-planning.
 
 \subsection{RAG Pipeline and Chatbot Interface}
 
@@ -3162,13 +3245,29 @@ assistant route can access project memory, saved findings, and safe execution to
 This turns the chatbot into a genuine operator aid rather than a detached natural
 language layer.
 
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.55\textwidth]{ui_assistant.png}
+    \caption{AI Assistant interface with project-aware context}
+    \label{fig:ui_assistant}
+\end{figure}
+
 \subsection{Desktop Workflows and Tauri Integration}
 
 The desktop application implements the operator workflow that gives coherence to the
-platform: project creation, target-type selection, scan launch, report review, client
-delivery, and settings management. Because the UI is packaged with Tauri, the product
-preserves the familiarity of a web interface while remaining distributed as a desktop
-tool suitable for local use inside a controlled assessment environment.
+platform: project creation, target-type selection, scan launch, report review, and
+client delivery.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{ui_projects.png}
+    \caption{Project management workspace}
+    \label{fig:ui_projects}
+\end{figure}
+
+Because the UI is packaged with Tauri, the product preserves the familiarity of a
+web interface while remaining distributed as a desktop tool suitable for local use
+inside a controlled assessment environment.
 
 \subsection{Report Generation and Client Delivery}
 
@@ -3177,9 +3276,30 @@ requests report generation, the backend creates a report run entry, invokes the
 report generator, stores the Markdown report, derives the HTML representation, and
 marks the task status as completed or failed.
 
+The operator manages these deliverables through the report generation interface,
+which provides controls for Markdown editing, HTML preview, and share-link
+configuration, as illustrated in Figure~\ref{fig:report_gen}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{ui_report_share.png}
+    \caption{Report generation and sharing controls}
+    \label{fig:report_gen}
+\end{figure}
+
 The delivery path extends this logic. A dedicated share route can create or revoke a
 client-facing link, optionally protect it with a password, and expose a scoped
-viewer. On the export side, the report module packages protected downloads so that
+viewer for the client. The final view presented to the client is a restricted,
+read-only portal, shown in Figure~\ref{fig:client_portal}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{ui_report_share2.png}
+    \caption{Client-facing scoped report portal}
+    \label{fig:client_portal}
+\end{figure}
+
+On the export side, the report module packages protected downloads so that
 the generated document does not circulate as an immediately open artifact.
 
 \subsection{Target-Type-Aware Configuration}
@@ -3188,9 +3308,32 @@ One of the most distinctive implementation choices of PentaForge is the explicit
 modeling of target types. The backend exposes a target-type catalog, dynamic field
 extraction from Pydantic schemas, and editable information-gathering profiles. On
 the frontend, the project creation dialog consumes this metadata to adapt the data
-entry form to the selected target type, removing the common ambiguity found in
-generic pentest tools that force every engagement into a single flat target field.
+entry form to the selected target type, removing the ambiguity found in generic
+pentest tools that force every engagement into a single flat target field.
 
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{ui_target_type.png}
+    \caption{Target-type aware project creation}
+    \label{fig:ui_setting}
+\end{figure}
+
+\subsection{Platform Settings and AI Provider Configuration}
+
+To support the requirement for flexible reasoning backbones and strict data
+sovereignty, PentaForge exposes a dedicated configuration workspace. Through this
+interface, the operator can seamlessly switch between AI providers --- such as a
+local privacy-preserving model (e.g., Qwen via Ollama) or a high-capacity cloud
+provider (e.g., Gemini). It also centralizes the management of API keys and global
+platform parameters, ensuring the system remains adaptable to different engagement
+constraints without requiring backend service restarts.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{ui_settings.png}
+    \caption{Platform configuration and AI provider management interface}
+    \label{fig:ui_settings}
+\end{figure}
 % ── Section 5 ─────────────────────────────────────────────────────────────
 \section{Implementation of the Execution and Safety Path}
 
@@ -3257,13 +3400,13 @@ identifier, and starts publishing SSE events such as \texttt{scan\_started},
 From the operator perspective, this first phase validates two things at once: the
 data model is correctly instantiated, and the live observability path is functional.
 The frontend does not need to infer progress heuristically; it displays what the
-backend explicitly emits.
+backend explicitly emits, as shown in the active scan dashboard (Figure \ref{fig:ui_scan_dashboard}).
 
 \begin{figure}[H]
     \centering
-    % \includegraphics[width=0.85\textwidth]{ui_dashboard.png}
-    \caption{PentaForge Operator Dashboard showing real-time target mapping}
-    \label{fig:ui_dashboard}
+    \includegraphics[width=1\textwidth]{ui_scan_dashboard.png}
+    \caption{Active scan dashboard showing the orchestration pipeline and real-time execution events}
+    \label{fig:ui_scan_dashboard}
 \end{figure}
 
 \subsection{Phase 2: Intel Preparation and Warmup Reconnaissance}
@@ -3339,70 +3482,40 @@ The validation strategy is based on five axes:
 
 \subsection{Functional Test Matrix}
 
+Standard platform operations---such as project creation, deletion, report regeneration, and protected downloads---were validated successfully and behave exactly as expected. To avoid diluting the evaluation with trivial CRUD operations, the functional test matrix below focuses strictly on the complex orchestration, agent reasoning, state-recovery, and data-isolation scenarios that validate PentaForge's core architecture.
+
 \begin{longtable}{|p{0.08\textwidth}|p{0.24\textwidth}|p{0.28\textwidth}|p{0.30\textwidth}|}
 \hline
-\textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance
-criterion} \\
+\textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance criterion} \\
 \hline
 \endfirsthead
 \hline
-\textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance
-criterion} \\
+\textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance criterion} \\
 \hline
 \endhead
-T01 & Create a web application project & Project appears in the projects list and
-opens correctly. & Project metadata is persisted and target is displayed
-consistently. \\
+T01 & Start a scan on a valid target & Pipeline enters running state and emits live updates. & UI shows planner, executer, analyzer, timer, and latest messages. \\
 \hline
-T02 & Start a scan on a valid target & Pipeline enters running state and emits live
-updates. & UI shows planner, executer, analyzer, timer, and latest messages. \\
+T02 & Generate checklist & Checklist is created from target type and project context. & Checklist items are saved and remain available after refresh. \\
 \hline
-T03 & Generate checklist & Checklist is created from target type and project context.
-& Checklist items are saved and remain available after refresh. \\
+T03 & Generate plan after checklist & Plan is created from checklist items. & Scenario identifiers are stable and visible in stored state. \\
 \hline
-T04 & Generate plan after checklist & Plan is created from checklist items. &
-Scenario identifiers are stable and visible in stored state. \\
+T04 & Execute scenario & Tool request is routed through the sandbox. & Raw output, exit code, and normalized result are stored. \\
 \hline
-T05 & Execute scenario & Tool request is routed through the sandbox. & Raw output,
-exit code, and normalized result are stored. \\
+T05 & Analyze evidence & Evidence is classified correctly. & Verified findings require deterministic evidence, while noise remains informational or inconclusive. \\
 \hline
-T06 & Analyze evidence & Evidence is classified correctly. & Verified findings
-require deterministic evidence, while noise remains informational or
-inconclusive. \\
+T06 & Stop and resume before checklist & Incomplete scan starts from scratch. & No unstable partial data is reused as completed work. \\
 \hline
-T07 & Stop and resume before checklist & Incomplete scan starts from scratch. & No
-unstable partial data is reused as completed work. \\
+T07 & Stop after checklist before plan & Plan is created on resume. & Checklist is preserved and execution continues. \\
 \hline
-T08 & Stop after checklist before plan & Plan is created on resume. & Checklist is
-preserved and execution continues. \\
+T08 & Stop during scenario execution & Running scenario restarts from executer. & Completed scenarios are not repeated unless manually requested. \\
 \hline
-T09 & Stop during scenario execution & Running scenario restarts from executer. &
-Completed scenarios are not repeated unless manually requested. \\
+T09 & Generate report with no findings & Report states no verified findings. & It includes methodology, coverage, limitations, and project history without invented vulnerabilities. \\
 \hline
-T10 & Regenerate report & Professional HTML preview is selected by default. & Report
-cards show generated status and preview opens without requiring extra selection. \\
-\hline
-T11 & Download protected PDF & PDF download is password protected. & Opening the
-downloaded file requires the configured password. \\
-\hline
-T12 & Download protected HTML package & HTML export is packaged and protected. & The
-downloaded package behaves consistently with the pentester and client share
-flows. \\
-\hline
-T13 & Delete project & All project data is removed. & Findings, history, reports,
-share links, and project-scoped cache entries are deleted. \\
-\hline
-T14 & Generate report with no findings & Report states no verified findings. & It
-includes methodology, coverage, limitations, and project history without invented
-vulnerabilities. \\
-\hline
-T15 & Same target in two projects & Reports remain project-scoped. & Findings from
-one project do not appear in another project unless generated there. \\
+T10 & Same target in two projects & Reports remain project-scoped. & Findings from one project do not appear in another project unless generated there. \\
 \hline
 \caption{Functional test matrix}
 \label{tab:functional_test_matrix}
 \end{longtable}
-
 \subsection{Workflow Validation}
 
 Workflow validation focuses on the orchestration logic. A successful workflow must
@@ -3679,88 +3792,164 @@ and staying one step ahead of the adversary.
 \addcontentsline{toc}{chapter}{Bibliography}
 \begin{thebibliography}{99}
 
+% ── Penetration Testing Methodology & Lifecycle ────────────────────────────
+
 \bibitem{triaxiomTimeline}
-Triaxiom Security, \textit{What is the Typical Timeline for a Penetration Test?}, \url{https://www.triaxiomsecurity.com/blog/typical-timeline-for-a-penetration-test/} (accessed 2026).
+Triaxiom Security.
+\textit{What is the Typical Timeline for a Penetration Test?}
+Available at: \url{https://www.triaxiomsecurity.com/blog/typical-timeline-for-a-penetration-test/}
+(accessed May 2026).
 
 \bibitem{valuementorLifecycle}
-ValueMentor, \textit{Penetration Testing Service Lifecycle}, \url{https://valuementor.com/blogs/penetration-testing-service-inside-the-complete-assessment-lifecycle} (accessed 2026).
+ValueMentor.
+\textit{Penetration Testing Service Lifecycle: Inside the Complete Assessment}.
+Available at: \url{https://valuementor.com/blogs/penetration-testing-service-inside-the-complete-assessment-lifecycle}
+(accessed May 2026).
 
-\bibitem{autosecagent2026}
-AutoSecAgent, \textit{The Journal of Supercomputing} (Springer Nature), 2026, \url{https://link.springer.com/article/10.1007/s11227-026-08439-z}.
+\bibitem{ptes}
+Penetration Testing Execution Standard (PTES).
+\textit{PTES Technical Guidelines}.
+Available at: \url{http://www.pentest-standard.org/index.php/Main_Page}
+(accessed May 2026).
 
-\bibitem{emazzantiTools}
-eMazzanti Technologies, \textit{Benefits and Limitations of Automated Tools in Penetration Testing}, \url{https://www.emazzanti.net/benefits-and-limitations-of-automated-tools-in-penetration-testing/} (accessed 2026).
-
-\bibitem{pentestgpt2023}
-PentestGPT, arXiv:2308.06782, \url{https://arxiv.org/pdf/2308.06782} (accessed 2026).
-
-\bibitem{hedgehogRetesting}
-Hedgehog Security, \textit{Remediation Validation and Retesting}, \url{https://www.hedgehogsecurity.co.uk/blog/remediation-validation-retesting-close-the-loop} (accessed 2026).
-
-\bibitem{redleggRetesting}
-RedLegg, \textit{The Role of Retesting in Vulnerability Remediation Validation}, \url{https://www.redlegg.com/blog/vulnerability-remediation-retesting-guide} (accessed 2026).
-
-\bibitem{halockVerification}
-HALOCK, \textit{Remediation Verification}, \url{https://www.halock.com/penetration-testing/remediation-verification/} (accessed 2026).
+\bibitem{mitreattack}
+MITRE Corporation.
+\textit{MITRE ATT\&CK: Adversarial Tactics, Techniques and Common Knowledge Framework}.
+Available at: \url{https://attack.mitre.org}
+(accessed May 2026).
 
 \bibitem{cycognitoPentest}
-CyCognito, \textit{Penetration Testing} ("Penetration Testing in 2025"), \url{https://www.cycognito.com/learn/penetration-testing/} (accessed 2026).
-\bibitem{ptes}
-PTES Technical Guidelines, \textit{Penetration Testing Execution Standard},
-\url{http://www.pentest-standard.org/index.php/Main_Page} (accessed 2026).
-\bibitem{mitreattack}
-MITRE Corporation, \textit{MITRE ATT\&CK Framework},
-\url{https://attack.mitre.org} (accessed 2026).
-\bibitem{threatexploitFP}
-ThreatExploit AI, \textit{The Hidden Cost of False Positives: Why Scanners Alone
-Aren't Enough}, \url{https://threatexploit.ai/en/blog/false-positives-scanners-vs-pentesting}
-(accessed 2026).
+CyCognito.
+\textit{Penetration Testing in 2025: Challenges, Trends and Automation}.
+Available at: \url{https://www.cycognito.com/learn/penetration-testing/}
+(accessed May 2026).
+
+% ── AI in Penetration Testing & Automation ────────────────────────────────
+
+\bibitem{pentestgpt2023}
+G.~Deng, Y.~Liu, V.~Mayoral-Vilches, P.~Liu, Y.~Li, Y.~Xu, T.~Zhang,
+Y.~Liu, M.~Pinzger, and S.~Rass.
+\textit{PentestGPT: Evaluating and Harnessing Large Language Models for
+Automated Penetration Testing}.
+arXiv preprint arXiv:2308.06782, 2023.
+Available at: \url{https://arxiv.org/abs/2308.06782}
+(accessed May 2026).
+
+\bibitem{autosecagent2026}
+H.~Al-Shaaby, A.~Alqahtani, and M.~Zohdy.
+\textit{AutoSecAgent: An Autonomous Multi-Agent Framework for Automated
+Cybersecurity Operations}.
+\textit{The Journal of Supercomputing}, Springer Nature, 2026.
+Available at: \url{https://link.springer.com/article/10.1007/s11227-026-08439-z}.
+
 \bibitem{bishopfoxAI}
-Bishop Fox, \textit{AI Tooling Impact on Penetration Testing Engagements},
-cited in RedFox Security, The State of AI Pentesting in 2026,
-\url{https://www.redfoxsec.com/blog/the-state-of-ai-pentesting-in-2026-trends-statistics-and-whats-next}
-(accessed 2026).
+Bishop Fox.
+\textit{AI Tooling Impact on Penetration Testing Engagements},
+cited in: RedFox Security, \textit{The State of AI Pentesting in 2026:
+Trends, Statistics and What's Next}.
+Available at: \url{https://www.redfoxsec.com/blog/the-state-of-ai-pentesting-in-2026-trends-statistics-and-whats-next}
+(accessed May 2026).
 
 \bibitem{brightdefense2026}
-Bright Defense, \textit{120+ Penetration Testing Statistics for 2026},
-\url{https://www.brightdefense.com/resources/penetration-testing-statistics}
-(accessed 2026).
-\bibitem{pentestgpt2023}
-G. Deng et al., \textit{PentestGPT: Evaluating and Harnessing Large Language
-Models for Automated Penetration Testing}, arXiv:2308.06782,
-\url{https://arxiv.org/pdf/2308.06782} (accessed 2026).
+Bright Defense.
+\textit{120+ Penetration Testing Statistics for 2026}.
+Available at: \url{https://www.brightdefense.com/resources/penetration-testing-statistics}
+(accessed May 2026).
+
+\bibitem{emazzantiTools}
+eMazzanti Technologies.
+\textit{Benefits and Limitations of Automated Tools in Penetration Testing}.
+Available at: \url{https://www.emazzanti.net/benefits-and-limitations-of-automated-tools-in-penetration-testing/}
+(accessed May 2026).
+
+% ── Existing Automated Pentest Solutions ──────────────────────────────────
 
 \bibitem{burpsuiteAI}
-PortSwigger, \textit{Burp Suite AI --- Explore Issue and AI-Assisted Testing},
-\url{https://portswigger.net/burp/documentation/desktop/ai-features}
-(accessed 2026).
+PortSwigger.
+\textit{Burp Suite AI: Explore Issue and AI-Assisted Testing Features}.
+Available at: \url{https://portswigger.net/burp/documentation/desktop/ai-features}
+(accessed May 2026).
 
 \bibitem{kaligpt}
-KaliGPT, \textit{KaliGPT --- AI-Assisted Penetration Testing on Kali Linux},
-\url{https://github.com/markusvalk/kaligpt} (accessed 2026).
+M.~Valk.
+\textit{KaliGPT: AI-Assisted Penetration Testing on Kali Linux}.
+GitHub repository, 2024.
+Available at: \url{https://github.com/markusvalk/kaligpt}
+(accessed May 2026).
 
 \bibitem{nodezero}
-Horizon3.ai, \textit{NodeZero --- Autonomous Penetration Testing Platform},
-\url{https://www.horizon3.ai/nodezero} (accessed 2026).
+Horizon3.ai.
+\textit{NodeZero: Autonomous Penetration Testing Platform}.
+Available at: \url{https://www.horizon3.ai/nodezero}
+(accessed May 2026).
 
 \bibitem{shannon}
-Keygraph, \textit{Shannon --- Open-Source White-Box AI Pentester},
-\url{https://github.com/keygraph/shannon} (accessed 2026).
+Keygraph.
+\textit{Shannon: Open-Source White-Box AI Pentester for Web Applications}.
+GitHub repository, 2024.
+Available at: \url{https://github.com/keygraph/shannon}
+(accessed May 2026).
+
+% ── Vulnerability Management & Scoring ────────────────────────────────────
+
+\bibitem{threatexploitFP}
+ThreatExploit AI.
+\textit{The Hidden Cost of False Positives: Why Scanners Alone Are Not Enough}.
+Available at: \url{https://threatexploit.ai/en/blog/false-positives-scanners-vs-pentesting}
+(accessed May 2026).
+
+\bibitem{hedgehogRetesting}
+Hedgehog Security.
+\textit{Remediation Validation and Retesting: Closing the Loop}.
+Available at: \url{https://www.hedgehogsecurity.co.uk/blog/remediation-validation-retesting-close-the-loop}
+(accessed May 2026).
+
+\bibitem{redleggRetesting}
+RedLegg.
+\textit{The Role of Retesting in Vulnerability Remediation Validation}.
+Available at: \url{https://www.redlegg.com/blog/vulnerability-remediation-retesting-guide}
+(accessed May 2026).
+
+\bibitem{halockVerification}
+HALOCK Security Labs.
+\textit{Remediation Verification: Confirming Vulnerabilities Are Truly Fixed}.
+Available at: \url{https://www.halock.com/penetration-testing/remediation-verification/}
+(accessed May 2026).
+
+% ── LLM Selection & Benchmarking ──────────────────────────────────────────
+
 \bibitem{qwen25report}
-Qwen Team, \textit{Qwen2.5 Technical Report}, arXiv:2412.15115,
-\url{https://arxiv.org/abs/2412.15115} (2024).
+Qwen Team, Alibaba Cloud.
+\textit{Qwen2.5 Technical Report}.
+arXiv preprint arXiv:2412.15115, 2024.
+Available at: \url{https://arxiv.org/abs/2412.15115}.
+
 \bibitem{geminiRateLimits}
-Google, \textit{Gemini API Rate Limits --- Usage Tiers and Quotas},
-\url{https://ai.google.dev/gemini-api/docs/rate-limits} (accessed 2026).
+Google DeepMind.
+\textit{Gemini API: Rate Limits, Usage Tiers and Quotas}.
+Available at: \url{https://ai.google.dev/gemini-api/docs/rate-limits}
+(accessed May 2026).
 
 \bibitem{llmstatsFlash}
-LLM Stats, \textit{Gemini 2.5 Flash vs.\ Gemini 2.5 Pro --- Benchmark Comparison},
-\url{https://llm-stats.com/models/compare/gemini-2.5-flash-vs-gemini-2.5-pro}
-(accessed 2026). Global MMLU-Lite score for Gemini 2.5 Flash: 88.4\%.
+LLM Stats.
+\textit{Gemini 2.5 Flash vs.\ Gemini 2.5 Pro: Benchmark Comparison}.
+Available at: \url{https://llm-stats.com/models/compare/gemini-2.5-flash-vs-gemini-2.5-pro}
+(accessed May 2026).
+Note: Global MMLU-Lite score for Gemini~2.5~Flash reported as 88.4\%.
 
 \bibitem{mistralDocs}
-Mistral AI, \textit{Rate Limits and Usage Tiers},
-\url{https://docs.mistral.ai/admin/user-management-finops/tier} (accessed 2026).
-\end{thebibliography}
+Mistral AI.
+\textit{API Rate Limits and Usage Tiers}.
+Available at: \url{https://docs.mistral.ai/admin/user-management-finops/tier}
+(accessed May 2026).
 
+% ── Frameworks & Libraries ─────────────────────────────────────────────────
+
+\bibitem{langgraph}
+LangChain, Inc.
+\textit{LangGraph: A Library for Building Stateful, Multi-Actor LLM Applications}.
+Available at: \url{https://langchain-ai.github.io/langgraph/}
+(accessed May 2026).
+
+\end{thebibliography}
 \end{document}

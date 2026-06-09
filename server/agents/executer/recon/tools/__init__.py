@@ -86,6 +86,23 @@ def _ensure_registry_loaded() -> None:
         return
 
     tools, errors = _load_recon_registry()
+
+    from server.agents.tools.run_custom import run_custom, RUN_CUSTOM_TOOL_DEFINITION
+    from server.agents.tools.run_python import run_python, RUN_PYTHON_TOOL_DEFINITION
+    
+    tools.append(Tool(
+        name=RUN_CUSTOM_TOOL_DEFINITION["name"],
+        description=RUN_CUSTOM_TOOL_DEFINITION["description"],
+        fn=run_custom,
+        parameters=RUN_CUSTOM_TOOL_DEFINITION["parameters"],
+    ))
+    tools.append(Tool(
+        name=RUN_PYTHON_TOOL_DEFINITION["name"],
+        description=RUN_PYTHON_TOOL_DEFINITION["description"],
+        fn=run_python,
+        parameters=RUN_PYTHON_TOOL_DEFINITION["parameters"],
+    ))
+
     _ALL_RECON_TOOLS_CACHE = tools
     _RECON_TOOL_NAMES_CACHE = [tool.name for tool in tools]
     _LOAD_ERRORS_CACHE = errors

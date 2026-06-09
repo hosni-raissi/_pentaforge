@@ -41,8 +41,8 @@ def _default_queue_limits() -> tuple[int, int]:
         except Exception:
             provider = ""
     if provider == "gemini":
-        return 4, 8
-    return 2, 3
+        return 4, 15
+    return 4, 15
 
 
 class BackupLLMFallback:

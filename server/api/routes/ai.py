@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from server.agents.architect.agent import ArchitectAgent
+from server.nodes.architect.agent import ArchitectAgent
 from server.agents.assistant import AssistantAgent
 from server.api.dependencies import projects_store, scan_orchestrator
 from server.api.routes.settings import has_saved_usable_llm_profile, llm_required_response

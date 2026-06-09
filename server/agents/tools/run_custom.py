@@ -461,35 +461,7 @@ def _prepare_git_clone_destination(cmd: list[str], execution_cwd: str) -> None:
 # 3a. OUTPUT FILE FLAG STRIPPER
 # ══════════════════════════════════════════════════════════════
 
-_SHORT_OUTPUT_FLAGS_BY_COMMAND: dict[str, set[str]] = {
-    "curl": {"-o"},
-    "wget": {"-o", "-O"},
-    "ffuf": {"-o", "-od"},
-    "nuclei": {"-o", "-report-db"},
-    "hydra": {"-o", "-O"},
-    "nikto": {"-output"},
-}
-_COMBINED_OUTPUT_PREFIXES_BY_COMMAND: dict[str, tuple[str, ...]] = {
-    "nmap": ("-oA", "-oN", "-oX", "-oG"),
-}
-_LONG_OUTPUT_FLAGS = {
-    "--output",
-    "--output-file",
-    "--out",
-    "--outfile",
-    "--report",
-    "--report-file",
-    "--report-dir",
-    "--outdir",
-    "--jsonfile",
-    "--json_out",
-    "--log-json",
-    "--xml",
-    "--xml-output",
-    "--save-report",
-    "--write-report",
-}
-_LONG_OUTPUT_FLAG_PREFIXES = tuple(f"{flag}=" for flag in _LONG_OUTPUT_FLAGS)
+
 
 
 def _project_root() -> Path:
@@ -513,30 +485,10 @@ def _safe_tool_output_dir(tool_name: str) -> str:
     return str(path)
 
 
-def _looks_like_file_sink(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return True
-    lowered = text.lower()
-    if lowered in {"-", "stdout", "/dev/stdout", "/dev/fd/1", "/dev/null"}:
-        return False
-    if "=" in text and "/" not in text and "\\" not in text:
-        left, _, right = text.partition("=")
-        if left.strip() and right.strip():
-            return False
-    if text.startswith("-"):
-        return False
-    if lowered.startswith(("http://", "https://")):
-        return False
-    return True
 
 
-def strip_output_file_flags(command: str, args: list[str]) -> tuple[list[str], list[str]]:
-    """
-    Remove command-aware output file flags from arguments.
-    (Disabled: output flags are now completely allowed).
-    """
-    return args, []
+
+
 
 
 def redirect_default_tool_outputs(command: str, args: list[str]) -> tuple[list[str], list[str]]:

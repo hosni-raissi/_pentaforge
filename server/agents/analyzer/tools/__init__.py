@@ -46,19 +46,8 @@ run_python_tool = Tool(
     parameters=RUN_PYTHON_TOOL_DEFINITION["parameters"],
 )
 
-search_web_tool = Tool(
-    name=SEARCH_WEB_TOOL_DEFINITION["name"],
-    description=SEARCH_WEB_TOOL_DEFINITION["description"],
-    fn=search_web,
-    parameters=SEARCH_WEB_TOOL_DEFINITION["parameters"],
-)
-
-fetch_url_content_tool = Tool(
-    name=FETCH_URL_CONTENT_TOOL_DEFINITION["name"],
-    description=FETCH_URL_CONTENT_TOOL_DEFINITION["description"],
-    fn=fetch_url_content,
-    parameters=FETCH_URL_CONTENT_TOOL_DEFINITION["parameters"],
-)
+search_web_tool = search_web
+fetch_url_content_tool = fetch_url_content
 
 VERIFY_ANALYZER_TOOLS: list[Tool] = [
     run_custom_tool,

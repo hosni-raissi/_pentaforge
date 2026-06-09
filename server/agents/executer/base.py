@@ -48,36 +48,7 @@ _executer_tool_context: contextvars.ContextVar[dict[str, Any]] = contextvars.Con
 
 _EXECUTER_LLM_RETRY_MAX = 3
 _EXECUTER_LLM_RETRY_BASE_SECONDS = 1.5
-_GENERIC_FILE_OUTPUT_FLAGS = {
-    "--output",
-    "--output-file",
-    "--out",
-    "--outfile",
-    "--report",
-    "--report-file",
-    "--report-dir",
-    "--outdir",
-    "--jsonfile",
-    "--json_out",
-    "--log-json",
-    "--xml",
-    "--xml-output",
-    "--save-report",
-    "--write-report",
-}
-_GENERIC_FILE_OUTPUT_PREFIXES = tuple(f"{flag}=" for flag in _GENERIC_FILE_OUTPUT_FLAGS)
-_RUN_CUSTOM_SHORT_FILE_OUTPUT_FLAGS: dict[str, set[str]] = {
-    "curl": {"-o"},
-    "wget": {"-o", "-O"},
-    "nmap": set(),
-    "ffuf": {"-o", "-od"},
-    "nuclei": {"-o", "-report-db"},
-    "hydra": {"-o", "-O"},
-    "nikto": {"-output"},
-}
-_RUN_CUSTOM_COMBINED_FILE_OUTPUT_PREFIXES: dict[str, tuple[str, ...]] = {
-    "nmap": ("-oA", "-oN", "-oX", "-oG"),
-}
+
 _RUN_CUSTOM_URL_TARGET_FLAGS = {
     "-u",
     "--url",
@@ -1196,184 +1167,7 @@ class BaseExecuterAgent:
             round_labels=[f"r{n}" for n in range(1, rounds_executed + 1)],
         )
 
-    def _is_allowed_output_sink(self, value: str) -> bool:
-        lowered = value.strip().lower()
-        return lowered in {
-            "-",
-            "json",
-            "jsonl",
-            "xml",
-            "csv",
-            "yaml",
-            "yml",
-            "cli",
-            "stdout",
-            "/dev/stdout",
-            "/dev/fd/1",
-        }
 
-    def _looks_like_file_sink(self, value: str) -> bool:
-        val = str(value or "").strip()
-        if not val:
-            return True
-        if self._is_allowed_output_sink(val):
-            return False
-        lowered = val.lower()
-        if lowered.startswith(("http://", "https://")):
-            return False
-        if "=" in val and "/" not in val and "\\" not in val:
-            left, _, right = val.partition("=")
-            if left.strip() and right.strip():
-                return False
-        if val.startswith("-"):
-            return False
-        if "/" in val or "\\" in val:
-            return True
-        if re.search(
-            r"\.(txt|json|jsonl|xml|csv|log|out|html|yaml|yml|cap|pcap)$",
-            lowered,
-        ):
-            return True
-        return True
-
-    def _scan_args_for_file_output(self, tokens: list[str]) -> str | None:
-        return self._scan_args_for_file_output_for_command(tokens)
-
-    def _scan_args_for_file_output_for_command(
-        self,
-        tokens: list[str],
-        *,
-        command: str = "",
-    ) -> str | None:
-        normalized_command = str(command or "").strip().lower()
-        short_flags = _RUN_CUSTOM_SHORT_FILE_OUTPUT_FLAGS.get(normalized_command, set())
-        combined_prefixes = _RUN_CUSTOM_COMBINED_FILE_OUTPUT_PREFIXES.get(normalized_command, ())
-
-        for idx, raw in enumerate(tokens):
-            token = str(raw or "").strip()
-            if not token:
-                continue
-            if token in short_flags or token in _GENERIC_FILE_OUTPUT_FLAGS or token == "-o":
-                next_value = str(tokens[idx + 1]).strip() if idx + 1 < len(tokens) else ""
-                if self._looks_like_file_sink(next_value):
-                    return f"{token} {next_value}".strip()
-                continue
-            if any(token.startswith(prefix) for prefix in _GENERIC_FILE_OUTPUT_PREFIXES):
-                if "=" in token:
-                    _, value = token.split("=", 1)
-                else:
-                    value = ""
-                if self._looks_like_file_sink(value):
-                    return token
-            for prefix in combined_prefixes:
-                if token == prefix:
-                    next_value = str(tokens[idx + 1]).strip() if idx + 1 < len(tokens) else ""
-                    if self._looks_like_file_sink(next_value):
-                        return f"{token} {next_value}".strip()
-                    break
-                if token.startswith(prefix):
-                    value = token[len(prefix) :].strip()
-                    if self._looks_like_file_sink(value):
-                        return token
-        return None
-
-    def _sanitize_known_file_output_args(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> tuple[dict[str, Any], list[str]]:
-        if not isinstance(args, dict) or tool_name != "run_custom":
-            return args, []
-
-        command = str(args.get("command", "")).strip().lower()
-        tool_args = args.get("args")
-        if not command or not isinstance(tool_args, list):
-            return args, []
-
-        short_flags = _RUN_CUSTOM_SHORT_FILE_OUTPUT_FLAGS.get(command, set())
-        combined_prefixes = _RUN_CUSTOM_COMBINED_FILE_OUTPUT_PREFIXES.get(command, ())
-        if not short_flags and not combined_prefixes and not any(
-            token in _GENERIC_FILE_OUTPUT_FLAGS or any(token.startswith(prefix) for prefix in _GENERIC_FILE_OUTPUT_PREFIXES)
-            for token in [str(item or "").strip() for item in tool_args]
-        ):
-            return args, []
-
-        cleaned: list[str] = []
-        stripped: list[str] = []
-        idx = 0
-        while idx < len(tool_args):
-            token = str(tool_args[idx] or "").strip()
-            if not token:
-                idx += 1
-                continue
-            if token in short_flags or token in _GENERIC_FILE_OUTPUT_FLAGS:
-                stripped.append(token)
-                next_value = str(tool_args[idx + 1]).strip() if idx + 1 < len(tool_args) else ""
-                if next_value and self._looks_like_file_sink(next_value):
-                    stripped.append(next_value)
-                    idx += 2
-                else:
-                    idx += 1
-                continue
-            matched_combined = False
-            for prefix in combined_prefixes:
-                if token == prefix:
-                    stripped.append(token)
-                    next_value = str(tool_args[idx + 1]).strip() if idx + 1 < len(tool_args) else ""
-                    if next_value and self._looks_like_file_sink(next_value):
-                        stripped.append(next_value)
-                        idx += 2
-                    else:
-                        idx += 1
-                    matched_combined = True
-                    break
-                if token.startswith(prefix):
-                    suffix = token[len(prefix) :].strip()
-                    if self._looks_like_file_sink(suffix):
-                        stripped.append(token)
-                        idx += 1
-                        matched_combined = True
-                        break
-            if matched_combined:
-                continue
-            if any(token.startswith(prefix) for prefix in _GENERIC_FILE_OUTPUT_PREFIXES):
-                value = token.split("=", 1)[1] if "=" in token else ""
-                if self._looks_like_file_sink(value):
-                    stripped.append(token)
-                    idx += 1
-                    continue
-            cleaned.append(str(tool_args[idx]))
-            idx += 1
-
-        if not stripped:
-            return args, []
-        updated = dict(args)
-        updated["args"] = cleaned
-        return updated, stripped
-
-    def _detect_disallowed_file_output(self, tool_name: str, args: dict[str, Any]) -> str | None:
-        if not isinstance(args, dict):
-            return None
-
-        tool_args = args.get("args")
-        if isinstance(tool_args, list):
-            command = str(args.get("command", "")).strip().lower() if tool_name == "run_custom" else ""
-            reason = self._scan_args_for_file_output_for_command(
-                [str(x) for x in tool_args],
-                command=command,
-            )
-            if reason:
-                return reason
-
-        extra_args = args.get("extra_args")
-        if isinstance(extra_args, dict):
-            for maybe_list in extra_args.values():
-                if isinstance(maybe_list, list):
-                    reason = self._scan_args_for_file_output([str(x) for x in maybe_list])
-                    if reason:
-                        return reason
-
-        return None
 
     def _declared_target_url(self) -> str:
         message = str(getattr(self, "_current_user_message", "") or "")
@@ -1645,49 +1439,7 @@ class BaseExecuterAgent:
                     pass
 
             args = self._filter_tool_args(tool_name, args)
-            args, sanitized_output_flags = self._sanitize_known_file_output_args(tool_name, args)
-            if sanitized_output_flags:
-                self._cb.on_step(
-                    f"[{self._role}] normalized {tool_name}: removed file-output args {' '.join(sanitized_output_flags[:4])}"
-                )
-            output_arg_issue = self._detect_disallowed_file_output(tool_name, args)
-            if output_arg_issue:
-                result = json.dumps(
-                    {
-                        "success": False,
-                        "error": (
-                            "File output arguments are blocked by policy. "
-                            "Re-run without saving to disk and return results via stdout/stdin only."
-                        ),
-                        "blocked_arg": output_arg_issue,
-                        "role": self._role,
-                        "tool": tool_name,
-                    },
-                    ensure_ascii=True,
-                )
-                self._cb.on_warn(
-                    f"[{self._role}] blocked output-file arg for {tool_name}: {output_arg_issue}"
-                )
-                tool_messages.append(
-                    {
-                        "role": "tool",
-                        "content": result,
-                        "tool_call_id": call_id,
-                        "name": tool_name,
-                    },
-                )
-                tool_results.append(
-                    {
-                        "tool_call_id": call_id,
-                        "name": tool_name,
-                        "args": args,
-                        "scenario_id": scenario_id,
-                        "result": result,
-                        "discovered_target_types": extract_discovered_target_types(result),
-                        "approval_required": False,
-                    },
-                )
-                continue
+
 
             target_scope_issue = self._detect_out_of_scope_run_custom_url(tool_name, args)
             if target_scope_issue:
@@ -1805,20 +1557,14 @@ class BaseExecuterAgent:
                     if not approved:
                         result = json.dumps(
                             {
-                                "success": False,
-                                "error": "User approval required before executing tool",
-                                "approval_required": True,
-                                "role": self._role,
-                                "tool": tool_name,
-                                "call_id": call_id,
-                                "args": args,
+                                "success": True,
+                                "message": "Tool execution was skipped/denied by the operator. Proceed with alternative tools if applicable, or complete the scenario.",
                             },
                             ensure_ascii=True,
                         )
                         self._cb.on_warn(
-                            f"[{self._role}] blocked pending user approval: {tool_name}"
+                            f"[{self._role}] tool skipped by operator: {tool_name}"
                         )
-                        halted_for_approval = True
                         global_cache.unlock_and_fail(invocation_signature)
                     else:
                         self._cb.on_step(
@@ -1923,6 +1669,15 @@ class BaseExecuterAgent:
                     "name": tool_name,
                 },
             )
+            status_label = "passed"
+            result_str = str(result)
+            if result_str.startswith("Error executing") or "Tool not installed" in result_str:
+                status_label = "failed"
+            elif "Exited with code " in result_str and "Exited with code 0" not in result_str:
+                status_label = "failed"
+            elif "skipped" in result_str.lower() or "denied" in result_str.lower():
+                status_label = "skipped"
+
             tool_results.append(
                 {
                     "tool_call_id": call_id,
@@ -1930,6 +1685,7 @@ class BaseExecuterAgent:
                     "args": args,
                     "scenario_id": scenario_id,
                     "result": result,
+                    "status": status_label,
                     "cached_result": False,
                     "safety_profile": (
                         get_run_custom_command_profile(
@@ -2332,7 +2088,11 @@ class BaseExecuterAgent:
                 self._run_max_tool_rounds_override = previous_round_override
 
         effective_max_tool_rounds = self._effective_max_tool_rounds()
-        for round_index in range(1, effective_max_tool_rounds + 1):
+        extended_for_skip = False
+        extended_for_no_tools = False
+        for round_index in range(1, 100):
+            if round_index > effective_max_tool_rounds:
+                break
             rounds_executed = round_index
             self._cb.on_step(
                 f"[{self._role}] LLM round {round_index}/{effective_max_tool_rounds}"
@@ -2575,6 +2335,21 @@ class BaseExecuterAgent:
                             tool_results=all_tool_results,
                         )
                         return await _finalize_result(result)
+                    
+                    if not all_tool_results and not extended_for_no_tools:
+                        extended_for_no_tools = True
+                        effective_max_tool_rounds += 1
+                        nudge = (
+                            "You did not invoke any tools. You must invoke at least one tool to gather evidence "
+                            "before concluding the scenario."
+                        )
+                        self._cb.on_warn(f"[{self._role}] No tools called; extending max rounds by 1 to force tool usage")
+                        messages.append({
+                            "role": "user",
+                            "content": nudge,
+                        })
+                        continue
+
                     # Final round with no tool calls: consolidate now
                     result = _parse_executer_output(last_content, role=self._role)
                     return await _finalize_result(result)
@@ -2616,6 +2391,18 @@ class BaseExecuterAgent:
             messages.extend(tool_messages)
             all_tool_results.extend(tool_results)
             all_discovered_target_types.update(discovered)
+
+            any_tool_skipped = any(
+                isinstance(tr.get("result"), str) and "skipped/denied" in tr.get("result", "")
+                for tr in tool_results
+                if not tr.get("cached_result")
+            )
+            
+            last_tool_round = effective_max_tool_rounds if tool_round_model else max(1, effective_max_tool_rounds - 1)
+            if any_tool_skipped and not extended_for_skip and round_index >= last_tool_round:
+                extended_for_skip = True
+                effective_max_tool_rounds += 1
+                self._cb.on_step(f"[{self._role}] extended max rounds by 1 to allow alternative tool selection after skip")
 
             if tool_results:
                 round_summary = self._build_round_execution_summary(

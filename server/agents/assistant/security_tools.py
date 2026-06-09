@@ -271,46 +271,53 @@ ASSISTANT_TARGET_OPTIONAL_COMMANDS: frozenset[str] = frozenset(
 )
 
 ASSISTANT_SANDBOX_WORDLISTS: dict[str, dict[str, object]] = {
-    "short": {
-        "t": "wordlist",
-        "c": "common_paths",
-        "p": "wordlists/short.txt",
-        "d": ["small path fuzzing", "quick ffuf checks", "lightweight gobuster runs"],
-        "use_with": ["ffuf", "gobuster"],
-    },
-    "medium": {
-        "t": "wordlist",
-        "c": "common_paths",
-        "p": "wordlists/medium.txt",
-        "d": ["deeper path discovery", "balanced content enumeration"],
-        "use_with": ["ffuf", "gobuster"],
-    },
-    "large": {
-        "t": "wordlist",
-        "c": "common_paths",
-        "p": "wordlists/large.txt",
-        "d": ["larger path brute force", "wider endpoint discovery"],
-        "use_with": ["ffuf", "gobuster"],
-    },
-    "dns-fuzz-common": {
+    "dns_short": {
         "t": "wordlist",
         "c": "dns",
-        "p": "wordlists/dns-fuzz-common.txt",
-        "d": ["common DNS names", "quick subdomain brute force"],
-        "use_with": ["gobuster", "dnsrecon"],
+        "p": "wordlists/dns/subdomains_short.txt",
+        "d": ["fast subdomain brute force", "quick DNS checks"],
+        "use_with": ["gobuster dns", "dnsrecon"],
     },
-    "rockyou": {
+    "web_files_short": {
+        "t": "wordlist",
+        "c": "web",
+        "p": "wordlists/web/files_short.txt",
+        "d": ["quick file discovery", "lightweight ffuf runs"],
+        "use_with": ["ffuf", "gobuster"],
+    },
+    "web_folders_short": {
+        "t": "wordlist",
+        "c": "web",
+        "p": "wordlists/web/folders_short.txt",
+        "d": ["quick directory enumeration"],
+        "use_with": ["ffuf", "gobuster"],
+    },
+    "passwords_short": {
         "t": "wordlist",
         "c": "passwords",
-        "p": "wordlists/rockyou.txt",
-        "d": ["password audit inputs", "credential checks when authorized"],
-        "use_with": ["hydra-style workflows", "custom checks"],
+        "p": "seclists/Passwords/Common-Credentials/passwords_short.txt",
+        "d": ["fast password audits", "credential checks"],
+        "use_with": ["hydra", "custom checks"],
     },
-    "seclists": {
+    "usernames_short": {
+        "t": "wordlist",
+        "c": "usernames",
+        "p": "seclists/Usernames/usernames_short.txt",
+        "d": ["fast username enumeration", "login audits"],
+        "use_with": ["hydra", "ffuf"],
+    },
+    "common_web_content": {
+        "t": "wordlist",
+        "c": "web",
+        "p": "seclists/Discovery/Web-Content/common_short.txt",
+        "d": ["common web content discovery"],
+        "use_with": ["ffuf", "gobuster"],
+    },
+    "seclists_root": {
         "t": "wordlist_bundle",
         "c": "seclists",
         "p": "seclists/",
-        "d": ["bundled SecLists mirror in sandbox", "use for targeted usernames/passwords/fuzzing lists"],
+        "d": ["bundled SecLists mirror in sandbox", "use for targeted lists"],
         "use_with": ["ffuf", "gobuster", "custom recon"],
     },
 }
@@ -347,14 +354,14 @@ ASSISTANT_SANDBOX_RUN_CUSTOM_CATALOG: dict[str, dict[str, object]] = {
     "ffuf": {
         "t": "fuzzing",
         "c": "content_discovery",
-        "u": "ffuf -u http://TARGET/FUZZ -w wordlists/short.txt -ic -mc all -fc 404",
+        "u": "ffuf -u http://TARGET/FUZZ -w wordlists/web/files_short.txt -ic -mc all -fc 404",
         "d": ["path discovery", "endpoint brute force", "wordlist-based content enumeration"],
         "tgt": ["web", "api"],
     },
     "gobuster": {
         "t": "fuzzing",
         "c": "directory_bruteforce",
-        "u": "gobuster dir -u http://TARGET -w wordlists/short.txt -q",
+        "u": "gobuster dir -u http://TARGET -w wordlists/web/folders_short.txt -q",
         "d": ["directory enumeration", "simple brute force", "alternate ffuf workflow"],
         "tgt": ["web"],
     },

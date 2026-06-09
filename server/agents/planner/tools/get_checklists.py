@@ -1544,8 +1544,28 @@ async def get_checklists(target_type: str, n_items: int = 0, info: str = "") -> 
 
 
 async def _get_checklists_impl(target_type: str, n_items: int = 0, info: str = "") -> str:
-    _ = info
     target = _norm(target_type)
+
+    custom_checklist_text = ""
+    if info and "Operator-supplied custom checklist text:\n" in info:
+        parts = info.split("Operator-supplied custom checklist text:\n")
+        if len(parts) > 1:
+            custom_checklist_text = parts[1].split("\n\nChecklist generation task:")[0].strip()
+
+    if custom_checklist_text:
+        from server.nodes.intel.helpers import _parse_custom_checklist_text
+        parsed_custom = _parse_custom_checklist_text(custom_checklist_text, target_type=target)
+        return json.dumps({
+            "t": target,
+            "src": "user_custom_checklist",
+            "ok": True,
+            "available_total": parsed_custom.get("available_total", 0),
+            "checklist": parsed_custom.get("checklist", []),
+            "mitre": {"tactics": {}, "total": 0},
+            "mitre_urls": [],
+            "ptes_urls": [],
+        }, ensure_ascii=False, separators=(",", ":"))
+
     profile = _PROFILE.get(target, "web")
     sources = CHECKLIST_SOURCES.get(profile, CHECKLIST_SOURCES["web"])
 

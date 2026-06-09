@@ -645,7 +645,6 @@ def _normalize_scenario_agent(scenario: dict[str, Any]) -> dict[str, Any]:
         "privesc",
     )
 
-    has_verify = any(cue in text for cue in verify_cues)
     has_recon = any(cue in text for cue in recon_cues)
     has_exploit = any(cue in text for cue in exploit_cues)
 
@@ -2149,20 +2148,23 @@ class PlannerAgent:
                     global_queue.release("planner")
 
             except Exception as exc:
-                # BACKUP LLM FALLBACK: On 429, try backup LLM for single call
+                # BACKUP LLM FALLBACK: On 429 or Timeout, try backup LLM for single call
                 text = str(exc).lower()
                 is_rate_limited = "429" in text or "rate limit" in text
+                is_timeout = isinstance(exc, (_TRANSIENT_EXCEPTIONS, TimeoutError, asyncio.TimeoutError)) or "timeout" in text
 
-                if is_rate_limited:
+                if is_rate_limited or is_timeout:
                     backup_llm = await backup_fallback.get_backup_llm()
                     if backup_llm is not None:
                         try:
+                            reason_log = "main_llm_429" if is_rate_limited else "main_llm_timeout"
                             logger.info(
                                 "planner_backup_llm_fallback",
-                                reason="main_llm_429",
+                                reason=reason_log,
                             )
+                            reason_msg = "main hit 429" if is_rate_limited else "main timed out"
                             self._cb.on_warn(
-                                "Planner using backup LLM (main hit 429); single call, then return to main LLM"
+                                f"Planner using backup LLM ({reason_msg}); single call, then return to main LLM"
                             )
 
                             response = await asyncio.wait_for(

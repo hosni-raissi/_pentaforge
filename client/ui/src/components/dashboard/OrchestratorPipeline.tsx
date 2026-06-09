@@ -349,12 +349,12 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
                       <p className="text-sm font-semibold text-text-primary">
                         {node.actionPanel.title}
                       </p>
-                      <p
+                      <code
                         title={node.actionPanel.detail}
-                        className="overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-5 text-text-secondary"
+                        className="block overflow-hidden text-ellipsis whitespace-nowrap rounded-md border border-border/40 dark:border-border bg-surface-2/40 px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
                       >
                         {node.actionPanel.detail}
-                      </p>
+                      </code>
                     </div>
                     {node.actionPanel.controls ? (
                       <div className="flex flex-col items-stretch gap-1.5 pt-0.5 sm:items-end">

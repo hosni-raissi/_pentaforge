@@ -338,7 +338,10 @@ export function MissionControlPanel({
                 <p className="mt-1 text-sm font-semibold text-text-primary">
                   {action?.title ?? "No action waiting"}
                 </p>
-                <p className="mt-1 text-sm leading-6 text-text-secondary">
+                <p
+                  title={action?.detail}
+                  className="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-text-secondary"
+                >
                   {action?.detail ?? "Approvals, reconnect notices, and failure guidance will appear here instead of being scattered across the page."}
                 </p>
               </div>

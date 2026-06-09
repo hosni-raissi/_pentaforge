@@ -1,7 +1,0 @@
-www
-mail
-api
-admin
-app
-auth
-cdn

@@ -20,7 +20,6 @@ from server.agents.tools.run_custom import (
     redirect_default_tool_outputs,
     resolve_sandbox_resource_args,
     safe_execute,
-    strip_output_file_flags,
     validate_command_policy,
 )
 from server.agents.tools.run_python import run_python as local_run_python
@@ -105,8 +104,7 @@ def execute_run_custom(req: RunCustomRemoteRequest) -> dict[str, Any]:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Validation error: {exc}") from exc
 
-        cleaned_args, _stripped_flags = strip_output_file_flags(validated.command, validated.args)
-        redirected_args, _redirected_flags = redirect_default_tool_outputs(validated.command, cleaned_args)
+        redirected_args, _redirected_flags = redirect_default_tool_outputs(validated.command, validated.args)
         validated.args = resolve_sandbox_resource_args(redirected_args)
 
         role_violation = detect_recon_role_violation(validated.command, role=req.execution_context.role)

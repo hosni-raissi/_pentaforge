@@ -60,13 +60,13 @@ Core rules:
     - DNS failures, TLS handshake failures, and connection timeouts are inconclusive; they do not prove a finding is false positive by themselves.
     - **CRITICAL**: If a reachability check fails (DNS, Connection Refused, Timeout), you MUST attempt a basic network diagnostic (prefer `dig` or `nslookup`; `ping -c 1` is also acceptable) before concluding `needs_retest`.
 - If the user asks what tools, commands, or access you have, be helpful. Explain that you can use the installed sandbox security tools listed below, search project evidence, and inspect target pages.
-- When a command needs a wordlist, prefer the compact sandbox catalog paths like `wordlists/short.txt` or `seclists/...`. The sandbox executor resolves those to the bundled in-container files automatically.
+- When a command needs a wordlist, prefer the compact sandbox catalog paths like `wordlists/web/files_short.txt` or `seclists/...`. The sandbox executor resolves those to the bundled in-container files automatically.
 - Never invent wordlist filenames or paths. Only use exact entries from the JSON wordlist catalog below; for example, do not substitute names like `common.txt` unless that exact file appears in the catalog.
 - For `ffuf` and `gobuster`, preserve exact result statuses when summarizing. Do not rewrite `301` or `302` as `200`, and treat `403` hits as potentially interesting rather than discarding them.
 - If a bundled wordlist may contain comment or header lines, prefer the tool mode that ignores comments. For `ffuf`, add `-ic` unless there is a reason not to.
 - Before running higher-impact fuzzing or injection tools like ffuf, nuclei, or sqlmap, confirm the operator is authorized and aware of potential service impact.
 - Example Tool Usage:
-    - Fuzzing: `ffuf -u http://target/FUZZ -w wordlists/short.txt -ic -mc all -fc 404`
+    - Fuzzing: `ffuf -u http://target/FUZZ -w wordlists/web/files_short.txt -ic -mc all -fc 404`
     - SQL Injection: `sqlmap -u "http://target/page?id=1" --batch`
     - Vuln Scanning: `nuclei -u http://target -t cves/`
 - Available sandbox security tools:

@@ -19,7 +19,7 @@ import httpx
 import structlog
 
 from server.agents.rate_limiter import get_backup_llm_fallback, get_global_llm_queue
-from server.agents.report.report_generator import generate_report
+from server.nodes.report.report_generator import generate_report
 from server.agents.tool_output_parsers import parse_ffuf_findings, summarize_tool_output
 from server.config.agent import get_public_agent_config
 from server.core.llm import ChatMessage, LLMClient, LLMResponse
@@ -118,24 +118,29 @@ _VAGUE_COMMAND_TOKENS = {
 }
 _ASSISTANT_NETWORK_COMMANDS = ASSISTANT_ALLOWED_NETWORK_COMMANDS
 _ASSISTANT_SANDBOX_PATH_REWRITES = {
-    "../share/wordlists/short.txt": "wordlists/short.txt",
-    "../share/wordlists/medium.txt": "wordlists/medium.txt",
-    "../share/wordlists/large.txt": "wordlists/large.txt",
-    "../share/wordlists/rockyou.txt": "wordlists/rockyou.txt",
-    "../share/wordlists/dns-fuzz-common.txt": "wordlists/dns-fuzz-common.txt",
+    "../share/wordlists/short.txt": "wordlists/web/files_short.txt",
+    "../share/wordlists/medium.txt": "wordlists/web/files_medium.txt",
+    "../share/wordlists/large.txt": "wordlists/web/files_large.txt",
+    "../share/wordlists/rockyou.txt": "seclists/Passwords/Common-Credentials/passwords_large.txt",
+    "../share/wordlists/dns-fuzz-common.txt": "wordlists/dns/subdomains_short.txt",
     "../share/seclists": "seclists",
-    "/usr/share/wordlists/pentaforge/short.txt": "wordlists/short.txt",
-    "/usr/share/wordlists/pentaforge/medium.txt": "wordlists/medium.txt",
-    "/usr/share/wordlists/pentaforge/large.txt": "wordlists/large.txt",
-    "/usr/share/wordlists/pentaforge/rockyou.txt": "wordlists/rockyou.txt",
-    "/usr/share/wordlists/pentaforge/dns-fuzz-common.txt": "wordlists/dns-fuzz-common.txt",
+    "/usr/share/wordlists/pentaforge/short.txt": "wordlists/web/files_short.txt",
+    "/usr/share/wordlists/pentaforge/medium.txt": "wordlists/web/files_medium.txt",
+    "/usr/share/wordlists/pentaforge/large.txt": "wordlists/web/files_large.txt",
+    "/usr/share/wordlists/pentaforge/rockyou.txt": "seclists/Passwords/Common-Credentials/passwords_large.txt",
+    "/usr/share/wordlists/pentaforge/dns-fuzz-common.txt": "wordlists/dns/subdomains_short.txt",
     "/usr/share/seclists/pentaforge": "seclists",
-    "/app/server/sandbox/share/wordlists/short.txt": "wordlists/short.txt",
-    "/app/server/sandbox/share/wordlists/medium.txt": "wordlists/medium.txt",
-    "/app/server/sandbox/share/wordlists/large.txt": "wordlists/large.txt",
-    "/app/server/sandbox/share/wordlists/rockyou.txt": "wordlists/rockyou.txt",
-    "/app/server/sandbox/share/wordlists/dns-fuzz-common.txt": "wordlists/dns-fuzz-common.txt",
+    "/app/server/sandbox/share/wordlists/short.txt": "wordlists/web/files_short.txt",
+    "/app/server/sandbox/share/wordlists/medium.txt": "wordlists/web/files_medium.txt",
+    "/app/server/sandbox/share/wordlists/large.txt": "wordlists/web/files_large.txt",
+    "/app/server/sandbox/share/wordlists/rockyou.txt": "seclists/Passwords/Common-Credentials/passwords_large.txt",
+    "/app/server/sandbox/share/wordlists/dns-fuzz-common.txt": "wordlists/dns/subdomains_short.txt",
     "/app/server/sandbox/share/seclists": "seclists",
+    "wordlists/short.txt": "wordlists/web/files_short.txt",
+    "wordlists/medium.txt": "wordlists/web/files_medium.txt",
+    "wordlists/large.txt": "wordlists/web/files_large.txt",
+    "wordlists/rockyou.txt": "seclists/Passwords/Common-Credentials/passwords_large.txt",
+    "wordlists/dns-fuzz-common.txt": "wordlists/dns/subdomains_short.txt",
 }
 def _assistant_policy_error(
     command: str,

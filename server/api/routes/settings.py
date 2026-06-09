@@ -117,6 +117,25 @@ def get_settings() -> SystemSettings:
 
 @router.post("")
 def update_settings(settings: SystemSettings) -> dict[str, bool]:
+    for fallback in settings.fallback_profiles:
+        if not fallback.is_active:
+            continue
+        fallback_provider = str(fallback.provider or "").strip().lower()
+        fallback_key = str(fallback.api_key or "").strip()
+        
+        for main_p in settings.llm_profiles:
+            if not main_p.is_active:
+                continue
+            main_provider = str(main_p.provider or "").strip().lower()
+            main_key = str(main_p.api_key or "").strip()
+            
+            if fallback_provider and fallback_provider == main_provider:
+                if fallback_key == main_key:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Backup LLM cannot use the exact same Provider and API Key as the Main LLM."
+                    )
+
     try:
         _save_settings(settings)
         return {"ok": True}

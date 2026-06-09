@@ -24,7 +24,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency fallback
     pisa = None
 
-from server.agents.report.report_generator import generate_report
+from server.nodes.report.report_generator import generate_report
 from server.api.dependencies import projects_store
 from server.api.routes.settings import has_saved_usable_llm_profile, llm_required_response
 

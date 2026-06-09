@@ -1303,6 +1303,13 @@ function buildPendingApprovalCommand(view: PendingToolApprovalView | null): stri
       return full;
     }
   }
+  if (view.toolName === "run_python") {
+    const code = typeof args.code === "string" ? args.code.trim() : "";
+    if (code) {
+      return `run_python:\n${code}`;
+    }
+    return "Python Script Execution";
+  }
   return view.toolName;
 }
 

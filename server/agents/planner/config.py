@@ -26,8 +26,6 @@ PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP: int = 0
 
 _DISCOVERY_TOOLS = frozenset({"get_page", "search_kb", "search_web"})
 _TRANSIENT_EXCEPTIONS = (
-    asyncio.TimeoutError,
-    TimeoutError,
     httpx.ReadTimeout,
     httpx.ConnectTimeout,
     httpx.PoolTimeout,

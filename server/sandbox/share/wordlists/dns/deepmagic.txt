@@ -1,5 +1,0 @@
-www
-mail
-api
-admin
-staging
