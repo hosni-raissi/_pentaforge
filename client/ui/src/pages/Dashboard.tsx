@@ -326,6 +326,9 @@ const PROJECT_STATUSES: ProjectStatus[] = [
   "stopped",
   "completed",
   "error",
+  "awaiting_tool_approval",
+  "awaiting_planner_approval",
+  "awaiting_information_gathering_approval",
 ];
 const AGENT_ROLES: AgentGraphRole[] = [
   "planner",
@@ -497,20 +500,20 @@ function getLatestAnalyzerAgentReportEntry(
       updated_at: typeof entry.updated_at === "string" ? entry.updated_at : undefined,
       scenario_report: Array.isArray(entry.scenario_report)
         ? entry.scenario_report
-            .filter((item): item is Record<string, unknown> => isRecord(item))
-            .map((item) => ({
-              scenario_ran: typeof item.scenario_ran === "string" ? item.scenario_ran : undefined,
-              agent: typeof item.agent === "string" ? item.agent : undefined,
-              status: typeof item.status === "string" ? item.status : undefined,
-              tools_ran: Array.isArray(item.tools_ran)
-                ? uniqueNormalizedStrings(item.tools_ran)
-                : undefined,
-              tool_results: normalizeScenarioToolResults(item.tool_results),
-              findings_summary: Array.isArray(item.findings_summary)
-                ? uniqueNormalizedStrings(item.findings_summary)
-                : undefined,
-              execution_summary: typeof item.execution_summary === "string" ? item.execution_summary : undefined,
-            }))
+          .filter((item): item is Record<string, unknown> => isRecord(item))
+          .map((item) => ({
+            scenario_ran: typeof item.scenario_ran === "string" ? item.scenario_ran : undefined,
+            agent: typeof item.agent === "string" ? item.agent : undefined,
+            status: typeof item.status === "string" ? item.status : undefined,
+            tools_ran: Array.isArray(item.tools_ran)
+              ? uniqueNormalizedStrings(item.tools_ran)
+              : undefined,
+            tool_results: normalizeScenarioToolResults(item.tool_results),
+            findings_summary: Array.isArray(item.findings_summary)
+              ? uniqueNormalizedStrings(item.findings_summary)
+              : undefined,
+            execution_summary: typeof item.execution_summary === "string" ? item.execution_summary : undefined,
+          }))
         : undefined,
     };
   }
@@ -651,8 +654,8 @@ function getFallbackInformationGatheringEntries(
           status: normalizeText(item.status) === "completed"
             ? "passed"
             : normalizeText(item.status) === "error"
-            ? "failed"
-            : normalizeText(item.status),
+              ? "failed"
+              : normalizeText(item.status),
           raw_status: normalizeText(item.status),
           summary: normalizeText(item.summary),
         })).filter((item) => item.command),
@@ -700,12 +703,12 @@ function buildCombinedAnalyzerMarkdown(
       : [];
     const toolResults = Array.isArray(report?.tool_results)
       ? report.tool_results
-          .map((item) => ({
-            command: String(item.command || item.tool || "").trim(),
-            status: String(item.status || "").trim(),
-            summary: String(item.summary || "").trim(),
-          }))
-          .filter((item) => item.command)
+        .map((item) => ({
+          command: String(item.command || item.tool || "").trim(),
+          status: String(item.status || "").trim(),
+          summary: String(item.summary || "").trim(),
+        }))
+        .filter((item) => item.command)
       : [];
     const findings = Array.isArray(report?.findings_summary)
       ? uniqueNormalizedStrings(report.findings_summary)
@@ -723,13 +726,13 @@ function buildCombinedAnalyzerMarkdown(
     const nextActions = uniqueNormalizedStrings(entry.next_actions ?? []);
     const whatWeFound = entry.agent === "information_gathering"
       ? uniqueNormalizedStrings(
-          confirmedFacts.length > 0 || securitySignals.length > 0
-            ? [...confirmedFacts, ...securitySignals]
-            : findings,
-        )
+        confirmedFacts.length > 0 || securitySignals.length > 0
+          ? [...confirmedFacts, ...securitySignals]
+          : findings,
+      )
       : findings.length > 0
-      ? uniqueNormalizedStrings(findings)
-      : uniqueNormalizedStrings(entry.summary?.trim() ? [entry.summary.trim()] : []);
+        ? uniqueNormalizedStrings(findings)
+        : uniqueNormalizedStrings(entry.summary?.trim() ? [entry.summary.trim()] : []);
 
     lines.push(
       "",
@@ -1035,11 +1038,11 @@ function detectMissionPhase(event: ScanEventPayload): MissionControlPhaseKey | n
   const prompt = typeof data?.prompt === "string" ? data.prompt : "";
 
   // Check content-rich fields (message, reason, prompt) FIRST to catch specific tasks like "reconnaissance"
-  const fromContent = 
-    detectMissionPhaseFromText(event.message || "") ?? 
-    detectMissionPhaseFromText(reason) ?? 
+  const fromContent =
+    detectMissionPhaseFromText(event.message || "") ??
+    detectMissionPhaseFromText(reason) ??
     detectMissionPhaseFromText(prompt);
-  
+
   if (fromContent) return fromContent;
 
   // Then check specific stage/phase metadata if provided
@@ -1071,7 +1074,7 @@ function toProjectStatus(value: unknown): ProjectStatus | null {
     : null;
 }
 
-function normalizeRunningStatus(project: {
+export function normalizeRunningStatus(project: {
   status: ProjectStatus;
   lastScan?: unknown;
 }): ProjectStatus {
@@ -1090,7 +1093,10 @@ function normalizeRunningStatus(project: {
     lastScanStatus === "completed" ||
     lastScanStatus === "stopped" ||
     lastScanStatus === "idle" ||
-    lastScanStatus === "error"
+    lastScanStatus === "error" ||
+    lastScanStatus === "awaiting_tool_approval" ||
+    lastScanStatus === "awaiting_planner_approval" ||
+    lastScanStatus === "awaiting_information_gathering_approval"
   ) {
     return lastScanStatus as ProjectStatus;
   }
@@ -2237,6 +2243,7 @@ export default function Dashboard() {
     (
       activeProject?.status === "running" ||
       activeLastScanStatus === "running" ||
+      activeLastScanStatus === "awaiting_tool_approval" ||
       activeLastScanStatus === "awaiting_planner_approval" ||
       activeLastScanStatus === "awaiting_information_gathering_approval"
     ),
@@ -2455,11 +2462,12 @@ export default function Dashboard() {
   };
 
   const ingestScanEvent = useCallback(
-    (event: ScanEventPayload) => {
+    (event: ScanEventPayload & { is_cached?: boolean }, isLiveParam = true) => {
+      const isLive = isLiveParam && !event.is_cached;
       if (!activeProjectId) {
         return;
       }
-      if (event.event === "scan_started") {
+      if (isLive && event.event === "scan_started") {
         const isSavedPlanResume = isRecord(event.data.resume_plan);
         if (!isSavedPlanResume) {
           seenEventKeysRef.current.clear();
@@ -2525,6 +2533,10 @@ export default function Dashboard() {
         return [...previous, nextEntry];
       });
 
+      if (!isLive) {
+        return;
+      }
+
       const nextStatus = toProjectStatus(event.data.status);
       const rawProgress = event.data.scan_progress;
       const nextProgress =
@@ -2541,35 +2553,50 @@ export default function Dashboard() {
       const nextFinishedAt =
         typeof event.data.finished_at === "string" ? event.data.finished_at : undefined;
 
+      const activeProject = useProjects
+        .getState()
+        .projects.find((project) => project.id === activeProjectId);
+      const currentLastScan = isRecord(activeProject?.lastScan)
+        ? activeProject?.lastScan
+        : {};
+      const currentLastScanStatus =
+        typeof currentLastScan.status === "string"
+          ? currentLastScan.status.trim().toLowerCase()
+          : "";
+      const isCurrentlyWaiting =
+        currentLastScanStatus === "awaiting_tool_approval" ||
+        currentLastScanStatus === "awaiting_planner_approval" ||
+        currentLastScanStatus === "awaiting_information_gathering_approval";
+
+      // If we are currently in a waiting state, do not let generic status updates
+      // overwrite it back to "running".
+      const shouldUpdateStatus =
+        nextStatus &&
+        !(isCurrentlyWaiting && nextStatus === "running");
+
       if (
-        nextStatus ||
+        shouldUpdateStatus ||
         typeof nextProgress === "number" ||
         typeof nextElapsedSeconds === "number" ||
         nextStartedAt ||
         nextFinishedAt
       ) {
-        const activeProject = useProjects
-          .getState()
-          .projects.find((project) => project.id === activeProjectId);
-        const currentLastScan = isRecord(activeProject?.lastScan)
-          ? activeProject?.lastScan
-          : {};
         updateProject(
           activeProjectId,
           {
-            ...(nextStatus ? { status: nextStatus } : {}),
+            ...(shouldUpdateStatus ? { status: nextStatus } : {}),
             ...(typeof nextProgress === "number"
               ? { scanProgress: nextProgress }
               : {}),
             lastScan: {
               ...currentLastScan,
-              ...(nextStatus ? { status: nextStatus } : {}),
+              ...(shouldUpdateStatus ? { status: nextStatus } : {}),
               ...(nextStartedAt ? { startedAt: nextStartedAt } : {}),
               ...(nextFinishedAt ? { finishedAt: nextFinishedAt } : {}),
               ...(typeof nextElapsedSeconds === "number"
                 ? {
                   elapsedSeconds: nextElapsedSeconds,
-                  ...(nextStatus && nextStatus !== "running"
+                  ...(shouldUpdateStatus && nextStatus !== "running"
                     ? { durationSeconds: nextElapsedSeconds }
                     : {}),
                 }
@@ -2803,21 +2830,31 @@ export default function Dashboard() {
             }
             : currentWarmup;
 
-          updateProject(
-            activeProjectId,
-            {
-              updatedAt: event.timestamp,
-              lastScan: {
-                ...lastScan,
-                result: {
-                  ...result,
-                  ...(isPlannerPlanEvent ? { planner: nextPlanner } : {}),
-                  ...(isWarmupPlanEvent ? { warmup: nextWarmup } : {}),
-                },
-              },
-            },
-            { persist: false },
-          );
+          useProjects.setState((state) => {
+            const innerActive = state.projects.find((p) => p.id === activeProjectId);
+            if (!innerActive) return state;
+            const innerLastScan = isRecord(innerActive.lastScan) ? innerActive.lastScan : {};
+            const innerResult = isRecord(innerLastScan.result) ? innerLastScan.result : {};
+
+            return {
+              projects: state.projects.map((p) =>
+                p.id === activeProjectId
+                  ? {
+                    ...p,
+                    updatedAt: event.timestamp,
+                    lastScan: {
+                      ...innerLastScan,
+                      result: {
+                        ...innerResult,
+                        ...(isPlannerPlanEvent ? { planner: nextPlanner } : {}),
+                        ...(isWarmupPlanEvent ? { warmup: nextWarmup } : {}),
+                      },
+                    },
+                  }
+                  : p
+              ),
+            };
+          });
         }
       }
 
@@ -2867,29 +2904,39 @@ export default function Dashboard() {
             event.event === "planner_failed" ||
             event.event === "planner_crashed";
 
-          updateProject(
-            activeProjectId,
-            {
-              updatedAt: event.timestamp,
-              lastScan: {
-                ...lastScan,
-                ...(event.event === "planner_waiting_approval"
-                  ? { awaitingPlannerApproval: true, status: "awaiting_planner_approval" }
-                  : {}),
-                ...(event.event === "planner_checklist_started"
-                  ? { status: "running" }
-                  : {}),
-                ...(clearPlannerApproval
-                  ? { awaitingPlannerApproval: false, status: "running" }
-                  : {}),
-                result: {
-                  ...result,
-                  intel: nextIntel,
-                },
-              },
-            },
-            { persist: false },
-          );
+          useProjects.setState((state) => {
+            const innerActive = state.projects.find((p) => p.id === activeProjectId);
+            if (!innerActive) return state;
+            const innerLastScan = isRecord(innerActive.lastScan) ? innerActive.lastScan : {};
+            const innerResult = isRecord(innerLastScan.result) ? innerLastScan.result : {};
+
+            return {
+              projects: state.projects.map((p) =>
+                p.id === activeProjectId
+                  ? {
+                    ...p,
+                    updatedAt: event.timestamp,
+                    lastScan: {
+                      ...innerLastScan,
+                      ...(event.event === "planner_waiting_approval"
+                        ? { awaitingPlannerApproval: true, status: "awaiting_planner_approval" }
+                        : {}),
+                      ...(event.event === "planner_checklist_started"
+                        ? { status: "running" }
+                        : {}),
+                      ...(clearPlannerApproval
+                        ? { awaitingPlannerApproval: false, status: "running" }
+                        : {}),
+                      result: {
+                        ...innerResult,
+                        intel: nextIntel,
+                      },
+                    },
+                  }
+                  : p
+              ),
+            };
+          });
         }
       }
 
@@ -2979,28 +3026,76 @@ export default function Dashboard() {
             }
           }
 
-          updateProject(
-            activeProjectId,
-            {
-              updatedAt: event.timestamp,
-              lastScan: {
-                ...lastScan,
-                ...(event.event === "target_info_gathering_waiting_approval"
-                  ? {}
-                  : {}),
-                ...(event.event === "target_info_gathering_approval_received" ||
-                  event.event === "target_info_gathering_complete"
-                  ? { status: "running" }
-                  : {}),
-                result: {
-                  ...result,
-                  targetInfoGathering: nextGathering,
-                },
-              },
-            },
-            { persist: false },
-          );
+          useProjects.setState((state) => {
+            const innerActive = state.projects.find((p) => p.id === activeProjectId);
+            if (!innerActive) return state;
+            const innerLastScan = isRecord(innerActive.lastScan) ? innerActive.lastScan : {};
+            const innerResult = isRecord(innerLastScan.result) ? innerLastScan.result : {};
+
+            return {
+              projects: state.projects.map((p) =>
+                p.id === activeProjectId
+                  ? {
+                    ...p,
+                    updatedAt: event.timestamp,
+                    lastScan: {
+                      ...innerLastScan,
+                      ...(event.event === "target_info_gathering_waiting_approval"
+                        ? {}
+                        : {}),
+                      ...(event.event === "target_info_gathering_approval_received" ||
+                        event.event === "target_info_gathering_complete"
+                        ? { status: "running" }
+                        : {}),
+                      result: {
+                        ...innerResult,
+                        targetInfoGathering: nextGathering,
+                      },
+                    },
+                  }
+                  : p
+              ),
+            };
+          });
         }
+      }
+
+      if (
+        event.event === "executer_tool_waiting_approval" ||
+        event.event === "executer_tool_approval_decision" ||
+        event.event === "executer_tool_approval_cleared" ||
+        event.event === "executer_tool_approval_timeout"
+      ) {
+        const clearToolApproval =
+          event.event === "executer_tool_approval_decision" ||
+          event.event === "executer_tool_approval_cleared" ||
+          event.event === "executer_tool_approval_timeout";
+
+        useProjects.setState((state) => {
+          const innerActive = state.projects.find((p) => p.id === activeProjectId);
+          if (!innerActive) return state;
+          const innerLastScan = isRecord(innerActive.lastScan) ? innerActive.lastScan : {};
+
+          return {
+            projects: state.projects.map((p) =>
+              p.id === activeProjectId
+                ? {
+                  ...p,
+                  updatedAt: event.timestamp,
+                  lastScan: {
+                    ...innerLastScan,
+                    ...(event.event === "executer_tool_waiting_approval"
+                      ? { awaitingToolApproval: true, status: "awaiting_tool_approval" }
+                      : {}),
+                    ...(clearToolApproval
+                      ? { awaitingToolApproval: false, status: "running" }
+                      : {}),
+                  },
+                }
+                : p
+            ),
+          };
+        });
       }
 
       if (
@@ -3112,13 +3207,13 @@ export default function Dashboard() {
       try {
         const recent = await listProjectScanEventsFromDesktop(
           activeProjectId,
-          220,
+          700,
         );
         if (cancelled || recent.length === 0) {
           return;
         }
         for (const event of recent) {
-          ingestScanEvent(event);
+          ingestScanEvent(event, false);
         }
       } catch {
         // Ignore polling errors; SSE remains primary channel.
@@ -3221,7 +3316,7 @@ export default function Dashboard() {
       try {
         const snapshot = await getProjectScanObservabilityFromDesktop(
           activeProjectId,
-          120,
+          700,
           activeScanId || undefined,
         );
         if (cancelled) {
@@ -3293,6 +3388,11 @@ export default function Dashboard() {
 
   const effectiveStatus = activeProject ? normalizeRunningStatus(activeProject) : "idle";
   const isRunning = effectiveStatus === "running";
+  const isScanActive =
+    effectiveStatus === "running" ||
+    effectiveStatus === "awaiting_tool_approval" ||
+    effectiveStatus === "awaiting_planner_approval" ||
+    effectiveStatus === "awaiting_information_gathering_approval";
   const isStarting = activeProject ? startingProjectId === activeProject.id : false;
   const activeLastScan = isRecord(activeProject?.lastScan)
     ? activeProject?.lastScan
@@ -3370,18 +3470,18 @@ export default function Dashboard() {
       const markdown = analyzerReportEntries.length > 0
         ? buildCombinedAnalyzerMarkdown(analyzerReportEntries, activeScanId || undefined)
         : [
-            "# Findings History Markdown",
-            "",
-            "No saved findings history markdown is available yet for this pipeline.",
-            "",
-            `- Project: ${activeProject?.name || "Unknown Project"}`,
-            `- Status: ${effectiveStatus}`,
-            `- Pending Tool Approval: ${pendingToolApproval?.toolName || "none"}`,
-            `- Current Scan ID: ${activeScanId || "none"}`,
-            `- Classified Analyzer Entries Saved: ${analyzerReportEntries.length}`,
-            "",
-            "Findings history is saved after information gathering, recon, or exploit results are returned and organized.",
-          ].join("\n");
+          "# Findings History Markdown",
+          "",
+          "No saved findings history markdown is available yet for this pipeline.",
+          "",
+          `- Project: ${activeProject?.name || "Unknown Project"}`,
+          `- Status: ${effectiveStatus}`,
+          `- Pending Tool Approval: ${pendingToolApproval?.toolName || "none"}`,
+          `- Current Scan ID: ${activeScanId || "none"}`,
+          `- Classified Analyzer Entries Saved: ${analyzerReportEntries.length}`,
+          "",
+          "Findings history is saved after information gathering, recon, or exploit results are returned and organized.",
+        ].join("\n");
       const latestEntry = analyzerReportEntries[analyzerReportEntries.length - 1] ?? null;
       const summaryLine = latestEntry?.sequence_label?.trim()
         || latestEntry?.summary?.trim()
@@ -3412,18 +3512,18 @@ export default function Dashboard() {
     const markdown = analyzerReportEntries.length > 0
       ? buildCombinedAnalyzerMarkdown(analyzerReportEntries, activeScanId || undefined)
       : [
-          "# Findings History Markdown",
-          "",
-          "No saved findings history markdown is available yet for this pipeline.",
-          "",
-          `- Project: ${activeProject?.name || "Unknown Project"}`,
-          `- Status: ${effectiveStatus}`,
-          `- Pending Tool Approval: ${pendingToolApproval?.toolName || "none"}`,
-          `- Current Scan ID: ${activeScanId || "none"}`,
-          `- Classified Findings History Entries Saved: ${analyzerReportEntries.length}`,
-          "",
-          "Findings history is saved after information gathering, recon, or exploit results are returned and organized.",
-        ].join("\n");
+        "# Findings History Markdown",
+        "",
+        "No saved findings history markdown is available yet for this pipeline.",
+        "",
+        `- Project: ${activeProject?.name || "Unknown Project"}`,
+        `- Status: ${effectiveStatus}`,
+        `- Pending Tool Approval: ${pendingToolApproval?.toolName || "none"}`,
+        `- Current Scan ID: ${activeScanId || "none"}`,
+        `- Classified Findings History Entries Saved: ${analyzerReportEntries.length}`,
+        "",
+        "Findings history is saved after information gathering, recon, or exploit results are returned and organized.",
+      ].join("\n");
     const latestEntry = analyzerReportEntries[analyzerReportEntries.length - 1] ?? null;
     const description = latestEntry?.sequence_label?.trim()
       || latestEntry?.summary?.trim()
@@ -3477,12 +3577,17 @@ export default function Dashboard() {
     );
   })();
   const displayedPentestElapsed = formatPentestElapsed(liveElapsedSeconds);
-  const hasAnotherRunningProject = projects.some(
-    (project) =>
-      project.id !== activeProject?.id &&
-      normalizeRunningStatus(project) === "running",
-  );
-  const canRun = !isRunning && !isStarting && stoppingProjectId !== activeProjectId && !hasAnotherRunningProject;
+  const hasAnotherRunningProject = projects.some((project) => {
+    if (project.id === activeProject?.id) return false;
+    const status = normalizeRunningStatus(project);
+    return (
+      status === "running" ||
+      status === "awaiting_tool_approval" ||
+      status === "awaiting_planner_approval" ||
+      status === "awaiting_information_gathering_approval"
+    );
+  });
+  const canRun = !isScanActive && !isStarting && stoppingProjectId !== activeProjectId && !hasAnotherRunningProject;
 
   const awaitingPlannerApproval = (() => {
     if (!activeProject) return false;
@@ -3515,7 +3620,7 @@ export default function Dashboard() {
 
   const pendingToolCommandPreview = buildPendingApprovalCommand(pendingToolApproval);
   const autoApprovingPendingTool = Boolean(
-    isRunning
+    isScanActive
     && pendingToolApproval
     && shouldAutoApproveForRole(String(pendingToolApproval.role || ""))
     && !autoApprovalFailedIdsRef.current.has(pendingToolApproval.approvalId)
@@ -3601,7 +3706,7 @@ export default function Dashboard() {
   };
 
   const handleApprovePlanner = async () => {
-    if (!activeProjectId || plannerApprovalLoading || !isRunning) {
+    if (!activeProjectId || plannerApprovalLoading || !isScanActive) {
       return;
     }
     setPlannerApprovalLoading(true);
@@ -3629,7 +3734,7 @@ export default function Dashboard() {
   };
 
   const handleToolApproval = async (action: "approve" | "skip") => {
-    if (!activeProjectId || !isRunning || !pendingToolApproval?.approvalId || toolApprovalLoading) {
+    if (!activeProjectId || !isScanActive || !pendingToolApproval?.approvalId || toolApprovalLoading) {
       return;
     }
     const approvalId = pendingToolApproval.approvalId;
@@ -3667,7 +3772,7 @@ export default function Dashboard() {
   };
 
   const handlePasswordResponse = async (approved: boolean) => {
-    if (!activeProjectId || !isRunning || !pendingPasswordRequest?.passwordId || passwordResponseLoading) {
+    if (!activeProjectId || !isScanActive || !pendingPasswordRequest?.passwordId || passwordResponseLoading) {
       return;
     }
     const passwordId = pendingPasswordRequest.passwordId;
@@ -3851,16 +3956,16 @@ export default function Dashboard() {
 
 
   useEffect(() => {
-    if (approvalMode !== "auto" || !isRunning) {
+    if (approvalMode !== "auto" || !isScanActive) {
       return;
     }
     if (awaitingPlannerApproval && !plannerApprovalLoading) {
       void handleApprovePlanner();
     }
-  }, [approvalMode, isRunning, awaitingPlannerApproval, plannerApprovalLoading]);
+  }, [approvalMode, isScanActive, awaitingPlannerApproval, plannerApprovalLoading]);
 
   useEffect(() => {
-    if (!isRunning || !pendingToolApproval || toolApprovalLoading) {
+    if (!isScanActive || !pendingToolApproval || toolApprovalLoading) {
       return;
     }
     if (autoApprovalFailedIdsRef.current.has(pendingToolApproval.approvalId)) {
@@ -3870,7 +3975,7 @@ export default function Dashboard() {
     if (shouldAutoApprove) {
       void handleToolApproval("approve");
     }
-  }, [isRunning, pendingToolApproval, shouldAutoApproveForRole, toolApprovalLoading]);
+  }, [isScanActive, pendingToolApproval, shouldAutoApproveForRole, toolApprovalLoading]);
 
   useEffect(() => {
     const activeApprovalId = pendingToolApproval?.approvalId ?? "";
@@ -4977,9 +5082,9 @@ export default function Dashboard() {
     }, null);
     const activeWorkflowRole =
       missionControlState === "running"
-      || missionControlState === "paused_for_approval"
-      || missionControlState === "reconnecting_sse"
-      || missionControlState === "initializing"
+        || missionControlState === "paused_for_approval"
+        || missionControlState === "reconnecting_sse"
+        || missionControlState === "initializing"
         ? workflowRoleForPhase(latestMissionPhase)
         : null;
 
@@ -5427,15 +5532,15 @@ export default function Dashboard() {
           pipelineIsIdle
             ? 'Planner'
             : plannerDisplayPhase === 'intel'
-            ? 'Intel Phase'
-            : 'Planner',
+              ? 'Intel Phase'
+              : 'Planner',
         icon: Brain,
         subtext:
           pipelineIsIdle
             ? 'Ready for a new scan...'
             : plannerDisplayPhase === 'intel'
-            ? (infoGatherStatus === 'running' || infoGatherStatus === 'thinking' ? 'Running automated information gathering...' : 'Refreshing RAG & synthesizing checklist...')
-            : (plannerAgent?.currentTask || 'Synthesizing target checklist...'),
+              ? (infoGatherStatus === 'running' || infoGatherStatus === 'thinking' ? 'Running automated information gathering...' : 'Refreshing RAG & synthesizing checklist...')
+              : (plannerAgent?.currentTask || 'Synthesizing target checklist...'),
         recentActivity:
           plannerDisplayPhase === 'intel'
             ? plannerPhaseActivity
@@ -5461,20 +5566,20 @@ export default function Dashboard() {
         status: pipelineIsIdle
           ? 'idle'
           : (plannerDisplayPhase === 'intel')
-          ? 'waiting'
-          : onlyActiveStageCanRun(
-            'analyzer',
-            (brainStatus === 'running' || brainStatus === 'error') ? brainStatus : analyzerStatus,
-          ),
+            ? 'waiting'
+            : onlyActiveStageCanRun(
+              'analyzer',
+              (brainStatus === 'running' || brainStatus === 'error') ? brainStatus : analyzerStatus,
+            ),
         label: (plannerDisplayPhase !== 'intel' && brainStatus === 'running') ? 'Brain' : 'Analyser',
         icon: Search,
         subtext: pipelineIsIdle
           ? 'Ready for a new scan...'
           : (plannerDisplayPhase !== 'intel' && brainStatus === 'running')
-          ? 'Processing findings into system memory...'
-          : plannerDisplayPhase === 'intel'
-            ? 'Waiting for execution results...'
-            : (analyzerAgent?.currentTask || 'Verifying impact and findings...'),
+            ? 'Processing findings into system memory...'
+            : plannerDisplayPhase === 'intel'
+              ? 'Waiting for execution results...'
+              : (analyzerAgent?.currentTask || 'Verifying impact and findings...'),
         recentActivity: plannerDisplayPhase !== 'intel' && analyzerFeedVisible
           ? (
             mergeRecentActivities(
@@ -5663,7 +5768,7 @@ export default function Dashboard() {
           <DashboardProjectHeader
             projectName={activeProject.name}
             effectiveStatus={effectiveStatus}
-            isRunning={isRunning}
+            isRunning={isScanActive}
             canRun={canRun}
             isStarting={isStarting}
             startingMessage={isStarting ? startingProjectMessage : null}
@@ -5962,7 +6067,7 @@ export default function Dashboard() {
                     </div>
                   ) : (
                     <p className={`px-1 py-2 text-text-muted text-sm`}>
-                      {isRunning
+                      {isScanActive
                         ? "Plan is loading. We will show planner phases as soon as they are persisted."
                         : "No planner result available yet."}
                     </p>
@@ -6070,7 +6175,7 @@ export default function Dashboard() {
 
                   {checklistBlocks.length === 0 ? (
                     <p className={`px-1 py-2 text-text-muted ${isInsightFullscreen ? "text-sm" : "text-xs"}`}>
-                      {isRunning
+                      {isScanActive
                         ? "Checklist is generating and will appear after Intel finalizes set_checklist."
                         : "No checklist generated yet."}
                     </p>

@@ -393,12 +393,12 @@ export function DashboardTargetOverviewCard({
             Status
           </p>
           <p
-            className={`mt-1.5 text-lg font-bold capitalize ${effectiveStatus === "running"
+            className={`mt-1.5 text-sm md:text-base lg:text-lg font-bold capitalize break-words ${effectiveStatus === "running"
                 ? "text-pf-700 dark:text-pf-300 animate-pulse"
                 : "text-text-primary"
               }`}
           >
-            {effectiveStatus}
+            {effectiveStatus.replaceAll("_", " ")}
           </p>
         </div>
         <div className="rounded-xl bg-surface-0/40 p-3 border border-border/40 shadow-sm dark:border-border">

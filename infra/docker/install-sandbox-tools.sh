@@ -219,7 +219,6 @@ run_best_effort "pip-web-api-tools" install_pip_packages \
   arjun \
   zap-cli \
   param-miner \
-  paramspider \
   pyjwt \
   graphw00f \
   git-dumper \
@@ -340,6 +339,13 @@ run_best_effort "cloudbrute" bash -c '
   clone_repo "https://github.com/0xsha/CloudBrute" "${TOOLS_ROOT}/CloudBrute"
   cd "${TOOLS_ROOT}/CloudBrute"
   go build -o "${BIN_DIR}/cloudbrute" main.go
+'
+
+run_best_effort "paramspider-repo" bash -c '
+  clone_repo "https://github.com/devanshbatham/paramspider" "${TOOLS_ROOT}/paramspider"
+  cd "${TOOLS_ROOT}/paramspider"
+  pip install .
+  link_alias "$(which paramspider)" "paramspider"
 '
 
 log "installing system security tools..."

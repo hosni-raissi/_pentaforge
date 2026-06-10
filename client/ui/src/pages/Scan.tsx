@@ -7,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { Dialog } from '../components/ui/Dialog';
 import { useState } from 'react';
 import { getProjectMobileRuntimeNotice } from '../lib/mobileRuntime';
+import { normalizeRunningStatus } from './Dashboard';
 
 export default function Scan() {
   const project = useProjects((s) => s.getActive());
@@ -36,6 +37,8 @@ export default function Scan() {
   const canRun = ((!runningProjectId && !startingProjectId && !stoppingProjectId) || runningProjectId === project.id) && !isStopping;
   const mobileRuntimeNotice = getProjectMobileRuntimeNotice(project);
 
+  const effectiveStatus = normalizeRunningStatus(project);
+
   return (
     <div className="max-w-3xl mx-auto space-y-4">
       <h1 className="text-lg font-bold text-text-primary">Scan Control</h1>
@@ -43,7 +46,7 @@ export default function Scan() {
       <Card>
         <CardHeader>
           <CardTitle>{project.name}</CardTitle>
-          <Badge variant={project.status} dot>{project.status}</Badge>
+          <Badge variant={effectiveStatus} dot>{effectiveStatus}</Badge>
         </CardHeader>
 
         <div className="space-y-3">
@@ -63,7 +66,7 @@ export default function Scan() {
             {!isRunning ? (
               <Button
                 onClick={() => {
-                  if (project.status === 'completed') {
+                  if (effectiveStatus === 'completed') {
                     const confirmed = window.confirm('This scan already completed. Start a new scan and clear previous results?');
                     if (!confirmed) {
                       return;
@@ -71,7 +74,7 @@ export default function Scan() {
                     setRunning(project.id, { triggerScan: true, force: true });
                     return;
                   }
-                  if (project.status === 'stopped') {
+                  if (effectiveStatus === 'stopped') {
                     const confirmed = window.confirm('Resume will start a new scan and keep previous history visible. Continue?');
                     if (!confirmed) {
                       return;

@@ -17,6 +17,9 @@ const variantStyles: Record<string, string> = {
   error:     'bg-red-500/15 text-red-400 border-red-500/20',
   success:   'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
   waiting:   'bg-yellow-500/15 text-yellow-400 border-yellow-500/20',
+  awaiting_tool_approval: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/20',
+  awaiting_planner_approval: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/20',
+  awaiting_information_gathering_approval: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/20',
   default:   'bg-surface-3 text-text-secondary border-border',
 };
 

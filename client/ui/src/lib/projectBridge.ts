@@ -130,6 +130,7 @@ export interface ScanEventPayload {
   tool?: string;
   worker_id?: string;
   reason_code?: string;
+  is_cached?: boolean;
 }
 
 export interface ScanDebugTimelineEntry {
@@ -1046,6 +1047,7 @@ function parseScanEventPayload(value: unknown): ScanEventPayload | null {
     tool: typeof value.tool === "string" ? value.tool : undefined,
     worker_id: typeof value.worker_id === "string" ? value.worker_id : undefined,
     reason_code: typeof value.reason_code === "string" ? value.reason_code : undefined,
+    is_cached: typeof value.is_cached === "boolean" ? value.is_cached : undefined,
   };
 }
 
@@ -1109,7 +1111,7 @@ export async function listProjectScanEventsFromDesktop(
 
 export async function getProjectScanObservabilityFromDesktop(
   projectId: string,
-  limit: number = 120,
+  limit: number = 700,
   scanId?: string,
 ): Promise<ScanObservabilitySnapshot> {
   if (!supportsDesktopProjectBridge()) {
@@ -1133,7 +1135,7 @@ export async function getProjectScanObservabilityFromDesktop(
     };
   }
 
-  const safeLimit = Math.max(10, Math.min(500, Math.floor(limit)));
+  const safeLimit = Math.max(10, Math.min(2000, Math.floor(limit)));
   const query = new URLSearchParams({ limit: String(safeLimit) });
   if (scanId && scanId.trim()) {
     query.set("scan_id", scanId.trim());

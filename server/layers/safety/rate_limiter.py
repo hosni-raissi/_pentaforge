@@ -236,8 +236,9 @@ class _Bucket:
     ) -> float:
         """Apply escalating penalty. Returns actual duration applied."""
         self._penalty_count += 1
+        exponent = min(self._penalty_count - 1, 100)
         duration = min(
-            base_duration * (multiplier ** (self._penalty_count - 1)),
+            base_duration * (multiplier ** exponent),
             max_duration,
         )
         now = self._clock.monotonic()

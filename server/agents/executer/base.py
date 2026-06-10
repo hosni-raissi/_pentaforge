@@ -96,6 +96,8 @@ def _is_rate_limit_error(exc: Exception | None) -> bool:
 
 
 def _is_transient_llm_error(exc: Exception | None) -> bool:
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
     text = str(exc or "").lower()
     transient_markers = (
         "temporary failure in name resolution",

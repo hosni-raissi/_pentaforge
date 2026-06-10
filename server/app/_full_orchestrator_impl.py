@@ -3306,7 +3306,20 @@ def _merge_scan_metadata(
     if incoming_scan_id and incoming_scan_id != existing_scan_id:
         merged = deepcopy(incoming)
     else:
+        existing_started = existing.get("startedAt")
+        incoming_started = incoming.get("startedAt")
+        
         merged = _merge_nested_records(existing, incoming)
+        
+        if existing_started and incoming_started:
+            try:
+                from datetime import datetime
+                existing_dt = datetime.fromisoformat(existing_started.replace("Z", "+00:00"))
+                incoming_dt = datetime.fromisoformat(incoming_started.replace("Z", "+00:00"))
+                if existing_dt > incoming_dt:
+                    merged["startedAt"] = existing_started
+            except Exception:
+                pass
 
     result = merged.get("result", {})
     if not isinstance(result, dict):
@@ -6021,6 +6034,17 @@ class ScanOrchestratorService:
         _ensure_intel_node_importable()
         _ensure_planner_agent_importable()
 
+        # If a task is currently running but marked as shutting down,
+        # wait briefly for it to exit so we can cleanly restart without flip-flopping.
+        existing_task = self._tasks.get(project_key)
+        if existing_task is not None and not existing_task.done():
+            run_state = self._runs.get(project_key, {})
+            if run_state.get("status") in ("paused", "error", "completed", "cancelled"):
+                try:
+                    await asyncio.wait_for(asyncio.shield(existing_task), timeout=170.0)
+                except BaseException:
+                    pass
+
         async with self._lock:
             active_task = self._tasks.get(project_key)
             if active_task is not None and not active_task.done():
@@ -6195,7 +6219,9 @@ class ScanOrchestratorService:
                 error=str(exc),
             )
         for payload in cached:
-            self._push_event(queue, payload)
+            payload_copy = dict(payload)
+            payload_copy["is_cached"] = True
+            self._push_event(queue, payload_copy)
 
         status_snapshot = self.get_scan_status(project_key)
         self._push_event(
@@ -6633,7 +6659,7 @@ class ScanOrchestratorService:
             run_state["approval_mode"] = approval_mode
             self._runs[project_key] = run_state
 
-        if approval_mode == "auto" and not require_manual:
+        if approval_mode == "auto":
             logger.info(
                 "executer_tool_auto_approved",
                 project_id=project_key,
@@ -6670,6 +6696,17 @@ class ScanOrchestratorService:
                 run_state["updated_at"] = _utc_now_iso()
                 self._runs[project_key] = run_state
 
+            self._persist_project_status(
+                project_key,
+                status="running",
+                scan_progress=run_state.get("progress", 50) if isinstance(run_state, dict) else 50,
+                scan_meta={
+                    "status": "awaiting_tool_approval",
+                    "awaitingToolApproval": True,
+                    "pendingToolApproval": run_state.get("pending_tool_approval") if isinstance(run_state, dict) else None,
+                }
+            )
+
             self._emit_event(
                 project_key,
                 event="executer_tool_waiting_approval",
@@ -6682,6 +6719,7 @@ class ScanOrchestratorService:
                 data={
                     "stage": "executer",
                     "kind": "waiting_tool_approval",
+                    "status": "awaiting_tool_approval",
                     "awaiting_user_approval": True,
                     "approval_id": approval_id,
                     "role": pending.role,
@@ -6693,25 +6731,11 @@ class ScanOrchestratorService:
                 },
             )
 
-        # Tools with long execution times need longer approval timeouts
-        # Tool-specific timeouts: hydra/nuclei/sqlmap can take 10-20+ minutes
-        TOOL_TIMEOUTS = {
-            "hydra_bruteforce": 1800,      # 30 minutes - brute force takes time
-            "nuclei_vuln_scan": 1200,      # 20 minutes - template scanning
-            "sqlmap": 1200,                # 20 minutes - SQL injection testing
-            "run_custom": 40,              # 40 seconds - auto-approve fallback
-            "run_python": 600,             # 10 minutes - Python scripts
-            "payload_generator": 300,      # 5 minutes
-        }
-        # OPTIMIZATION: Default to 60 seconds for approval timeout (was 1800s/30min)
-        # This prevents artificial delays while keeping tool-specific longer timeouts
-        APPROVAL_TIMEOUT = TOOL_TIMEOUTS.get(pending.tool_name, 60)
-
+        wait_start = time.time()
         try:
             # Wait with heartbeat messages every 60 seconds to keep connection alive
             start_time = time.time()
             HEARTBEAT_INTERVAL = 60  # Send keepalive every 60 seconds
-            next_heartbeat = start_time + HEARTBEAT_INTERVAL
 
             while not pending.event.is_set():
                 # Pause timeout if we are waiting in queue (not the active approval)
@@ -6720,21 +6744,22 @@ class ScanOrchestratorService:
                     if active_id != approval_id:
                         await asyncio.sleep(1.0)
                         start_time = time.time()
-                        next_heartbeat = start_time + HEARTBEAT_INTERVAL
                         continue
-                remaining = APPROVAL_TIMEOUT - (time.time() - start_time)
-                if remaining <= 0:
-                    raise asyncio.TimeoutError()
+                
+                # Re-evaluate approval mode inside the loop
+                current_project = self._projects_store.get_project(project_key)
+                if current_project:
+                    approval_mode = str(current_project.get("approval_mode") or "custom").lower().strip()
+                
+                if approval_mode == "auto":
+                    pending.decision = "approve"
+                    logger.info("tool_approval_bypassed_by_mode_switch", project_id=project_key, tool_name=pending.tool_name)
+                    break
 
-                # Wait for event or heartbeat interval, whichever is shorter
-                wait_time = min(HEARTBEAT_INTERVAL, remaining)
                 try:
-                    await asyncio.wait_for(pending.event.wait(), timeout=wait_time)
+                    await asyncio.wait_for(pending.event.wait(), timeout=HEARTBEAT_INTERVAL)
                     break  # Event was set, exit loop
                 except asyncio.TimeoutError:
-                    # Check if total timeout exceeded
-                    if time.time() - start_time >= APPROVAL_TIMEOUT:
-                        raise
                     # Send keepalive message
                     elapsed = int(time.time() - start_time)
                     self._emit_event(
@@ -6744,7 +6769,7 @@ class ScanOrchestratorService:
                         level="info",
                         message=(
                             f"{display_prefix} [approval waiting] {pending.role} tool '{pending.tool_name}' "
-                            f"waiting for approval... ({elapsed}s/{APPROVAL_TIMEOUT}s)"
+                            f"waiting for approval... ({elapsed}s)"
                         ),
                         data={
                             "stage": "executer",
@@ -6752,43 +6777,20 @@ class ScanOrchestratorService:
                             "approval_id": approval_id,
                             "role": pending.role,
                             "tool_name": pending.tool_name,
-                            "elapsed_seconds": elapsed,
-                            "timeout_seconds": APPROVAL_TIMEOUT,
+                            "wait_seconds": elapsed,
                         },
                     )
                     continue
 
-        except asyncio.TimeoutError:
-            # Timeout - auto-approve the tool (USER requested auto-approve after 40s)
-            pending.decision = "approve"
-            logger.warning(
-                "tool_approval_timeout",
-                project_id=project_key,
-                approval_id=approval_id,
-                tool_name=pending.tool_name,
-                timeout_seconds=APPROVAL_TIMEOUT,
-            )
-            self._emit_event(
-                project_key,
-                event="executer_tool_approval_timeout",
-                scan_id=pending.scan_id,
-                level="warn",
-                message=(
-                    f"{display_prefix} [approval timeout] {pending.role} tool '{pending.tool_name}' "
-                    f"timeout after {APPROVAL_TIMEOUT}s - auto-approving tool"
-                ),
-                data={
-                    "stage": "executer",
-                    "kind": "tool_approval_timeout",
-                    "approval_id": approval_id,
-                    "role": pending.role,
-                    "tool_name": pending.tool_name,
-                    "call_id": pending.call_id,
-                    "timeout_seconds": APPROVAL_TIMEOUT,
-                },
-            )
+        except Exception as exc:
+            logger.error("tool_approval_error", project_id=project_key, error=str(exc))
+            pending.decision = "skip"
 
         approved = pending.decision == "approve"
+
+        wait_duration = time.time() - wait_start
+        if wait_duration > 0.1:
+            self._shift_project_scan_start_time(project_key, wait_duration)
 
         project_pending = self._tool_approval_events.get(project_key, {})
         project_pending.pop(approval_id, None)
@@ -6813,6 +6815,17 @@ class ScanOrchestratorService:
                 run_state["pending_tool_approval"] = None
             run_state["updated_at"] = _utc_now_iso()
             self._runs[project_key] = run_state
+
+        self._persist_project_status(
+            project_key,
+            status="running",
+            scan_progress=run_state.get("progress", 50) if isinstance(run_state, dict) else 50,
+            scan_meta={
+                "status": "awaiting_tool_approval" if project_pending else "running",
+                "awaitingToolApproval": bool(project_pending),
+                "pendingToolApproval": run_state.get("pending_tool_approval") if isinstance(run_state, dict) else None,
+            }
+        )
 
         self._emit_event(
             project_key,
@@ -6848,6 +6861,7 @@ class ScanOrchestratorService:
                 data={
                     "stage": "executer",
                     "kind": "waiting_tool_approval",
+                    "status": "awaiting_tool_approval",
                     "awaiting_user_approval": True,
                     "approval_id": next_id,
                     "role": next_pending.role,
@@ -6952,6 +6966,7 @@ class ScanOrchestratorService:
 
         # Wait for password response with generous timeout and heartbeat
         PASSWORD_TIMEOUT = 600  # 10 minutes - user needs time to enter password
+        wait_start = time.time()
         try:
             start_time = time.time()
             HEARTBEAT_INTERVAL = 30  # Send keepalive every 30 seconds
@@ -7015,6 +7030,11 @@ class ScanOrchestratorService:
             project_pending = self._password_request_events.get(project_key, {})
             project_pending.pop(password_id, None)
             return None
+
+        # Shift startedAt if we waited
+        wait_duration = time.time() - wait_start
+        if wait_duration > 0.1:
+            self._shift_project_scan_start_time(project_key, wait_duration)
 
         # Clean up
         project_pending = self._password_request_events.get(project_key, {})
@@ -7230,7 +7250,8 @@ class ScanOrchestratorService:
         }
 
     def _on_task_done(self, project_id: str, task: asyncio.Task[None]) -> None:
-        self._tasks.pop(project_id, None)
+        if self._tasks.get(project_id) is task:
+            self._tasks.pop(project_id, None)
         self._info_gathering_approval_events.pop(project_id, None)
         self._planner_approval_events.pop(project_id, None)
         self._tool_approval_events.pop(project_id, None)
@@ -8979,9 +9000,6 @@ class ScanOrchestratorService:
             "BATCH FINDINGS SUMMARY:\n"
             + ("\n\n".join(planner_sections) if planner_sections else "No findings classified in this cycle. Continue enumeration.")
             + "\n\n"
-            "TARGET MEMORY UPDATE:\n"
-            + _build_target_memory_prompt_block(target_memory)
-            + "\n\n"
             "Review all findings above. Update plan accordingly:\n"
             "- For real vulnerabilities: mark as discovered and continue testing\n"
             "- For false positives: acknowledge and move forward\n"
@@ -9831,7 +9849,7 @@ class ScanOrchestratorService:
                     data={
                         "stage": "planner",
                         "kind": "waiting_approval",
-                        "status": "running",
+                        "status": "awaiting_planner_approval",
                         "awaiting_user_approval": True,
                         "checklist_items_count": checklist_items_count,
                         "warmup_summary_count": len(warmup_summaries),
@@ -9848,8 +9866,12 @@ class ScanOrchestratorService:
                 )
 
         if gate:
+            wait_start = time.time()
             try:
                 await gate.wait()
+                wait_duration = time.time() - wait_start
+                if wait_duration > 0.1:
+                    self._shift_project_scan_start_time(project_id, wait_duration)
             except asyncio.CancelledError:
                 current = self._runs.get(project_id, {})
                 if str(current.get("status")) in {"paused", "idle"}:
@@ -10585,9 +10607,11 @@ class ScanOrchestratorService:
             )
             self._mark_failed(project_id, scan_id, f"fatal orchestrator error: {exc}")
         finally:
-            self._runs.pop(project_id, None)
-            self._planner_approval_events.pop(project_id, None)
-            self._info_gathering_approval_events.pop(project_id, None)
+            current_run = self._runs.get(project_id)
+            if isinstance(current_run, dict) and str(current_run.get("scan_id")) == str(scan_id):
+                self._runs.pop(project_id, None)
+                self._planner_approval_events.pop(project_id, None)
+                self._info_gathering_approval_events.pop(project_id, None)
 
     def _mark_failed(
         self,
@@ -10637,6 +10661,55 @@ class ScanOrchestratorService:
             message=f"Scan failed: {error_message}",
             data={"status": "error", "scan_progress": 0, "error": error_message},
         )
+
+    def _shift_project_scan_start_time(self, project_id: str, shift_seconds: float) -> None:
+        try:
+            from datetime import datetime, timedelta
+            project = self._projects_store.get_project(project_id)
+            if not project or not isinstance(project, dict):
+                return
+            last_scan = project.get("lastScan")
+            if not isinstance(last_scan, dict):
+                return
+            started_at_raw = last_scan.get("startedAt")
+            if not started_at_raw:
+                return
+            
+            try:
+                started_dt = datetime.fromisoformat(started_at_raw.replace("Z", "+00:00"))
+            except ValueError:
+                return
+                
+            shifted_dt = started_dt + timedelta(seconds=shift_seconds)
+            new_started_at = shifted_dt.isoformat()
+            if started_at_raw.endswith("Z"):
+                new_started_at = new_started_at.replace("+00:00", "Z")
+            
+            last_scan["startedAt"] = new_started_at
+            
+            elapsed_seconds = _compute_scan_elapsed_seconds(last_scan)
+            last_scan["elapsedSeconds"] = elapsed_seconds
+            
+            project["lastScan"] = last_scan
+            self._projects_store.upsert_project(project)
+            
+            self._emit_event(
+                project_id,
+                event="project_status",
+                scan_id=str(last_scan.get("scanId", "")),
+                level="info",
+                message="Adjusting scan timer for wait period.",
+                data={
+                    "status": project.get("status", "running"),
+                    "scan_progress": project.get("scanProgress", 50),
+                    "elapsed_seconds": elapsed_seconds,
+                    "started_at": new_started_at,
+                    "finished_at": last_scan.get("finishedAt"),
+                },
+            )
+            logger.info("shifted_scan_started_at_for_gate_wait", project_id=project_id, shift_seconds=shift_seconds, new_started_at=new_started_at)
+        except Exception as exc:
+            logger.warning("failed_to_shift_project_scan_start_time", project_id=project_id, error=str(exc))
 
     def _persist_project_status(
         self,

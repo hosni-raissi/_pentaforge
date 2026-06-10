@@ -325,7 +325,7 @@ async def list_scan_events(
 @router.get("/api/scans/{project_id}/observability")
 async def get_scan_observability(
     project_id: str,
-    limit: int = Query(default=120, ge=10, le=500),
+    limit: int = Query(default=700, ge=10, le=2000),
     scan_id: str | None = Query(default=None),
 ) -> dict[str, Any]:
     try:

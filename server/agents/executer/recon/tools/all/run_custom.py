@@ -8,7 +8,6 @@ from server.agents.tools.run_custom import (
     redirect_default_tool_outputs,
     run_custom,
     safe_execute,
-    strip_output_file_flags,
     validate_command_policy,
 )
 
@@ -20,6 +19,5 @@ __all__ = [
     "redirect_default_tool_outputs",
     "run_custom",
     "safe_execute",
-    "strip_output_file_flags",
     "validate_command_policy",
 ]

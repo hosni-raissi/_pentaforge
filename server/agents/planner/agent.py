@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from operator import add
 from typing import Annotated, Any, Protocol, TypedDict
+from copy import deepcopy
 
 import structlog
 import httpx
@@ -2896,24 +2897,44 @@ class PlannerAgent:
         plan_state = last_scan.get("plan", {}) if isinstance(last_scan.get("plan"), dict) else {}
         checklist_state = project.get("checklist", {}) if isinstance(project.get("checklist"), dict) else {}
 
+        checklist_payload = intel_checklist if isinstance(intel_checklist, dict) else {}
+        checklist_compact_summary = _build_intel_checklist_compact_summary(checklist_payload)
+        checklist_overview, checklist_windows = _build_intel_checklist_windows(
+            checklist_payload
+        )
+        
+        # Filter out completed plan items to reduce noise
+        filtered_plan_state = deepcopy(plan_state)
+        if "phases" in filtered_plan_state:
+            for phase in filtered_plan_state.get("phases", []):
+                if isinstance(phase, dict) and "scenarios" in phase:
+                    # Heavily truncate completed scenarios to prevent amnesia while saving tokens
+                    filtered_scenarios = []
+                    for s in phase.get("scenarios", []):
+                        if not isinstance(s, dict): continue
+                        if str(s.get("status", "")).strip().lower() == "completed" or s.get("done", False):
+                            filtered_scenarios.append({
+                                "id": s.get("id"),
+                                "task": s.get("task"),
+                                "status": s.get("status"),
+                                "done": s.get("done")
+                            })
+                        else:
+                            filtered_scenarios.append(s)
+                    phase["scenarios"] = filtered_scenarios
+
         system_content = render_planner_prompt(
             system_content,
             engagement_type=engagement_type,
             target=target,
             scope=scope,
             brain=brain,
-            checklist_state=checklist_state,
-            plan_state=plan_state,
+            checklist_state=checklist_compact_summary if checklist_compact_summary else checklist_state,
+            plan_state=filtered_plan_state,
         )
 
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content
-
-        checklist_payload = intel_checklist if isinstance(intel_checklist, dict) else {}
-        checklist_compact_summary = _build_intel_checklist_compact_summary(checklist_payload)
-        checklist_overview, checklist_windows = _build_intel_checklist_windows(
-            checklist_payload
-        )
         if normalized_plan_mode in {"warmup", "full"} and checklist_compact_summary:
             self._cb.on_step(
                 "Planner checklist compact state prepared: "

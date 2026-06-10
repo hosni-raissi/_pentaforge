@@ -1,6 +1,14 @@
 /* ── Core types ──────────────────────────────────────────── */
 
-export type ProjectStatus = 'idle' | 'running' | 'stopped' | 'completed' | 'error';
+export type ProjectStatus =
+  | 'idle'
+  | 'running'
+  | 'stopped'
+  | 'completed'
+  | 'error'
+  | 'awaiting_tool_approval'
+  | 'awaiting_planner_approval'
+  | 'awaiting_information_gathering_approval';
 export type SeverityLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type AgentName = 'planner' | 'executer' | 'analyzer';
 export type AgentState = 'idle' | 'running' | 'success' | 'error' | 'waiting';
@@ -9,6 +17,14 @@ export type FindingStatus = 'open' | 'verified' | 'fixed' | 'false_positive';
 export type FindingEvidenceStatus = 'suspicion' | 'evidence_backed' | 'confirmed';
 export type FindingProofQuality = 'weak' | 'moderate' | 'strong';
 export type DashboardSeverity = SeverityLevel;
+
+export interface ScanEventPayload {
+  agent?: string;
+  tool?: string;
+  worker_id?: string;
+  reason_code?: string;
+  is_cached?: boolean;
+}
 
 export interface RealtimeVulnFinding {
   id: string;

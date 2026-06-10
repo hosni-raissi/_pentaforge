@@ -29,6 +29,8 @@ _TRANSIENT_EXCEPTIONS = (
     httpx.ReadTimeout,
     httpx.ConnectTimeout,
     httpx.PoolTimeout,
+    TimeoutError,
+    asyncio.TimeoutError,
 )
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 2.0

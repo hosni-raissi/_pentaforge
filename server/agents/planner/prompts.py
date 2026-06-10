@@ -432,7 +432,7 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
             if isinstance(item, dict)
             and str(item.get("status", "")).strip().lower() in {"real_vulnerability", "verified", "vulnerability"}
             and str(item.get("claim_status", "")).strip().lower() not in {"assumed", "unsupported"}
-        ][:12]
+        ][-12:]
     false_positives = brain.get("false_positives", [])
     if not false_positives and isinstance(raw_verified, list):
         false_positives = [
@@ -452,7 +452,7 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
             if isinstance(item, dict)
             and str(item.get("status", "")).strip().lower() in {"real_vulnerability", "verified", "vulnerability"}
             and str(item.get("claim_status", "")).strip().lower() in {"assumed", "unsupported"}
-        ][:12]
+        ][-12:]
     recent_info = brain.get("recent_info", brain.get("info_findings", []))
     if not recent_info and isinstance(raw_verified, list):
         recent_info = [
@@ -467,12 +467,12 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
     trimmed = {
         "target_info": brain.get("target_info", {}),
         "tech_stack": brain.get("tech_stack", {}),
-        "tech_inventory": brain.get("tech_inventory", [])[:10] if isinstance(brain.get("tech_inventory", []), list) else [],
-        "known_vulnerability_signals": brain.get("known_vulnerability_signals", [])[:12] if isinstance(brain.get("known_vulnerability_signals", []), list) else [],
-        "recommended_run_custom_tools": brain.get("recommended_run_custom_tools", [])[:10] if isinstance(brain.get("recommended_run_custom_tools", []), list) else [],
+        "tech_inventory": brain.get("tech_inventory", [])[-10:] if isinstance(brain.get("tech_inventory", []), list) else [],
+        "known_vulnerability_signals": brain.get("known_vulnerability_signals", [])[-12:] if isinstance(brain.get("known_vulnerability_signals", []), list) else [],
+        "recommended_run_custom_tools": brain.get("recommended_run_custom_tools", [])[-10:] if isinstance(brain.get("recommended_run_custom_tools", []), list) else [],
         "nuclei_scan_hints": brain.get("nuclei_scan_hints", {}) if isinstance(brain.get("nuclei_scan_hints"), dict) else {},
         "confirmed_vulns": confirmed_vulns,
-        "testing_hypotheses": testing_hypotheses[:12] if isinstance(testing_hypotheses, list) else [],
+        "testing_hypotheses": testing_hypotheses[-12:] if isinstance(testing_hypotheses, list) else [],
         "recent_info": recent_info[-16:] if isinstance(recent_info, list) else [],
         "false_positives": _false_positive_names(false_positives),
         "anonymous_routes": _clean_route_list(brain.get("anonymous_routes", [])),
@@ -489,12 +489,12 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
     if len(result) > max_chars:
         trimmed["recent_info"] = trimmed["recent_info"][-5:]
         trimmed["tool_observations"] = trimmed["tool_observations"][-6:]
-        trimmed["anonymous_routes"] = trimmed["anonymous_routes"][:6]
-        trimmed["authenticated_routes"] = trimmed["authenticated_routes"][:6]
-        trimmed["blocked_routes"] = trimmed["blocked_routes"][:6]
-        trimmed["parameter_hints"] = trimmed["parameter_hints"][:8]
-        trimmed["tech_inventory"] = trimmed["tech_inventory"][:6]
-        trimmed["known_vulnerability_signals"] = trimmed["known_vulnerability_signals"][:6]
+        trimmed["anonymous_routes"] = trimmed["anonymous_routes"][-6:]
+        trimmed["authenticated_routes"] = trimmed["authenticated_routes"][-6:]
+        trimmed["blocked_routes"] = trimmed["blocked_routes"][-6:]
+        trimmed["parameter_hints"] = trimmed["parameter_hints"][-8:]
+        trimmed["tech_inventory"] = trimmed["tech_inventory"][-6:]
+        trimmed["known_vulnerability_signals"] = trimmed["known_vulnerability_signals"][-6:]
         result = json.dumps(trimmed)
     return result
 

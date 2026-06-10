@@ -159,20 +159,23 @@ function formatProjectSaveError(error: unknown): string {
   return message || fallback;
 }
 
+import { normalizeRunningStatus } from './Dashboard';
+
 export default function Projects() {
   const navigate = useNavigate();
   const {
     projects,
-    addProject,
-    updateProject,
-    removeProject,
-    setActive,
-    setRunning,
-    runningProjectId,
+    activeProjectId,
     startingProjectId,
     startingProjectMessage,
     stoppingProjectId,
     stoppingProjectMessage,
+    runningProjectId,
+    setActive,
+    setRunning,
+    addProject,
+    updateProject,
+    removeProject,
     stopScan,
     hydrateFromDatabase,
   } = useProjects();
@@ -777,7 +780,7 @@ export default function Projects() {
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0 ml-4">
-                    <Badge variant={project.status} dot>{project.status}</Badge>
+                    <Badge variant={normalizeRunningStatus(project)} dot>{normalizeRunningStatus(project)}</Badge>
                     {startingProjectId === project.id && (
                       <span className="text-sm text-text-muted">
                         {startingProjectMessage || 'starting...'}
@@ -795,6 +798,12 @@ export default function Projects() {
                       {(() => {
                         const isStartingThisProject = startingProjectId === project.id;
                         const isStoppingThisProject = stoppingProjectId === project.id;
+                        const effectiveStatus = normalizeRunningStatus(project);
+                        const isScanActive =
+                          effectiveStatus === "running" ||
+                          effectiveStatus === "awaiting_tool_approval" ||
+                          effectiveStatus === "awaiting_planner_approval" ||
+                          effectiveStatus === "awaiting_information_gathering_approval";
                         const anotherProjectBusy = (
                           (!!runningProjectId && runningProjectId !== project.id)
                           || (!!startingProjectId && startingProjectId !== project.id)
@@ -804,11 +813,11 @@ export default function Projects() {
 
                         return (
                           <>
-                            {project.status !== 'running' && (
+                            {!isScanActive && (
                               <Button
                                 variant="ghost" size="sm"
                                 onClick={() => {
-                                  if (project.status === 'completed') {
+                                  if (effectiveStatus === 'completed') {
                                     const confirmed = window.confirm('This scan already completed. Start a new scan and clear previous results?');
                                     if (!confirmed) {
                                       return;
@@ -816,7 +825,7 @@ export default function Projects() {
                                     setRunning(project.id, { triggerScan: true, force: true });
                                     return;
                                   }
-                                  if (project.status === 'stopped') {
+                                  if (effectiveStatus === 'stopped') {
                                     const confirmed = window.confirm('This scan was stopped. Restart will begin a fresh analysis. Continue?');
                                     if (!confirmed) {
                                       return;
@@ -832,7 +841,7 @@ export default function Projects() {
                                 <Play size={12} />
                               </Button>
                             )}
-                            {project.status === 'running' && (
+                            {isScanActive && (
                               <Button
                                 variant="ghost"
                                 size="sm"
