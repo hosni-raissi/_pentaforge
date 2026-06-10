@@ -5919,6 +5919,7 @@ class _PendingToolApproval:
     call_id: str
     event: asyncio.Event
     decision: str | None = None
+    loop: asyncio.AbstractEventLoop | None = None
 
 
 @dataclass
@@ -5931,6 +5932,7 @@ class _PendingPasswordRequest:
     event: asyncio.Event
     password: str | None = None
     approved: bool = False
+    loop: asyncio.AbstractEventLoop | None = None
 
 
 class ScanOrchestratorService:
@@ -6387,14 +6389,28 @@ class ScanOrchestratorService:
             task.cancel()
         info_gate = self._info_gathering_approval_events.get(project_key)
         if info_gate is not None:
-            info_gate.set()
+            loop = getattr(info_gate, "_loop", None)
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(info_gate.set)
+            else:
+                info_gate.set()
+        
         gate = self._planner_approval_events.get(project_key)
         if gate is not None:
-            gate.set()
+            loop = getattr(gate, "_loop", None)
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(gate.set)
+            else:
+                gate.set()
+                
         pending_tool_approvals = list(self._tool_approval_events.get(project_key, {}).items())
         for _approval_id, pending in pending_tool_approvals:
             pending.decision = "skip"
-            pending.event.set()
+            loop = getattr(pending, "loop", None)
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(pending.event.set)
+            else:
+                pending.event.set()
         self._tool_approval_events.pop(project_key, None)
 
         now_iso = _utc_now_iso()
@@ -6551,7 +6567,11 @@ class ScanOrchestratorService:
 
                 gate = self._info_gathering_approval_events.get(project_key)
                 if gate is not None:
-                    gate.set()
+                    loop = getattr(gate, "_loop", None)
+                    if loop is not None and not loop.is_closed():
+                        loop.call_soon_threadsafe(gate.set)
+                    else:
+                        gate.set()
                 now_iso = _utc_now_iso()
                 run_state["awaiting_information_gathering_approval"] = False
                 run_state.pop("active_memory", None)  # Clean up reference
@@ -6605,7 +6625,11 @@ class ScanOrchestratorService:
             if waiting:
                 gate = self._planner_approval_events.get(project_key)
                 if gate is not None:
-                    gate.set()
+                    loop = getattr(gate, "_loop", None)
+                    if loop is not None and not loop.is_closed():
+                        loop.call_soon_threadsafe(gate.set)
+                    else:
+                        gate.set()
                 now_iso = _utc_now_iso()
                 run_state["awaiting_planner_approval"] = False
                 run_state["updated_at"] = now_iso
@@ -6676,6 +6700,7 @@ class ScanOrchestratorService:
             args=dict(args or {}),
             call_id=str(call_id or ""),
             event=asyncio.Event(),
+            loop=asyncio.get_running_loop(),
         )
         project_pending = self._tool_approval_events.setdefault(project_key, {})
         is_first = len(project_pending) == 0
@@ -6742,7 +6767,7 @@ class ScanOrchestratorService:
                 if project_pending:
                     active_id = next(iter(project_pending.keys()))
                     if active_id != approval_id:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(0.1)
                         start_time = time.time()
                         continue
                 
@@ -6905,7 +6930,12 @@ class ScanOrchestratorService:
             }
 
         pending.decision = action_clean
-        pending.event.set()
+        
+        loop = getattr(pending, "loop", None)
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(pending.event.set)
+        else:
+            pending.event.set()
 
         return {
             "ok": True,
@@ -6941,6 +6971,7 @@ class ScanOrchestratorService:
             reason=str(reason or ""),
             call_id=str(call_id or ""),
             event=asyncio.Event(),
+            loop=asyncio.get_running_loop(),
         )
         project_pending = self._password_request_events.setdefault(project_key, {})
         project_pending[password_id] = pending
@@ -7132,7 +7163,12 @@ class ScanOrchestratorService:
 
         pending.approved = approved
         pending.password = password if approved else None
-        pending.event.set()
+        
+        loop = getattr(pending, "loop", None)
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(pending.event.set)
+        else:
+            pending.event.set()
 
         self._emit_event(
             project_key,

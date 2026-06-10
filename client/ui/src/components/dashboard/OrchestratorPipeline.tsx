@@ -178,7 +178,7 @@ function renderMarkdown(text: string) {
 const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ node, isCurrentActive }) => {
   const Icon = node.icon;
   const hasActionPanel = Boolean(node.actionPanel);
-  const effectiveStatus: OrchestratorStatus = hasActionPanel && node.status === 'completed'
+  const effectiveStatus: OrchestratorStatus = hasActionPanel
     ? 'running'
     : node.status;
   const isWorking = (effectiveStatus === 'thinking' || effectiveStatus === 'running') && (isCurrentActive || hasActionPanel);
@@ -226,6 +226,9 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
   };
 
   const primaryStatusLine = () => {
+    if (hasActionPanel) {
+      return 'awaiting approval...';
+    }
     if (effectiveStatus === 'thinking') {
       if (node.stage === 'analyzer') {
         return `thinking... ${analyzerThinkingContext()}`;
@@ -233,9 +236,6 @@ const PipelineNode: React.FC<{ node: NodeData; isCurrentActive: boolean }> = ({ 
       return 'thinking...';
     }
     if (effectiveStatus === 'running') {
-      if (hasActionPanel) {
-        return 'awaiting approval...';
-      }
       return 'working...';
     }
     if (effectiveStatus === 'completed') {

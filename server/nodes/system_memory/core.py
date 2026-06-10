@@ -1065,37 +1065,34 @@ def build_system_memory_prompt_block(memory: dict[str, Any]) -> str:
                     f"- Summary: {block_summary}",
                 ]
             )
-            key_findings = block.get("key_findings", [])
-            if isinstance(key_findings, list) and key_findings:
-                lines.append("- Key findings:")
-                for item in key_findings[:4]:
+            confirmed_facts = block.get("confirmed_facts", [])
+            if isinstance(confirmed_facts, list) and confirmed_facts:
+                lines.append("- Confirmed facts:")
+                for item in confirmed_facts[:4]:
                     text = str(item or "").strip()
                     if text:
                         lines.append(f"  - {text}")
-            risk_signals = block.get("risk_signals", [])
-            if isinstance(risk_signals, list) and risk_signals:
-                lines.append("- Risk signals:")
-                for item in risk_signals[:3]:
+            security_signals = block.get("security_signals", [])
+            if isinstance(security_signals, list) and security_signals:
+                lines.append("- Security signals:")
+                for item in security_signals[:3]:
                     text = str(item or "").strip()
                     if text:
                         lines.append(f"  - {text}")
-            open_questions = block.get("open_questions", [])
-            if isinstance(open_questions, list) and open_questions:
-                lines.append("- Open questions:")
-                for item in open_questions[:3]:
+            unknowns = block.get("unknowns", [])
+            if isinstance(unknowns, list) and unknowns:
+                lines.append("- Unknowns / open questions:")
+                for item in unknowns[:3]:
                     text = str(item or "").strip()
                     if text:
                         lines.append(f"  - {text}")
-            results = block.get("results", [])
-            if isinstance(results, list) and results:
-                lines.append("- Tool outcomes:")
-                for row in results[:4]:
-                    if not isinstance(row, dict):
-                        continue
-                    tool_name = str(row.get("tool", "")).strip() or "tool"
-                    tool_summary = str(row.get("summary", "")).strip()
-                    if tool_summary:
-                        lines.append(f"  - {tool_name}: {tool_summary}")
+            next_actions = block.get("next_actions", [])
+            if isinstance(next_actions, list) and next_actions:
+                lines.append("- Next actions:")
+                for item in next_actions[:3]:
+                    text = str(item or "").strip()
+                    if text:
+                        lines.append(f"  - {text}")
             lines.append("")
     else:
         lines.append("- (no grouped gathering blocks stored)")

@@ -3212,7 +3212,8 @@ export default function Dashboard() {
         if (cancelled || recent.length === 0) {
           return;
         }
-        for (const event of recent) {
+        const chronological = [...recent].reverse();
+        for (const event of chronological) {
           ingestScanEvent(event, false);
         }
       } catch {
@@ -3734,12 +3735,41 @@ export default function Dashboard() {
   };
 
   const handleToolApproval = async (action: "approve" | "skip") => {
-    if (!activeProjectId || !isScanActive || !pendingToolApproval?.approvalId || toolApprovalLoading) {
+    if (!activeProject || !activeProjectId || !isScanActive || !pendingToolApproval?.approvalId || toolApprovalLoading) {
       return;
     }
     const approvalId = pendingToolApproval.approvalId;
     setLocallyAckedApprovalId(approvalId);
     setToolApprovalLoading(action);
+
+    // Optimistically update the UI to "running"
+    updateProject(
+      activeProject.id,
+      {
+        status: "running",
+      },
+      { persist: false }
+    );
+    useProjects.setState((state) => {
+      const innerActive = state.projects.find((p) => p.id === activeProject.id);
+      if (!innerActive) return state;
+      const innerLastScan = isRecord(innerActive.lastScan) ? innerActive.lastScan : {};
+      return {
+        projects: state.projects.map((p) =>
+          p.id === activeProject.id
+            ? {
+                ...p,
+                lastScan: {
+                  ...innerLastScan,
+                  awaitingToolApproval: false,
+                  status: "running",
+                },
+              }
+            : p
+        ),
+      };
+    });
+
     try {
       await approveToolForProjectScanFromDesktop(activeProjectId, {
         approvalId,
@@ -5336,8 +5366,19 @@ export default function Dashboard() {
           return p === phaseKey;
         });
         if (lastEvent) {
-          if (lastEvent.event.includes('_started') || lastEvent.event.includes('_running')) return 'running';
-          if (lastEvent.event.includes('_complete')) {
+          if (
+            lastEvent.event.includes('_started') ||
+            lastEvent.event.includes('_running') ||
+            lastEvent.event.includes('_step') ||
+            lastEvent.event.includes('_batch_progress') ||
+            lastEvent.event.includes('_finding_working') ||
+            lastEvent.event.includes('_waiting_approval') ||
+            lastEvent.event.includes('_approval_decision') ||
+            lastEvent.event.includes('_approval_cleared')
+          ) {
+            return 'running';
+          }
+          if (lastEvent.event.includes('_complete') || lastEvent.event.includes('_done')) {
             // Only show 'completed' when the scan is finished; otherwise 'waiting'
             return (effectiveStatus === 'completed' || effectiveStatus === 'stopped') ? 'completed' : 'waiting';
           }

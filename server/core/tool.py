@@ -111,6 +111,9 @@ def _build_parameters(fn: Callable[..., Any]) -> dict[str, Any]:
             }
         else:
             properties[name] = {"type": json_type}
+            if json_type == "array":
+                # Strict API providers require an items schema
+                properties[name]["items"] = {}
         if param.default is inspect.Parameter.empty:
             required.append(name)
 

@@ -1274,15 +1274,13 @@ class BaseExecuterAgent:
             if not url_host:
                 continue
 
-            same_host = url_host == target_host
+            same_host = url_host == target_host or url_host.endswith(f".{target_host}")
             same_loopback_family = (
                 self._is_loopback_hostname(url_host)
                 and self._is_loopback_hostname(target_host)
             )
             if not (same_host or same_loopback_family):
                 return f"{url} is outside target host {target_host}"
-            if target_port is not None and url_port is not None and url_port != target_port:
-                return f"{url} uses port {url_port}, expected {target_port}"
 
         return None
 
@@ -1953,8 +1951,8 @@ class BaseExecuterAgent:
         forced_due_to_final_round_tool_calls: bool = True,
     ) -> ExecuterResult:
         if forced_due_to_final_round_tool_calls:
-            self._cb.on_warn(
-                f"[{self._role}] final round emitted tool calls; forcing one last JSON-only consolidation pass"
+            self._cb.on_step(
+                f"[{self._role}] extending rounds to process final tool outputs and consolidate payload"
             )
         else:
             self._cb.on_step(

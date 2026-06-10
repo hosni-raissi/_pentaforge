@@ -2549,7 +2549,11 @@ class PlannerAgent:
 
         if plan_payload is not None:
             persist_status = await update_pentest_plan.execute(
-                plan_json=json.dumps(plan_payload, ensure_ascii=True),
+                target=plan_payload.get("target", ""),
+                scope=plan_payload.get("scope", ""),
+                target_types=plan_payload.get("target_types"),
+                phases=plan_payload.get("phases"),
+                notes=plan_payload.get("notes", ""),
                 planner_round=rounds,
             )
             lowered = str(persist_status).strip().lower()
@@ -2651,11 +2655,7 @@ class PlannerAgent:
     def _report_tool_start(self, tool_name: str, args: dict[str, Any]) -> None:
         if tool_name == "update_pentest_plan":
             try:
-                plan_data = (
-                    args
-                    if isinstance(args.get("phases"), list)
-                    else json.loads(args.get("plan_json", "{}"))
-                )
+                plan_data = args
                 phases = len(plan_data.get("phases", []))
                 target = plan_data.get("target", "?")
                 total_scenarios = sum(
@@ -2783,6 +2783,23 @@ class PlannerAgent:
                 for k, v in plan_obj.items():
                     fixed.setdefault(k, v)
 
+            # Strip legacy plan_json hallucination and flatten it if present.
+            plan_json_val = fixed.pop("plan_json", None)
+            if plan_json_val:
+                try:
+                    if isinstance(plan_json_val, str):
+                        parsed = json.loads(plan_json_val)
+                    elif isinstance(plan_json_val, dict):
+                        parsed = plan_json_val
+                    else:
+                        parsed = None
+                        
+                    if isinstance(parsed, dict):
+                        for k, v in parsed.items():
+                            fixed.setdefault(k, v)
+                except Exception:
+                    pass
+
             # Decode stringified JSON fields.
             for key in ("target_types", "phases"):
                 if isinstance(fixed.get(key), str):
@@ -2790,59 +2807,6 @@ class PlannerAgent:
                         fixed[key] = json.loads(fixed[key])
                     except json.JSONDecodeError:
                         pass
-
-            # Ensure plan_json is a string if present.
-            if "plan_json" in fixed and not isinstance(
-                fixed.get("plan_json"), str
-            ):
-                try:
-                    fixed["plan_json"] = json.dumps(
-                        fixed["plan_json"], ensure_ascii=True
-                    )
-                except Exception:
-                    fixed["plan_json"] = str(fixed["plan_json"])
-            elif isinstance(fixed.get("plan_json"), str):
-                raw_plan_json = fixed["plan_json"].strip()
-                candidate = raw_plan_json
-                if candidate.startswith("```"):
-                    candidate = re.sub(
-                        r"^```(?:json)?\s*",
-                        "",
-                        candidate,
-                        flags=re.IGNORECASE,
-                    )
-                    candidate = re.sub(r"\s*```$", "", candidate).strip()
-
-                recovered: dict[str, Any] | None = None
-                try:
-                    parsed = json.loads(candidate)
-                    if isinstance(parsed, dict):
-                        recovered = parsed
-                except json.JSONDecodeError:
-                    obj_start = candidate.find("{")
-                    extracted: str | None = None
-                    if obj_start >= 0:
-                        extracted = _extract_json_object_at(
-                            candidate, obj_start
-                        )
-                    if extracted:
-                        try:
-                            parsed = json.loads(extracted)
-                            if isinstance(parsed, dict):
-                                recovered = parsed
-                        except json.JSONDecodeError:
-                            recovered = _repair_truncated_json(extracted)
-                    else:
-                        recovered = _repair_truncated_json(candidate)
-
-                if recovered is not None:
-                    fixed["plan_json"] = json.dumps(recovered, ensure_ascii=True)
-                elif any(
-                    key in fixed
-                    for key in ("target", "scope", "target_types", "phases", "notes")
-                ):
-                    # Avoid hard failure in tool: rely on direct fields when available.
-                    fixed.pop("plan_json", None)
 
         return fixed
 
