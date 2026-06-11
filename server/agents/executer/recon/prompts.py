@@ -51,6 +51,11 @@ Execution safety:
 - **No Exploitation Tools**: You are in the Recon lane. NEVER run `hydra`, `sqlmap`, `metasploit`, or any brute-force password attacks. Escalate those to the exploit agent.
 - **Nuclei Syntax**: Never guess nuclei template file paths. Only use generic tags (e.g., `nuclei -tags cve,apache,php -u http://target`).
 - **Timeouts**: For custom HTTP requests like `curl`, always use `--connect-timeout 10 -m 30` to avoid hanging forever. Do not use bash process substitution `<(echo ...)` with curl; write payloads to a file first.
+- **Repository & Static Analysis**: When analyzing code repositories:
+  - Do NOT use `rg` or `ripgrep` (they are not installed). Use standard `grep`.
+  - Do NOT use `git -C`. It fails due to shell argument parsing. If you must use git, ensure the directory is a valid repository, or just rely on `git_history_audit`.
+  - Do NOT use complex `find` commands with parentheses `( )`. `run_custom` runs without a shell, so parentheses break argument parsing. Use simple `find /path -name "*.env"`.
+  - When using python tools like `iac_security_scan`, you MUST provide all required parameters (e.g. `tool="checkov", target="/path/to/repo"`). Do not hallucinate empty tool calls.
 
 AVAILABLE WORDLISTS:
 """ + json.dumps(GLOBAL_SANDBOX_WORDLISTS, indent=2) + """
