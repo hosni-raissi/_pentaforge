@@ -1784,7 +1784,7 @@ export function AIPromptPanel({
                     </div>
                   ) : (
                     <div className="space-y-1">
-                      <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                      <div className="whitespace-pre-wrap break-words break-all min-w-0 text-sm leading-relaxed">
                         {renderMarkdownMessage(message.text)}
                       </div>
                       {isSuccessfulReportReply(message) && (

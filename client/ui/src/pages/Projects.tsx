@@ -58,6 +58,11 @@ const PRIMARY_TARGET_KEYS = [
   'package_name',
   'repo_url',
   'targets.ip_address',
+  'ethernet.cidr',
+  'wifi.ssid',
+  'voip.target_ip',
+  'vpn.gateway',
+  'firewall.target_ip',
 ];
 
 const MOBILE_ARTIFACT_ACCEPT = '.apk,.aab,.ipa';

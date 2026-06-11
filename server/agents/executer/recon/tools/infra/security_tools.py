@@ -439,7 +439,7 @@ _RAW_INFRA_RECON_TOOLS: dict[str, dict[str, object]] = {
     "hydra": {
     "t": "auth_bruteforce",
     "c": "online_password_spray",
-    "u": "echo '(WORDLIST:userpass)' | hydra -L - -P - -t 4 -f -o - TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]|password'",
+    "u": "hydra -L (WORDLIST:users) -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null",
     "d": [
         "online credential brute-forcing",
         "protocol-aware authentication testing",
@@ -452,8 +452,8 @@ _RAW_INFRA_RECON_TOOLS: dict[str, dict[str, object]] = {
         "mysql", "postgres", "ldap", "smtp", "pop3", 
         "active_directory", "network_services", "auth_testing"
     ],
-    "note": "(WORDLIST:userpass) piped via stdin as 'user:pass' pairs; -o - outputs to stdout; SERVICE = ssh/ftp/http/etc.",
-    "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]'"
+    "note": "(WORDLIST:users) and (WORDLIST:passwords) resolved at runtime; SERVICE = ssh/ftp/http/etc.",
+    "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null"
     },
 }
 

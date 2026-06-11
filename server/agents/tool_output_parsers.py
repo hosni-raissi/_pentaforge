@@ -242,7 +242,7 @@ def _normalize_observations(values: Any) -> list[str]:
             continue
         seen.add(lowered)
         observations.append(text)
-        if len(observations) >= 8:
+        if len(observations) >= 300:
             break
     return observations
 
@@ -311,7 +311,7 @@ def summarize_tool_output(payload: Any) -> dict[str, Any]:
         parser_name = "structured_json"
         if not parsed_observations:
             body = stdout or stderr
-            parsed_observations = [_short_text(line, limit=200) for line in _first_lines(strip_ansi_sequences(body), limit=4)]
+            parsed_observations = [_short_text(line, limit=200) for line in _first_lines(strip_ansi_sequences(body), limit=250)]
             parser_name = "generic_text"
         return {
             "output_parser": parser_name,
@@ -324,7 +324,7 @@ def summarize_tool_output(payload: Any) -> dict[str, Any]:
     text = strip_ansi_sequences(str(payload or ""))
     return {
         "output_parser": "generic_text",
-        "observations": _normalize_observations([_short_text(line, limit=200) for line in _first_lines(text, limit=4)]),
+        "observations": _normalize_observations([_short_text(line, limit=200) for line in _first_lines(text, limit=250)]),
         "status_codes": _extract_status_codes(text),
         "urls": _extract_urls(text),
         "parsed_findings": [],

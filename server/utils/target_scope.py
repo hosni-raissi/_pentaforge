@@ -74,9 +74,30 @@ def is_loopback_host(host: str) -> bool:
     return normalized in {"localhost", "127.0.0.1", "::1"}
 
 
+def _is_host_in_target_scope(value_host: str, target_host: str, target_path: str) -> bool:
+    if value_host == target_host or value_host.endswith(f".{target_host}"):
+        return True
+        
+    same_loopback_family = is_loopback_host(value_host) and is_loopback_host(target_host)
+    if same_loopback_family:
+        return True
+        
+    # Check if target is a CIDR network (e.g. 192.168.1.0/24 split into host=192.168.1.0 and path=/24)
+    if target_path and target_path.startswith("/") and target_path[1:].isdigit():
+        try:
+            target_cidr = ipaddress.ip_network(f"{target_host}{target_path}", strict=False)
+            val_ip = ipaddress.ip_address(value_host)
+            if val_ip in target_cidr:
+                return True
+        except ValueError:
+            pass
+            
+    return False
+
+
 def describe_url_scope_issue(url: str, active_target: str) -> str | None:
     """Return a human-readable scope mismatch for a URL, or None if allowed."""
-    _, target_host, target_port, _ = _split_target(active_target)
+    _, target_host, target_port, target_path = _split_target(active_target)
     if not target_host:
         return None
 
@@ -104,12 +125,10 @@ def describe_url_scope_issue(url: str, active_target: str) -> str | None:
     if url.lower().endswith(ignored_extensions):
         return None
 
-    same_host = url_host == target_host
-    same_loopback_family = is_loopback_host(url_host) and is_loopback_host(target_host)
-    if not (same_host or same_loopback_family):
-        return f"{url} is outside target host {target_host}"
-    if target_port is not None and url_port is not None and url_port != target_port:
-        return f"{url} uses port {url_port}, expected {target_port}"
+    if not _is_host_in_target_scope(url_host, target_host, target_path):
+        # Determine actual target string to print
+        target_display = f"{target_host}{target_path}" if target_path and target_path.startswith("/") and target_path[1:].isdigit() else target_host
+        return f"{url} is outside target host {target_display}"
     return None
 
 
@@ -121,7 +140,7 @@ def describe_network_target_scope_issue(value: str, active_target: str) -> str |
     if "://" in text:
         return describe_url_scope_issue(text, active_target)
 
-    _, target_host, target_port, _ = _split_target(active_target)
+    _, target_host, target_port, target_path = _split_target(active_target)
     if not target_host:
         return None
 
@@ -137,10 +156,7 @@ def describe_network_target_scope_issue(value: str, active_target: str) -> str |
     if not host_like:
         return None
 
-    same_host = value_host == target_host
-    same_loopback_family = is_loopback_host(value_host) and is_loopback_host(target_host)
-    if not (same_host or same_loopback_family):
-        return f"{text} is outside target host {target_host}"
-    if target_port is not None and value_port is not None and value_port != target_port:
-        return f"{text} uses port {value_port}, expected {target_port}"
+    if not _is_host_in_target_scope(value_host, target_host, target_path):
+        target_display = f"{target_host}{target_path}" if target_path and target_path.startswith("/") and target_path[1:].isdigit() else target_host
+        return f"{text} is outside target host {target_display}"
     return None

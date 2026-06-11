@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from server.agents.sandbox_wordlists import GLOBAL_SANDBOX_WORDLISTS
+
 MINIMAL_ANALYZER_SUMMARY_FORMAT = (
     "finding_type={finding_type} confidence={confidence} "
     "summary={summary}"
@@ -40,6 +43,9 @@ Evidence Capture Requirements:
 - Visual Evidence: Capture screenshots of tool results, UI states showing the issue, error messages, malicious input in the URL bar, and browser console output.
 - Programmatic Evidence: Capture complete HTTP request/response pairs, exact payloads used, system state before/after, and precise timing.
 - Best Practices: Always capture BEFORE and AFTER exploitation. Annotate screenshots with highlights.
+
+AVAILABLE WORDLISTS:
+""" + json.dumps(GLOBAL_SANDBOX_WORDLISTS, indent=2) + """
 
 Verification Quality & Tiers:
 - You MUST classify verified findings into one of these tiers:

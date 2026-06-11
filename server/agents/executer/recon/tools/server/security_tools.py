@@ -153,7 +153,7 @@ _RAW_SERVER_RECON_TOOLS: dict[str, dict[str, object]] = {
     "ffuf": {
         "t": "fuzz",
         "c": "parameter_vhost_discovery",
-        "u": "ffuf -u http://TARGET_IP/FUZZ -w (WORDLIST:paths) -mc 200,301,403 -H 'Host: FUZZ.TARGET_IP' -silent 2>/dev/null",
+        "u": "ffuf -u http://TARGET_IP/FUZZ -w (WORDLIST:paths) -mc 200,301,403 -H 'Host: FUZZ.TARGET_IP' -s 2>/dev/null",
         "d": ["Parameter fuzzing", "Vhost discovery", "Header injection testing", "Rate limiting aware"],
         "tgt": ["web_server", "api_recon", "virtual_host_enum"],
         "note": "(WORDLIST:paths) resolved at runtime; -silent for clean stdout"
@@ -364,7 +364,7 @@ _RAW_SERVER_RECON_TOOLS: dict[str, dict[str, object]] = {
     "hydra": {
         "t": "auth_bruteforce",
         "c": "online_password_spray",
-        "u": "echo '(WORDLIST:userpass)' | hydra -L - -P - -t 4 -f -o - TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]|password'",
+        "u": "hydra -L (WORDLIST:users) -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null",
         "d": [
             "online credential brute-forcing",
             "protocol-aware authentication testing",
@@ -377,8 +377,8 @@ _RAW_SERVER_RECON_TOOLS: dict[str, dict[str, object]] = {
             "mysql", "postgres", "ldap", "smtp", "pop3", 
             "active_directory", "network_services", "auth_testing"
         ],
-        "note": "(WORDLIST:userpass) piped via stdin as 'user:pass' pairs; -o - outputs to stdout",
-        "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]'"
+        "note": "(WORDLIST:users) and (WORDLIST:passwords) resolved at runtime; SERVICE = ssh/ftp/http/etc.",
+        "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null"
     }
 }
 

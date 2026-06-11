@@ -362,29 +362,28 @@ _RAW_NETWORK_RECON_TOOLS: dict[str, dict[str, object]] = {
     "tgt": [
         "ntlm", "kerberos", "sha1", "sha256", "sha512", "bcrypt", 
         "md5", "ssh_keys", "zip", "pdf", "local_accounts", 
-        "dumped_credentials", "hash_cracking", "post_exploitation"
     ],
     "note": "(MANIFEST:hashes) piped via stdin in John format (user:hash); (WORDLIST:passwords) resolved at runtime; --stdout outputs cracked creds; --pot=none avoids file writes",
     "alt": "john --format=nt --wordlist=(WORDLIST:passwords) --stdout --pot=none - 2>/dev/null"
     },
     "hydra": {
-    "t": "auth_bruteforce",
-    "c": "online_password_spray",
-    "u": "echo '(WORDLIST:userpass)' | hydra -L - -P - -t 4 -f -o - TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]|password'",
-    "d": [
-        "online credential brute-forcing",
-        "protocol-aware authentication testing",
-        "parallel connection handling",
-        "early exit on first success",
-        "stdout results for chaining"
-    ],
-    "tgt": [
-        "ssh", "ftp", "http", "https", "smb", "rdp", 
-        "mysql", "postgres", "ldap", "smtp", "pop3", 
-        "active_directory", "network_services", "auth_testing"
-    ],
-    "note": "(WORDLIST:userpass) piped via stdin as 'user:pass' pairs; -o - outputs to stdout; SERVICE = ssh/ftp/http/etc.",
-    "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]'"
+        "t": "auth_bruteforce",
+        "c": "online_password_spray",
+        "u": "hydra -L (WORDLIST:users) -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null",
+        "d": [
+            "online credential brute-forcing",
+            "protocol-aware authentication testing",
+            "parallel connection handling",
+            "early exit on first success",
+            "stdout results for chaining"
+        ],
+        "tgt": [
+            "ssh", "ftp", "http", "https", "smb", "rdp", 
+            "mysql", "postgres", "ldap", "smtp", "pop3", 
+            "active_directory", "network_services", "auth_testing"
+        ],
+        "note": "(WORDLIST:users) and (WORDLIST:passwords) resolved at runtime; SERVICE = ssh/ftp/http/etc.",
+        "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null"
     },
 }
 

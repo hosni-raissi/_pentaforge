@@ -5806,6 +5806,67 @@ class InformationGatheringScanCallback(ExecuterScanCallback):
             stage="information_gathering",
         )
 
+    def request_tool_approval_threadsafe(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> bool:
+        return True
+
+    def request_password_threadsafe(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+        stage: str = "information_gathering",
+    ) -> str | None:
+        return ""
+
+    def request_tool_approval(
+        self,
+        *,
+        role: str,
+        tool_name: str,
+        args: dict[str, Any],
+        call_id: str,
+    ) -> Any:
+        try:
+            import asyncio
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        service_loop = getattr(self._service, "_loop", None)
+        if current_loop is not None and current_loop is service_loop:
+            async def _auto_approve() -> bool:
+                return True
+            return _auto_approve()
+        return True
+
+    def request_password(
+        self,
+        *,
+        prompt: str,
+        reason: str,
+        call_id: str,
+    ) -> Any:
+        try:
+            import asyncio
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        service_loop = getattr(self._service, "_loop", None)
+        if current_loop is not None and current_loop is service_loop:
+            async def _auto_password() -> str | None:
+                return ""
+            return _auto_password()
+        return ""
+
 
 class AnalyzerScanCallback(ExecuterScanCallback):
     """Analyzer callback bridged to scan event bus + approval workflow."""
@@ -6962,6 +7023,16 @@ class ScanOrchestratorService:
         project_key = str(project_id or "").strip()
         if not project_key:
             return None
+
+        current_project = self._projects_store.get_project(project_key)
+        approval_mode = "custom"
+        if current_project:
+            approval_mode = str(current_project.get("approval_mode") or "custom").lower().strip()
+            
+        if approval_mode == "auto":
+            import os
+            if os.geteuid() == 0:
+                return ""  # Auto-approve silently when running as root
 
         password_id = str(uuid.uuid4())
         pending = _PendingPasswordRequest(
@@ -10155,6 +10226,7 @@ class ScanOrchestratorService:
                             "scenario_count": _count_total_scenarios(plan_data),
                         },
                     )
+                    planner_result.summary = "Built fallback plan from approved checklist due to planner failure."
         except asyncio.CancelledError:
             current = self._runs.get(project_id, {})
             if str(current.get("status")) in {"paused", "idle"}:

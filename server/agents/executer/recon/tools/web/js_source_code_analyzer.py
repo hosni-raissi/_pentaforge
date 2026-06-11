@@ -214,26 +214,31 @@ def safe_execute(
     cmd: list[str],
     timeout: int = 300,
 ) -> tuple[str, str, int, str]:
-    """Run a subprocess safely. Returns (stdout, stderr, returncode, cwd)."""
-    cwd = ProjectConfig.get_project_dir()
-    log.debug("Executing: %s", " ".join(cmd))
+    """Run a subprocess safely via run_custom in the sandbox. Returns (stdout, stderr, returncode, cwd)."""
+    cwd = str(ProjectConfig.get_project_dir())
+    log.debug("Executing via run_custom: %s", " ".join(cmd))
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
+        from server.agents.tools.run_custom import run_custom
+        
+        # If the command is js-beautify and involves a local temp file,
+        # we can't easily pass it to the sandbox since the file is on the backend.
+        # But wait! If we rewrite the command to use curl for js-beautify in run_custom?
+        # Actually, if secretfinder is used, it takes a URL natively.
+        
+        result = run_custom(
+            command=cmd[0],
+            reason=f"Internal js analysis execution of {cmd[0]}",
+            args=cmd[1:],
             timeout=timeout,
-            shell=False,       # ← Never shell=True
-            cwd=str(cwd),
         )
-        return result.stdout, result.stderr, result.returncode, str(cwd)
-    except subprocess.TimeoutExpired:
-        log.warning("Command timed out after %ds: %s", timeout, cmd[0])
-        return "", f"Timeout after {timeout}s", -1, str(cwd)
-    except FileNotFoundError:
-        return "", f"Tool not installed or not in PATH: '{cmd[0]}'", -1, str(cwd)
-    except Exception as exc:  # noqa: BLE001
-        return "", str(exc), -1, str(cwd)
+        rc = result.get("return_code", -1)
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("error") or result.get("stderr") or "")
+        if rc != 0 and "not found" in stderr.lower():
+            return "", f"Tool not installed or not in PATH: '{cmd[0]}'", -1, cwd
+        return stdout, stderr, rc, cwd
+    except Exception as exc:
+        return "", str(exc), -1, cwd
 
 
 def download_file(url: str) -> tuple[Optional[Path], Optional[str]]:
@@ -251,7 +256,10 @@ def download_file(url: str) -> tuple[Optional[Path], Optional[str]]:
         with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
             content = resp.read()
 
-        tmp_path = ProjectConfig.get_temp_dir() / f"js_{int(time.time() * 1000)}.js"
+        # Use the shared cache directory so the sandbox can access the downloaded file
+        cache_dir = ProjectConfig.get_project_dir() / "server" / "cache" / "tmp"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_dir / f"js_{int(time.time() * 1000)}.js"
         tmp_path.write_bytes(content)
         log.debug("Downloaded %d bytes → %s", len(content), tmp_path)
         return tmp_path, None

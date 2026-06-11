@@ -1265,22 +1265,22 @@ class BaseExecuterAgent:
             return None
 
         target_url = self._declared_target_url()
-        target_host, target_port, _ = self._url_host_port(target_url)
+        from server.utils.target_scope import _split_target, _is_host_in_target_scope
+        _, target_host, _, target_path = _split_target(target_url)
         if not target_host:
             return None
 
         for url in self._extract_urls_from_run_custom(args):
-            url_host, url_port, _ = self._url_host_port(url)
+            _, url_host, _, _ = _split_target(url)
             if not url_host:
                 continue
 
-            same_host = url_host == target_host or url_host.endswith(f".{target_host}")
-            same_loopback_family = (
-                self._is_loopback_hostname(url_host)
-                and self._is_loopback_hostname(target_host)
-            )
-            if not (same_host or same_loopback_family):
-                return f"{url} is outside target host {target_host}"
+            if url_host.endswith(f".{target_host}"):
+                continue
+
+            if not _is_host_in_target_scope(url_host, target_host, target_path):
+                target_display = f"{target_host}{target_path}" if target_path and target_path.startswith("/") and target_path[1:].isdigit() else target_host
+                return f"{url} is outside target host {target_display}"
 
         return None
 

@@ -487,7 +487,7 @@ async def _retry_with_backoff(
         except httpx.HTTPStatusError as exc:
             # 400 errors are NOT retried — they need arg/payload fixes.
             # 429/5xx ARE retried.
-            if exc.response is not None and exc.response.status_code in (429, 500, 502, 503, 504):
+            if exc.response is not None and (exc.response.status_code == 429 or exc.response.status_code >= 500):
                 last_exc = exc
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt) + random.uniform(0, jitter_max)
@@ -1868,7 +1868,7 @@ class PlannerAgent:
                     [_dict_to_msg(m) for m in round_messages],
                     tools=tools_for_call,
                     temperature=0,
-                    max_tokens=min(PLANNER_MAX_TOKENS_PER_REQUEST, 5000),
+                    max_tokens=min(PLANNER_MAX_TOKENS_PER_REQUEST, 8192),
                 )
 
                 raw_content = response.content or ""
@@ -2113,7 +2113,7 @@ class PlannerAgent:
         token_budget = PLANNER_MAX_TOKENS_PER_REQUEST
         if round_count >= 2:
             # Round 2+ likely needs to generate the full plan JSON.
-            token_budget = max(token_budget, 4096)
+            token_budget = max(token_budget, 8192)
 
         try:
 

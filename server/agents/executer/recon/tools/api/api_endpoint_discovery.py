@@ -1820,20 +1820,21 @@ def parse_graphql_voyager(stdout: str, target: str) -> list[GraphQLInfo]:
 # ══════════════════════════════════════════════════════════════
 
 def safe_execute(cmd: list[str], timeout: int = 600) -> tuple[str, str, int]:
-    """Run subprocess safely — no shell, no injection."""
+    """Run subprocess safely using sandbox run_custom."""
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
+        from server.agents.tools.run_custom import run_custom
+        result = run_custom(
+            command=cmd[0],
+            reason=f"Internal discovery execution of {cmd[0]}",
+            args=cmd[1:],
             timeout=timeout,
-            shell=False,
         )
-        return result.stdout, result.stderr, result.returncode
-    except subprocess.TimeoutExpired:
-        return "", f"Timed out after {timeout}s", -1
-    except FileNotFoundError:
-        return "", f"Tool '{cmd[0]}' not installed", -1
+        rc = result.get("return_code", -1)
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("error") or result.get("stderr") or "")
+        if rc != 0 and "not found" in stderr.lower():
+            return "", f"Tool '{cmd[0]}' not installed", -1
+        return stdout, stderr, rc
     except Exception as e:
         return "", str(e), -1
 
@@ -2073,8 +2074,12 @@ def api_endpoint_discovery(
         if req.wordlist:
             wl_path = req.wordlist
         else:
+            from pathlib import Path
+            repo_root = Path(__file__).resolve().parent.parent.parent.parent.parent.parent
+            cache_dir = repo_root / "server" / "cache" / "tmp"
+            cache_dir.mkdir(parents=True, exist_ok=True)
             tmp_wl  = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, prefix="api_paths_"
+                mode="w", suffix=".txt", delete=False, prefix="api_paths_", dir=str(cache_dir)
             )
             tmp_wl.write("\n".join(p.lstrip("/") for p in full_paths))
             tmp_wl.close()

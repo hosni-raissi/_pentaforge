@@ -53,12 +53,13 @@ _RAW_WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
         "note": "Requires CENSYS_API_ID and CENSYS_API_SECRET env vars",
         "pipe_into": ["nmap"]
     },
-    "crt_sh": {
+    "curl_crt_sh": {
         "t": "cert_transparency",
         "c": "subdomain_from_certs",
-        "u": "curl -s 'https://crt.sh/?q=%25.TARGET&output=json' 2>/dev/null | jq -r '.[].name_value' | sort -u",
+        "u": "curl -s 'https://crt.sh/?q=%25.TARGET&output=json'",
         "d": ["enumerate subdomains from SSL certificates", "zero-noise passive recon", "no API key needed"],
         "tgt": ["domain"],
+        "note": "Returns JSON. Do not pipe to jq, parse the JSON directly.",
         "pipe_into": ["dnsx", "httpx"]
     },
     "gau": {
@@ -139,10 +140,10 @@ _RAW_WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
     "subjack": {
         "t": "takeover_detection",
         "c": "dangling_cname_check",
-        "u": "echo '(WORDLIST:resolved)' | subjack -w - -t 100 -timeout 30 -ssl -v 2>/dev/null | grep -E '^\\[\\+\\]|vulnerable'",
+        "u": "subjack -w (WORDLIST:resolved) -t 100 -timeout 30 -ssl -v 2>/dev/null",
         "d": ["detect subdomain takeover vulnerabilities", "check dangling CNAME records pointing to unclaimed services"],
         "tgt": ["subdomain_list"],
-        "note": "(WORDLIST:resolved) piped via stdin; -w - reads from stdin"
+        "note": "(WORDLIST:resolved) resolved at runtime"
     },
 
     # ── PHASE 3: HTTP PROBING & FINGERPRINTING ─────────────────────────────
@@ -209,10 +210,10 @@ _RAW_WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
     "ffuf": {
         "t": "fuzzer",
         "c": "dir_param_vhost_fuzz",
-        "u": "ffuf -u TARGET/FUZZ -w (WORDLIST:folders) -mc 200,204,301,302,307,401,403 -silent 2>/dev/null",
+        "u": "ffuf -u TARGET/FUZZ -w (WORDLIST:folders) -mc 200,204,301,302,307,401,403 -s 2>/dev/null",
         "d": ["directory and file brute force", "parameter fuzzing", "vhost discovery", "fastest fuzz option"],
         "tgt": ["url"],
-        "note": "(WORDLIST:folders) resolved at runtime; -silent for clean stdout"
+        "note": "(WORDLIST:folders) resolved at runtime; -s for clean stdout"
     },
     "feroxbuster": {
         "t": "fuzzer",
@@ -381,7 +382,7 @@ _RAW_WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
     "hydra": {
         "t": "auth_bruteforce",
         "c": "online_password_spray",
-        "u": "echo '(WORDLIST:userpass)' | hydra -L - -P - -t 4 -f -o - TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]|password'",
+        "u": "hydra -L (WORDLIST:users) -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null",
         "d": [
             "online credential brute-forcing",
             "protocol-aware authentication testing",
@@ -394,7 +395,7 @@ _RAW_WEB_RECON_TOOLS: dict[str, dict[str, object]] = {
             "mysql", "postgres", "ldap", "smtp", "pop3", 
             "active_directory", "network_services", "auth_testing"
         ],
-        "note": "(WORDLIST:userpass) piped via stdin as 'user:pass' pairs; -o - outputs to stdout; SERVICE = ssh/ftp/http/etc.",
+        "note": "(WORDLIST:users) and (WORDLIST:passwords) resolved at runtime; SERVICE = ssh/ftp/https-post-form/etc.",
     }
 }
 

@@ -200,8 +200,15 @@ class SudoValidationRequest(BaseModel):
 def verify_sudo_password(payload: SudoValidationRequest) -> dict[str, Any]:
     """Verify if the provided password is valid for root/sudo on the host system."""
     import subprocess
+    import os
     pwd = payload.password
     
+    # Method 0: If we are already root (e.g. running in a Docker container), 
+    # we can't verify the host password, but we don't need one to run commands locally.
+    # We will accept the password so it can be passed to external SSH targets if needed.
+    if os.geteuid() == 0:
+        return {"ok": True, "message": "Backend is already running as root. Password accepted."}
+
     # Method 1: Try sudo -S
     try:
         proc = subprocess.run(
@@ -222,14 +229,24 @@ def verify_sudo_password(payload: SudoValidationRequest) -> dict[str, Any]:
     try:
         import pexpect
         child = pexpect.spawn("su", ["-c", "echo OK", "root"], timeout=5)
-        index = child.expect([r"(?i)password:", pexpect.EOF, pexpect.TIMEOUT])
+        index = child.expect([r"(?i)password.*:", pexpect.EOF, pexpect.TIMEOUT])
         if index == 0:
             child.sendline(pwd)
             child.expect(pexpect.EOF)
             out = child.before.decode(errors="ignore").strip()
             if "OK" in out or "su: Authentication failure" not in out:
                 return {"ok": True, "message": "Password verified via su"}
+        elif index == 1:
+            out = child.before.decode(errors="ignore").strip()
+            if "OK" in out:
+                return {"ok": True, "message": "Verified via passwordless su"}
     except Exception:
         pass
 
-    return {"ok": False, "message": "Authentication failed. Incorrect password or not supported on this system."}
+    return {"ok": False, "message": "Authentication failed. Make sure you use your USER password for sudo, or your ROOT password for su."}
+
+@router.get("/is-root")
+def is_running_as_root() -> dict[str, bool]:
+    """Check if the backend is currently running as the root user."""
+    import os
+    return {"is_root": os.geteuid() == 0}

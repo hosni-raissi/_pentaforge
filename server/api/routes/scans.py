@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from server.api.dependencies import projects_store, scan_orchestrator
 from server.api.routes.settings import has_saved_usable_llm_profile, llm_required_response
-from server.app.mobile_runtime import prepare_mobile_runtime_for_project, stop_mobile_runtime_for_project
 
 router = APIRouter(tags=["scans"])
 
@@ -52,62 +51,7 @@ def _sse_message(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
 
-def _prepare_mobile_runtime_if_required(project_id: str) -> dict[str, Any]:
-    try:
-        project = projects_store.get_project(project_id)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to load project: {exc}") from exc
 
-    if not isinstance(project, dict):
-        raise HTTPException(status_code=404, detail="Project not found.")
-
-    target_type = str(project.get("targetType", "")).strip().lower()
-    if target_type != "mobile":
-        return {"skipped": True, "reason": "project is not a mobile target"}
-
-    target_config = project.get("targetConfig")
-    if not isinstance(target_config, dict):
-        target_config = {}
-
-    target_path = str(target_config.get("file_path") or project.get("target") or "").strip()
-    if not target_path:
-        return {"skipped": True, "reason": "mobile project has no uploaded artifact path"}
-
-    try:
-        prepared = prepare_mobile_runtime_for_project(project)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        return {
-            "requested": True,
-            "runtime_available": False,
-            "prepared": False,
-            "execution_mode": "static_only",
-            "fallback_mode": "static_only",
-            "warning": (
-                "Dynamic mobile runtime is disabled in this deployment. "
-                f"Continuing with static APK analysis only: {exc}"
-            ),
-            "error": str(exc),
-        }
-
-    package_name = str(prepared.get("package_name") or "").strip()
-    if package_name and not str(target_config.get("package_name") or "").strip():
-        target_config["package_name"] = package_name
-        project["targetConfig"] = target_config
-        try:
-            projects_store.upsert_project(project)
-        except Exception:
-            pass
-
-    return {
-        "requested": True,
-        "runtime_available": False,
-        "prepared": False,
-        "execution_mode": "static_only",
-        "fallback_mode": "static_only",
-        **prepared,
-    }
 
 
 @router.post("/api/scans/start")
@@ -116,7 +60,6 @@ async def start_scan(payload: StartScanPayload) -> dict[str, Any]:
         if not has_saved_usable_llm_profile():
             raise HTTPException(status_code=409, detail=llm_required_response())
 
-        mobile_runtime = _prepare_mobile_runtime_if_required(payload.project_id)
         result = await scan_orchestrator.start_scan(
             payload.project_id,
             target=payload.target or "",
@@ -139,7 +82,6 @@ async def start_scan(payload: StartScanPayload) -> dict[str, Any]:
 
     return {
         "ok": True,
-        "mobile_runtime": mobile_runtime,
         **result,
     }
 
@@ -148,13 +90,6 @@ async def start_scan(payload: StartScanPayload) -> dict[str, Any]:
 async def stop_scan(payload: StopScanPayload) -> dict[str, Any]:
     try:
         result = await scan_orchestrator.stop_scan(payload.project_id, mode=payload.mode)
-        mobile_runtime_cleanup: dict[str, Any] = {"skipped": True, "reason": "not a mobile artifact target"}
-        try:
-            project = projects_store.get_project(payload.project_id)
-            if isinstance(project, dict):
-                mobile_runtime_cleanup = stop_mobile_runtime_for_project(project)
-        except Exception as cleanup_exc:
-            mobile_runtime_cleanup = {"error": str(cleanup_exc)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -162,7 +97,7 @@ async def stop_scan(payload: StopScanPayload) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to stop scan: {exc}") from exc
 
-    return {**result, "mobile_runtime_cleanup": mobile_runtime_cleanup}
+    return {**result}
 
 
 @router.post("/api/scans/{project_id}/approve-planner")

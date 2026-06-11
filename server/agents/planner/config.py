@@ -8,7 +8,7 @@ CHECKLIST_MAX_TOOL_ROUNDS = 3
 
 PLANNER_CALL_TIMEOUT_SECONDS: int = 600
 
-PLANNER_MAX_TOKENS_PER_REQUEST: int = 4096
+PLANNER_MAX_TOKENS_PER_REQUEST: int = 8192
 
 MAX_TOOL_RESULT_CHARS: int = 1200
 
@@ -21,7 +21,7 @@ PLANNER_CHECKLIST_SUMMARY_MAX_CHANGED_ITEMS: int = 10
 
 # Keep loop context bounded so Planner does not carry the full plan forever.
 # 0 => uncapped (no hard truncation). Set >0 to enforce a cap.
-PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE: int = 0
+PLANNER_LOOP_CONTEXT_MAX_STEPS_PER_PHASE: int = 6
 PLANNER_LOOP_CONTEXT_MAX_SCENARIOS_PER_STEP: int = 0
 
 _DISCOVERY_TOOLS = frozenset({"get_page", "search_kb", "search_web"})

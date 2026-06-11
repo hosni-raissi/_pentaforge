@@ -2860,27 +2860,12 @@ class AssistantAgent:
     @staticmethod
     def _allows_external_research(prompt: str) -> bool:
         lowered = str(prompt or "").strip().lower()
-        if not lowered:
-            return False
         
         # Explicit block if user wants to stay offline
         if any(token in lowered for token in ("offline", "no internet", "without internet", "local only")):
             return False
             
-        # Allow by default if any web-related intent is detected, 
-        # or just allow by default for assistant-style queries.
-        web_tokens = (
-            "search", "web", "online", "google", "find", "look up", "research",
-            "cve", "vuln", "advisory", "latest", "current", "recent", "news",
-            "browse", "internet", "sourch", # Added sourch for the user's typo
-        )
-        if any(token in lowered for token in web_tokens):
-            return True
-            
-        # Default to False for very short or non-research queries to save tokens/latency
-        if len(lowered.split()) < 3:
-            return False
-            
+        # Always allow external research by default. The agent decides when to use it.
         return True
 
     @staticmethod

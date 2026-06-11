@@ -36,7 +36,7 @@ _RAW_IOT_RECON_TOOLS: dict[str, dict[str, object]] = {
     "ffuf": {
         "t": "fuzz",
         "c": "dir_param_fuzz",
-        "u": "ffuf -u http://TARGET/FUZZ -w (WORDLIST:iot_paths) -mc 200,302,403 -H 'Authorization: Bearer (SECRET:iot_token)' -silent 2>/dev/null",
+        "u": "ffuf -u http://TARGET/FUZZ -w (WORDLIST:iot_paths) -mc 200,302,403 -H 'Authorization: Bearer (SECRET:iot_token)' -s 2>/dev/null",
         "d": ["directory brute", "parameter fuzzing", "vhost discovery", "auth endpoint testing"],
         "tgt": ["web", "api", "auth_endpoints", "iot_admin"],
         "note": "(WORDLIST:iot_paths) and (SECRET:iot_token) resolved at runtime"

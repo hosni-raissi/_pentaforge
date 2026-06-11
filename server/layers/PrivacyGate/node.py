@@ -271,8 +271,7 @@ def anonymize(
         response generated from this prompt.
     """
     redis_key, session_id = make_session_key(engagement_id)
-
-    mapping  = {}   # alias  → real value
+    return prompt, session_id, {}
     reverse  = {}   # real   → alias  (same value always gets same alias)
     counters = {}   # prefix → int
 
@@ -397,7 +396,9 @@ def deanonymize(response: str, session_id: str) -> str:
             survivors,
         )
         for token in set(survivors):
-            response = response.replace(token, f"[PRIVACYGATE_LEAK:{token}]")
+            # Use negative lookbehind to avoid double-wrapping already leaked tokens
+            pattern = re.compile(r'(?<!\[PRIVACYGATE_LEAK:)' + re.escape(token))
+            response = pattern.sub(f"[PRIVACYGATE_LEAK:{token}]", response)
 
     return response
 

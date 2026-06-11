@@ -117,6 +117,7 @@ interface PlannerPlanSummary {
 interface PlannerScenarioView {
   scenario: string;
   agent: string;
+  priority?: number;
   status: "completed" | "working" | "not yet";
   plannerRound: string;
 }
@@ -1925,6 +1926,7 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
         const nextScenario: PlannerScenarioView = {
           scenario: task,
           agent: normalizeText(rawScenario.agent) || "recon",
+          priority: normalizePriority(rawScenario.priority) ?? undefined,
           status: normalizeScenarioStatus(
             rawScenario.status,
             rawScenario.done === true,
@@ -2530,7 +2532,9 @@ export default function Dashboard() {
           at: event.timestamp,
           source: detectLogSource(event),
         };
-        return [...previous, nextEntry];
+        const nextList = [...previous, nextEntry];
+        if (nextList.length > 500) return nextList.slice(-500);
+        return nextList;
       });
 
       if (!isLive) {
@@ -3161,7 +3165,9 @@ export default function Dashboard() {
             at: new Date().toISOString(),
             source: "system",
           };
-          return [...previous, nextEntry];
+          const nextList = [...previous, nextEntry];
+          if (nextList.length > 500) return nextList.slice(-500);
+          return nextList;
         });
         void hydrateFromDatabase();
         if (streamRetryRef.current < 3) {
@@ -3727,7 +3733,9 @@ export default function Dashboard() {
           at: new Date().toISOString(),
           source: "planner",
         };
-        return [...previous, nextEntry];
+        const nextList = [...previous, nextEntry];
+        if (nextList.length > 500) return nextList.slice(-500);
+        return nextList;
       });
     } finally {
       setPlannerApprovalLoading(false);
@@ -3794,7 +3802,9 @@ export default function Dashboard() {
           at: new Date().toISOString(),
           source: "executer",
         };
-        return [...previous, nextEntry];
+        const nextList = [...previous, nextEntry];
+        if (nextList.length > 500) return nextList.slice(-500);
+        return nextList;
       });
     } finally {
       setToolApprovalLoading(null);
@@ -3833,7 +3843,9 @@ export default function Dashboard() {
           at: new Date().toISOString(),
           source: "executer",
         };
-        return [...previous, nextEntry];
+        const nextList = [...previous, nextEntry];
+        if (nextList.length > 500) return nextList.slice(-500);
+        return nextList;
       });
     } finally {
       setPasswordResponseLoading(null);
@@ -3872,7 +3884,9 @@ export default function Dashboard() {
           at: new Date().toISOString(),
           source: "system",
         };
-        return [...previous, nextEntry];
+        const nextList = [...previous, nextEntry];
+        if (nextList.length > 500) return nextList.slice(-500);
+        return nextList;
       });
       return;
     }
@@ -4395,27 +4409,33 @@ export default function Dashboard() {
   })();
   const missionAction: MissionControlAction | null = (() => {
     if (pendingPasswordRequest) {
+      const isSudo = pendingPasswordRequest.toolName?.toLowerCase() === "sudo";
+      
       return {
-        title: `${pendingPasswordRequest.toolName || "External tool"} needs credentials`,
-        detail: pendingPasswordRequest.reason || pendingPasswordRequest.prompt || "Provide credentials or deny the prompt so the scan can continue safely.",
+        title: isSudo ? `Approve sudo command` : `${pendingPasswordRequest.toolName || "External tool"} needs credentials`,
+        detail: isSudo
+          ? `Review the command: ${pendingPasswordRequest.reason || pendingPasswordRequest.prompt}`
+          : pendingPasswordRequest.reason || pendingPasswordRequest.prompt || "Provide credentials or deny the prompt so the scan can continue safely.",
         tone: "warn",
         controls: (
           <div className="flex flex-col gap-2">
-            <Input
-              type="password"
-              autoFocus
-              autoComplete="new-password"
-              spellCheck={false}
-              value={pendingPasswordValue}
-              onChange={(event) => setPendingPasswordValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && pendingPasswordValue.length > 0) {
-                  void handlePasswordResponse(true);
-                }
-              }}
-              placeholder="Verification password..."
-              className="min-h-9 rounded-xl border-amber-400/50 bg-white/90 px-3 text-sm shadow-sm placeholder:text-slate-400"
-            />
+            {!isSudo && (
+              <Input
+                type="password"
+                autoFocus
+                autoComplete="new-password"
+                spellCheck={false}
+                value={pendingPasswordValue}
+                onChange={(event) => setPendingPasswordValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && pendingPasswordValue.length > 0) {
+                    void handlePasswordResponse(true);
+                  }
+                }}
+                placeholder="Verification password..."
+                className="min-h-9 rounded-xl border-amber-400/50 bg-white/90 px-3 text-sm shadow-sm placeholder:text-slate-400"
+              />
+            )}
             <div className="grid grid-cols-2 gap-2">
               <Button
                 variant="primary"
@@ -4424,9 +4444,9 @@ export default function Dashboard() {
                   void handlePasswordResponse(true);
                 }}
                 loading={passwordResponseLoading === "approve"}
-                disabled={pendingPasswordValue.length === 0}
+                disabled={!isSudo && pendingPasswordValue.length === 0}
               >
-                Verify
+                {isSudo ? "Allow" : "Verify"}
               </Button>
               <Button
                 variant="secondary"
@@ -5235,30 +5255,36 @@ export default function Dashboard() {
         if (stage !== passwordStage) {
           return null;
         }
+        
+        const isSudo = pendingPasswordRequest.toolName?.toLowerCase() === "sudo";
+
         return {
-          title: `${pendingPasswordRequest.toolName || 'External tool'} needs credentials`,
-          detail:
-            pendingPasswordRequest.reason
-            || pendingPasswordRequest.prompt
-            || 'Provide credentials or deny the prompt so the scan can continue safely.',
+          title: isSudo ? `Approve sudo command` : `${pendingPasswordRequest.toolName || 'External tool'} needs credentials`,
+          detail: isSudo
+            ? `Review the command: ${pendingPasswordRequest.reason || pendingPasswordRequest.prompt}`
+            : pendingPasswordRequest.reason
+              || pendingPasswordRequest.prompt
+              || 'Provide credentials or deny the prompt so the scan can continue safely.',
           tone: 'warn',
           controls: (
             <div className="flex flex-col gap-2">
-              <Input
-                type="password"
-                autoFocus
-                autoComplete="new-password"
-                spellCheck={false}
-                value={pendingPasswordValue}
-                onChange={(event) => setPendingPasswordValue(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && pendingPasswordValue.length > 0) {
-                    void handlePasswordResponse(true);
-                  }
-                }}
-                placeholder="Verification password..."
-                className="min-h-9 rounded-xl border-amber-400/50 bg-white/90 px-3 text-sm shadow-sm placeholder:text-slate-400"
-              />
+              {!isSudo && (
+                <Input
+                  type="password"
+                  autoFocus
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  value={pendingPasswordValue}
+                  onChange={(event) => setPendingPasswordValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && pendingPasswordValue.length > 0) {
+                      void handlePasswordResponse(true);
+                    }
+                  }}
+                  placeholder="Verification password..."
+                  className="min-h-9 rounded-xl border-amber-400/50 bg-white/90 px-3 text-sm shadow-sm placeholder:text-slate-400"
+                />
+              )}
               <div className="grid grid-cols-2 gap-2">
                 <Button
                   size="sm"
@@ -5268,9 +5294,9 @@ export default function Dashboard() {
                     void handlePasswordResponse(true);
                   }}
                   loading={passwordResponseLoading === 'approve'}
-                  disabled={pendingPasswordValue.length === 0}
+                  disabled={!isSudo && pendingPasswordValue.length === 0}
                 >
-                  Verify
+                  {isSudo ? "Allow" : "Verify"}
                 </Button>
                 <Button
                   size="sm"
@@ -5779,16 +5805,20 @@ export default function Dashboard() {
       await hydrateFromDatabase();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to mark finding as false positive.";
-      setStreamLogs((previous) => [
-        ...previous,
-        {
-          id: `false-positive-error-${Math.random().toString(36).slice(2, 10)}`,
-          level: "warn",
-          message,
-          at: new Date().toISOString(),
-          source: "system",
-        },
-      ]);
+      setStreamLogs((previous) => {
+        const nextList = [
+          ...previous,
+          {
+            id: `false-positive-error-${Math.random().toString(36).slice(2, 10)}`,
+            level: "warn",
+            message,
+            at: new Date().toISOString(),
+            source: "system",
+          } as DashboardLogEntry,
+        ];
+        if (nextList.length > 500) return nextList.slice(-500);
+        return nextList;
+      });
     } finally {
       setFalsePositiveLoadingId(null);
     }
@@ -6100,6 +6130,7 @@ export default function Dashboard() {
                                                   {scenario.scenario}
                                                 </p>
                                                 <div className="flex items-center gap-1.5">
+                                                  
                                                   {scenario.plannerRound ? (
                                                     <span className="rounded border border-pf-500/30 bg-pf-500/10 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-pf-200">
                                                       {scenario.plannerRound}
@@ -6110,6 +6141,11 @@ export default function Dashboard() {
                                                   >
                                                     {scenario.status}
                                                   </span>
+                                                  {scenario.priority ? (
+                                                    <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-[11px]">
+                                                      S{scenario.priority}
+                                                    </span>
+                                                  ) : null}
                                                   <span className="rounded border border-border bg-surface-1/55 px-1.5 py-0.5 text-text-muted text-xs">
                                                     {scenario.agent}
                                                   </span>

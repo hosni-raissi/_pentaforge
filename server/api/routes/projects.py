@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict
 from server.api.dependencies import projects_store
 from server.agents.assistant.tools.mark_false_positive import mark_false_positive as mark_project_finding_false_positive
 from server.agents.executer.sandbox import delete_project_workspace
-from server.app.mobile_runtime import prepare_mobile_runtime_for_project, uninstall_mobile_runtime_for_project
 from server.db.projects.config import projects_db_config
 
 router = APIRouter(tags=["projects"])
@@ -166,14 +165,8 @@ def upsert_project(project: ProjectPayload) -> dict[str, Any]:
 
 @router.delete("/api/projects/{project_id}")
 def delete_project(project_id: str) -> dict[str, Any]:
-    mobile_runtime_cleanup: dict[str, Any] = {"skipped": True, "reason": "project unavailable"}
     try:
         project = projects_store.get_project(project_id)
-        if isinstance(project, dict):
-            try:
-                mobile_runtime_cleanup = uninstall_mobile_runtime_for_project(project)
-            except Exception as cleanup_exc:
-                mobile_runtime_cleanup = {"error": str(cleanup_exc)}
         projects_store.delete_project(project_id)
         deleted_cache = _delete_project_runtime_artifacts(
             project_id,
@@ -187,7 +180,6 @@ def delete_project(project_id: str) -> dict[str, Any]:
         "id": project_id,
         **deleted_cache,
         **deleted_uploads,
-        "mobile_runtime_cleanup": mobile_runtime_cleanup,
     }
 
 
@@ -196,10 +188,6 @@ def reset_project_runtime(project_id: str) -> dict[str, Any]:
     try:
         project = projects_store.reset_project_runtime_state(project_id)
         deleted_cache = _delete_project_runtime_artifacts(project_id, project_payload=project)
-        try:
-            mobile_runtime_cleanup = uninstall_mobile_runtime_for_project(project)
-        except Exception as cleanup_exc:
-            mobile_runtime_cleanup = {"error": str(cleanup_exc)}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -211,7 +199,6 @@ def reset_project_runtime(project_id: str) -> dict[str, Any]:
         "project": project,
         "id": project_id,
         **deleted_cache,
-        "mobile_runtime_cleanup": mobile_runtime_cleanup,
     }
 
 
@@ -317,43 +304,3 @@ async def upload_mobile_artifact(
         "content_type": str(file.content_type or ""),
     }
 
-
-@router.post("/api/projects/{project_id}/mobile-runtime/prepare")
-def prepare_mobile_runtime(project_id: str) -> dict[str, Any]:
-    try:
-        project = projects_store.get_project(project_id)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to load project: {exc}") from exc
-
-    if not isinstance(project, dict):
-        raise HTTPException(status_code=404, detail="Project not found.")
-
-    target_type = str(project.get("targetType", "")).strip().lower()
-    if target_type != "mobile":
-        raise HTTPException(status_code=400, detail="Mobile runtime preparation is only available for mobile projects.")
-
-    target_config = project.get("targetConfig")
-    if not isinstance(target_config, dict):
-        target_config = {}
-
-    target_path = str(target_config.get("file_path") or project.get("target") or "").strip()
-    if not target_path:
-        raise HTTPException(status_code=400, detail="Mobile project has no uploaded artifact path.")
-
-    try:
-        prepared = prepare_mobile_runtime_for_project(project)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to prepare mobile runtime: {exc}") from exc
-
-    package_name = str(prepared.get("package_name") or "").strip()
-    if package_name and not str(target_config.get("package_name") or "").strip():
-        target_config["package_name"] = package_name
-        project["targetConfig"] = target_config
-        try:
-            projects_store.upsert_project(project)
-        except Exception:
-            pass
-
-    return {"ok": True, "project_id": project_id, **prepared}

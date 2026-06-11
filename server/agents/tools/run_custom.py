@@ -658,7 +658,6 @@ def _command_needs_password(command: str, args: list[str]) -> tuple[bool, str]:
         "ssh": "SSH authentication",
         "sshpass": "SSH with password",
         "ssh-keyscan": "SSH key scanning",
-        "sudo": "Privilege escalation",
         "mysql": "MySQL authentication",
         "psql": "PostgreSQL authentication",
         "sqlite3": "SQLite access",

@@ -477,13 +477,13 @@ export default function ClientShare() {
                       {isPentester && <span className="text-emerald-400">You</span>}
                     </div>
                     <div
-                      className={`max-w-[85%] rounded-2xl px-5 py-3.5 text-base shadow-lg ring-1 transition-all hover:ring-2 ${
+                      className={`max-w-[85%] rounded-2xl px-5 py-3.5 text-base shadow-lg ring-1 transition-all hover:ring-2 min-w-0 ${
                         isPentester
                           ? "rounded-tr-none bg-pf-600 text-white ring-pf-400/30"
                           : "rounded-tl-none bg-surface-2 text-text-primary ring-border"
                       }`}
                     >
-                      <p className="leading-relaxed whitespace-pre-wrap break-words text-base">{message.content}</p>
+                      <p className="leading-relaxed whitespace-pre-wrap break-words break-all text-base">{message.content}</p>
                     </div>
                   </div>
                 );

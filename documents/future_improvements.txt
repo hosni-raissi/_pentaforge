@@ -1,0 +1,26 @@
+# PentaForge: Future Intelligence Upgrades
+
+To take PentaForge from a "great" AI tool to a world-class, state-of-the-art AI hacker, the system needs deeper reasoning capabilities beyond stringing commands together. Here are the core architectural upgrades to implement:
+
+## 1. Self-Correction & Auto-Debugging (The "Critic" Node)
+Right now, if an agent runs a command and it fails (e.g., `curl` times out, or `nuclei` throws a syntax error), it often just marks it as "failed" and gives up.
+**Upgrade:** Add a "Critic" or "Debugger" layer. If a tool returns an error code, the agent should intercept the `stderr`, read the error message, realize its mistake, rewrite the command, and try again automatically before returning to the Planner.
+
+## 2. Vision Integration (Screenshot Analysis)
+Many web vulnerabilities are obvious to a human looking at a screen but invisible in pure HTML code (e.g., CAPTCHAs, weird UI rendering from XSS, or recognizing a specific CMS admin panel).
+**Upgrade:** Integrate Playwright/Puppeteer to take a screenshot of the target, and pass that image to a Vision model (like GPT-4o or Claude 3.5 Sonnet). Let the AI "look" at the webpage to identify login portals, default splash screens, or error messages.
+
+## 3. Dynamic Wordlist Generation
+Using standard SecLists (like `burp-parameter-names.txt`) is good, but basic.
+**Upgrade:** If the AI determines the target is a "Hospital Management System", it should use its LLM brain to dynamically generate a custom wordlist on the fly (e.g., `/api/patients`, `/get_xray`, `/dental_records`, `doctor_id=`) and feed *that* custom list into `ffuf` or `gobuster`.
+
+## 4. Live Custom Exploit Writing (Python Sandbox)
+Standard tools like `sqlmap` or `nuclei` fail when a target uses custom AES encryption on their API endpoints or has a unique CSRF token flow.
+**Upgrade:** Allow the Exploit Agent to write its own custom Python scripts. The agent writes a custom Python exploit script, runs it in the sandbox, analyzes the traceback if it crashes, fixes the code, and runs it again until the exploit works.
+
+## 5. Semantic Memory (RAG for HackTheBox Writeups)
+LLMs sometimes hallucinate exploit commands because they vaguely remember the CVE.
+**Upgrade:** Create a Vector Database (like Qdrant) filled with thousands of verified Exploit-DB scripts, HackTheBox writeups, and Bug Bounty reports. Before the Exploit Agent attacks, it queries the database: *"How do I bypass the WAF for WebLogic CVE-2020-14882?"* The database returns the exact, proven payload structure for the agent to use.
+
+## 6. Multi-Agent Debate
+**Upgrade:** Let your agents talk to each other. If the Recon agent finds a potential SQL injection, force the Exploit agent to review the Recon agent's proof. If the Exploit agent thinks the Recon agent is hallucinating, it rejects the finding and sends the Recon agent back to gather more proof. This "peer-review" system drastically reduces false positives!

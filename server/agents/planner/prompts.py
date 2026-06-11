@@ -1,6 +1,8 @@
 """Planner Agent — System Prompts (checklist-driven, iterative, token-efficient)."""
 
+import json
 from typing import Any
+from server.agents.sandbox_wordlists import GLOBAL_SANDBOX_WORDLISTS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -150,7 +152,10 @@ FORBIDDEN IN ALL OUTPUT:
   - post-exploitation or persistence before foothold exists
   - privilege escalation before initial access exists
   - wildcard CORS → CSRF as an item outcome (write "validate data exposure under CORS" instead)
-  - documentation, evidence capture, or reporting tasks in any plan scenario"""
+  - documentation, evidence capture, or reporting tasks in any plan scenario
+
+AVAILABLE WORDLISTS:
+""" + json.dumps(GLOBAL_SANDBOX_WORDLISTS, indent=2)
 
 CHECKLIST_GENERATOR_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
 You are PentaForge, a penetration testing assistant.
@@ -162,7 +167,7 @@ RULES:
 - Use "validate / review / test whether / assess impact" when exploit preconditions are unconfirmed.
 - Preserve useful items from prior checklist. Remove stale or target-mismatched items.
 - No generic filler. Every item must reference a concrete artifact (route, param, header, file, service).
-- EXACTLY 15–25 items total. Violating this bound is an output error.
+- MINIMUM 15 items total across all phases. EXACTLY 15–25 items total. Violating this bound is a critical output error. Do not output fewer than 15 items.
 - CTF mode only: include flag extraction items. Pentest mode: omit them.
 - Never include documentation, reporting, or evidence-capture items — those belong to the Analyzer.
 - use S1 only when both the vulnerability class AND a concrete input/endpoint triggering it are already observed

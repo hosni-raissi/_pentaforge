@@ -55,7 +55,7 @@ _RAW_API_RECON_TOOLS: dict[str, dict[str, object]] = {
     "swagger-ui-enum": {
         "t": "enum",
         "c": "openapi_doc_discovery",
-        "u": "ffuf -u TARGET/FUZZ -w (WORDLIST:swagger) -mc 200 -mr 'swagger|openapi' -silent",
+        "u": "ffuf -u TARGET/FUZZ -w (WORDLIST:swagger) -mc 200 -mr 'swagger|openapi' -s",
         "d": ["Swagger/OpenAPI UI discovery", "API documentation enumeration", "Spec file location"],
         "tgt": ["openapi", "swagger", "api_docs", "developer_portal"]
     },
@@ -222,7 +222,7 @@ _RAW_API_RECON_TOOLS: dict[str, dict[str, object]] = {
     "ffuf-api-fuzz": {
         "t": "fuzz",
         "c": "api_endpoint_discovery",
-        "u": "ffuf -u TARGET/api/FUZZ -w (WORDLIST:api-endpoints) -mc 200,201,401,403,500 -t 50 -silent",
+        "u": "ffuf -u TARGET/api/FUZZ -w (WORDLIST:api-endpoints) -mc 200,201,401,403,500 -t 50 -s",
         "d": ["API endpoint brute-forcing", "Version path discovery", "Status code filtering"],
         "tgt": ["rest_api", "api_versions", "hidden_endpoints"]
     },
@@ -332,7 +332,7 @@ _RAW_API_RECON_TOOLS: dict[str, dict[str, object]] = {
     "hydra": {
     "t": "auth_bruteforce",
     "c": "online_password_spray",
-    "u": "echo '(WORDLIST:userpass)' | hydra -L - -P - -t 4 -f -o - TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]|password'",
+    "u": "hydra -L (WORDLIST:users) -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null",
     "d": [
         "online credential brute-forcing",
         "protocol-aware authentication testing",
@@ -345,8 +345,8 @@ _RAW_API_RECON_TOOLS: dict[str, dict[str, object]] = {
         "mysql", "postgres", "ldap", "smtp", "pop3", 
         "active_directory", "network_services", "auth_testing"
     ],
-    "note": "(WORDLIST:userpass) piped via stdin as 'user:pass' pairs; -o - outputs to stdout; SERVICE = ssh/ftp/http/etc.",
-    "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null | grep -E '^\\[\\+\\]'"
+    "note": "(WORDLIST:users) and (WORDLIST:passwords) resolved at runtime; SERVICE = ssh/ftp/http/etc.",
+    "alt": "hydra -l user -P (WORDLIST:passwords) -t 4 -f TARGET SERVICE 2>/dev/null"
     },
 
 

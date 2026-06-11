@@ -806,7 +806,7 @@ export default function Reports() {
                     >
                       <div
                         className={clsx(
-                          "rounded-xl px-4 py-2.5 text-sm shadow-sm",
+                          "rounded-xl px-4 py-2.5 text-sm shadow-sm whitespace-pre-wrap break-words break-all min-w-0",
                           msg.sender === "pentester"
                             ? "bg-pf-600 text-white rounded-tr-none"
                             : "bg-surface-2 text-text-primary border border-border/50 rounded-tl-none"

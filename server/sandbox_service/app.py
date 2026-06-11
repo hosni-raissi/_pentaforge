@@ -50,7 +50,7 @@ class SandboxExecutionContext(BaseModel):
 class RunCustomRemoteRequest(BaseModel):
     command: str
     args: list[str] = Field(default_factory=list)
-    timeout: int = Field(default=300, ge=5, le=600)
+    timeout: int = Field(default=300, ge=5, le=900)
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
     password: str | None = None
@@ -66,7 +66,7 @@ class RunPythonRemoteRequest(BaseModel):
     code_two: str = ""
     which_file_two: str = "two"
     install_deps: bool = True
-    timeout: int = Field(default=120, ge=5, le=600)
+    timeout: int = Field(default=120, ge=5, le=900)
     memory_limit_mb: int = Field(default=512, ge=64, le=4096)
     execution_context: SandboxExecutionContext = Field(default_factory=SandboxExecutionContext)
 

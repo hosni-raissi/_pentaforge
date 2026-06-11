@@ -152,15 +152,19 @@ def _build_target_placeholders(
             "repo_abs_path": repo_abs_path,
         }
 
-    parsed = urlsplit(raw if "://" in raw else f"//{raw}")
-    host = str(parsed.hostname or "").strip().lower()
-    if not host:
-        host = raw.split("/", 1)[0].split(":", 1)[0].strip().lower()
-
-    if "://" in raw:
+    if normalized_target_type == "network":
+        host = raw
         full_target = raw
     else:
-        full_target = f"https://{raw.lstrip('/')}"
+        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+        host = str(parsed.hostname or "").strip().lower()
+        if not host:
+            host = raw.split("/", 1)[0].split(":", 1)[0].strip().lower()
+
+        if "://" in raw:
+            full_target = raw
+        else:
+            full_target = f"https://{raw.lstrip('/')}"
 
     return {
         "target": raw,

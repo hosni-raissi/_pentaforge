@@ -78,7 +78,7 @@ export function ClientChat({ projectId }: ClientChatProps) {
                 <span className="text-[10px] text-text-muted mb-1 px-1">
                   {isMe ? "You" : "Client"} • {new Date(msg.created_at).toLocaleTimeString()}
                 </span>
-                <div className={`px-3 py-2 rounded-lg text-sm ${isMe ? "bg-pf-600 text-white rounded-br-none" : "bg-surface-2 text-text-primary border border-border rounded-bl-none"}`}>
+                <div className={`px-3 py-2 rounded-lg text-sm whitespace-pre-wrap break-words break-all min-w-0 ${isMe ? "bg-pf-600 text-white rounded-br-none" : "bg-surface-2 text-text-primary border border-border rounded-bl-none"}`}>
                   {msg.content}
                 </div>
               </div>

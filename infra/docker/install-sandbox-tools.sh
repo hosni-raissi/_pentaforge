@@ -344,7 +344,7 @@ run_best_effort "cloudbrute" bash -c '
 run_best_effort "paramspider-repo" bash -c '
   clone_repo "https://github.com/devanshbatham/paramspider" "${TOOLS_ROOT}/paramspider"
   cd "${TOOLS_ROOT}/paramspider"
-  pip install .
+  python3 -m pip install --prefer-binary .
   link_alias "$(which paramspider)" "paramspider"
 '
 
@@ -478,6 +478,8 @@ if [[ -f "${TOOLS_ROOT}/LinkFinder/linkfinder.py" ]]; then
 fi
 if [[ -f "${TOOLS_ROOT}/SecretFinder/SecretFinder.py" ]]; then
   write_python_wrapper "secretfinder" "${TOOLS_ROOT}/SecretFinder/SecretFinder.py"
+  # Also make sure it's executable directly just in case
+  chmod +x "${TOOLS_ROOT}/SecretFinder/SecretFinder.py"
 fi
 if [[ -f "${TOOLS_ROOT}/cloud_enum/cloud_enum.py" ]]; then
   write_python_wrapper "cloud_enum" "${TOOLS_ROOT}/cloud_enum/cloud_enum.py"

@@ -326,6 +326,25 @@ class AssistantExecuterCallback:
         reason: str,
         call_id: str,
     ) -> str | None:
+        from server.api.dependencies import projects_store
+        
+        # Check global system settings for automation password
+        project = projects_store.get_project(self.run.project_id) if self.run.project_id else None
+        approval_mode = "custom"
+        if isinstance(project, dict):
+            approval_mode = str(project.get("approval_mode", "custom")).lower().strip()
+            
+        if approval_mode == "auto":
+            import os
+            if os.geteuid() == 0:
+                return ""  # Auto-approve silently without a password when running as root
+
+        global_settings = projects_store.get_project("global_system_settings")
+        if isinstance(global_settings, dict):
+            sudo_pwd = global_settings.get("sudo_password")
+            if sudo_pwd and approval_mode == "auto":
+                return str(sudo_pwd)
+
         future = asyncio.run_coroutine_threadsafe(
             self._request_password_async(prompt, reason, call_id),
             self.loop

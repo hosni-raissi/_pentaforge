@@ -717,6 +717,18 @@ export async function resetSystemSettingsToDefaultsFromDesktop(): Promise<System
   });
 }
 
+export async function checkIsRootFromDesktop(): Promise<boolean> {
+  try {
+    const res = await fetch("http://127.0.0.1:8000/api/settings/is-root");
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!data.is_root;
+  } catch (err) {
+    console.error("Failed to check is-root status:", err);
+    return false;
+  }
+}
+
 export async function verifySudoPasswordFromDesktop(password: string): Promise<{ ok: boolean; message: string }> {
   if (!supportsDesktopProjectBridge()) {
     throw new Error("Desktop bridge required for this operation.");

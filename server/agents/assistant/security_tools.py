@@ -193,6 +193,13 @@ ASSISTANT_ALLOWED_NETWORK_COMMANDS: frozenset[str] = frozenset(
         "uniq",
         "wc",
         "whois",
+        "echo",
+        "printf",
+        "base64",
+        "tee",
+        "xargs",
+        "less",
+        "more",
     }
 )
 
@@ -267,60 +274,17 @@ ASSISTANT_TARGET_OPTIONAL_COMMANDS: frozenset[str] = frozenset(
         "trufflehog",
         "uniq",
         "wc",
+        "echo",
+        "printf",
+        "base64",
+        "tee",
+        "xargs",
+        "less",
+        "more",
     }
 )
 
-ASSISTANT_SANDBOX_WORDLISTS: dict[str, dict[str, object]] = {
-    "dns_short": {
-        "t": "wordlist",
-        "c": "dns",
-        "p": "wordlists/dns/subdomains_short.txt",
-        "d": ["fast subdomain brute force", "quick DNS checks"],
-        "use_with": ["gobuster dns", "dnsrecon"],
-    },
-    "web_files_short": {
-        "t": "wordlist",
-        "c": "web",
-        "p": "wordlists/web/files_short.txt",
-        "d": ["quick file discovery", "lightweight ffuf runs"],
-        "use_with": ["ffuf", "gobuster"],
-    },
-    "web_folders_short": {
-        "t": "wordlist",
-        "c": "web",
-        "p": "wordlists/web/folders_short.txt",
-        "d": ["quick directory enumeration"],
-        "use_with": ["ffuf", "gobuster"],
-    },
-    "passwords_short": {
-        "t": "wordlist",
-        "c": "passwords",
-        "p": "seclists/Passwords/Common-Credentials/passwords_short.txt",
-        "d": ["fast password audits", "credential checks"],
-        "use_with": ["hydra", "custom checks"],
-    },
-    "usernames_short": {
-        "t": "wordlist",
-        "c": "usernames",
-        "p": "seclists/Usernames/usernames_short.txt",
-        "d": ["fast username enumeration", "login audits"],
-        "use_with": ["hydra", "ffuf"],
-    },
-    "common_web_content": {
-        "t": "wordlist",
-        "c": "web",
-        "p": "seclists/Discovery/Web-Content/common_short.txt",
-        "d": ["common web content discovery"],
-        "use_with": ["ffuf", "gobuster"],
-    },
-    "seclists_root": {
-        "t": "wordlist_bundle",
-        "c": "seclists",
-        "p": "seclists/",
-        "d": ["bundled SecLists mirror in sandbox", "use for targeted lists"],
-        "use_with": ["ffuf", "gobuster", "custom recon"],
-    },
-}
+from server.agents.sandbox_wordlists import GLOBAL_SANDBOX_WORDLISTS as ASSISTANT_SANDBOX_WORDLISTS
 
 ASSISTANT_SANDBOX_RUN_CUSTOM_CATALOG: dict[str, dict[str, object]] = {
     "curl": {
