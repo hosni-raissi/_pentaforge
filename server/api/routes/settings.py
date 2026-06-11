@@ -35,6 +35,7 @@ class SystemSettings(BaseModel):
     llm_profiles: List[LLMProfile] = Field(default_factory=list)
     llm_mode: str = "public"
     fallback_profiles: List[LLMProfile] = Field(default_factory=list)
+    sudo_password: str | None = Field(default=None, description="Global root/sudo password for tool automation")
 
 
 def _profile_has_usable_config(profile: Any, llm_mode: str = "public") -> bool:
@@ -191,3 +192,44 @@ async def test_llm_config(profile: LLMProfile) -> dict[str, Any]:
     except Exception as exc:
         logger.error("llm_test_failed", error=str(exc))
         return {"ok": False, "message": str(exc)}
+
+class SudoValidationRequest(BaseModel):
+    password: str
+
+@router.post("/verify-sudo")
+def verify_sudo_password(payload: SudoValidationRequest) -> dict[str, Any]:
+    """Verify if the provided password is valid for root/sudo on the host system."""
+    import subprocess
+    pwd = payload.password
+    
+    # Method 1: Try sudo -S
+    try:
+        proc = subprocess.run(
+            ["sudo", "-S", "-v"],
+            input=f"{pwd}\n",
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if proc.returncode == 0:
+            return {"ok": True, "message": "Password verified via sudo"}
+    except FileNotFoundError:
+        pass # sudo not installed
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Method 2: Try su root
+    try:
+        import pexpect
+        child = pexpect.spawn("su", ["-c", "echo OK", "root"], timeout=5)
+        index = child.expect([r"(?i)password:", pexpect.EOF, pexpect.TIMEOUT])
+        if index == 0:
+            child.sendline(pwd)
+            child.expect(pexpect.EOF)
+            out = child.before.decode(errors="ignore").strip()
+            if "OK" in out or "su: Authentication failure" not in out:
+                return {"ok": True, "message": "Password verified via su"}
+    except Exception:
+        pass
+
+    return {"ok": False, "message": "Authentication failed. Incorrect password or not supported on this system."}

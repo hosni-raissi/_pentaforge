@@ -52,6 +52,16 @@ class ProjectsStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _normalize_db_timestamp(self, ts: Any) -> str:
+        s = str(ts or "").strip()
+        if not s:
+            return ""
+        if " " in s and "T" not in s:
+            s = s.replace(" ", "T")
+        if not s.endswith("Z") and "+" not in s:
+            s += "Z"
+        return s
+
     def init_schema(self) -> None:
         with self._connect() as conn:
             cur = conn.cursor()
@@ -1347,8 +1357,8 @@ class ProjectsStore:
             "scope_key": str(row["scope_key"] or ""),
             "status": str(row["status"]),
             "payload": payload,
-            "created_at": str(row["created_at"]),
-            "updated_at": str(row["updated_at"]),
+            "created_at": self._normalize_db_timestamp(row["created_at"]),
+            "updated_at": self._normalize_db_timestamp(row["updated_at"]),
         }
 
     def list_task_runs(
@@ -1420,8 +1430,8 @@ class ProjectsStore:
                     "scope_key": str(row["scope_key"] or ""),
                     "status": str(row["status"]),
                     "payload": payload,
-                    "created_at": str(row["created_at"]),
-                    "updated_at": str(row["updated_at"]),
+                    "created_at": self._normalize_db_timestamp(row["created_at"]),
+                    "updated_at": self._normalize_db_timestamp(row["updated_at"]),
                 }
             )
         return results

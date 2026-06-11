@@ -21,6 +21,8 @@
 \usepackage{fancyhdr}
 \usepackage[most]{tcolorbox}
 \usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
 
 % ── Default page style: footer only (line + page number right) ─────────────
 \pagestyle{fancy}
@@ -806,7 +808,12 @@ followed by six two-week development sprints.
         for single-command deployment
     \end{itemize}
 \end{enumerate}
-
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{sprint_timeline.png}
+    \caption{PentaForge sprint timeline across the 16-week internship}
+    \label{fig:sprint_timeline}
+\end{figure}
 \section{Conclusion}
 
 This first chapter has established the general framework of the internship at Talan,
@@ -838,6 +845,9 @@ tools, and the specific gap that PentaForge is designed to fill.
 \addcontentsline{toc}{chapter}{Chapter 2 --- State of the Art}
 \setcounter{chapter}{2}
 \setcounter{section}{0}
+% Reset float counters because chapter headings are manual (no \chapter command)
+\setcounter{table}{0}
+\setcounter{figure}{0}
 
 \section{Introduction}
 
@@ -950,7 +960,6 @@ capability is central to the design of PentaForge's Exploit and Report agents.
 
 A penetration test follows a structured methodology defined by the PTES
 (Penetration Testing Execution Standard)~\cite{ptes} and aligned with the MITRE ATT\&CK framework~\cite{mitreattack}. This cycle comprises five fundamental phases:
-
 \begin{enumerate}
     \item \textbf{Reconnaissance} --- passive and active collection of information
     about the target: open ports, exposed services, technology stack, and
@@ -964,6 +973,29 @@ A penetration test follows a structured methodology defined by the PTES
     \item \textbf{Reporting} --- documentation of findings, evidence, severity
     ratings, and remediation recommendations.
 \end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \begin{tikzpicture}[
+        node distance=8mm,
+        phase/.style={draw, rounded corners, align=center, font=\small, inner xsep=8pt, inner ysep=6pt},
+        arr/.style={-Latex, thick}
+    ]
+        \node[phase] (recon) {Reconnaissance};
+        \node[phase, below=of recon] (scan) {Scanning \\ \& Enumeration};
+        \node[phase, below=of scan] (exploit) {Exploitation};
+        \node[phase, below=of exploit] (post) {Post-Exploitation};
+        \node[phase, below=of post] (report) {Reporting};
+
+        \draw[arr] (recon) -- (scan);
+        \draw[arr] (scan) -- (exploit);
+        \draw[arr] (exploit) -- (post);
+        \draw[arr] (post) -- (report);
+    \end{tikzpicture}
+    \caption{Traditional penetration testing lifecycle phases (PTES-inspired)}
+    \label{fig:pentest_lifecycle}
+\end{figure}
+
 
 Executed manually, this cycle takes an average of two to four weeks for a standard
 engagement~\cite{triaxiomTimeline,valuementorLifecycle}. AI allows this timeframe to
@@ -1053,16 +1085,19 @@ non-technical stakeholders.
     \label{tab:ai_gains}
 \end{table}
 % ── Section 3 ─────────────────────────────────────────────────────────────
-% ── Section 3 ─────────────────────────────────────────────────────────────
 \section{Existing Solutions and Comparative Analysis}
+
+This section reviews five representative AI-assisted penetration testing solutions.
+Each tool is assessed against a shared set of evaluation criteria to make the comparison
+consistent and to surface differences in scope, autonomy, evidence handling, and integration maturity.
 
 \subsection{PentestGPT}
 
 PentestGPT~\cite{pentestgpt2023} is an open-source solution that integrates an LLM
-into a pentester's workflow via a CLI interface. Its architecture is based on a
-three-module reasoning loop: a Reasoning Module for strategic planning, a Generation
-Module for command and payload generation, and a Parsing Module for analyzing tool
-outputs and feeding results back to the reasoning layer.
+into a pentester's workflow through a command-line interface. Its architecture relies on
+a three-module reasoning loop: a Reasoning Module for planning, a Generation Module for
+command and payload creation, and a Parsing Module that interprets tool outputs and
+feeds them back into the reasoning layer. Because it functions primarily as an interactive co-pilot, the human operator remains responsible for manually executing the suggested commands and pasting the results back into the prompt, which limits its true operational autonomy.
 
 \textbf{Strengths:} context maintenance over long sessions, support for local LLMs
 via Ollama, and multi-category coverage across web, crypto, forensics, and privilege
@@ -1075,12 +1110,11 @@ monolithic architecture with no agent parallelization.
 \subsection{Burp Suite AI (PortSwigger)}
 
 Burp Suite Professional~\cite{burpsuiteAI} introduced Burp AI in its 2025.2 release,
-adding a set of AI-powered features to its web application penetration testing
-workflow. Its Explore Issue feature autonomously investigates vulnerabilities
-identified by the scanner, attempting exploits and identifying additional attack
-vectors as a human pentester would. A dedicated AI-assisted false positive reduction
-mechanism filters out broken access control false positives before they are reported,
-reducing manual verification effort.
+adding AI-assisted features to its web application penetration testing workflow. The
+Explore Issue feature autonomously investigates scanner findings by attempting
+exploitation steps and uncovering additional attack vectors. In addition, an
+AI-assisted false positive reduction mechanism filters broken access control false
+positives before reporting, reducing manual verification effort. Unlike standalone autonomous agents, Burp AI is deeply embedded within a traditional proxy-based workflow, serving as an advanced accelerator for human-led testing rather than an independent orchestrator.
 
 \textbf{Strengths:} autonomous vulnerability follow-up with automated exploit
 attempts, AI-assisted false positive reduction for access control issues, and an
@@ -1094,10 +1128,10 @@ reports; and a costly commercial license.
 
 \subsection{KaliGPT}
 
-KaliGPT~\cite{kaligpt} integrates an LLM into Kali Linux, allowing execution and
-analysis of penetration testing commands via a structured workflow. Its \texttt{run}
-pattern automatically routes each tool execution through AI analysis without requiring
-manual copy-paste.
+KaliGPT~\cite{kaligpt} integrates an LLM into Kali Linux to support the execution and
+interpretation of penetration testing commands through a structured workflow. Its
+\texttt{run} pattern routes each tool execution through AI analysis without requiring
+manual copy-paste. While this streamlines the immediate execution-to-analysis loop, the tool acts primarily as an intelligent command-line wrapper rather than an autonomous planner capable of multi-step strategic reasoning.
 
 \textbf{Strengths:} elegant command analysis pattern, and a structured workflow
 covering the complete cycle from reconnaissance to reporting.
@@ -1109,8 +1143,8 @@ automatic structured report generation.
 \subsection{NodeZero (Horizon3.ai)}
 
 NodeZero~\cite{nodezero} is a commercial SaaS autonomous penetration testing platform
-representing the enterprise state of the art. It delivers end-to-end automation,
-multi-surface coverage, impact-based prioritization, and executive reporting.
+positioned for enterprise use. It provides end-to-end automation across multiple
+attack surfaces, impact-based prioritization, and executive-level reporting. It operates purely as a black-box testing engine, leveraging vast proprietary datasets to autonomously discover and chain vulnerabilities across complex enterprise networks.
 
 \textbf{Strengths:} the most complete automation available commercially, with
 persistent context and prioritized findings.
@@ -1122,13 +1156,13 @@ open-source access for research or adaptation.
 \subsection{Shannon (Keygraph)}
 
 Shannon~\cite{shannon} is an open-source, white-box AI pentester developed by
-Keygraph for web applications and APIs. It combines static source code analysis
-with live exploitation: it reads the application's source code to map attack vectors,
-then dispatches dedicated exploit agents --- running via Playwright browser automation
---- to confirm each hypothesis with a working proof of concept. Shannon enforces a
+Keygraph for web applications and APIs. It combines static source code analysis with
+live exploitation: it analyzes the application's source to identify attack vectors,
+then dispatches dedicated exploit agents (via Playwright browser automation) to
+confirm each hypothesis with a working proof of concept (PoC). Shannon enforces a
 strict ``PoC or it didn't happen'' policy: no vulnerability is reported without a
-verified exploit, and the platform reports a high exploit verification success rate
-on standardized security benchmarks.
+verified exploit, and the project reports a high exploit verification success rate on
+standardized security benchmarks.
 
 \textbf{Strengths:} parallel exploit agent architecture, automated PoC capture with
 full evidence chain, native false positive elimination through exploit verification,
@@ -1139,11 +1173,12 @@ making it unsuitable for black-box or grey-box engagements; limited to web
 applications and APIs with no network, cloud, or infrastructure coverage; no
 human-in-the-loop control layer; no conversational interface for querying findings
 or reports; and dependent on external API inference with no on-premise LLM option.
-
 \subsection{Comparative Matrix}
 
-Table~\ref{tab:comparison} summarizes the coverage of each solution across the
-criteria most relevant to PentaForge's design goals.
+In the following, we build a comparative matrix that maps each solution to a common
+set of evaluation criteria. This allows us to identify which capabilities are already
+well addressed in the market and which gaps remain. These gaps directly motivate the
+functional priorities and architectural choices retained for PentaForge.
 
 \begin{table}[H]
     \centering
@@ -1315,7 +1350,7 @@ Mistral Large~3 (Mistral AI), and Qwen~2.5~7B (Alibaba, served locally via
 Ollama)~\cite{qwen25report}.
 
 \subsection{Benchmark Results}
-
+To objectively determine the most suitable reasoning backbone for PentaForge, a comparative benchmark was conducted across three distinct categories of Large Language Models. \textbf{Gemini 2.5 Flash} was selected to represent high-throughput, massive-context API solutions; \textbf{Mistral Large 3} was evaluated as a high-performing open-weight alternative; and \textbf{Qwen 2.5 7B} was chosen to test the viability of a fully local, privacy-first model capable of running on consumer-grade hardware. The evaluation, synthesized in Table \ref{tab:llm_bench}, aligns directly with the architectural constraints identified previously: it measures each model's capacity to handle heavy token budgets (TPM), retain deep engagement memory, perform structured security reasoning, and meet the strict economic and confidentiality requirements of penetration testing.
 \begin{table}[H]
     \centering
     \renewcommand{\arraystretch}{1.45}
@@ -1740,10 +1775,13 @@ architecture for the platform.
 {\LARGE\bfseries Specification and Architecture}
 
 \vspace{0.8cm}
-
 \addcontentsline{toc}{chapter}{Chapter 3 --- Specification and Architecture}
 \setcounter{chapter}{3}
 \setcounter{section}{0}
+% Reset float counters because chapter headings are manual (no \chapter command)
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
 
 \section{Introduction}
 
@@ -1852,7 +1890,6 @@ from PentaForge. They are organized around four major operational
 responsibilities of the platform. Each group is presented with its scope
 description, the list of requirements it covers, and a dedicated use case
 diagram that zooms into the interactions relevant to that functional domain.
-
 % ── 3.1.3.1 ───────────────────────────────────────────────────────────────
 \subsubsection{Project and Scope Management}
 
@@ -1867,13 +1904,21 @@ throughout the assessment.
     \item The system shall support multiple target categories such as web
     applications, APIs, infrastructure, networks, cloud, mobile, IoT, containers,
     repositories, and Linux servers.
-    \item The system shall persist the complete project state, including target
-    metadata, scan state, reports, findings, and delivery information.
+    \item The system shall allow the pentester to explicitly define in-scope 
+    boundaries and out-of-scope exclusions (e.g., blacklisted IP ranges or sensitive 
+    endpoints) to prevent unauthorized automated interactions.
+    \item The system shall allow the operator to configure and securely store 
+    authentication profiles (e.g., session cookies, API tokens, or login credentials) 
+    required for authenticated (grey-box) target assessments.
     \item The system shall maintain editable information-gathering profiles for
     each target type so that reconnaissance baselines remain configurable from
     the UI.
+    \item The system shall persist the complete project state, including target
+    metadata, scan state, reports, findings, and delivery information.
+    \item The system shall provide a secure deletion mechanism to completely 
+    remove all project-related artifacts, vector memory, and execution logs 
+    once an engagement is formally closed.
 \end{itemize}
-
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.95\textwidth]{uc_project_scope.png}
@@ -2690,88 +2735,89 @@ one discarded alternative.
 
 \subsection{Backend and Infrastructure}
 
-\begin{table}[H]
-    \centering
-    \renewcommand{\arraystretch}{1.35}
-    \begin{tabular}{|p{0.22\textwidth}|p{0.24\textwidth}|p{0.44\textwidth}|}
-        \hline
-        \textbf{Technology} & \textbf{Discarded Alternative} & \textbf{Reason for
-        Choice} \\
-        \hline
-        FastAPI & Flask / Django & Clear async API structure, typed route contracts
-        and strong compatibility with SSE workflows. \\
-        \hline
-        Pydantic & Manual validation & Schema-driven request and state validation
-        for target configuration, scan requests and tool payloads. \\
-        \hline
-        SQLite Projects Store & Flat files only & Simple local persistence for
-        project-centric workflows without requiring a remote database. \\
-        \hline
-        Redis & In-process cache only & Explicit low-latency coordination and cache
-        boundary for runtime state. \\
-        \hline
-        Qdrant & Ad-hoc embedding files & Dedicated vector retrieval engine for
-        semantically indexed data and RAG context. \\
-        \hline
-        Docker Compose & Manual service startup & Reproducible multi-service local
-        deployment for backend, frontend, Redis, Qdrant and sandbox. \\
-        \hline
-        Uvicorn & Custom server wiring & Lightweight ASGI runtime suitable for
-        FastAPI services. \\
-        \hline
-        Structlog & Plain print debugging & Structured operational logging across
-        backend services and scan execution. \\
-        \hline
-        7-Zip / sandbox tooling & Unprotected local execution & Protected export
-        packaging and isolated command tooling. \\
-        \hline
-    \end{tabular}
-    \caption{Backend and infrastructure technology choices}
-    \label{tab:backend_stack}
-\end{table}
+\renewcommand{\arraystretch}{1.35}
+\begin{longtable}{|p{0.22\textwidth}|p{0.24\textwidth}|p{0.44\textwidth}|}
+\hline
+\textbf{Technology} & \textbf{Discarded Alternative} & \textbf{Reason for Choice} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Technology} & \textbf{Discarded Alternative} & \textbf{Reason for Choice} \\
+\hline
+\endhead
+FastAPI & Flask / Django & Clear async API structure, typed route contracts
+and strong compatibility with SSE workflows. \\
+\hline
+Pydantic & Manual validation & Schema-driven request and state validation
+for target configuration, scan requests and tool payloads. \\
+\hline
+SQLite Projects Store & Flat files only & Simple local persistence for
+project-centric workflows without requiring a remote database. \\
+\hline
+Redis & In-process cache only & Explicit low-latency coordination and cache
+boundary for runtime state. \\
+\hline
+Qdrant & Ad-hoc embedding files & Dedicated vector retrieval engine for
+semantically indexed data and RAG context. \\
+\hline
+Docker Compose & Manual service startup & Reproducible multi-service local
+deployment for backend, frontend, Redis, Qdrant and sandbox. \\
+\hline
+Uvicorn & Custom server wiring & Lightweight ASGI runtime suitable for
+FastAPI services. \\
+\hline
+Structlog & Plain print debugging & Structured operational logging across
+backend services and scan execution. \\
+\hline
+7-Zip / sandbox tooling & Unprotected local execution & Protected export
+packaging and isolated command tooling. \\
+\hline
+\caption{Backend and infrastructure technology choices}
+\label{tab:backend_stack}
+\end{longtable}
 
 \subsection{Frontend --- Desktop Application}
 
-\begin{table}[H]
-    \centering
-    \renewcommand{\arraystretch}{1.35}
-    \begin{tabular}{|p{0.22\textwidth}|p{0.24\textwidth}|p{0.44\textwidth}|}
-        \hline
-        \textbf{Technology} & \textbf{Category} & \textbf{Role} \\
-        \hline
-        React 19 & UI framework & Component model and responsive operator
-        interface. \\
-        \hline
-        Vite & Build tool & Fast development server, optimized bundles and
-        desktop-friendly frontend workflow. \\
-        \hline
-        Tailwind CSS & Styling & Utility-first styling, consistent spacing and
-        dark/light theme support. \\
-        \hline
-        shadcn/ui & Component library & Accessible primitives for forms, dialogs,
-        cards and report controls. \\
-        \hline
-        TanStack Query & Server state & HTTP data synchronization, caching and
-        refresh behavior. \\
-        \hline
-        Zustand & Client state & Active project, UI session and local operator
-        state. \\
-        \hline
-        Recharts & Data visualization & Scan progress, finding distributions and
-        dashboard metrics. \\
-        \hline
-        React Flow & Diagram rendering & Flow and architecture visualization inside
-        the desktop UI. \\
-        \hline
-        XTerm.js & Terminal emulator & Embedded terminal-style execution logs. \\
-        \hline
-        Tauri & Desktop packaging & Native shell around the web frontend with a
-        smaller footprint than Electron. \\
-        \hline
-    \end{tabular}
-    \caption{Frontend technology choices}
-    \label{tab:frontend_stack}
-\end{table}
+\renewcommand{\arraystretch}{1.35}
+\begin{longtable}{|p{0.22\textwidth}|p{0.24\textwidth}|p{0.44\textwidth}|}
+\hline
+\textbf{Technology} & \textbf{Category} & \textbf{Role} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Technology} & \textbf{Category} & \textbf{Role} \\
+\hline
+\endhead
+React 19 & UI framework & Component model and responsive operator
+interface. \\
+\hline
+Vite & Build tool & Fast development server, optimized bundles and
+desktop-friendly frontend workflow. \\
+\hline
+Tailwind CSS & Styling & Utility-first styling, consistent spacing and
+dark/light theme support. \\
+\hline
+shadcn/ui & Component library & Accessible primitives for forms, dialogs,
+cards and report controls. \\
+\hline
+TanStack Query & Server state & HTTP data synchronization, caching and
+refresh behavior. \\
+\hline
+Zustand & Client state & Active project, UI session and local operator
+state. \\
+\hline
+Recharts & Data visualization & Scan progress, finding distributions and
+dashboard metrics. \\
+\hline
+
+XTerm.js & Terminal emulator & Embedded terminal-style execution logs. \\
+\hline
+Tauri & Desktop packaging & Native shell around the web frontend with a
+smaller footprint than Electron. \\
+\hline
+\caption{Frontend technology choices}
+\label{tab:frontend_stack}
+\end{longtable}
 
 \subsection{Hardware Prerequisites}
 
@@ -2797,10 +2843,7 @@ one discarded alternative.
         \hline
         GPU & Not required for API-based execution. & 6GB VRAM recommended for
         running Qwen 2.5 7B locally via Ollama. \\
-        \hline
-        Network & Internet connection for initial setup and target reachability. &
-        Stable internet access for Docker pulls, package installation, remote LLM
-        calls, and live target access. \\
+        
         \hline
     \end{tabular}
     \caption{Hardware and system prerequisites for PentaForge deployment}
@@ -2874,10 +2917,13 @@ produced on a real test environment.
 {\LARGE\bfseries Implementation}
 
 \vspace{0.8cm}
-
 \addcontentsline{toc}{chapter}{Chapter 4 --- Implementation}
 \setcounter{chapter}{4}
 \setcounter{section}{0}
+% Reset float counters because chapter headings are manual (no \chapter command)
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
 
 \section{Introduction}
 
@@ -3261,7 +3307,7 @@ client delivery.
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{ui_projects.png}
-    \caption{Project management workspace}
+<<    \caption{Project management workspace}
     \label{fig:ui_projects}
 \end{figure}
 
@@ -3731,7 +3777,10 @@ extensible manner.
 
 % ── Restore default page style ─────────────────────────────────────────────
 \pagestyle{fancy}
-
+\fancyhf{}
+\fancyfoot[R]{\thepage}
+\renewcommand{\footrulewidth}{0.4pt}
+\renewcommand{\headrulewidth}{0pt}
 % ==================== GENERAL CONCLUSION ====================
 \newpage
 \thispagestyle{fancy}
@@ -3790,6 +3839,7 @@ and staying one step ahead of the adversary.
 % ==================== BIBLIOGRAPHY ====================
 \cleardoublepage
 \addcontentsline{toc}{chapter}{Bibliography}
+\renewcommand{\bibname}{Bibliography}
 \begin{thebibliography}{99}
 
 % ── Penetration Testing Methodology & Lifecycle ────────────────────────────

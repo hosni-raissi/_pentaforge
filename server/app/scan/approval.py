@@ -277,7 +277,7 @@ class ApprovalGateService:
     async def approve_info_gathering(
         self, 
         project_id: str, 
-        modified_program: List[Dict[str, Any]] | None = None
+        modified_program: list[Dict[str, Any]] | None = None
     ) -> Dict[str, Any]:
         project_key = str(project_id or "").strip()
         run_state = self._persistence.get_run_state(project_key)

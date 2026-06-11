@@ -191,7 +191,7 @@ export default function Settings() {
   const [showForceUpdatePanel, setShowForceUpdatePanel] = useState(false);
   const [llmProfiles, setLlmProfiles] = useState<LLMProfile[]>([]);
   const [fallbackProfiles, setFallbackProfiles] = useState<LLMProfile[]>([]);
-  const [llmMode, setLlmMode] = useState("public");
+  const [llmMode, setLlmMode] = useState<"public" | "local">("public");
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [profileName, setProfileName] = useState("");
   const [profileProvider, setProfileProvider] = useState("cerebras");
@@ -201,6 +201,10 @@ export default function Settings() {
   const [llmTestingId, setLlmTestingId] = useState<string | null>(null);
   const [llmTestResult, setLlmTestResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
   const [llmSaveLoading, setLlmSaveLoading] = useState(false);
+  const [sudoPassword, setSudoPassword] = useState("");
+  const [savedSudoPassword, setSavedSudoPassword] = useState("");
+  const [sudoVerifyLoading, setSudoVerifyLoading] = useState(false);
+  const [sudoVerifyResult, setSudoVerifyResult] = useState<{ok: boolean, message: string} | null>(null);
 
   const forceUpdateStatusValue = String(forceUpdateStatus?.status || "").toLowerCase();
   const forceUpdateIsActive = forceUpdateStatusValue === "running" || forceUpdateStatusValue === "cancelling";
@@ -295,6 +299,8 @@ export default function Settings() {
       if (remote.privacy_gate !== config.privacyGate) {
         config.updateConfig({ privacyGate: remote.privacy_gate });
       }
+      setSudoPassword(remote.sudo_password || "");
+      setSavedSudoPassword(remote.sudo_password || "");
     } catch (err) {
       console.error("Failed to sync system settings:", err);
     }
@@ -310,12 +316,14 @@ export default function Settings() {
       await updateSystemSettingsFromDesktop({
         privacy_gate: next,
         llm_profiles: llmProfiles,
-        llm_mode: llmMode
+        fallback_profiles: fallbackProfiles,
+        llm_mode: llmMode,
+        sudo_password: sudoPassword
       });
     } catch (err) {
       console.error("Failed to update backend privacy gate setting:", err);
     }
-  }, [config, llmProfiles, llmMode]);
+  }, [config, llmProfiles, llmMode, sudoPassword]);
   
   const redistributeLLMRoles = (profiles: LLMProfile[]): LLMProfile[] => {
     if (profiles.length === 0) return [];
@@ -337,7 +345,7 @@ export default function Settings() {
     setEditingProfileId(id);
   };
 
-  const handleSaveLLMSettings = async (profiles: LLMProfile[], mode: string) => {
+  const handleSaveLLMSettings = async (profiles: LLMProfile[], mode: "public" | "local") => {
     // Automatically redistribute roles before saving
     const balanced = redistributeLLMRoles(profiles);
     setLlmProfiles(balanced);
@@ -347,12 +355,62 @@ export default function Settings() {
       await updateSystemSettingsFromDesktop({
         privacy_gate: config.privacyGate,
         llm_profiles: balanced,
-        llm_mode: mode
+        fallback_profiles: fallbackProfiles,
+        llm_mode: mode,
+        sudo_password: sudoPassword
       });
     } catch (err) {
       console.error("Failed to save LLM settings:", err);
     } finally {
       setLlmSaveLoading(false);
+    }
+  };
+
+  const handleSaveSudo = async () => {
+    import("@/lib/projectBridge").then(async ({ verifySudoPasswordFromDesktop }) => {
+      setSudoVerifyLoading(true);
+      setSudoVerifyResult(null);
+      try {
+        const verifyResult = await verifySudoPasswordFromDesktop(sudoPassword);
+        if (!verifyResult.ok) {
+          setSudoVerifyResult({ ok: false, message: "Root password not correct." });
+          return;
+        }
+
+        await updateSystemSettingsFromDesktop({
+          privacy_gate: config.privacyGate,
+          llm_profiles: llmProfiles,
+          fallback_profiles: fallbackProfiles,
+          llm_mode: llmMode,
+          sudo_password: sudoPassword
+        });
+        setSavedSudoPassword(sudoPassword);
+        setSudoVerifyResult({ ok: true, message: "Done" });
+      } catch (err) {
+        setSudoVerifyResult({ ok: false, message: "Failed to save: " + (err instanceof Error ? err.message : String(err)) });
+      } finally {
+        setSudoVerifyLoading(false);
+      }
+    });
+  };
+
+  const handleDeleteSudo = async () => {
+    setSudoVerifyLoading(true);
+    setSudoVerifyResult(null);
+    try {
+      await updateSystemSettingsFromDesktop({
+        privacy_gate: config.privacyGate,
+        llm_profiles: llmProfiles,
+        fallback_profiles: fallbackProfiles,
+        llm_mode: llmMode,
+        sudo_password: ""
+      });
+      setSudoPassword("");
+      setSavedSudoPassword("");
+    } catch (err) {
+      setSudoVerifyResult({ ok: false, message: "Failed to delete: " + (err instanceof Error ? err.message : String(err)) });
+    } finally {
+      setSudoVerifyLoading(false);
     }
   };
 
@@ -1027,6 +1085,62 @@ export default function Settings() {
                   </div>
                 </div>
               </div>
+            )
+          },
+          {
+            id: "automation",
+            label: "Automation",
+            content: (
+              <Card className="space-y-4">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Cpu size={14} />
+                    Tool Automation
+                  </CardTitle>
+                </CardHeader>
+                <div className="space-y-3 px-1 pb-2">
+                  <p className="text-sm text-text-muted">
+                    Set a global root/sudo password. When projects are run in <strong>Auto-Approve</strong> mode, PentaForge will automatically use this password if tools like <code>sudo</code> or <code>su</code> request it.
+                  </p>
+                  <div className="flex flex-col gap-3">
+                    <Input
+                      label="Host Root/Sudo Password"
+                      type="password"
+                      placeholder="••••••••"
+                      value={sudoPassword}
+                      onChange={(e) => {
+                        setSudoPassword(e.target.value);
+                        if (sudoVerifyResult?.ok) {
+                          setSudoVerifyResult(null);
+                        }
+                      }}
+                      disabled={sudoVerifyLoading}
+                    />
+                    <div className="flex items-center gap-2">
+                      {savedSudoPassword && sudoPassword === savedSudoPassword ? (
+                        <>
+                          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-md text-sm font-bold">
+                            <CheckCircle2 size={16} />
+                            Done
+                          </div>
+                          <Button size="sm" variant="ghost" onClick={handleDeleteSudo} loading={sudoVerifyLoading}>
+                            Delete
+                          </Button>
+                        </>
+                      ) : (
+                        <Button size="sm" onClick={handleSaveSudo} loading={sudoVerifyLoading} disabled={!sudoPassword.trim()}>
+                          {savedSudoPassword ? "Update Password" : "Save Password"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  {sudoVerifyResult && !sudoVerifyResult.ok && (
+                    <p className="mt-2 text-xs p-2 rounded-md border bg-red-500/10 border-red-500/30 text-red-400">
+                      {sudoVerifyResult.message}
+                    </p>
+                  )}
+                </div>
+              </Card>
             )
           },
           {

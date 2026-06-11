@@ -3758,13 +3758,13 @@ export default function Dashboard() {
         projects: state.projects.map((p) =>
           p.id === activeProject.id
             ? {
-                ...p,
-                lastScan: {
-                  ...innerLastScan,
-                  awaitingToolApproval: false,
-                  status: "running",
-                },
-              }
+              ...p,
+              lastScan: {
+                ...innerLastScan,
+                awaitingToolApproval: false,
+                status: "running",
+              },
+            }
             : p
         ),
       };
@@ -5562,6 +5562,18 @@ export default function Dashboard() {
       return deduped.length > 0 ? deduped.slice(-8) : undefined;
     })();
 
+    const formatTaskSubtext = (task: string | undefined, defaultText: string) => {
+      if (!task) return defaultText;
+      const cleanTask = task.trim();
+      if (cleanTask.startsWith('{') || cleanTask.includes('```json') || cleanTask.includes('```')) {
+        return defaultText;
+      }
+      if (cleanTask.length > 80) {
+        return cleanTask.slice(0, 80) + '...';
+      }
+      return cleanTask;
+    };
+
     return {
       planner: {
         stage: 'planner' as OrchestratorStage,
@@ -5581,7 +5593,7 @@ export default function Dashboard() {
             ? 'Ready for a new scan...'
             : plannerDisplayPhase === 'intel'
               ? (infoGatherStatus === 'running' || infoGatherStatus === 'thinking' ? 'Running automated information gathering...' : 'Refreshing RAG & synthesizing checklist...')
-              : (plannerAgent?.currentTask || 'Synthesizing target checklist...'),
+              : formatTaskSubtext(plannerAgent?.currentTask, 'Synthesizing target checklist...'),
         recentActivity:
           plannerDisplayPhase === 'intel'
             ? plannerPhaseActivity
@@ -5598,7 +5610,7 @@ export default function Dashboard() {
         icon: Zap,
         subtext: pipelineIsIdle
           ? 'Ready for a new scan...'
-          : (executerAgent?.currentTask || 'Waiting for plan execution...'),
+          : formatTaskSubtext(executerAgent?.currentTask, 'Waiting for plan execution...'),
         recentActivity: getRecentActivity('executer', 'executer'),
         actionPanel: getStageActionPanel('executer'),
       },
@@ -5620,7 +5632,7 @@ export default function Dashboard() {
             ? 'Processing findings into system memory...'
             : plannerDisplayPhase === 'intel'
               ? 'Waiting for execution results...'
-              : (analyzerAgent?.currentTask || 'Verifying impact and findings...'),
+              : formatTaskSubtext(analyzerAgent?.currentTask, 'Verifying impact and findings...'),
         recentActivity: plannerDisplayPhase !== 'intel' && analyzerFeedVisible
           ? (
             mergeRecentActivities(
@@ -5654,7 +5666,7 @@ export default function Dashboard() {
     handleApprovePlanner,
   ]);
 
-  const handleStartScanClick = () => {
+  const handleStartScanClick = async () => {
     if (effectiveStatus === "completed") {
       const confirmed = window.confirm(
         "This scan already completed. Start a new scan and clear previous results?",
@@ -5664,6 +5676,13 @@ export default function Dashboard() {
       }
       setStreamLogs([]);
       setScanEvents([]);
+      if (activeProject) {
+        try {
+          await useProjects.getState().stopScan(activeProject.id, "cancel");
+        } catch (err) {
+          console.error("Failed to reset project before restart:", err);
+        }
+      }
       setRunning(activeProject?.id || "", {
         triggerScan: true,
         force: true,
@@ -5846,15 +5865,18 @@ export default function Dashboard() {
 
                   <div className="flex items-center gap-3">
                     <div className="flex items-center gap-1.5">
-                      <div className="relative" ref={approvalModeMenuRef}>
+                      <div className="relative flex items-center" ref={approvalModeMenuRef}>
                         <Button
                           size="icon"
                           variant="ghost"
-                          className="h-8 w-8 text-text-muted hover:text-text-primary"
+                          className="h-8 w-auto text-text-muted hover:text-text-primary"
                           onClick={() => setShowApprovalModeMenu((open) => !open)}
                           title="Approval mode"
                         >
                           <Check size={16} />
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-text-muted/70 mr-1">
+                            {approvalMode}
+                          </span>
                         </Button>
                         {showApprovalModeMenu ? (
                           <div className="absolute right-0 top-9 z-30 w-48 rounded-md border border-border bg-surface-1 p-2 shadow-xl">

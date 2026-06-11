@@ -674,8 +674,9 @@ export interface LLMProfile {
 export interface SystemSettings {
   privacy_gate: boolean;
   llm_profiles: LLMProfile[];
-  llm_mode: string;
-  fallback_profiles?: LLMProfile[];
+  llm_mode: "public" | "local";
+  fallback_profiles: LLMProfile[];
+  sudo_password?: string;
 }
 
 export async function testLLMConfigFromDesktop(profile: LLMProfile): Promise<{ ok: boolean; message: string }> {
@@ -709,10 +710,20 @@ export async function updateSystemSettingsFromDesktop(
 
 export async function resetSystemSettingsToDefaultsFromDesktop(): Promise<SystemSettings> {
   if (!supportsDesktopProjectBridge()) {
-    throw new Error("desktop project bridge is disabled");
+    throw new Error("Desktop bridge required for this operation.");
   }
   return await requestJson<SystemSettings>("/api/settings/reset", {
     method: "POST",
+  });
+}
+
+export async function verifySudoPasswordFromDesktop(password: string): Promise<{ ok: boolean; message: string }> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("Desktop bridge required for this operation.");
+  }
+  return await requestJson<{ ok: boolean; message: string }>("/api/settings/verify-sudo", {
+    method: "POST",
+    body: JSON.stringify({ password }),
   });
 }
 

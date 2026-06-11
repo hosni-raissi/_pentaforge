@@ -149,6 +149,8 @@ function messageSignature(message: Pick<CopilotMessage, 'role' | 'text' | 'route
 }
 
 function comparePanelMessages(a: PanelMessage, b: PanelMessage): number {
+  if (a.id === 'intro') return -1;
+  if (b.id === 'intro') return 1;
   const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
   const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
   if (timeA !== timeB) {
@@ -218,8 +220,8 @@ function CodeCopyButton({ text, isWhiteBg }: { text: string; isWhiteBg: boolean 
       type="button"
       onClick={handleCopy}
       className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-all ${isWhiteBg
-          ? 'text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700'
-          : 'text-zinc-400 hover:bg-white/10 hover:text-white'
+        ? 'text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700'
+        : 'text-zinc-400 hover:bg-white/10 hover:text-white'
         }`}
     >
       {copied ? (
@@ -455,10 +457,12 @@ function mergeActiveAssistantRun(
     toolLogs,
     passwordRequests,
   });
-  const existingUser = messages.find((message) => message.id === `u-${run.run_id}`);
+  const existingUser = messages.find(
+    (message) => message.id === `u-${run.run_id}` || (message.role === 'user' && message.text === prompt)
+  );
   const existingAssistant = messages.find((message) => message.id === `a-${run.run_id}`);
 
-  const next = [...messages];
+  let next = [...messages];
   if (prompt && !existingUser) {
     next.push({
       id: `u-${run.run_id}`,
@@ -490,11 +494,12 @@ function mergeActiveAssistantRun(
   if (!existingAssistant) {
     next.push(assistantMessage);
   } else {
-    return next.map((message) => (
+    next = next.map((message) => (
       message.id === existingAssistant.id ? { ...message, ...assistantMessage } : message
-    )).slice(-MAX_CHAT_MESSAGES);
+    ));
   }
 
+  next.sort(comparePanelMessages);
   return next.slice(-MAX_CHAT_MESSAGES);
 }
 
@@ -912,10 +917,10 @@ export function AIPromptPanel({
     if (!scrollContainerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
     const distFromBottom = scrollHeight - scrollTop - clientHeight;
-    
+
     // User is "at bottom" if they are within 50px of the end
     userIsAtBottomRef.current = distFromBottom < 50;
-    
+
     // Show button if more than 200px away from bottom AND we are actually scrollable
     setShowScrollButton(scrollHeight > clientHeight && distFromBottom > 200);
   }, []);
@@ -1159,7 +1164,7 @@ export function AIPromptPanel({
   useEffect(() => {
     const lastMessage = messages[messages.length - 1];
     const isUserMessage = lastMessage?.role === 'user';
-    
+
     // Only auto-scroll if it's a user message OR if we're already at the bottom
     if (isUserMessage || userIsAtBottomRef.current) {
       const timer = setTimeout(() => {
@@ -1340,7 +1345,7 @@ export function AIPromptPanel({
                       const ts = new Date(m.timestamp).getTime();
                       return !isNaN(ts) && (now - ts < 10000);
                     });
-                  if (alreadyNotified) return prev;
+                    if (alreadyNotified) return prev;
                     const separator: PanelMessage = {
                       id: `opt-${now}`,
                       role: 'assistant',
@@ -1538,7 +1543,7 @@ export function AIPromptPanel({
     if (metrics.should_compress_before_send || needsBootstrapCompression) {
       setSending(true);
       const optimizationId = `opt-${Date.now()}`;
-      
+
       // Inject optimization notification (transient, won't be truncated).
       setMessages(prev => [...prev, {
         id: optimizationId,
@@ -1677,147 +1682,148 @@ export function AIPromptPanel({
           }
           return (
             <div key={message.id} className={message.role === 'user' ? 'flex justify-end' : ''}>
-            <div
-              className={
-                message.role === 'assistant'
-                  ? `max-w-[92%] rounded-md border p-2 text-sm ${message.localState === 'error'
-                    ? 'border-orange-500/30 bg-orange-500/10 text-orange-900 dark:text-orange-200'
-                    : message.localState === 'cancelled'
-                      ? 'border-border bg-surface-1/70 text-text-secondary'
-                      : 'border-pf-500/20 bg-pf-500/10 text-text-primary'
-                  }`
-                  : 'max-w-[92%] rounded-md border border-border bg-surface-2 p-2 text-sm text-text-primary'
-              }
-            >
-              {/* Assistant label */}
-              {message.role === 'assistant' && (
-                <div className="mb-1 flex items-center gap-1 text-xs font-semibold text-pf-400">
-                  <Bot size={11} />
-                  Echo
-                </div>
-              )}
+              <div
+                className={
+                  message.role === 'assistant'
+                    ? `max-w-[92%] rounded-md border p-2 text-sm ${message.localState === 'error'
+                      ? 'border-orange-500/30 bg-orange-500/10 text-orange-900 dark:text-orange-200'
+                      : message.localState === 'cancelled'
+                        ? 'border-border bg-surface-1/70 text-text-secondary'
+                        : 'border-pf-500/20 bg-pf-500/10 text-text-primary'
+                    }`
+                    : 'max-w-[92%] rounded-md border border-border bg-surface-2 p-2 text-sm text-text-primary'
+                }
+              >
+                {/* Assistant label */}
+                {message.role === 'assistant' && (
+                  <div className="mb-1 flex items-center gap-1 text-xs font-semibold text-pf-400">
+                    <Bot size={11} />
+                    Echo
+                  </div>
+                )}
 
-              {/* Content */}
-              <div className="flex flex-col gap-2">
-                {/* Tool Logs */}
-                {message.toolLogs && message.toolLogs.length > 0 && (
-                  <div className="flex flex-col gap-1.5 border-l-2 border-pf-500/30 pl-2 my-1">
-                    {message.toolLogs.map((log, idx) => (
-                      <div key={idx} className="text-[11px] leading-tight">
-                        <div className="flex items-center gap-1.5 text-text-muted">
-                          <span className={`h-1.5 w-1.5 rounded-full ${log.status === 'running' ? 'bg-orange-500 animate-pulse' : 'bg-green-500/50'}`} />
-                          {(() => {
-                            const t = (log.tool || '').toLowerCase().trim();
-                            if (t === 'search_project_vectors') return <span className="opacity-80">Searching findings</span>;
-                            if (t === 'get_page') return <span className="opacity-80">Fetching page</span>;
-                            if (t === 'mark_false_positive') return <span className="opacity-80">Marking false positive</span>;
-                            if (t === 'memory' || t === 'context') return <span className="opacity-80">Updating memory</span>;
-                            if (t === 'run_custom' || !t) return null;
-                            return <span className="font-mono opacity-80">[{log.tool}]</span>;
-                          })()}
-                          <div className={`break-all min-w-0 flex-1 ${log.tool === 'run_custom' ? 'font-mono text-[11px] text-zinc-600 font-medium' : 'text-[10px] italic opacity-80'}`}>
-                            {log.tool === 'run_custom' ? log.input : `"${log.input}"`}
+                {/* Content */}
+                <div className="flex flex-col gap-2">
+                  {/* Tool Logs */}
+                  {message.toolLogs && message.toolLogs.length > 0 && (
+                    <div className="flex flex-col gap-1.5 border-l-2 border-pf-500/30 pl-2 my-1">
+                      {message.toolLogs.map((log, idx) => (
+                        <div key={idx} className="text-[11px] leading-tight">
+                          <div className="flex items-center gap-1.5 text-text-muted">
+                            <span className={`h-1.5 w-1.5 rounded-full ${log.status === 'running' ? 'bg-orange-500 animate-pulse' : 'bg-green-500/50'}`} />
+                            {(() => {
+                              const t = (log.tool || '').toLowerCase().trim();
+                              if (t === 'search_project_vectors') return <span className="opacity-80">Searching findings</span>;
+                              if (t === 'get_page') return <span className="opacity-80">Fetching page</span>;
+                              if (t === 'mark_false_positive') return <span className="opacity-80">Marking false positive</span>;
+                              if (t === 'memory' || t === 'context') return <span className="opacity-80">Updating memory</span>;
+                              if (t === 'run_custom' || !t) return null;
+                              return <span className="font-mono opacity-80">[{log.tool}]</span>;
+                            })()}
+                            <div className={`break-all min-w-0 flex-1 ${log.tool === 'run_custom' ? 'font-mono text-[11px] text-zinc-600 font-medium' : 'text-[10px] italic opacity-80'}`}>
+                              {log.tool === 'run_custom' ? log.input : `"${log.input}"`}
+                            </div>
                           </div>
+                          {log.output && log.output.error && (
+                            <div className="mt-0.5 text-red-500 opacity-90 pl-3">
+                              Error: {log.output.error}
+                            </div>
+                          )}
+                          {log.output && log.output.success && log.tool === 'run_custom' && (
+                            <div className="mt-0.5 text-[10px] text-text-muted/80 pl-3 line-clamp-2 font-mono">
+                              {log.output.stdout || 'Command completed.'}
+                            </div>
+                          )}
                         </div>
-                        {log.output && log.output.error && (
-                          <div className="mt-0.5 text-red-500 opacity-90 pl-3">
-                            Error: {log.output.error}
-                          </div>
-                        )}
-                        {log.output && log.output.success && log.tool === 'run_custom' && (
-                          <div className="mt-0.5 text-[10px] text-text-muted/80 pl-3 line-clamp-2 font-mono">
-                            {log.output.stdout || 'Command completed.'}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Password Requests */}
-                {message.passwordRequests && message.passwordRequests.length > 0 && (
-                  <div className="flex flex-col gap-3 my-2">
-                    {message.passwordRequests.map((req) => (
-                      <PasswordRequestBlock
-                        key={req.call_id}
-                        requestId={message.requestId || ''}
-                        request={req}
-                        onResponse={(callId, val, denied) => {
-                          setMessages((prev) =>
-                            prev.map((m) => {
-                              if (m.requestId === message.requestId && m.passwordRequests) {
-                                return {
-                                  ...m,
-                                  passwordRequests: m.passwordRequests.map((r) =>
-                                    r.call_id === callId
-                                      ? { ...r, status: denied ? ('denied' as const) : ('submitted' as const) }
-                                      : r
-                                  ),
-                                };
-                              }
-                              return m;
-                            })
-                          );
-                        }}
-                      />
-                    ))}
-                  </div>
-                )}
-
-                {message.localState === 'pending' ? (
-                  <div className="flex items-center gap-2 py-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pf-400 [animation-delay:-0.2s]" />
-                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pf-400 [animation-delay:-0.1s]" />
-                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pf-400" />
+                      ))}
                     </div>
-                    <span className="text-[11px] font-medium text-text-muted italic animate-pulse">
-                      {message.toolLogs?.some(l => l.status === 'running')
-                        ? `Echo is running ${message.toolLogs.find(l => l.status === 'running')?.tool === 'run_custom' ? 'command' : 'tool'}...`
-                        : (loadingStep === 'thinking' ? 'Echo is thinking...' : 'Echo is working...')}
+                  )}
+
+                  {/* Password Requests */}
+                  {message.passwordRequests && message.passwordRequests.length > 0 && (
+                    <div className="flex flex-col gap-3 my-2">
+                      {message.passwordRequests.map((req) => (
+                        <PasswordRequestBlock
+                          key={req.call_id}
+                          requestId={message.requestId || ''}
+                          request={req}
+                          onResponse={(callId, val, denied) => {
+                            setMessages((prev) =>
+                              prev.map((m) => {
+                                if (m.requestId === message.requestId && m.passwordRequests) {
+                                  return {
+                                    ...m,
+                                    passwordRequests: m.passwordRequests.map((r) =>
+                                      r.call_id === callId
+                                        ? { ...r, status: denied ? ('denied' as const) : ('submitted' as const) }
+                                        : r
+                                    ),
+                                  };
+                                }
+                                return m;
+                              })
+                            );
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {message.localState === 'pending' ? (
+                    <div className="flex items-center gap-2 py-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pf-400 [animation-delay:-0.2s]" />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pf-400 [animation-delay:-0.1s]" />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-pf-400" />
+                      </div>
+                      <span className="text-[11px] font-medium text-text-muted italic animate-pulse">
+                        {message.toolLogs?.some(l => l.status === 'running')
+                          ? `Echo is running ${message.toolLogs.find(l => l.status === 'running')?.tool === 'run_custom' ? 'command' : 'tool'}...`
+                          : (loadingStep === 'thinking' ? 'Echo is thinking...' : 'Echo is working...')}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                        {renderMarkdownMessage(message.text)}
+                      </div>
+                      {isSuccessfulReportReply(message) && (
+                        <div className="pt-1">
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={handleOpenReportsShare}
+                            className="font-semibold"
+                          >
+                            <FileText size={12} />
+                            Open Reports & Share
+                          </Button>
+                        </div>
+                      )}
+                      {message.localState === 'cancelled' && (
+                        <p className="text-[10px] uppercase tracking-wide text-text-muted">
+                          Stopped
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer: timestamp + copy */}
+                <div className="mt-1 flex items-center justify-between">
+                  {message.timestamp && (
+                    <span className="text-[10px] text-text-muted">
+                      {formatTime(message.timestamp)}
                     </span>
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-                      {renderMarkdownMessage(message.text)}
-                    </div>
-                    {isSuccessfulReportReply(message) && (
-                      <div className="pt-1">
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          onClick={handleOpenReportsShare}
-                          className="font-semibold"
-                        >
-                          <FileText size={12} />
-                          Open Reports & Share
-                        </Button>
-                      </div>
-                    )}
-                    {message.localState === 'cancelled' && (
-                      <p className="text-[10px] uppercase tracking-wide text-text-muted">
-                        Stopped
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Footer: timestamp + copy */}
-              <div className="mt-1 flex items-center justify-between">
-                {message.timestamp && (
-                  <span className="text-[10px] text-text-muted">
-                    {formatTime(message.timestamp)}
-                  </span>
-                )}
-                {message.role === 'assistant' && !message.localState && message.text && (
-                  <CopyButton text={message.text} />
-                )}
+                  )}
+                  {message.role === 'assistant' && !message.localState && message.text && (
+                    <CopyButton text={message.text} />
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        )})}
+          )
+        })}
         <div ref={messagesEndRef} className="h-0" />
       </div>
 
@@ -1863,10 +1869,10 @@ export function AIPromptPanel({
                 />
               </div>
               <div className=" absolute top-4 right-14  pointer-events-none">
-              <span className={`text-[9px] font-mono ${prompt.length >= MAX_PROMPT_CHARS ? 'text-red-500 font-bold' : 'text-text-muted/30'}`}>
-                {prompt.length}/{MAX_PROMPT_CHARS}
-              </span>
-            </div>
+                <span className={`text-[9px] font-mono ${prompt.length >= MAX_PROMPT_CHARS ? 'text-red-500 font-bold' : 'text-text-muted/30'}`}>
+                  {prompt.length}/{MAX_PROMPT_CHARS}
+                </span>
+              </div>
             </div>
 
             <Button
