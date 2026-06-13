@@ -459,14 +459,12 @@ class AssistantAgent:
     """Small tool-using assistant for the frontend chat panel."""
 
     def __init__(self) -> None:
-        self._config = get_public_agent_config("assistant")
-        self._llm = LLMClient(self._config, client_name="assistant")
         self._queue = get_global_llm_queue()
         self._backup = get_backup_llm_fallback()
         self._guard = PromptInjectionGuard()
 
     async def close(self) -> None:
-        await self._llm.close()
+        pass
 
     @staticmethod
     def _normalize_lane(value: str) -> str:
@@ -2013,12 +2011,14 @@ class AssistantAgent:
         tool_payload = self._tool_schemas_for_turn(allow_external_research=allow_external_research) if allow_tools else None
 
         async def _call_primary():
-            return await self._llm.chat(
-                messages,
-                tools=tool_payload,
-                temperature=0.2,
-                max_tokens=_MAX_REPLY_TOKENS,
-            )
+            config = get_public_agent_config("assistant")
+            async with LLMClient(config, client_name="assistant") as client:
+                return await client.chat(
+                    messages,
+                    tools=tool_payload,
+                    temperature=0.2,
+                    max_tokens=_MAX_REPLY_TOKENS,
+                )
 
         for attempt in range(3):
             try:
@@ -2587,7 +2587,7 @@ class AssistantAgent:
     async def _execute_search_web(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query", "")).strip()
         raw_limit = args.get("max_results", 5)
-        result = await assistant_search_web(
+        result = await assistant_search_web.fn(
             query=query,
             max_results=int(raw_limit) if str(raw_limit).strip() else 5,
         )
@@ -3251,7 +3251,7 @@ class AssistantAgent:
         labels = [segment for segment in bare.split(".") if segment]
         if len(labels) < 2:
             return False
-        if not all(re.fullmatch(r"[A-Za-z0-9-]+", segment) for segment in labels):
+        if not all(re.fullmatch(r"[A-Za-z0-9_-]+", segment) for segment in labels):
             return False
         return True
 

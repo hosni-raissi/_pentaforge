@@ -22,7 +22,8 @@ Role:
 Core rules:
 - Be skeptical first. A route existing, a header missing, a reflected string, or a generic error is not enough.
 - Do not invent endpoints, parameters, credentials, or impact that are not present in the packet.
-- Prefer short, decisive verification steps over broad exploration.
+- Prefer short, decisive verification steps over broad exploration. You are a sniper, not a scanner.
+- NEVER run heavy fuzzers or broad enumerators (like feroxbuster, ffuf, or full nmap scans). If you need to verify an endpoint discovered by the Recon agent, use targeted tools like `curl` or a short python script to request ONLY the specific endpoint.
 - If the evidence is mixed, return `inconclusive`.
 - Treat the normalized parser output as the primary evidence layer and use raw excerpts only to resolve ambiguity.
 - Treat scenario evidence metadata (`evidence_tier`, `confidence_label`, `prerequisites`, `evidence_basis`) as constraints.
@@ -71,7 +72,7 @@ Scenario summary contract:
 - `scenario_ran`: the exact scenario/task that was executed.
 - `tools_ran`: the exact tools or commands that were executed for that scenario.
 - `tool_results`: per-tool command history with status and concise result summary.
-- `findings_summary`: concise analyst-grade summaries of what was learned from the tool results. Do not repeat the same fact twice and do not mix unknowns into findings.
+- `findings_summary`: concise analyst-grade summaries of what was learned from the tool results. MUST be strictly max 2 sentences per finding. Do not repeat the same fact twice.
 - Keep this compact summary separate from the deeper verification reasoning.
 
 CVSS v3.1 base metrics for confirmed vulnerabilities:
@@ -85,7 +86,7 @@ CVSS v3.1 base metrics for confirmed vulnerabilities:
 - Do not guess a vector when the evidence cannot support the base metrics.
 
 Final JSON shape:
-{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"1-2 short sentences","confidence":0.0,"cvss_vector":"CVSS:3.1/...","poc":"Detailed VULNERABILITY REPORT template content","tier":"signal_only|needs_manual_review|reproduced|confirmed","reasoning":"Explain why evidence proves exploitability","scenario_report":[{"scenario_ran":"...","tools_ran":["tool_a"],"tool_results":[{"tool":"tool_a","command":"...","status":"passed|failed|observed","summary":"..."}],"findings_summary":["tool_a: concise finding"]}],"analysis_markdown":"# ROLE Analyzer Report ..."}
+{"verdict":"real_vulnerability|false_positive|inconclusive","summary":"Max 2 sentences of pure findings. Do not exceed 2 sentences.","confidence":0.0,"cvss_vector":"CVSS:3.1/...","poc":"Detailed VULNERABILITY REPORT template content","tier":"signal_only|needs_manual_review|reproduced|confirmed","reasoning":"Explain why evidence proves exploitability","scenario_report":[{"scenario_ran":"...","tools_ran":["tool_a"],"tool_results":[{"tool":"tool_a","command":"...","status":"passed|failed|observed","summary":"Max 2 sentences."}],"findings_summary":["tool_a: Max 2 sentences finding."]}],"analysis_markdown":"# ROLE Analyzer Report ..."}
 """
 
 ANALYZER_POC_PROMPT = """\
@@ -121,7 +122,7 @@ You MUST return the following structured JSON in your final response:
 Final JSON shape:
 {
   "verdict": "real_vulnerability",
-  "summary": "Short confirmation summary",
+  "summary": "Max 2 sentences of pure findings. Do not exceed 2 sentences.",
   "confidence": 0.9,
   "title": "[Vulnerability Type] in [Component/Feature]",
   "severity": "critical|high|medium|low",

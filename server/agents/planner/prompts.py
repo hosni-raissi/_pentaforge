@@ -251,6 +251,7 @@ PLAN RULES:
 - Every scenario must be unique, evidence-backed, and reference a specific artifact.
 - Do not repeat a failed or blocked scenario unchanged. Replace with a different evidence-backed follow-up.
 - Do not convert a clue into an exploit scenario unless prerequisites are in evidence.
+- If PROFILES (Auth/Credentials) are provided in the TARGET description, you MUST create explicit scenarios to test authenticated attack surface, authorization bypasses (IDOR, Broken Access Control), and session management using those credentials.
 - Use recon for impact validation when exploitability is still unproven.
 - If stuck: try alternate payload family → deeper enumeration → revisit surface mapping → logic/client-side paths.
 - Respect blocked_routes and blocked_route_prefixes from brain_json. Do not schedule scenarios on disproved
@@ -458,17 +459,28 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
             and str(item.get("status", "")).strip().lower() in {"real_vulnerability", "verified", "vulnerability"}
             and str(item.get("claim_status", "")).strip().lower() in {"assumed", "unsupported"}
         ][-12:]
-    recent_info = brain.get("recent_info", brain.get("info_findings", []))
-    if not recent_info and isinstance(raw_verified, list):
-        recent_info = [
-            {
-                "name": str(item.get("title", item.get("summary", ""))).strip(),
-                "endpoint": str(item.get("endpoint", item.get("target", ""))).strip(),
-            }
-            for item in raw_verified
-            if isinstance(item, dict)
-            and str(item.get("status", "")).strip().lower() not in {"real_vulnerability", "verified", "false_positive"}
-        ]
+    # Format recent_info as a strict ledger (Cycle | Scenario | Finding: max 2 sentences)
+    raw_recent_info = brain.get("recent_info", brain.get("info_findings", []))
+    recent_info = []
+    
+    # Check if we have tool observations which have the scenario task and summary
+    raw_observations = brain.get("tool_observations", [])
+    if isinstance(raw_observations, list) and raw_observations:
+        for idx, obs in enumerate(raw_observations):
+            if not isinstance(obs, dict): continue
+            task = str(obs.get("scenario_task", "")).strip() or "Tool Execution"
+            summary = str(obs.get("summary", "")).strip()
+            # truncate to approx 2 sentences
+            if len(summary) > 150: summary = summary[:147] + "..."
+            recent_info.append(f"Cycle: {idx+1} | Scenario: {task} | Finding: {summary}")
+    elif isinstance(raw_recent_info, list) and raw_recent_info:
+        for idx, item in enumerate(raw_recent_info):
+            if not isinstance(item, dict): continue
+            title = str(item.get("title", item.get("summary", ""))).strip()
+            endpoint = str(item.get("endpoint", item.get("target", ""))).strip()
+            # truncate to approx 2 sentences
+            if len(title) > 150: title = title[:147] + "..."
+            recent_info.append(f"Cycle: {idx+1} | Scenario: {endpoint} | Finding: {title}")
     trimmed = {
         "target_info": brain.get("target_info", {}),
         "tech_stack": brain.get("tech_stack", {}),
@@ -488,12 +500,10 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
         "parameter_hints": _clean_route_list(brain.get("parameter_hints", []), limit=16),
         "tool_efficiency": brain.get("tool_efficiency", {}),
         "tool_false_positive_rates": brain.get("tool_false_positive_rates", {}),
-        "tool_observations": _compact_tool_observations(brain.get("tool_observations", [])),
     }
     result = json.dumps(trimmed)
     if len(result) > max_chars:
         trimmed["recent_info"] = trimmed["recent_info"][-5:]
-        trimmed["tool_observations"] = trimmed["tool_observations"][-6:]
         trimmed["anonymous_routes"] = trimmed["anonymous_routes"][-6:]
         trimmed["authenticated_routes"] = trimmed["authenticated_routes"][-6:]
         trimmed["blocked_routes"] = trimmed["blocked_routes"][-6:]

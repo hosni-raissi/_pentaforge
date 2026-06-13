@@ -78,6 +78,11 @@ def _is_host_in_target_scope(value_host: str, target_host: str, target_path: str
     if value_host == target_host or value_host.endswith(f".{target_host}"):
         return True
         
+    if target_host.startswith("www."):
+        base_domain = target_host[4:]
+        if value_host == base_domain or value_host.endswith(f".{base_domain}"):
+            return True
+        
     same_loopback_family = is_loopback_host(value_host) and is_loopback_host(target_host)
     if same_loopback_family:
         return True

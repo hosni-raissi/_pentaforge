@@ -32,6 +32,16 @@ export function Sidebar() {
   const activeProject = useProjects((state) => state.getActive());
   const displayProject = activeProject || running;
 
+  const status = displayProject?.status;
+  const lastScanStatus = displayProject?.lastScan?.status;
+  const needsApproval =
+    status === "awaiting_tool_approval" ||
+    status === "awaiting_planner_approval" ||
+    status === "awaiting_information_gathering_approval" ||
+    lastScanStatus === "awaiting_tool_approval" ||
+    lastScanStatus === "awaiting_planner_approval" ||
+    lastScanStatus === "awaiting_information_gathering_approval";
+
   const activeLoop = PRODUCT_LOOPS.find((loop) => {
     if (loop.route === "/dashboard?focus=findings") {
       return (
@@ -62,14 +72,19 @@ export function Sidebar() {
         key={to}
         to={to}
         className={clsx(
-          "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors duration-100",
+          "flex items-center justify-between rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors duration-100",
           active
             ? "bg-pf-600/15 text-pf-400"
             : "text-text-secondary hover:bg-surface-2 hover:text-text-primary",
         )}
       >
-        <Icon size={15} className={active ? "text-pf-400" : ""} />
-        {label}
+        <div className="flex items-center gap-2.5">
+          <Icon size={15} className={active ? "text-pf-400" : ""} />
+          <span>{label}</span>
+        </div>
+        {label === "Run Scan" && needsApproval && (
+          <span className="h-2 w-2 rounded-full bg-yellow-500 animate-pulse" />
+        )}
       </NavLink>
     );
   };

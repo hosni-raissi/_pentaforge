@@ -333,10 +333,12 @@ export default function Settings() {
   
   const redistributeLLMRoles = (profiles: LLMProfile[]): LLMProfile[] => {
     if (profiles.length === 0) return [];
-    // Simple: first = primary (handles everything), second = backup (failover only)
+    if (profiles.length === 1) {
+      return [{ ...profiles[0], roles: ["primary", "backup", "all"] }];
+    }
     return profiles.map((p, idx) => ({
       ...p,
-      roles: idx === 0 ? ["primary"] : ["backup"],
+      roles: idx === 0 ? ["primary", "all"] : ["backup"],
     }));
   };
 

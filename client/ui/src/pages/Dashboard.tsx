@@ -3136,7 +3136,9 @@ export default function Dashboard() {
     lastLiveEventAtRef.current = 0;
     streamDegradedRef.current = true;
     seenEventKeysRef.current.clear();
-  }, [activeProjectId]);
+
+    void hydrateFromDatabase();
+  }, [activeProjectId, hydrateFromDatabase]);
 
   useEffect(() => {
     if (!activeProjectId || !shouldStreamScanEvents) {
@@ -4410,7 +4412,7 @@ export default function Dashboard() {
   const missionAction: MissionControlAction | null = (() => {
     if (pendingPasswordRequest) {
       const isSudo = pendingPasswordRequest.toolName?.toLowerCase() === "sudo";
-      
+
       return {
         title: isSudo ? `Approve sudo command` : `${pendingPasswordRequest.toolName || "External tool"} needs credentials`,
         detail: isSudo
@@ -5094,7 +5096,7 @@ export default function Dashboard() {
     byRole.analyzer.resultLabel = "Analyzer Summary";
     byRole.analyzer.result = latestAnalyzer
       ? latestAnalyzer.message
-      : `Scan status: ${effectiveStatus}. Progress: ${activeProject?.scanProgress || 0}%.`;
+      : `Scan status: ${effectiveStatus}.`;
 
     return byRole;
   })();
@@ -5255,7 +5257,7 @@ export default function Dashboard() {
         if (stage !== passwordStage) {
           return null;
         }
-        
+
         const isSudo = pendingPasswordRequest.toolName?.toLowerCase() === "sudo";
 
         return {
@@ -5263,8 +5265,8 @@ export default function Dashboard() {
           detail: isSudo
             ? `Review the command: ${pendingPasswordRequest.reason || pendingPasswordRequest.prompt}`
             : pendingPasswordRequest.reason
-              || pendingPasswordRequest.prompt
-              || 'Provide credentials or deny the prompt so the scan can continue safely.',
+            || pendingPasswordRequest.prompt
+            || 'Provide credentials or deny the prompt so the scan can continue safely.',
           tone: 'warn',
           controls: (
             <div className="flex flex-col gap-2">
@@ -6130,7 +6132,7 @@ export default function Dashboard() {
                                                   {scenario.scenario}
                                                 </p>
                                                 <div className="flex items-center gap-1.5">
-                                                  
+
                                                   {scenario.plannerRound ? (
                                                     <span className="rounded border border-pf-500/30 bg-pf-500/10 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-pf-200">
                                                       {scenario.plannerRound}

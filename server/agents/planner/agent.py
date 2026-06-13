@@ -803,7 +803,7 @@ def _build_loop_plan_context_message() -> str:
                     else:
                         pending_scenarios += 1
 
-            steps_source = raw_steps if step_cap == 0 else raw_steps[:step_cap]
+            steps_source = raw_steps if step_cap == 0 else raw_steps[-step_cap:]
             for step in steps_source:
                 if not isinstance(step, dict):
                     continue
@@ -2853,7 +2853,12 @@ class PlannerAgent:
         project = self._projects_store.get_project(self._project_id) if self._projects_store else {}
         if not isinstance(project, dict): project = {}
         engagement_type = project.get("engagement_type", "pentest")
+        
         target = project.get("target", "")
+        profiles = project.get("profiles", [])
+        if isinstance(profiles, list) and profiles:
+            target += f"\nPROFILES (Auth/Credentials): {json.dumps(profiles)}"
+            
         scope = project.get("scope", "")
         last_scan = project.get("lastScan", {}) if isinstance(project.get("lastScan"), dict) else {}
         scan_result = last_scan.get("result", {}) if isinstance(last_scan.get("result"), dict) else {}
@@ -2877,12 +2882,14 @@ class PlannerAgent:
                     for s in phase.get("scenarios", []):
                         if not isinstance(s, dict): continue
                         if str(s.get("status", "")).strip().lower() == "completed" or s.get("done", False):
-                            filtered_scenarios.append({
-                                "id": s.get("id"),
-                                "task": s.get("task"),
-                                "status": s.get("status"),
-                                "done": s.get("done")
-                            })
+                            # In loop mode, we can completely drop completed items, otherwise keep a tiny stub
+                            if normalized_plan_mode != "loop":
+                                filtered_scenarios.append({
+                                    "id": s.get("id"),
+                                    "task": s.get("task"),
+                                    "status": s.get("status"),
+                                    "done": s.get("done")
+                                })
                         else:
                             filtered_scenarios.append(s)
                     phase["scenarios"] = filtered_scenarios
@@ -2893,7 +2900,7 @@ class PlannerAgent:
             target=target,
             scope=scope,
             brain=brain,
-            checklist_state=checklist_compact_summary if checklist_compact_summary else checklist_state,
+            checklist_state={"status": "absorbed_into_plan", "note": "Checklist is omitted during loop execution to save tokens."} if normalized_plan_mode == "loop" else (checklist_compact_summary if checklist_compact_summary else checklist_state),
             plan_state=filtered_plan_state,
         )
 

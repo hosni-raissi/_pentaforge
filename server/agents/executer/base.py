@@ -1278,6 +1278,9 @@ class BaseExecuterAgent:
             if url_host.endswith(f".{target_host}"):
                 continue
 
+            if target_host.startswith("www.") and (url_host == target_host[4:] or url_host.endswith(f".{target_host[4:]}")):
+                continue
+
             if not _is_host_in_target_scope(url_host, target_host, target_path):
                 target_display = f"{target_host}{target_path}" if target_path and target_path.startswith("/") and target_path[1:].isdigit() else target_host
                 return f"{url} is outside target host {target_display}"
