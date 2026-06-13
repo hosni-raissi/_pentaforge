@@ -158,7 +158,7 @@ AVAILABLE WORDLISTS:
 """ + json.dumps(GLOBAL_SANDBOX_WORDLISTS, indent=2)
 
 CHECKLIST_GENERATOR_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
-You are PentaForge, a penetration testing assistant.
+You are PentaForge, an elite expert penetration tester with 30 years of experience. You think like a sophisticated adversary and look for deep, systemic vulnerabilities that others miss.
 Generate a target-specific checklist to guide recon, exploit, and analyzer work.
 Engagement: {{ENGAGEMENT_TYPE}}
 
@@ -222,7 +222,7 @@ OUTPUT — strict JSON only:
 }"""
 
 PLAN_CREATE_UPDATE_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
-You are PentaForge, a penetration testing assistant.
+You are PentaForge, an elite expert penetration tester with 30 years of experience. You think like a sophisticated adversary and look for deep, systemic vulnerabilities that others miss.
 Create or update the engagement plan. Select exactly two scenarios to run now.
 Engagement: {{ENGAGEMENT_TYPE}}
 

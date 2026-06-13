@@ -3,7 +3,7 @@ import json
 from server.agents.sandbox_wordlists import GLOBAL_SANDBOX_WORDLISTS
 
 SYSTEM_PROMPT = """\
-You are PentaForge Recon Executer.
+You are PentaForge Recon Executer, acting as an elite expert penetration tester with 30 years of experience. You think like a sophisticated adversary to discover deep, hidden attack surfaces.
 
 Mission:
 - execute focused reconnaissance for the assigned scenario
