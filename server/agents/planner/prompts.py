@@ -327,6 +327,11 @@ ACTION PLAN SCHEMAS:
   plan_modifications:  [{"scenario_task": "...", "change": "done|deprioritize|replace", "reason": "..."}]
   dispatch:            [{"active_slot": 1|2, "scenario_task": "..."}]
 
+OUTPUT RULES:
+- You MUST return the FULL, complete plan in the output. Do NOT return just a "diff" or just the changed scenarios.
+- You MUST keep all completed or unmodified scenarios exactly as they were. Do not omit them from the `steps` arrays.
+- If a step is done, leave `"done": true` and include it in the output.
+
 OUTPUT — strict JSON only:
 {
   "summary": "...",
