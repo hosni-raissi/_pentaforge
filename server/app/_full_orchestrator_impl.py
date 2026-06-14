@@ -4983,7 +4983,7 @@ def _extract_saved_plan_from_last_scan(last_scan: Any) -> dict[str, Any]:
 
 
 def _prepare_plan_for_resume(plan_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
-    """Use the saved plan as resume source and rerun only unfinished scenarios."""
+    """Use the saved plan as resume source but rerun ALL scenarios by resetting them."""
 
     resumed_plan = deepcopy(plan_data) if isinstance(plan_data, dict) else {}
     stats = {
@@ -5000,14 +5000,9 @@ def _prepare_plan_for_resume(plan_data: dict[str, Any]) -> tuple[dict[str, Any],
             "done",
         }
         scenario["active_slot"] = None
-        if is_completed:
-            scenario["done"] = True
-            scenario["status"] = "completed"
-            stats["completed"] += 1
-            continue
-
+        
         scenario["done"] = False
-        if status in {"working", "running", "in_progress", "in progress", "active", "executing"}:
+        if is_completed or status in {"working", "running", "in_progress", "in progress", "active", "executing"}:
             stats["reset_to_pending"] += 1
         scenario["status"] = "not yet"
         stats["pending"] += 1
