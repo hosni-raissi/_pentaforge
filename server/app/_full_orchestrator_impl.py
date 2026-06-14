@@ -10089,21 +10089,42 @@ class ScanOrchestratorService:
                     event="planner_started",
                     scan_id=scan_id,
                     level="info",
-                    message="Planner [skip] Resuming with previously generated plan.",
+                    message="Planner [start] agent started to rebuild pentest plan from resumed checkpoint.",
                     data={"stage": "planner", "status": "running", "kind": "start"},
                 )
                 plan_data, resume_plan_stats = _prepare_plan_for_resume(existing_plan)
                 _sync_plan_data_into_planner_state(plan_data)
-                planner_result = PlannerResult(
-                    summary=(
-                        "Resumed from saved plan checkpoint "
-                        f"({resume_plan_stats.get('completed', 0)} completed, "
-                        f"{resume_plan_stats.get('pending', 0)} pending)."
+                
+                # We do NOT return a fake PlannerResult here anymore.
+                # We inject the resumed plan_data into the planner's input so it runs
+                # a full planning cycle over the explicitly reset scenarios.
+                planner_callback = PrintCallback(
+                    enabled=print_steps,
+                    on_log=lambda level, message: self._emit_planner_callback_event(
+                        project_id=project_id,
+                        scan_id=scan_id,
+                        level=level,
+                        raw_message=message,
                     ),
-                    scenarios=[],
-                    needs=[],
-                    action_plan={"resume": {"source": "saved_plan", "stats": resume_plan_stats}},
                 )
+                
+                # Append context to inform the LLM it's resuming and needs to re-evaluate
+                resume_context = f"\n\nRESUME CONTEXT: We are resuming a previous scan. Previous scenarios have been reset to 'not yet'. Re-evaluate the plan, validate prerequisites, and select exactly two scenarios to execute next.\n\n"
+                
+                async with PlannerAgent(
+                    callback=planner_callback,
+                    project_id=project_id,
+                    projects_store=self._projects_store,
+                    vector_store=self._vector_store,
+                ) as planner_agent:
+                    planner_result = await planner_agent.run(
+                        planner_input + resume_context,
+                        is_loop=False,
+                        intel_checklist=intel_checklist,
+                        plan_mode="full",
+                    )
+                    from server.agents.planner.tools.pentest_plan import _current_plan
+                    plan_data = dict(_current_plan) if isinstance(_current_plan, dict) else {}
             else:
                 self._emit_event(
                     project_id,
