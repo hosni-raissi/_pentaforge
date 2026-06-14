@@ -475,11 +475,6 @@ def _build_report_payload(
             key=lambda row: (_severity_rank(row.get("severity")), str(row.get("title", "")).lower()),
         )
     ]
-    false_positives = [
-        _sanitize_false_positive(item)
-        for item in findings
-        if str(item.get("status", "")).strip().lower() == "false_positive"
-    ]
     activity = [_summarize_history_entry(item) for item in history_entries]
     severity_counts: dict[str, int] = {}
     for item in verified_findings:
@@ -512,7 +507,6 @@ def _build_report_payload(
         "risk_summary_rows": risk_summary_rows,
         "verified_findings": verified_findings,
         "open_findings": open_findings,
-        "false_positives": false_positives,
         "assessment_activity": activity,
         "appendix": {
             "tool_commands_used": _extract_commands(findings),
@@ -526,7 +520,6 @@ def _build_report_payload(
         "summary": {
             "verified_count": len(verified_findings),
             "open_count": len(open_findings),
-            "false_positive_count": len(false_positives),
             "activity_record_count": len(activity),
             "severity_counts": severity_counts,
         },

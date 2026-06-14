@@ -29,6 +29,7 @@ Important authoring constraints:
 - Do not expose scan IDs, entry IDs, internal agent names, raw function signatures, checklist labels, or internal workflow terminology in the final report.
 - For Scope -> Tools used, summarize tools concisely using the provided human-friendly labels. Do not list every raw command unless it is useful in the appendix.
 - If verified findings exist, do not include assessment-activity narratives, methodology writeups, project metadata, or scanner limitations except where directly needed to qualify a finding.
+- Do NOT include False Positives anywhere in the report. False positives are internal noise and must not be presented to the client.
 - In Section 4, for each finding, use this pattern:
   - Severity
   - CVSS
@@ -39,8 +40,8 @@ Important authoring constraints:
   - Remediation
 - For Evidence, prefer short bullet points from the provided evidence summaries or commands. Do not dump full internal traces.
 - For Impact, use only the impact text provided in the data. If impact is not provided, infer only the direct security consequence already supported by the finding summary; do not speculate.
-- For Section 6, include an attack path only if at least two verified findings plausibly chain together. Otherwise state that no confirmed attack path was established from the verified findings.
-- For Section 7, keep the appendix concise and client-facing:
+- For Section 5, include an attack path only if at least two verified findings plausibly chain together. Otherwise state that no confirmed attack path was established from the verified findings.
+- For Section 6, keep the appendix concise and client-facing:
   - Include tools and commands used
   - Include references such as CVEs/CWEs when present
   - If there are no verified findings, include a brief coverage summary and key gaps based on assessment activity
@@ -63,9 +64,7 @@ Use this exact report structure:
 
 ## 4. Findings
 
-## 5. False Positives
+## 5. Attack Path
 
-## 6. Attack Path
-
-## 7. Appendix
+## 6. Appendix
 """

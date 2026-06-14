@@ -8136,6 +8136,7 @@ class ScanOrchestratorService:
         recon_agent: Any,
         recon_agent_worker_1: Any | None,
         exploit_agent: Any,
+        exploit_agent_worker_1: Any | None,
         target: str,
         target_type: str,
         scope: str,
@@ -8154,7 +8155,12 @@ class ScanOrchestratorService:
         )
         role = str(scenario.get("agent", "recon")).strip().lower()
         if role == "exploit":
-            result = await exploit_agent.run(
+            selected_exploit_agent = (
+                exploit_agent_worker_1
+                if recon_worker_index == 1 and exploit_agent_worker_1 is not None
+                else exploit_agent
+            )
+            result = await selected_exploit_agent.run(
                 message,
                 max_tool_rounds_override=_scenario_max_rounds(scenario, default=2),
             )
@@ -8172,7 +8178,7 @@ class ScanOrchestratorService:
         return {
             "scenario": dict(scenario),
             "executor_agent": role,
-            "worker_index": recon_worker_index if role == "recon" else None,
+            "worker_index": recon_worker_index if role in ("recon", "exploit") else None,
             "result": {
                 "status": result.status,
                 "summary": result.summary,
@@ -8196,6 +8202,7 @@ class ScanOrchestratorService:
         recon_agent: Any,
         recon_agent_worker_1: Any | None,
         exploit_agent: Any,
+        exploit_agent_worker_1: Any | None,
         analyzer_agent: Any,
         loop_planner: Any,
         target: str,
@@ -8285,11 +8292,16 @@ class ScanOrchestratorService:
         # Mark selected scenarios as working and emit state change
         selected_with_workers: list[tuple[dict[str, Any], int | None]] = []
         next_recon_worker = 0
+        next_exploit_worker = 0
         for scenario in selected:
             worker_index: int | None = None
-            if str(scenario.get("agent", "recon")).strip().lower() == "recon":
+            agent_role = str(scenario.get("agent", "recon")).strip().lower()
+            if agent_role == "recon":
                 worker_index = min(next_recon_worker, 1)
                 next_recon_worker += 1
+            elif agent_role == "exploit":
+                worker_index = min(next_exploit_worker, 1)
+                next_exploit_worker += 1
             selected_with_workers.append((scenario, worker_index))
 
         for scenario, worker_index in selected_with_workers:
@@ -8331,6 +8343,7 @@ class ScanOrchestratorService:
                     recon_agent=recon_agent,
                     recon_agent_worker_1=recon_agent_worker_1,
                     exploit_agent=exploit_agent,
+                    exploit_agent_worker_1=exploit_agent_worker_1,
                     target=target,
                     target_type=target_type,
                     scope=scope,
@@ -9358,6 +9371,19 @@ class ScanOrchestratorService:
         summary = str(plan_result.summary or "").strip()
         normalized_summary = re.sub(r"\s+", " ", summary.lower()).strip()
         is_done = normalized_summary.startswith("pentest complete") or normalized_summary == "complete"
+
+        # Anti-infinite-loop: If the planner didn't actually generate any new runnable scenarios,
+        # we must force completion to prevent an endless handoff loop.
+        has_runnable = any(
+            isinstance(s, dict) and not s.get("done") and str(s.get("status", "")).strip().lower() != "completed"
+            for phase in updated_plan.get("phases", [])
+            if isinstance(phase, dict)
+            for step in (phase.get("steps", []) if isinstance(phase.get("steps"), list) else [])
+            if isinstance(step, dict)
+            for s in step.get("scenarios", [])
+        )
+        if not has_runnable:
+            is_done = True
 
         if not is_done:
             self._emit_event(
@@ -10421,6 +10447,7 @@ class ScanOrchestratorService:
         recon_agent = None
         recon_agent_worker_1 = None
         exploit_agent = None
+        exploit_agent_worker_1 = None
         analyzer_agent = None
         loop_planner = None
 
@@ -10445,6 +10472,8 @@ class ScanOrchestratorService:
             )
             recon_worker_0_callback = WorkerExecuterCallback(parent=executer_callback, worker_index=0)
             recon_worker_1_callback = WorkerExecuterCallback(parent=executer_callback, worker_index=1)
+            exploit_worker_0_callback = WorkerExecuterCallback(parent=executer_callback, worker_index=0)
+            exploit_worker_1_callback = WorkerExecuterCallback(parent=executer_callback, worker_index=1)
 
             recon_agent = ReconExecuterAgent(
                 callback=recon_worker_0_callback,
@@ -10462,10 +10491,18 @@ class ScanOrchestratorService:
                 approval_mode=run_state.get("approval_mode", "custom"),
             )
             exploit_agent = ExploitExecuterAgent(
-                callback=executer_callback,
+                callback=exploit_worker_0_callback,
                 target_types=[target_type],
                 project_id=project_id,
                 project_cache_dir=project_cache_dir,
+                approval_mode=run_state.get("approval_mode", "custom"),
+            )
+            exploit_agent_worker_1 = ExploitExecuterAgent(
+                callback=exploit_worker_1_callback,
+                target_types=[target_type],
+                project_id=project_id,
+                project_cache_dir=project_cache_dir,
+                config=get_public_agent_config("exploit"),
                 approval_mode=run_state.get("approval_mode", "custom"),
             )
             analyzer_agent = AnalyzerAgent(
@@ -10491,6 +10528,7 @@ class ScanOrchestratorService:
             await recon_agent.clear_context_window()
             await recon_agent_worker_1.clear_context_window()
             await exploit_agent.clear_context_window()
+            await exploit_agent_worker_1.clear_context_window()
             await analyzer_agent.clear_context_window()
 
             try:
@@ -10521,6 +10559,7 @@ class ScanOrchestratorService:
                     recon_agent.reset_context_window_for_cycle()
                     recon_agent_worker_1.reset_context_window_for_cycle()
                     exploit_agent.reset_context_window_for_cycle()
+                    exploit_agent_worker_1.reset_context_window_for_cycle()
                     analyzer_agent.reset_context_window_for_cycle()
                     executed_scenarios = _count_done_scenarios(plan_data)
 
@@ -10547,6 +10586,7 @@ class ScanOrchestratorService:
                             recon_agent=recon_agent,
                             recon_agent_worker_1=recon_agent_worker_1,
                             exploit_agent=exploit_agent,
+                            exploit_agent_worker_1=exploit_agent_worker_1,
                             analyzer_agent=analyzer_agent,
                             loop_planner=loop_planner,
                             target=target,
@@ -10655,6 +10695,8 @@ class ScanOrchestratorService:
                     await recon_agent_worker_1.close()
                 if exploit_agent:
                     await exploit_agent.close()
+                if exploit_agent_worker_1:
+                    await exploit_agent_worker_1.close()
                 if analyzer_agent:
                     await analyzer_agent.close()
                 if loop_planner:
