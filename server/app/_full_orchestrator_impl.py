@@ -9666,39 +9666,44 @@ class ScanOrchestratorService:
                 scan_id=scan_id,
                 enabled=print_steps,
             )
-            callback_token = _executer_callback_context.set(info_gathering_cb)
-            try:
-                target_memory = await brain_builder.run(
-                    project_id=project_id,
-                    scan_id=scan_id,
-                    target=target,
-                    target_type=_normalize_target_type(target_type),
-                    scope=scope_text,
-                    info=info,
-                    profile=target_info_profile,
-                    project_cache_dir=project_cache_dir,
-                    tool_map=tool_map,
-                    tool_arg_builder=_build_target_info_tool_kwargs,
-                    progress_callback=_emit_system_memory_progress,
-                    pre_execution_gate=None,
-                )
+            
+            target_memory = _load_target_memory(project_cache_dir)
+            gathering_state = target_memory.get("gathering", {}) if isinstance(target_memory.get("gathering"), dict) else {}
+            if str(gathering_state.get("status", "")).strip().lower() != "completed":
+                callback_token = _executer_callback_context.set(info_gathering_cb)
+                try:
+                    target_memory = await brain_builder.run(
+                        project_id=project_id,
+                        scan_id=scan_id,
+                        target=target,
+                        target_type=_normalize_target_type(target_type),
+                        scope=scope_text,
+                        info=info,
+                        profile=target_info_profile,
+                        project_cache_dir=project_cache_dir,
+                        tool_map=tool_map,
+                        tool_arg_builder=_build_target_info_tool_kwargs,
+                        progress_callback=_emit_system_memory_progress,
+                        pre_execution_gate=None,
+                    )
+                    target_memory = _apply_memory_enrichment(target_memory)
+                    target_memory = await _run_authenticated_surface_enrichment(
+                        project_cache_dir=project_cache_dir,
+                        target_memory=target_memory,
+                        target=target,
+                        target_type=target_type,
+                        target_config=project.get("targetConfig") if isinstance(project.get("targetConfig"), dict) else None,
+                        tool_map=tool_map,
+                    )
+                finally:
+                    _executer_callback_context.reset(callback_token)
                 target_memory = _apply_memory_enrichment(target_memory)
-                target_memory = await _run_authenticated_surface_enrichment(
-                    project_cache_dir=project_cache_dir,
-                    target_memory=target_memory,
-                    target=target,
-                    target_type=target_type,
-                    target_config=project.get("targetConfig") if isinstance(project.get("targetConfig"), dict) else None,
-                    tool_map=tool_map,
+                target_memory = await _save_target_memory(
+                    project_cache_dir,
+                    target_memory,
+                    memory_llm=SystemMemoryLLM(),
                 )
-            finally:
-                _executer_callback_context.reset(callback_token)
-            target_memory = _apply_memory_enrichment(target_memory)
-            target_memory = await _save_target_memory(
-                project_cache_dir,
-                target_memory,
-                memory_llm=SystemMemoryLLM(),
-            )
+                
             target_info_gathering_result = _build_target_info_gathering_result(target_memory)
             detected_tech = [
                 str(value).strip()

@@ -1112,6 +1112,10 @@ class InformationGatheringNode:
         pre_execution_gate: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         memory = self._memory_node.load(project_cache_dir)
+        gathering_state = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+        if str(gathering_state.get("status", "")).strip().lower() == "completed":
+            return memory
+
         overview = memory.get("overview", {}) if isinstance(memory.get("overview"), dict) else {}
         if not str(overview.get("target", "")).strip():
             memory = self._memory_node.initialize(
@@ -1132,10 +1136,6 @@ class InformationGatheringNode:
             memory,
             progress_callback=progress_callback,
         )
-
-        gathering_state = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
-        if str(gathering_state.get("status", "")).strip().lower() == "completed":
-            return memory
 
         blocks = profile.get("blocks", []) if isinstance(profile, dict) else []
         valid_blocks = [block for block in blocks if isinstance(block, dict)]
