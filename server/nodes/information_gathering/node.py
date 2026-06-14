@@ -1111,15 +1111,22 @@ class InformationGatheringNode:
         progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
         pre_execution_gate: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
-        memory = self._memory_node.initialize(
-            project_id=project_id,
-            scan_id=scan_id,
-            target=target,
-            target_type=target_type,
-            scope=scope,
-            info=info,
-            profile=profile,
-        )
+        memory = self._memory_node.load(project_cache_dir)
+        overview = memory.get("overview", {}) if isinstance(memory.get("overview"), dict) else {}
+        if not str(overview.get("target", "")).strip():
+            memory = self._memory_node.initialize(
+                project_id=project_id,
+                scan_id=scan_id,
+                target=target,
+                target_type=target_type,
+                scope=scope,
+                info=info,
+                profile=profile,
+            )
+        else:
+            overview["scan_id"] = scan_id
+            memory["overview"] = overview
+            
         memory = await self._memory_node.save(
             project_cache_dir,
             memory,
@@ -1129,6 +1136,7 @@ class InformationGatheringNode:
         gathering_state = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
         if str(gathering_state.get("status", "")).strip().lower() == "completed":
             return memory
+
         blocks = profile.get("blocks", []) if isinstance(profile, dict) else []
         valid_blocks = [block for block in blocks if isinstance(block, dict)]
         available_tools = sorted(
@@ -1137,59 +1145,71 @@ class InformationGatheringNode:
             if str(tool_name).strip()
         )
 
-        prepared_blocks = await self._prepare_blocks(
-            target=target,
-            target_type=target_type,
-            scope=scope,
-            info=info,
-            profile=profile,
-            valid_blocks=valid_blocks,
-            available_tools=available_tools,
-        )
-
-        if progress_callback:
-            progress_callback(
-                "program_organized",
-                {
-                    "total": len(prepared_blocks),
-                    "paths": memory.get("paths", {}),
-                    "blocks": [
-                        {
-                            "id": str(block.get("id", "")).strip(),
-                            "name": str(block.get("name", "")).strip(),
-                            "status": str(block.get("status", "keep")).strip().lower() or "keep",
-                            "planned_tools": block.get("tools", []),
-                            "selection_rationale": str(block.get("selection_rationale", "")).strip(),
-                            "skipped_tools": block.get("skipped_tools", []),
-                        }
-                        for block in prepared_blocks
-                        if isinstance(block, dict)
-                    ],
-                },
+        if gathering_state.get("program"):
+            prepared_blocks = gathering_state.get("program")
+        else:
+            prepared_blocks = await self._prepare_blocks(
+                target=target,
+                target_type=target_type,
+                scope=scope,
+                info=info,
+                profile=profile,
+                valid_blocks=valid_blocks,
+                available_tools=available_tools,
             )
 
-        gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
-        gathering["program"] = prepared_blocks
-        gathering["status"] = "organized"
-        memory["gathering"] = gathering
-        memory = await self._memory_node.save(
-            project_cache_dir,
-            memory,
-            progress_callback=progress_callback,
-        )
-        if pre_execution_gate is not None:
-            await pre_execution_gate(memory)
-            # Re-read organized program from memory after approval gate
-            # in case the user edited the blocks/tools in the UI.
-            gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
-            prepared_blocks = gathering.get("program", prepared_blocks)
-            if not isinstance(prepared_blocks, list):
-                prepared_blocks = []
+            if progress_callback:
+                progress_callback(
+                    "program_organized",
+                    {
+                        "total": len(prepared_blocks),
+                        "paths": memory.get("paths", {}),
+                        "blocks": [
+                            {
+                                "id": str(block.get("id", "")).strip(),
+                                "name": str(block.get("name", "")).strip(),
+                                "status": str(block.get("status", "keep")).strip().lower() or "keep",
+                                "planned_tools": block.get("tools", []),
+                                "selection_rationale": str(block.get("selection_rationale", "")).strip(),
+                                "skipped_tools": block.get("skipped_tools", []),
+                            }
+                            for block in prepared_blocks
+                            if isinstance(block, dict)
+                        ],
+                    },
+                )
+
+            gathering_state["program"] = prepared_blocks
+            gathering_state["status"] = "organized"
+            memory["gathering"] = gathering_state
+            memory = await self._memory_node.save(
+                project_cache_dir,
+                memory,
+                progress_callback=progress_callback,
+            )
+            if pre_execution_gate is not None:
+                await pre_execution_gate(memory)
+                # Re-read organized program from memory after approval gate
+                # in case the user edited the blocks/tools in the UI.
+                gathering_state = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+                prepared_blocks = gathering_state.get("program", prepared_blocks)
+                if not isinstance(prepared_blocks, list):
+                    prepared_blocks = []
+
+        completed_block_ids = {
+            str(b.get("id", "")).strip() 
+            for b in gathering_state.get("blocks", []) 
+            if isinstance(b, dict) and str(b.get("id", "")).strip()
+        }
 
         pending_organized_task: asyncio.Task[dict[str, Any]] | None = None
         pending_meta: dict[str, Any] | None = None
 
         for index, prepared_block in enumerate(prepared_blocks, start=1):
+            block_id = str(prepared_block.get("id", "")).strip()
+            if block_id and block_id in completed_block_ids:
+                continue
+
             original_block = valid_blocks[index - 1] if index - 1 < len(valid_blocks) else {}
             if progress_callback:
                 progress_callback(
