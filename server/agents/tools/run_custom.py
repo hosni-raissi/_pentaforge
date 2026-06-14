@@ -976,64 +976,83 @@ def run_custom(
 
     # ── Execute ───────────────────────────────────────────────
     execution_cwd = _effective_command_cwd()
-    if sandbox_remote_enabled():
-        remote_result = execute_run_custom_remotely(
-            command=req.command,
-            args=req.args,
-            timeout=req.timeout,
-            env=req.env or {},
-            cwd=execution_cwd,
-            password=password,
-        )
-        stdout = str(remote_result.get("stdout") or "")
-        stderr = str(remote_result.get("stderr") or "")
-        rc = int(remote_result.get("return_code", -1))
-        execution_cwd = str(remote_result.get("execution_cwd") or execution_cwd)
-        artifact_paths = (
-            list(remote_result.get("artifact_paths", []))
-            if isinstance(remote_result.get("artifact_paths"), list)
-            else collect_artifact_paths(req.args, execution_cwd=execution_cwd)
-        )
-    elif not _sandbox_service_local_execution_allowed():
-        error = (
-            "Sandbox executor unavailable: run_custom may only execute through the tool sandbox. "
-            "Configure SANDBOX_EXECUTOR_URL for backend-side callers."
-        )
-        append_audit_record(
-            command=req.command,
-            args=req.args,
-            full_command=full_command,
-            reason=req.reason,
-            status="blocked",
-            execution_cwd=execution_cwd,
-            return_code=-1,
-            execution_time=round(time.time() - start, 2),
-            error=error,
-            stripped_args=stripped_flags,
-            scope_target=str(current_execution_context().get("target_url", "")).strip(),
-            profile=command_profile,
-        )
-        return RunCustomResult(
-            success=False,
-            command=req.command,
-            args=req.args,
-            reason=req.reason,
-            full_command=full_command,
-            return_code=-1,
-            execution_time=round(time.time() - start, 2),
-            logged=True,
-            execution_cwd=execution_cwd,
-            error=error,
-        ).model_dump()
-    else:
-        stdout, stderr, rc = safe_execute(
-            cmd,
-            timeout=req.timeout,
-            extra_env=req.env or None,
-            cwd=execution_cwd,
-            password=password,
-        )
-        artifact_paths = collect_artifact_paths(runtime_args, execution_cwd=execution_cwd)
+    
+    max_retries = 2
+    base_delay = 5
+    
+    for attempt in range(max_retries + 1):
+        if sandbox_remote_enabled():
+            remote_result = execute_run_custom_remotely(
+                command=req.command,
+                args=req.args,
+                timeout=req.timeout,
+                env=req.env or {},
+                cwd=execution_cwd,
+                password=password,
+            )
+            stdout = str(remote_result.get("stdout") or "")
+            stderr = str(remote_result.get("stderr") or "")
+            rc = int(remote_result.get("return_code", -1))
+            execution_cwd = str(remote_result.get("execution_cwd") or execution_cwd)
+            artifact_paths = (
+                list(remote_result.get("artifact_paths", []))
+                if isinstance(remote_result.get("artifact_paths"), list)
+                else collect_artifact_paths(req.args, execution_cwd=execution_cwd)
+            )
+        elif not _sandbox_service_local_execution_allowed():
+            error = (
+                "Sandbox executor unavailable: run_custom may only execute through the tool sandbox. "
+                "Configure SANDBOX_EXECUTOR_URL for backend-side callers."
+            )
+            append_audit_record(
+                command=req.command,
+                args=req.args,
+                full_command=full_command,
+                reason=req.reason,
+                status="blocked",
+                execution_cwd=execution_cwd,
+                return_code=-1,
+                execution_time=round(time.time() - start, 2),
+                error=error,
+                stripped_args=stripped_flags,
+                scope_target=str(current_execution_context().get("target_url", "")).strip(),
+                profile=command_profile,
+            )
+            return RunCustomResult(
+                success=False,
+                command=req.command,
+                args=req.args,
+                reason=req.reason,
+                full_command=full_command,
+                return_code=-1,
+                execution_time=round(time.time() - start, 2),
+                logged=True,
+                execution_cwd=execution_cwd,
+                error=error,
+            ).model_dump()
+        else:
+            stdout, stderr, rc = safe_execute(
+                cmd,
+                timeout=req.timeout,
+                extra_env=req.env or None,
+                cwd=execution_cwd,
+                password=password,
+            )
+            artifact_paths = collect_artifact_paths(runtime_args, execution_cwd=execution_cwd)
+
+        # Check for rate limiting
+        combined_output = f"{stdout}\n{stderr}".lower()
+        if ("429 too many requests" in combined_output or 
+            "attention required! | cloudflare" in combined_output or 
+            "rate limit" in combined_output or 
+            "rate-limit" in combined_output):
+            
+            if attempt < max_retries:
+                delay = base_delay * (2 ** attempt)
+                time.sleep(delay)
+                continue
+                
+        break
     append_audit_record(
         command=req.command,
         args=req.args,

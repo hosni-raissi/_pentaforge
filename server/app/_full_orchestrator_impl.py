@@ -8723,9 +8723,10 @@ class ScanOrchestratorService:
                 inconclusives=len(verify_results_organized["inconclusives"]),
             )
 
-            # CRITICAL: Save real vulnerabilities to project database (Verify's responsibility)
-            # Only real vulnerabilities are added to findings
-            if verify_results_organized["real_vulnerabilities"]:
+            # CRITICAL: Save real vulnerabilities and inconclusive findings to project database
+            # This ensures WAF-blocked (inconclusive) findings are persisted and reported properly.
+            items_to_save = verify_results_organized["real_vulnerabilities"] + verify_results_organized["inconclusives"]
+            if items_to_save:
                 project_key = str(project_id or "").strip()
                 current_project = self._projects_store.get_project(project_key)
 
@@ -8739,7 +8740,7 @@ class ScanOrchestratorService:
                 current_project["findings"] = findings_list
                 saved_finding_entries: list[dict[str, Any]] = []
 
-                for item in verify_results_organized["real_vulnerabilities"]:
+                for item in items_to_save:
                     finding_entry = _build_verified_finding_entry(
                         target=target,
                         scan_id=scan_id,
@@ -8764,21 +8765,23 @@ class ScanOrchestratorService:
                 )
 
                 for saved_finding in saved_finding_entries:
-                    try:
-                        await index_verified_finding(
-                            project_id=project_key,
-                            target=target,
-                            target_type=target_type,
-                            finding=saved_finding,
-                            project_store=self._projects_store,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "verify_finding_project_rag_index_failed",
-                            project_id=project_key,
-                            finding_id=saved_finding.get("id"),
-                            exc_info=True,
-                        )
+                    # Only index verified vulnerabilities to avoid polluting RAG context with inconclusives
+                    if saved_finding.get("status") == "verified":
+                        try:
+                            await index_verified_finding(
+                                project_id=project_key,
+                                target=target,
+                                target_type=target_type,
+                                finding=saved_finding,
+                                project_store=self._projects_store,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "verify_finding_project_rag_index_failed",
+                                project_id=project_key,
+                                finding_id=saved_finding.get("id"),
+                                exc_info=True,
+                            )
                     self._emit_event(
                         project_id,
                         event="verify_finding_saved",
@@ -8797,7 +8800,7 @@ class ScanOrchestratorService:
                     "verify_findings_saved_to_db",
                     project_id=project_id,
                     scan_id=scan_id,
-                    findings_count=len(verify_results_organized["real_vulnerabilities"]),
+                    findings_count=len(items_to_save),
                     cache_path=cache_path,
                 )
 
@@ -9794,7 +9797,7 @@ class ScanOrchestratorService:
                     event="planner_checklist_started",
                     scan_id=scan_id,
                     level="info",
-                    message="Planner [skip] Resuming with saved plan checkpoint.",
+                    message="Planner [start] Rebuilding checklist from saved plan checkpoint.",
                     data={
                         "stage": "planner",
                         "kind": "checklist_start",

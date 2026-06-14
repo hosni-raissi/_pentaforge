@@ -537,9 +537,21 @@ export function DashboardFindingsPanel({
 
               <div className="flex items-center justify-between pt-2 border-t border-border/30 dark:border-border">
                 <div className="flex items-center gap-1.5">
-                  <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-widest">
-                    Verified
+                  <span
+                    className={cn(
+                      "flex h-1.5 w-1.5 rounded-full animate-pulse",
+                      item.status === "inconclusive" ? "bg-amber-500" : "bg-emerald-500"
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      "text-[10px] font-bold uppercase tracking-widest",
+                      item.status === "inconclusive"
+                        ? "text-amber-600 dark:text-amber-400"
+                        : "text-emerald-600 dark:text-emerald-400"
+                    )}
+                  >
+                    {item.status === "inconclusive" ? "Inconclusive" : "Verified"}
                   </span>
                 </div>
                 <span className="text-[10px] font-medium text-text-muted">
@@ -1038,7 +1050,10 @@ export function DashboardFindingDialog({
                     <div className="flex flex-wrap items-center gap-4 text-xs text-text-muted">
                       <div className="flex items-center gap-1.5">
                         <Clock3 size={14} className="text-pf-500" />
-                        <span>Verified at {formatTime(selectedFinding.timestamp || selectedFinding.at)}</span>
+                        <span>
+                          {selectedFinding.status === "inconclusive" ? "Marked inconclusive at " : "Verified at "}
+                          {formatTime(selectedFinding.timestamp || selectedFinding.at)}
+                        </span>
                       </div>
                       {selectedFinding.target && (
                         <div className="flex items-center gap-1.5 font-mono bg-surface-2/40 px-2 py-0.5 rounded border border-border/30">

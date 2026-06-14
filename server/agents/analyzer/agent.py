@@ -1080,6 +1080,21 @@ class AnalyzerAgent:
         data = dict(verify_data) if isinstance(verify_data, dict) else {}
         if not data.get("verdict"):
             data["verdict"] = self._extract_verdict(data)
+
+        waf_interference = False
+        tool_results = candidate.row_result.get("tool_results", [])
+        if isinstance(tool_results, list):
+            for cmd_res in tool_results:
+                if not isinstance(cmd_res, dict):
+                    continue
+                text = str(cmd_res.get("result", "")).lower()
+                if "429 too many requests" in text or "cloudflare waf" in text or "attention required! | cloudflare" in text or "rate limit" in text or "rate-limit" in text:
+                    waf_interference = True
+                    break
+                    
+        if waf_interference and data.get("verdict") == "real_vulnerability":
+            data["verdict"] = "inconclusive"
+            data["reasoning"] = "WAF interference or rate-limiting detected in the tool results. The finding cannot be conclusively verified."
         data = enrich_payload_with_cvss(data, candidate.scenario, candidate.row_result)
         data.setdefault("poc", "")
         data.setdefault(

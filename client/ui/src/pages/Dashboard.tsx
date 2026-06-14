@@ -3339,8 +3339,15 @@ export default function Dashboard() {
     };
 
     void load();
+    const intervalId = window.setInterval(() => {
+      if (!cancelled) {
+        void load();
+      }
+    }, 5000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
     };
   }, [activeProjectId, activeScanId, scanEvents.length, activeProject?.findings.length]);
 
@@ -4167,7 +4174,7 @@ export default function Dashboard() {
         source: "finding",
         at: finding.timestamp || new Date().toISOString(),
         endpoint: finding.target || "",
-        status: "verified_saved",
+        status: finding.status || "verified",
         findingKey,
         cve: finding.cve,
         cvss: finding.cvss,

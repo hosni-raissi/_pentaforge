@@ -60,5 +60,8 @@ Execution safety:
 AVAILABLE WORDLISTS:
 """ + json.dumps(GLOBAL_SANDBOX_WORDLISTS, indent=2) + """
 
+HTTP HEADERS:
+  - If the TARGET description or project context includes custom HTTP headers (e.g., Authorization, Cookie, X-Api-Key), you MUST explicitly include and use these headers in all relevant web/API tool executions and scripts.
+
 Your job is to gather the best evidence possible within the allowed round budget and carry forward concise summaries between rounds.
 """

@@ -48,6 +48,10 @@ Evidence Capture Requirements:
 AVAILABLE WORDLISTS:
 """ + json.dumps(GLOBAL_SANDBOX_WORDLISTS, indent=2) + """
 
+HTTP HEADERS:
+  - If the TARGET description or project context includes custom HTTP headers (e.g., Authorization, Cookie, X-Api-Key), you MUST explicitly include and use these headers in all relevant web/API tool executions and scripts.
+
+
 Verification Quality & Tiers:
 - You MUST classify verified findings into one of these tiers:
   1. `signal_only`: Suspicious observation or clue, but no evidence of unauthorized impact.
@@ -108,6 +112,7 @@ Rules:
 - sanitize sensitive secrets
 - stay on the verified vulnerability
 - include a defensible `cvss_vector` for the confirmed issue using CVSS v3.1 base metrics
+- If the TARGET description or project context includes custom HTTP headers (e.g., Authorization, Cookie, X-Api-Key), you MUST explicitly include and use these headers in all relevant web/API tool executions and scripts.
 
 CVSS v3.1 base metrics:
 - AV: `N` internet, `A` adjacent network, `L` local, `P` physical

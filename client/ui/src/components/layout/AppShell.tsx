@@ -22,9 +22,14 @@ export function AppShell() {
     window.addEventListener('focus', handleFocus);
     document.addEventListener('visibilitychange', handleVisibility);
 
+    const intervalId = window.setInterval(() => {
+      void hydrateFromDatabase();
+    }, 5000);
+
     return () => {
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.clearInterval(intervalId);
     };
   }, [hydrateFromDatabase]);
 

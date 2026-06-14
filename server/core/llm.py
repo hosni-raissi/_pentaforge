@@ -639,9 +639,9 @@ class LLMClient:
             base_url=self._config.api_url,
             headers=headers,
             timeout=httpx.Timeout(
-                600.0,
+                1200.0,
                 connect=30.0,
-                read=300.0,
+                read=1200.0,
                 write=60.0,
             ),
         )

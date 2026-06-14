@@ -117,6 +117,7 @@ class PlannerState(TypedDict):
     intel_checklist_windows: list[dict[str, Any]]
     intel_checklist_compact_summary: dict[str, Any]
     planning_round_cap: int
+    plan_mode: str
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2435,6 +2436,7 @@ class PlannerAgent:
                 self._cb.on_warn(f"Unknown tool: {raw_tool_name}")
             elif (
                 not state.get("is_loop")
+                and state.get("plan_mode") != "resume"
                 and tool_name == "update_pentest_plan"
                 and not has_prior_discovery
             ):
@@ -2953,6 +2955,7 @@ class PlannerAgent:
             "error": "",
             "recovery_attempted": False,
             "world_state_hash": world_state_hash,
+            "plan_mode": normalized_plan_mode,
             "intel_checklist_overview": checklist_overview,
             "intel_checklist_windows": checklist_windows,
             "intel_checklist_compact_summary": checklist_compact_summary,

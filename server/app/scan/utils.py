@@ -2707,6 +2707,8 @@ def _build_verified_finding_entry(
         evidence_map.setdefault("cvss_severity", cvss_severity)
     if cve_candidates:
         evidence_map.setdefault("cve_candidates", cve_candidates)
+    if item.get("verdict") == "inconclusive":
+        evidence_map["wafs_interference"] = True
 
     remediation = str(scenario.get("remediation", "")).strip()
     if not remediation:
@@ -2718,7 +2720,7 @@ def _build_verified_finding_entry(
         "severity": severity,
         "category": vuln_type,
         "target": target,
-        "status": "verified",
+        "status": item.get("verdict", "verified"),
         "cvss": float(cvss_score) if isinstance(cvss_score, (int, float)) else scenario.get("cvss"),
         "cvss_score": float(cvss_score) if isinstance(cvss_score, (int, float)) else None,
         "cvss_vector": cvss_vector or None,

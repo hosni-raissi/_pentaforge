@@ -127,7 +127,7 @@ def _prepare_report_findings(findings: list[dict[str, Any]]) -> list[dict[str, A
             continue
         row = dict(item)
         if str(row.get("status", "")).strip().lower() == "verified":
-            row = enrich_payload_with_cvss(row)
+            row = enrich_payload_with_cvss(row, set_severity=False)
         prepared.append(row)
     return prepared
 
@@ -485,7 +485,7 @@ def _build_report_payload(
     open_findings = [
         _sanitize_finding(item)
         for item in sorted(
-            [row for row in findings if str(row.get("status", "")).strip().lower() == "open"],
+            [row for row in findings if str(row.get("status", "")).strip().lower() in ("open", "inconclusive")],
             key=lambda row: (_severity_rank(row.get("severity")), str(row.get("title", "")).lower()),
         )
     ]
