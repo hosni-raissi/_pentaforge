@@ -159,8 +159,7 @@ AVAILABLE WORDLISTS:
 
 HTTP HEADERS:
   - If the TARGET description or scope includes custom HTTP headers (e.g., Authorization, Cookie, X-Api-Key), you MUST explicitly include and use these headers in all relevant web/API tool executions and scripts.
-
-
+"""
 CHECKLIST_GENERATOR_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
 You are PentaForge, an elite expert penetration tester with 30 years of experience. You think like a sophisticated adversary and look for deep, systemic vulnerabilities that others miss.
 Generate a target-specific checklist to guide recon, exploit, and analyzer work.

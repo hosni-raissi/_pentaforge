@@ -137,15 +137,9 @@ def _scope_findings_to_current_scan(
     *,
     scan_id: str,
 ) -> list[dict[str, Any]]:
-    if not scan_id:
-        return findings
-    has_tagged_findings = any(str(item.get("scan_id", "")).strip() for item in findings)
-    if not has_tagged_findings:
-        return findings
-    return [
-        item for item in findings
-        if str(item.get("scan_id", "")).strip() == scan_id
-    ]
+    # Findings and history are cleared on new scans. 
+    # Resuming a scan creates a new scan_id, but the findings belong to the same session.
+    return findings
 
 
 def _history_root(project: dict[str, Any]) -> dict[str, Any]:
@@ -171,14 +165,6 @@ def _history_entries(project: dict[str, Any], *, scan_id: str) -> list[dict[str,
         for item in bucket_entries:
             if isinstance(item, dict):
                 entries.append(dict(item))
-
-    if scan_id:
-        matching = [
-            item for item in entries
-            if str(item.get("scan_id", "")).strip() == scan_id
-        ]
-        if matching:
-            entries = matching
 
     entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     return entries

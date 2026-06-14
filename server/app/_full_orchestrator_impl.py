@@ -6831,6 +6831,7 @@ class ScanOrchestratorService:
                     active_id = next(iter(project_pending.keys()))
                     if active_id != approval_id:
                         await asyncio.sleep(0.1)
+                        wait_start = time.time()
                         start_time = time.time()
                         continue
                 
