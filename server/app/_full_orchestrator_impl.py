@@ -6189,6 +6189,12 @@ class ScanOrchestratorService:
             scan_id = str(uuid.uuid4())
             now_iso = _utc_now_iso()
             started_at = _started_at_for_elapsed(now_iso, resume_elapsed_seconds) if resume else now_iso
+            
+            if resume and isinstance(project.get("lastScan"), dict):
+                original_started_at = project["lastScan"].get("originalStartedAt") or project["lastScan"].get("startedAt") or now_iso
+            else:
+                original_started_at = now_iso
+                
             approval_mode = str(project.get("approval_mode") or "custom").lower().strip()
             run_state = {
                 "scan_id": scan_id,
@@ -6215,6 +6221,7 @@ class ScanOrchestratorService:
                     "scanId": scan_id,
                     "status": "running",
                     "startedAt": started_at,
+                    "originalStartedAt": original_started_at,
                     "elapsedSeconds": resume_elapsed_seconds,
                     # Preserve the previous stable checkpoint for _run_scan().
                     # _merge_scan_metadata intentionally drops old result data
@@ -9422,11 +9429,15 @@ class ScanOrchestratorService:
         try:
             project = self._projects_store.get_project(project_id) or {}
             project_name = _extract_project_display_name(project if isinstance(project, dict) else {})
+            
+            last_scan = project.get("lastScan") if isinstance(project, dict) else {}
+            original_started_at = last_scan.get("originalStartedAt") if isinstance(last_scan, dict) else None
+            
             project_cache_dir = _build_project_run_cache_dir(
                 project_id=project_id,
                 target=target,
                 project_name=project_name,
-                created_at=started_at,
+                created_at=original_started_at or started_at,
             )
             custom_checklist_text = (
                 str(project.get("customChecklistText", "")).strip()
