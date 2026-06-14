@@ -1125,6 +1125,10 @@ class InformationGatheringNode:
             memory,
             progress_callback=progress_callback,
         )
+
+        gathering_state = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
+        if str(gathering_state.get("status", "")).strip().lower() == "completed":
+            return memory
         blocks = profile.get("blocks", []) if isinstance(profile, dict) else []
         valid_blocks = [block for block in blocks if isinstance(block, dict)]
         available_tools = sorted(
