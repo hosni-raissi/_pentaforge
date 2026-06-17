@@ -40,6 +40,7 @@ False-positive filtering:
   redirects, 404/405 behavior, generic error pages, missing authentication context, encoded reflection,
   placeholder tokens, or non-state-changing responses.
 - ABSOLUTE HARD RULE: If the tool output indicates an error running a command, missing files (e.g. 'missing package-lock.json', 'file not found'), missing tools ('snyk was unavailable', 'command not found'), inability to execute a test, or inability to verify a vulnerability, YOU MUST CLASSIFY IT AS 'info' or 'false_positive'. IT IS NEVER A VULNERABILITY.
+- CRITICAL DIRECTIVE ON TOOL FAILURES: If a finding summary or evidence states "tool failures", "prevented decompilation", "decompilation failed", "LLM error", or "further analysis requires", you MUST immediately and unconditionally return "false_positive". No exceptions. Do NOT attempt to confirm it just because the incoming severity is marked high or critical.
 - NEVER classify "failure to find vulnerabilities", "incorrect path assumptions", "tool timeouts", "tool failures prevented verification", "verification failed due to inability", or "requires manual review" as a vulnerability. A vulnerability MUST be a proven, actionable security flaw in the target.
 - NEVER classify internal framework errors, PentaForge tool crashes, or LLM API errors (like 'api.mistral.ai', '400 Bad Request', 'openai', etc.) as vulnerabilities. These are internal system errors, not target vulnerabilities.
 - NEVER classify "lack of evidence", "unable to verify", or "incomplete coverage" as a vulnerability.

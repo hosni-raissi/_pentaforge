@@ -1,0 +1,32 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="Electron" type="device">
+  <diagram id="ai_storage" name="AI and Storage Layer">
+    <mxGraphModel dx="1000" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="gemini" value="&lt;div style='padding: 10px;'&gt;&lt;b style='color:#FFFFFF;font-size:18px;'&gt;Gemini 2.5 Flash Integration&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style='color:#E0E7FF;font-size:14px;line-height:1.4;'&gt;Primary LLM backbone handling all agent reasoning via native tool calling and structured JSON output. Selected for its 1M token context window and 1M TPM — critical for sustaining parallel agents with heavy memory loads.&lt;/span&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=0;shadow=1;fillColor=#3B50D2;" vertex="1" parent="1">
+          <mxGeometry x="170" y="50" width="660" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="memory" value="&lt;div style='padding: 10px;'&gt;&lt;b style='color:#FFFFFF;font-size:18px;'&gt;Agent Memory&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style='color:#F0F4FF;font-size:14px;line-height:1.4;'&gt;Each agent carries a persistent context object accumulating prior tool outputs, parsed findings, intermediate reasoning, and attack plan state. This memory is injected into every prompt, growing progressively as the engagement deepens.&lt;/span&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=0;shadow=1;fillColor=#5D7AF4;" vertex="1" parent="1">
+          <mxGeometry x="170" y="220" width="660" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="storage_cont" value="&lt;i&gt;&lt;span style='color:#546175;font-size:15px;font-weight:bold;'&gt;Persistent Data &amp;amp; Knowledge Retrieval&lt;/span&gt;&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#546175;strokeWidth=2;dashed=1;dashPattern=1 2;verticalAlign=top;spacingTop=15;" vertex="1" parent="1">
+          <mxGeometry x="140" y="390" width="720" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="qdrant" value="&lt;div style='padding: 10px;'&gt;&lt;b style='color:#FFFFFF;font-size:17px;'&gt;Qdrant Vector Store&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style='color:#E0F4FE;font-size:13px;line-height:1.4;'&gt;RAG knowledge base continuously updated with CVE descriptions, WAF bypass patterns, exploit techniques, and compliance mappings. Agents query it via vector similarity search before generating payloads.&lt;/span&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=0;shadow=1;fillColor=#37B0ED;" vertex="1" parent="1">
+          <mxGeometry x="170" y="440" width="310" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="sqlite" value="&lt;div style='padding: 10px;'&gt;&lt;b style='color:#FFFFFF;font-size:17px;'&gt;SQLite&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style='color:#CFD8E3;font-size:13px;line-height:1.4;'&gt;Persistent project storage: engagement history, findings, evidence metadata, and report data survive across sessions. Acts as the definitive source of truth for the project lifecycle.&lt;/span&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=0;shadow=1;fillColor=#1B263B;" vertex="1" parent="1">
+          <mxGeometry x="520" y="440" width="310" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#546175;strokeWidth=3;endArrow=block;endFill=1;startArrow=block;startFill=1;" edge="1" parent="1" source="gemini" target="memory">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#546175;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="memory" target="storage_cont">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

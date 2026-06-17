@@ -570,7 +570,7 @@ async def _execute_assistant_run(
     saved_context: str,
     saved_history: list[dict[str, object]],
 ) -> None:
-    from server.agents.executer.base import _executer_callback_context
+    from server.agents.executor.base import _executer_callback_context
     
     loop = asyncio.get_running_loop()
     callback = AssistantExecuterCallback(run, loop)

@@ -167,7 +167,7 @@ def _flatten(groups: Iterable[tuple[str, Iterable[str]]]) -> tuple[str, ...]:
 ASSISTANT_AVAILABLE_SECURITY_TOOLS: tuple[str, ...] = _flatten(_ASSISTANT_SECURITY_TOOL_GROUPS)
 
 # Commands the assistant may execute in chat when they exist in the sandbox.
-from server.agents.executer.run_custom_guard import _NETWORK_TARGET_COMMANDS
+from server.agents.executor.run_custom_guard import _NETWORK_TARGET_COMMANDS
 
 ASSISTANT_ALLOWED_NETWORK_COMMANDS: frozenset[str] = frozenset(
     _NETWORK_TARGET_COMMANDS

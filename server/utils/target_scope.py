@@ -125,7 +125,7 @@ def describe_url_scope_issue(url: str, active_target: str) -> str | None:
         ".txt", ".json", ".log", ".xml", ".csv", ".bak", ".html", ".js", ".dic",
         ".zip", ".tar.gz", ".gz", ".pdf", ".png", ".jpg", ".jpeg", ".sqlite", ".db",
         ".yaml", ".yml", ".sh", ".php", ".asp", ".aspx", ".jsp", ".exe", ".dll",
-        ".bin", ".py", ".md", ".conf", ".ini",
+        ".bin", ".py", ".md", ".conf", ".ini", ".apk", ".ipa", ".aab",
     )
     if url.lower().endswith(ignored_extensions):
         return None

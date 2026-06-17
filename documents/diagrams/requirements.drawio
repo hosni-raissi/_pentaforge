@@ -1,0 +1,110 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="Electron" type="device">
+  <diagram id="requirements_diagram" name="System Requirements">
+    <mxGraphModel dx="1000" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="fr_bg_0" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#3B50D2;strokeWidth=1;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="30" y="30" width="460" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_border_0" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#3B50D2;strokeColor=none;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="30" width="6" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_badge_0" value="FR-01" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#3B50D2;strokeColor=none;fontColor=#FFFFFF;fontSize=11;fontStyle=1;align=center;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="50" y="45" width="50" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_title_0" value="Project &amp; Scope Management" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#3B50D2;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="110" y="45" width="350" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_body_0" value="Define the exact engagement scope, target vectors, and custom checklists to manage the complete lifecycle of a penetration testing project." style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=13;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="50" y="80" width="420" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_bg_1" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#1E293B;strokeWidth=1;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="510" y="30" width="460" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_border_1" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#1E293B;strokeColor=none;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="510" y="30" width="6" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_badge_1" value="FR-02" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#1E293B;strokeColor=none;fontColor=#FFFFFF;fontSize=11;fontStyle=1;align=center;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="530" y="45" width="50" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_title_1" value="Supervised Scan Orchestration" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#1E293B;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="590" y="45" width="350" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_body_1" value="Orchestrate autonomous scan pipelines with real-time log streaming, while retaining absolute Human-in-the-Loop (HITL) control over destructive actions." style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=13;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="530" y="80" width="420" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_bg_2" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#06B6D4;strokeWidth=1;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="30" y="160" width="460" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_border_2" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#06B6D4;strokeColor=none;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="160" width="6" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_badge_2" value="FR-03" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#06B6D4;strokeColor=none;fontColor=#FFFFFF;fontSize=11;fontStyle=1;align=center;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="50" y="175" width="50" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_title_2" value="Analysis, Reporting &amp; Delivery" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#06B6D4;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="110" y="175" width="350" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_body_2" value="Automatically validate findings using SSVC to generate secure, professional, and client-ready reports stripped of internal agent logs." style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=13;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="50" y="210" width="420" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_bg_3" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#6366F1;strokeWidth=1;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="510" y="160" width="460" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_border_3" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#6366F1;strokeColor=none;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="510" y="160" width="6" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_badge_3" value="FR-04" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#6366F1;strokeColor=none;fontColor=#FFFFFF;fontSize=11;fontStyle=1;align=center;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="530" y="175" width="50" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_title_3" value="Assistant &amp; Execution Support" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#6366F1;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="590" y="175" width="350" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="fr_body_3" value="Leverage a context-aware conversational AI assistant for natural-language tool execution and rapid querying of the RAG knowledge base." style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=13;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="530" y="210" width="420" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_hdr" value="N O N - F U N C T I O N A L   R E Q U I R E M E N T S" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#6B7280;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="30" y="300" width="400" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_bg_0" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#0F172A;strokeColor=none;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="30" y="330" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_title_0" value="Security" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#93C5FD;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="45" y="345" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_body_0" value="All tool calls isolated in Docker sandbox; scope enforcement at execution layer" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#CBD5E1;fontSize=12;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="45" y="370" width="190" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_bg_1" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#0F172A;strokeColor=none;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="270" y="330" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_title_1" value="Performance" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#93C5FD;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="285" y="345" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_body_1" value="SSE streaming ensures live feedback; LangGraph state machine for deterministic flow" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#CBD5E1;fontSize=12;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="285" y="370" width="190" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_bg_2" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#0F172A;strokeColor=none;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="510" y="330" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_title_2" value="Privacy" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#93C5FD;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="525" y="345" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_body_2" value="Local LLM fallback (Qwen 2.5 7B) for zero data-egress deployments" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#CBD5E1;fontSize=12;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="525" y="370" width="190" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_bg_3" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#0F172A;strokeColor=none;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="750" y="330" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_title_3" value="Scalability" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#93C5FD;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="765" y="345" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nfr_body_3" value="Qdrant vector store + Redis cache support deep engagement sessions" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#CBD5E1;fontSize=12;lineHeight=1.5;" vertex="1" parent="1">
+          <mxGeometry x="765" y="370" width="190" height="50" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

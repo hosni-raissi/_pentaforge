@@ -7,8 +7,17 @@ PentaForge/
 ├── server/                       # Backend application and AI runtime
 │   ├── api/                      # FastAPI routes, middleware and API entrypoint
 │   ├── app/                      # Scan orchestrator and scan lifecycle services
-│   ├── agents/                   # Planner, executer, analyzer, assistant and report agents
-│   ├── nodes/                    # Intel, information gathering and system memory nodes
+│   ├── agents/                   # AI agents orchestrating intelligence and actions
+│   │   ├── analyzer/             # Synthesizes execution results into intelligence
+│   │   ├── assistant/            # General conversational support and queries
+│   │   ├── executor/             # Manages tool dispatch and sandbox execution
+│   │   └── planner/              # Determines action plans from gathered intel
+│   ├── nodes/                    # Deterministic nodes mapping to architectural blocks
+│   │   ├── architect/            # Project structure and scoping analysis
+│   │   ├── information_gathering/# Collects repository metadata and static facts
+│   │   ├── intel/                # State management and RAG retrieval node
+│   │   ├── report/               # Final report generation and synthesis
+│   │   └── system_memory/        # Context consolidation and memory building
 │   ├── db/                       # Project database, runtime cache and RAG storage logic
 │   ├── sandbox_service/          # Isolated command execution service
 │   └── test/                     # Backend tests and workflow validation
@@ -17,9 +26,8 @@ PentaForge/
 ├── infra/
 │   └── docker/                   # Docker Compose and service images
 ├── documents/                    # Report assets, diagrams and documentation snippets
-├── scripts/                      # Local startup and automation scriptsS
+└── scripts/                      # Local startup and automation scripts
 ```
-S
 This simplified structure highlights the main engineering blocks of the platform:
 the backend runtime, the desktop interface, the Docker deployment layer, the project
 documentation, and the report source. It is the most suitable version for a report

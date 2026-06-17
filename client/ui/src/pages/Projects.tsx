@@ -22,6 +22,7 @@ import {
   listProjectTargetTypesFromDesktop,
   saveProjectToDesktop,
   uploadMobileArtifactToDesktop,
+  uploadRepositoryToDesktop,
   type ProjectTargetField,
   type ProjectTargetTypeOption,
 } from '../lib/projectBridge';
@@ -606,6 +607,26 @@ export default function Projects() {
 
     const { primaryTarget, payload } = buildTargetConfigPayload();
     const projectId = editingProjectId ?? draftProjectId ?? crypto.randomUUID();
+
+    if (form.targetType === 'repository' && typeof payload.repo_url === 'string' && payload.repo_url.trim()) {
+      try {
+        const repoUrl = payload.repo_url.trim();
+        const branch = typeof payload.branch === 'string' ? payload.branch.trim() : undefined;
+        const authToken = typeof payload['credentials.auth.token'] === 'string' ? payload['credentials.auth.token'].trim() : (typeof payload.auth_token === 'string' ? payload.auth_token.trim() : undefined);
+        
+        const uploaded = await uploadRepositoryToDesktop(projectId, {
+          repo_url: repoUrl,
+          branch,
+          auth_token: authToken,
+        });
+        
+        payload.file_path = uploaded.path;
+      } catch (error) {
+        setSubmitError(error instanceof Error ? error.message : 'Failed to clone repository.');
+        setCreatingProject(false);
+        return;
+      }
+    }
 
     const projectPayload: Project = {
       id: projectId,

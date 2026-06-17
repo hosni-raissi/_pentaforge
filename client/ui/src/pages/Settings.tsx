@@ -31,6 +31,7 @@ import {
 } from "@/lib/projectBridge";
 import { useConfig } from "@/stores/config";
 import { useTheme } from "@/stores/theme";
+import { useProjects } from "@/stores/projects";
 
 function formatTimestamp(value: string | null): string {
   if (!value) {
@@ -148,6 +149,8 @@ function resourceDisplayTarget(resourceTargetType: string, selectedTargetFilter:
 export default function Settings() {
   const config = useConfig();
   const { isDark, setDark } = useTheme();
+  const { runningProjectId, startingProjectId, stoppingProjectId } = useProjects();
+  const isScanActive = Boolean(runningProjectId || startingProjectId || stoppingProjectId);
   const activeLLM = config.llmConfigs.find(
     (item) => item.id === config.activeLLM
   );
@@ -423,6 +426,10 @@ export default function Settings() {
   };
 
   const handleResetToDefaults = async () => {
+    if (isScanActive) {
+      alert("A scan is currently running. Modifying LLM profiles while a scan is active may cause background tasks to fail. Please stop the scan first.");
+      return;
+    }
     const confirmed = window.confirm(
       "This will remove all saved LLM profiles. PentaForge will block scans until a profile is added again. Continue?"
     );
@@ -904,7 +911,13 @@ export default function Settings() {
                                      <Button
                                        size="xs"
                                        variant="ghost"
-                                       onClick={() => handleEditProfile(profile.id)}
+                                       onClick={() => {
+                                         if (isScanActive) {
+                                           alert("A scan is currently running. Modifying LLM profiles while a scan is active may cause background tasks to fail. Please stop the scan first.");
+                                           return;
+                                         }
+                                         handleEditProfile(profile.id);
+                                       }}
                                        className="h-7 w-7 p-0 text-text-muted hover:text-pf-400"
                                      >
                                        <Pencil size={12} />
@@ -913,6 +926,10 @@ export default function Settings() {
                                        size="xs"
                                        variant="ghost"
                                        onClick={() => {
+                                         if (isScanActive) {
+                                           alert("A scan is currently running. Modifying LLM profiles while a scan is active may cause background tasks to fail. Please stop the scan first.");
+                                           return;
+                                         }
                                          const next = llmProfiles.filter(p => p.id !== profile.id);
                                          setLlmProfiles(next);
                                          handleSaveLLMSettings(next, llmMode);
@@ -998,6 +1015,10 @@ export default function Settings() {
                           <Button
                             className="flex-1"
                             onClick={async () => {
+                              if (isScanActive) {
+                                alert("A scan is currently running. Modifying LLM profiles while a scan is active may cause background tasks to fail. Please stop the scan first.");
+                                return;
+                              }
                               if (!editingProfileId && llmProfiles.length >= 2) {
                                 alert("You can only add a maximum of two LLM profiles (Primary and Backup).");
                                 return;

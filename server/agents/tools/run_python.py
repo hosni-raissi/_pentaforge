@@ -35,8 +35,8 @@ from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
-from server.agents.executer.sandbox import get_sandbox_root, get_sandbox_tmp_dir
-from server.agents.executer.sandbox_client import (
+from server.agents.executor.sandbox import get_sandbox_root, get_sandbox_tmp_dir
+from server.agents.executor.sandbox_client import (
     execute_run_python_remotely,
     sandbox_remote_enabled,
 )

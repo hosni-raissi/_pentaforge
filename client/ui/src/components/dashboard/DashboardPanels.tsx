@@ -751,16 +751,24 @@ export function DashboardArchitecturePanel({
                         minHeight: `${box.h}px`,
                       }}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+                      <div className="flex w-full items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1 pr-2">
+                          <p 
+                            className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 break-all"
+                            style={{ wordBreak: "break-all", overflowWrap: "anywhere" }}
+                          >
                             {box.title}
                           </p>
                           {box.subtitle ? (
-                            <p className="mt-1 text-sm font-bold text-zinc-900">{box.subtitle}</p>
+                            <p 
+                              className="mt-1 text-sm font-bold text-zinc-900 break-all"
+                              style={{ wordBreak: "break-all", overflowWrap: "anywhere" }}
+                            >
+                              {box.subtitle}
+                            </p>
                           ) : null}
                         </div>
-                        <span className={cn("rounded-sm border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em]", tone.chip)}>
+                        <span className={cn("shrink-0 rounded-sm border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em]", tone.chip)}>
                           {boardBoxKindLabel(box.kind)}
                         </span>
                       </div>

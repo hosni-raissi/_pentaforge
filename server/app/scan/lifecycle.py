@@ -5,7 +5,7 @@ import uuid
 import structlog
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
-from server.agents.executer.sandbox import delete_project_workspace
+from server.agents.executor.sandbox import delete_project_workspace
 
 from .types import ScanStatus
 from .utils import (

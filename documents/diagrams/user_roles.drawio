@@ -1,0 +1,80 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="Electron" type="device">
+  <diagram id="user_roles" name="User Roles &amp; Interactions">
+    <mxGraphModel dx="1000" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="450" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="bg_0" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#3B50D2;strokeWidth=2;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="30" width="220" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="icon_0" value="🔧" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;" vertex="1" parent="1">
+          <mxGeometry x="45" y="45" width="30" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="title_0" value="Pentester" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#3B50D2;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="45" y="85" width="190" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_0" value="Technical operator" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#9CA3AF;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="45" y="110" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="body_0" value="• Create project &amp; configure scope&#10;• Launch, pause, resume scans&#10;• Monitor live execution pipeline&#10;• Validate findings &amp; flag false positives&#10;• Generate reports &amp; create share links&#10;• Ask assistant for strategy / next steps" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=12;spacingTop=4;spacingBottom=4;" vertex="1" parent="1">
+          <mxGeometry x="45" y="140" width="195" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="bg_1" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#1E3A8A;strokeWidth=2;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="270" y="30" width="220" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="icon_1" value="👤" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;" vertex="1" parent="1">
+          <mxGeometry x="285" y="45" width="30" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="title_1" value="Client" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#1E3A8A;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="285" y="85" width="190" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_1" value="External stakeholder" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#9CA3AF;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="285" y="110" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="body_1" value="• Open scoped delivery portal&#10;• Preview professional HTML report&#10;• Download protected PDF export&#10;• Review executive summary &amp; findings&#10;• Access remediation guidance" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=12;spacingTop=4;spacingBottom=4;" vertex="1" parent="1">
+          <mxGeometry x="285" y="140" width="195" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="bg_2" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#06B6D4;strokeWidth=2;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="510" y="30" width="220" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="icon_2" value="⚙️" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;" vertex="1" parent="1">
+          <mxGeometry x="525" y="45" width="30" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="title_2" value="Administrator" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#06B6D4;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="525" y="85" width="190" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_2" value="Platform maintainer" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#9CA3AF;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="525" y="110" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="body_2" value="• Manage LLM API key profiles&#10;• Configure tool inventory &amp; sandbox image&#10;• Update wordlists &amp; payload collections&#10;• Monitor system health &amp; runtime logs&#10;• Maintain target-type schemas" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=12;spacingTop=4;spacingBottom=4;" vertex="1" parent="1">
+          <mxGeometry x="525" y="140" width="195" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="bg_3" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#F8FAFC;strokeColor=#6366F1;strokeWidth=2;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="750" y="30" width="220" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="icon_3" value="🤖" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;" vertex="1" parent="1">
+          <mxGeometry x="765" y="45" width="30" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="title_3" value="AI Assistant" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#6366F1;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="765" y="85" width="190" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_3" value="Secondary actor" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#9CA3AF;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="765" y="110" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="body_3" value="• Explain scan status &amp; agent decisions&#10;• Summarize evidence on demand&#10;• Answer scope questions in natural language&#10;• Execute security tools directly&#10;• Provide next-step recommendations" style="text;html=0;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontColor=#4B5563;fontSize=12;spacingTop=4;spacingBottom=4;" vertex="1" parent="1">
+          <mxGeometry x="765" y="140" width="195" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="banner_bg" value="" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#EEF2FF;strokeColor=none;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="30" y="330" width="940" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="banner_border" value="" style="rounded=0;whiteSpace=wrap;html=0;fillColor=#3B50D2;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="30" y="330" width="6" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="banner_text" value="&lt;div style='padding-left: 20px; padding-right: 15px; font-size: 13px; line-height: 1.5; font-family: Helvetica, sans-serif;'&gt;&lt;b style='color:#3B50D2;'&gt;Human-in-the-Loop (HITL):&lt;/b&gt; The Pentester retains absolute oversight &amp;mdash; every critical agent action requires explicit approval before execution. The AI Assistant operates within workflow rules and cannot bypass approval gates.&lt;/div&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="35" y="330" width="935" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

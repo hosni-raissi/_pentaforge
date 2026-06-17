@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from server.api.dependencies import projects_store
 from server.agents.assistant.tools.mark_false_positive import mark_false_positive as mark_project_finding_false_positive
-from server.agents.executer.sandbox import delete_project_workspace
+from server.agents.executor.sandbox import delete_project_workspace
 from server.db.projects.config import projects_db_config
 
 router = APIRouter(tags=["projects"])
@@ -302,5 +302,44 @@ async def upload_mobile_artifact(
         "path": str(destination_path),
         "size": destination_path.stat().st_size,
         "content_type": str(file.content_type or ""),
+    }
+
+
+class RepoClonePayload(BaseModel):
+    repo_url: str
+    branch: str | None = None
+    auth_token: str | None = None
+
+
+@router.post("/api/projects/{project_id}/artifacts/repo-clone")
+def clone_repo_artifact(project_id: str, payload: RepoClonePayload) -> dict[str, Any]:
+    import subprocess
+    safe_project_id = str(project_id or "").strip()
+    if not safe_project_id:
+        raise HTTPException(status_code=400, detail="Project id is required.")
+
+    destination_dir = _projects_artifacts_root() / safe_project_id / "repository"
+    shutil.rmtree(destination_dir, ignore_errors=True)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    
+    repo_url = payload.repo_url.strip()
+    if payload.auth_token:
+        if repo_url.startswith("https://"):
+            repo_url = repo_url.replace("https://", f"https://oauth2:{payload.auth_token}@")
+            
+    cmd = ["git", "clone", "--depth", "1"]
+    if payload.branch:
+        cmd.extend(["-b", payload.branch.strip()])
+    cmd.extend([repo_url, str(destination_dir)])
+    
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clone repository: {e.stderr}")
+        
+    return {
+        "ok": True,
+        "project_id": safe_project_id,
+        "path": str(destination_dir),
     }
 

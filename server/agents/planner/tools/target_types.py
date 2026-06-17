@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import structlog
 
-from server.agents.executer.target_tool_routing import normalize_target_type
+from server.agents.executor.target_tool_routing import normalize_target_type
 from server.core.tool import tool
 from .pentest_plan import VALID_TARGET_TYPES, _current_plan
 

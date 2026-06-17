@@ -8,7 +8,7 @@ from typing import Any, Iterator
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from server.agents.executer.run_custom_guard import (
+from server.agents.executor.run_custom_guard import (
     collect_artifact_paths,
     detect_recon_role_violation,
     detect_scope_violation,
@@ -25,7 +25,7 @@ from server.agents.tools.run_custom import (
 from server.agents.tools.run_python import run_python as local_run_python
 
 try:
-    from server.agents.executer.base import _executer_tool_context as executer_tool_context
+    from server.agents.executor.base import _executer_tool_context as executer_tool_context
 except Exception:  # pragma: no cover - defensive import for minimal runtime
     executer_tool_context = None
 

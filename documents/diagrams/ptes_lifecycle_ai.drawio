@@ -1,0 +1,50 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="Electron" type="device">
+  <diagram id="ptes_lifecycle" name="PTES Lifecycle &amp; AI">
+    <mxGraphModel dx="1000" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="2. Penetration Testing Lifecycle &amp;amp; AI Intervention" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#3B50D2;fontStyle=1;fontSize=22;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="700" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_left" value="PTES LIFECYCLE" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#6B7280;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="200" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_right" value="AI CONTRIBUTION PER PHASE" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontColor=#6B7280;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="100" width="300" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="block_0" value="Reconnaissance" style="rounded=1;whiteSpace=wrap;html=0;strokeWidth=0;fillColor=#1E3A8A;fontColor=#FFFFFF;fontSize=13;fontStyle=1;align=left;spacingLeft=15;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="130" width="220" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="block_1" value="Scanning &amp;amp; Enumeration" style="rounded=1;whiteSpace=wrap;html=0;strokeWidth=0;fillColor=#1D4ED8;fontColor=#FFFFFF;fontSize=13;fontStyle=1;align=left;spacingLeft=15;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="178" width="208" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="block_2" value="Exploitation" style="rounded=1;whiteSpace=wrap;html=0;strokeWidth=0;fillColor=#2563EB;fontColor=#FFFFFF;fontSize=13;fontStyle=1;align=left;spacingLeft=15;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="226" width="196" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="block_3" value="Post-Exploitation" style="rounded=1;whiteSpace=wrap;html=0;strokeWidth=0;fillColor=#3B82F6;fontColor=#FFFFFF;fontSize=13;fontStyle=1;align=left;spacingLeft=15;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="274" width="184" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="block_4" value="Reporting" style="rounded=1;whiteSpace=wrap;html=0;strokeWidth=0;fillColor=#0284C7;fontColor=#FFFFFF;fontSize=13;fontStyle=1;align=left;spacingLeft=15;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="322" width="172" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="time_estimates" value="&lt;span style='font-size:12px;color:#4B5563;line-height:1.6;'&gt;Manual cycle: &lt;b&gt;2-4 weeks&lt;/b&gt;&lt;br&gt;AI-assisted: &lt;b style='color:#1E3A8A;'&gt;hours&lt;/b&gt;&lt;/span&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="390" width="200" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="table" value="&#10;    &lt;table style=&quot;width:100%; border-collapse: collapse; font-family: Helvetica, Arial, sans-serif; font-size: 13px;&quot;&gt;&#10;      &lt;tr style=&quot;background-color: #111827; color: #FFFFFF; height: 38px; text-align: left;&quot;&gt;&#10;        &lt;th style=&quot;padding-left: 15px; width: 25%;&quot;&gt;Phase&lt;/th&gt;&#10;        &lt;th style=&quot;width: 55%;&quot;&gt;AI Contribution&lt;/th&gt;&#10;        &lt;th style=&quot;width: 20%; text-align: center;&quot;&gt;Estimated Gain&lt;/th&gt;&#10;      &lt;/tr&gt;&#10;      &lt;tr style=&quot;border-bottom: 1px solid #E5E7EB; height: 48px; color: #4B5563;&quot;&gt;&#10;        &lt;td style=&quot;padding-left: 15px; font-weight: bold; color: #1E3A8A;&quot;&gt;Reconnaissance&lt;/td&gt;&#10;        &lt;td&gt;Multi-source OSINT automation &amp;amp; target-context synthesis&lt;/td&gt;&#10;        &lt;td style=&quot;text-align: center; font-weight: bold; color: #1E3A8A;&quot;&gt;-35% time&lt;/td&gt;&#10;      &lt;/tr&gt;&#10;      &lt;tr style=&quot;border-bottom: 1px solid #E5E7EB; height: 48px; color: #4B5563;&quot;&gt;&#10;        &lt;td style=&quot;padding-left: 15px; font-weight: bold; color: #1D4ED8;&quot;&gt;Scanning &amp;amp; Enumeration&lt;/td&gt;&#10;        &lt;td&gt;Intelligent target prioritisation &amp;amp; adaptive test selection&lt;/td&gt;&#10;        &lt;td style=&quot;text-align: center; font-weight: bold; color: #1D4ED8;&quot;&gt;-50% time&lt;/td&gt;&#10;      &lt;/tr&gt;&#10;      &lt;tr style=&quot;border-bottom: 1px solid #E5E7EB; height: 48px; color: #4B5563;&quot;&gt;&#10;        &lt;td style=&quot;padding-left: 15px; font-weight: bold; color: #2563EB;&quot;&gt;Exploitation&lt;/td&gt;&#10;        &lt;td&gt;Contextual payload generation adapted to observed behaviour&lt;/td&gt;&#10;        &lt;td style=&quot;text-align: center; font-weight: bold; color: #2563EB;&quot;&gt;Qualitative&lt;/td&gt;&#10;      &lt;/tr&gt;&#10;      &lt;tr style=&quot;border-bottom: 1px solid #E5E7EB; height: 48px; color: #4B5563;&quot;&gt;&#10;        &lt;td style=&quot;padding-left: 15px; font-weight: bold; color: #3B82F6;&quot;&gt;Post-Exploitation&lt;/td&gt;&#10;        &lt;td&gt;Automated lateral movement analysis &amp;amp; privilege escalation pathing&lt;/td&gt;&#10;        &lt;td style=&quot;text-align: center; font-weight: bold; color: #3B82F6;&quot;&gt;-40% time&lt;/td&gt;&#10;      &lt;/tr&gt;&#10;      &lt;tr style=&quot;height: 48px; color: #4B5563;&quot;&gt;&#10;        &lt;td style=&quot;padding-left: 15px; font-weight: bold; color: #0284C7;&quot;&gt;Reporting&lt;/td&gt;&#10;        &lt;td&gt;Structured report generation from verified findings &amp;amp; evidence&lt;/td&gt;&#10;        &lt;td style=&quot;text-align: center; font-weight: bold; color: #0284C7;&quot;&gt;-35% time&lt;/td&gt;&#10;      &lt;/tr&gt;&#10;    &lt;/table&gt;&#10;    " style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="300" y="130" width="650" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="insight_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEF2FF;strokeColor=none;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="300" y="420" width="650" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="insight_border" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1A237E;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="300" y="420" width="6" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="insight_text" value="&lt;div style='padding-left:15px;padding-right:15px;font-size:13px;color:#374151;line-height:1.5;'&gt;&lt;b style='color:#3949AB;'&gt;Key insight:&lt;/b&gt; AI reduces the automatable phases from weeks to hours — freeing pentesters to focus on high-value manual tasks and creative attack chaining.&lt;/div&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="310" y="420" width="640" height="65" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

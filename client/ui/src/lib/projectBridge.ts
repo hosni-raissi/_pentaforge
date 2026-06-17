@@ -794,6 +794,31 @@ export async function uploadMobileArtifactToDesktop(
   return await response.json();
 }
 
+export async function uploadRepositoryToDesktop(
+  projectId: string,
+  payload: {
+    repo_url: string;
+    branch?: string;
+    auth_token?: string;
+  },
+): Promise<{
+  ok: boolean;
+  project_id: string;
+  path: string;
+}> {
+  if (!supportsDesktopProjectBridge()) {
+    throw new Error("desktop project bridge is disabled");
+  }
+  return await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/artifacts/repo-clone`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    120000, // 2 mins timeout for cloning
+  );
+}
+
 export async function prepareMobileRuntimeFromDesktop(
   projectId: string,
 ): Promise<{

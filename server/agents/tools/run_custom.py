@@ -19,14 +19,14 @@ from pathlib import Path
 from typing import Any, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from server.agents.executer.run_custom_guard import (
+from server.agents.executor.run_custom_guard import (
     append_audit_record,
     collect_artifact_paths,
     current_execution_context,
     detect_recon_role_violation,
     detect_scope_violation,
 )
-from server.agents.executer.sandbox import (
+from server.agents.executor.sandbox import (
     SandboxExecutionPolicy,
     build_sandbox_env,
     build_sandbox_preexec,
@@ -35,11 +35,11 @@ from server.agents.executer.sandbox import (
     get_sandbox_share_dir,
     resolve_sandbox_cwd,
 )
-from server.agents.executer.sandbox_client import (
+from server.agents.executor.sandbox_client import (
     execute_run_custom_remotely,
     sandbox_remote_enabled,
 )
-from server.agents.executer.tool_safety import get_run_custom_command_profile
+from server.agents.executor.tool_safety import get_run_custom_command_profile
 from server.agents.tool_output_parsers import summarize_tool_output
 
 
@@ -470,7 +470,7 @@ def _project_root() -> Path:
 
 def _safe_tool_output_dir(tool_name: str) -> str:
     try:
-        from server.agents.executer.base import _executer_tool_context
+        from server.agents.executor.base import _executer_tool_context
 
         context = _executer_tool_context.get({})
     except Exception:
@@ -678,7 +678,7 @@ def _request_password_via_callback(
     """Request password from callback if available."""
     try:
         # Import here to avoid circular imports
-        from server.agents.executer.base import _executer_callback_context
+        from server.agents.executor.base import _executer_callback_context
 
         callback = _executer_callback_context.get()
         if callback is None:

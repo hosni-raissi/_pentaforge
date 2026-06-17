@@ -32,9 +32,9 @@ from server.db.projects.config import projects_db_config
 from server.db.projects.project_rag import index_verified_finding
 from server.db.projects.runtime_cache import get_project_runtime_cache
 from server.db.knowledge.storage.qdrant_store import QdrantVectorStore
-from server.agents.executer.sandbox import delete_project_workspace
-from server.agents.executer.payload_filter import get_payloads as _get_filtered_payloads
-from server.agents.executer.base import _executer_callback_context
+from server.agents.executor.sandbox import delete_project_workspace
+from server.agents.executor.payload_filter import get_payloads as _get_filtered_payloads
+from server.agents.executor.base import _executer_callback_context
 from server.nodes.information_gathering import load_target_info_profile_defaults
 from server.nodes.intel import IntelNode
 from server.nodes.system_memory import (
@@ -1760,11 +1760,9 @@ def _delete_project_cache_artifacts(project_id: str) -> dict[str, int]:
 def _purge_project_runtime_artifacts(project_id: str, *, project_payload: dict[str, Any] | None = None) -> dict[str, int]:
     deleted_cache = _delete_project_cache_artifacts(project_id)
     deleted_sandbox = delete_project_workspace(project_id, project_payload=project_payload)
-    uploaded_artifacts_removed = _delete_project_uploaded_artifacts(project_id)
     return {
         **deleted_cache,
         **deleted_sandbox,
-        "uploaded_artifacts_removed": uploaded_artifacts_removed,
     }
 
 
@@ -3105,8 +3103,8 @@ async def _run_target_info_gathering(
     project_cache_dir: str,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    from server.agents.executer.recon.tools import ALL_RECON_TOOLS
-    from server.agents.executer.target_tool_routing import filter_tools_for_target_types
+    from server.agents.executor.recon.tools import ALL_RECON_TOOLS
+    from server.agents.executor.target_tool_routing import filter_tools_for_target_types
 
     normalized_type = _normalize_target_type(target_type)
     scoped_tools = filter_tools_for_target_types(
@@ -3376,6 +3374,12 @@ def _started_at_for_elapsed(now_iso: str, elapsed_seconds: int) -> str:
 
 
 def _extract_target(project: dict[str, Any]) -> str:
+    target_config = project.get("targetConfig")
+    if isinstance(target_config, dict):
+        file_path = _nested_get(target_config, "file_path")
+        if file_path:
+            return file_path
+
     primary = project.get("target")
     if isinstance(primary, str) and primary.strip():
         return primary.strip()
@@ -4293,7 +4297,7 @@ def _infer_target_value_line(info: str, scope: str) -> str:
 
 def _format_warmup_recon_tooling(target_type: str, limit: int = 12) -> str:
     try:
-        from server.agents.executer.target_tool_routing import RECON_TOOL_TARGET_TYPES
+        from server.agents.executor.target_tool_routing import RECON_TOOL_TARGET_TYPES
     except Exception:
         return "(recon tool inventory unavailable)"
 
@@ -7383,7 +7387,7 @@ class ScanOrchestratorService:
         info: str,
         target_memory: dict[str, Any] | None = None,
     ) -> str:
-        from server.agents.executer.target_tool_routing import recommend_product_tooling
+        from server.agents.executor.target_tool_routing import recommend_product_tooling
 
         history_block = _format_agent_execution_history_for_prompt(
             plan_data,
@@ -7801,7 +7805,7 @@ class ScanOrchestratorService:
         project_cache_dir: str = "",
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from server.agents.analyzer import AnalyzerAgent
-        from server.agents.executer.recon.agent import ReconExecuterAgent
+        from server.agents.executor.recon.agent import ReconExecuterAgent
         from server.config.agent import get_public_agent_config
 
         import re as _re
@@ -8297,10 +8301,10 @@ class ScanOrchestratorService:
             worker_index: int | None = None
             agent_role = str(scenario.get("agent", "recon")).strip().lower()
             if agent_role == "recon":
-                worker_index = min(next_recon_worker, 1)
+                worker_index = next_recon_worker % 2
                 next_recon_worker += 1
             elif agent_role == "exploit":
-                worker_index = min(next_exploit_worker, 1)
+                worker_index = next_exploit_worker % 2
                 next_exploit_worker += 1
             selected_with_workers.append((scenario, worker_index))
 
@@ -9645,8 +9649,8 @@ class ScanOrchestratorService:
                         },
                     )
 
-            from server.agents.executer.recon.tools import ALL_RECON_TOOLS
-            from server.agents.executer.target_tool_routing import filter_tools_for_target_types
+            from server.agents.executor.recon.tools import ALL_RECON_TOOLS
+            from server.agents.executor.target_tool_routing import filter_tools_for_target_types
 
             scoped_tools = filter_tools_for_target_types(
                 role="recon",
@@ -10453,8 +10457,8 @@ class ScanOrchestratorService:
 
         try:
             from server.agents.analyzer import AnalyzerAgent
-            from server.agents.executer.recon.agent import ReconExecuterAgent
-            from server.agents.executer.exploit.agent import ExploitExecuterAgent
+            from server.agents.executor.recon.agent import ReconExecuterAgent
+            from server.agents.executor.exploit.agent import ExploitExecuterAgent
             from server.agents.planner.agent import PlannerAgent
             from server.config.agent import get_public_agent_config
 

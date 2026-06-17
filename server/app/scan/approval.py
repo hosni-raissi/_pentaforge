@@ -6,7 +6,7 @@ import uuid
 import structlog
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
-from server.agents.executer.tool_safety import (
+from server.agents.executor.tool_safety import (
     get_run_custom_command_profile,
     get_tool_safety_profile,
 )

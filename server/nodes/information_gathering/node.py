@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
-from server.agents.executer.sandbox import build_sandbox_env, get_project_workspace_dir
+from server.agents.executor.sandbox import build_sandbox_env, get_project_workspace_dir
 from server.core.llm import ChatMessage, get_llm, get_public_agent_config
 from server.core.tool import coerce_args_from_schema
 from server.nodes.system_memory import (
@@ -88,20 +88,9 @@ def _ensure_repository_checkout(project_id: str, target: str) -> str:
     if checkout_dir.exists() and any(checkout_dir.iterdir()):
         return str(checkout_dir)
 
-    workspace = get_project_workspace_dir(project_id)
-    try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", raw, relative],
-            cwd=str(workspace),
-            env=build_sandbox_env(),
-            capture_output=True,
-            text=True,
-            timeout=300,
-            shell=False,
-            check=False,
-        )
-    except Exception:
-        pass
+    # Repository cloning is now handled by the UI uploading/cloning 
+    # to the artifacts folder before the scan begins.
+    # The scan shouldn't attempt to perform network clones directly.
     return str(checkout_dir)
 
 
@@ -153,6 +142,9 @@ def _build_target_placeholders(
         }
 
     if normalized_target_type == "network":
+        host = raw
+        full_target = raw
+    elif normalized_target_type in {"mobile", "container_image"} or raw.startswith("/"):
         host = raw
         full_target = raw
     else:
@@ -592,7 +584,7 @@ def _information_gathering_tool_context(
     tool_name: str,
 ):
     try:
-        from server.agents.executer.base import _executer_tool_context
+        from server.agents.executor.base import _executer_tool_context
     except Exception:
         yield
         return

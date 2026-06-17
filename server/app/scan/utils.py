@@ -1578,8 +1578,8 @@ def _build_executer_message(
     info: str,
     target_memory: dict[str, Any] | None = None,
 ) -> str:
-    from server.agents.executer.payload_filter import get_payloads as _get_filtered_payloads_local
-    from server.agents.executer.target_tool_routing import recommend_product_tooling
+    from server.agents.executor.payload_filter import get_payloads as _get_filtered_payloads_local
+    from server.agents.executor.target_tool_routing import recommend_product_tooling
 
     history_block = _format_agent_execution_history_for_prompt(
         plan_data,
@@ -3595,6 +3595,12 @@ def _verify_summary_indicates_blocked_route(summary: str) -> bool:
 
 
 def _extract_target(project: dict[str, Any]) -> str:
+    target_config = project.get("targetConfig")
+    if isinstance(target_config, dict):
+        file_path = _nested_get(target_config, "file_path")
+        if file_path:
+            return file_path
+
     primary = project.get("target")
     if isinstance(primary, str) and primary.strip():
         return primary.strip()
@@ -4242,7 +4248,7 @@ def _infer_target_value_line(info: str, scope: str) -> str:
 
 def _format_warmup_recon_tooling(target_type: str, limit: int = 12) -> str:
     try:
-        from server.agents.executer.target_tool_routing import RECON_TOOL_TARGET_TYPES
+        from server.agents.executor.target_tool_routing import RECON_TOOL_TARGET_TYPES
     except Exception:
         return "(recon tool inventory unavailable)"
 

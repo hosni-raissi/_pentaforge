@@ -2315,7 +2315,7 @@ class AssistantAgent:
             )
             return payload
 
-        from server.agents.executer.base import _executer_tool_context
+        from server.agents.executor.base import _executer_tool_context
         
         # Resolve target host/port for placeholder replacement
         target_host, target_port = extract_target_host_port(target)

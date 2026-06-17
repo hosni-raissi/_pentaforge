@@ -118,7 +118,7 @@ class PhaseRunnerService:
     async def run_warmup_recon_phase(self, project_id: str, scan_id: str) -> PhaseResult:
         """Run the Warmup Recon phase with parallel workers."""
         from server.agents.analyzer import AnalyzerAgent
-        from server.agents.executer.recon.agent import ReconExecuterAgent
+        from server.agents.executor.recon.agent import ReconExecuterAgent
         from server.config.agent import get_public_agent_config
 
         logger.info("phase_warmup_start", project_id=project_id, scan_id=scan_id)

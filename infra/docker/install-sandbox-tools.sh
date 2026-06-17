@@ -125,6 +125,16 @@ run_best_effort "rustscan-install" bash -c '
 run_best_effort "apt-mobile-static-stack" bash -c '
   apt-get update && apt-get install -y --no-install-recommends apktool binwalk default-jdk-headless
 '
+
+run_best_effort "jadx-install" bash -c '
+  VERSION=$(curl -s https://api.github.com/repos/skylot/jadx/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v1.4.7")
+  if [[ -z "${VERSION}" ]]; then VERSION="v1.4.7"; fi
+  curl -L "https://github.com/skylot/jadx/releases/download/${VERSION}/jadx-${VERSION:1}.zip" -o jadx.zip
+  unzip -oq jadx.zip -d /opt/pentaforge-tools/jadx && rm jadx.zip
+  ln -sf /opt/pentaforge-tools/jadx/bin/jadx /usr/local/bin/jadx
+  ln -sf /opt/pentaforge-tools/jadx/bin/jadx-gui /usr/local/bin/jadx-gui
+'
+
 run_best_effort "apt-container-cloud-stack" bash -c '
   apt-get update && apt-get install -y --no-install-recommends awscli kubernetes-client skopeo yq
 '
