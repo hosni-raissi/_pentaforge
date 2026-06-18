@@ -293,6 +293,14 @@ class AnalyzerAgent:
             evaluations.append(per_tool)
 
         overall = self._overall_assessment(evaluations)
+        try:
+            from mem0 import Memory
+            m = Memory()
+            target = scenario.get("target", "unknown target") if isinstance(scenario, dict) else "unknown target"
+            m.add(f"Analysis of {target}: {overall.get('summary', '')}", user_id="default")
+        except Exception:
+            pass
+
         scenario_reports = self._build_scenario_reports(
             scenario=scenario if isinstance(scenario, dict) else {},
             tool_results=tool_results if isinstance(tool_results, list) else [],

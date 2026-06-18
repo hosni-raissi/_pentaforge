@@ -1,7 +1,9 @@
 import os
 from typing import Dict, Any
+import shlex
 from langgraph.graph import StateGraph, END
 from mem0 import Memory
+from server.agents.assistant.tools import run_custom
 
 from .state import PentestState
 
@@ -45,7 +47,7 @@ def planner_node(state: PentestState) -> Dict[str, Any]:
 
 def executor_node(state: PentestState) -> Dict[str, Any]:
     """
-    The Executor strictly runs the tools defined in the task_queue.
+    The Executor strictly runs the tools defined in the task_queue using run_custom.
     """
     print("--- EXECUTOR NODE ---")
     
@@ -54,10 +56,34 @@ def executor_node(state: PentestState) -> Dict[str, Any]:
         return {}
     
     current_task = tasks[0]
-    print(f"[Executor] Running {current_task['tool']} on {current_task['target']}...")
+    tool_name = current_task.get("tool", "")
+    target = current_task.get("target", "")
+    args = current_task.get("args", "")
     
-    # Mocking the raw output of a tool
-    raw_output = "PORT 22/tcp open ssh OpenSSH 8.2p1\nPORT 80/tcp open http Apache httpd 2.4.41"
+    print(f"[Executor] Running {tool_name} on {target}...")
+    
+    command = str(tool_name)
+    args_list = shlex.split(str(args)) if isinstance(args, str) else list(args) if args else []
+    if target and target not in args_list:
+        args_list.append(target)
+        
+    try:
+        result = run_custom(
+            command=command,
+            reason=f"Automated pentest execution of {command} against {target}",
+            args=args_list
+        )
+        
+        raw_output = str(result.get("stdout") or "")
+        if not raw_output and result.get("error"):
+            raw_output = str(result.get("error"))
+        elif not raw_output and result.get("stderr"):
+            raw_output = str(result.get("stderr"))
+            
+        print(f"[Executor] Execution completed. Output size: {len(raw_output)}")
+    except Exception as e:
+        raw_output = f"Execution failed: {e}"
+        print(f"[Executor] {raw_output}")
     
     return {
         "last_tool_call": current_task,

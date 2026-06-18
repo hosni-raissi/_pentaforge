@@ -9424,14 +9424,79 @@ class ScanOrchestratorService:
             target_type=target_type,
             target=target,
         )
-        self._emit_event(
-            project_id,
-            event="intel_started",
-            scan_id=scan_id,
-            level="info",
-            message=f"Intel [start] agent started for target type '{target_type}'.",
-            data={"stage": "intel", "status": "running", "kind": "start"},
-        )
+        
+        # --- NEW LANGGRAPH INTEGRATION (Step 4) ---
+        try:
+            from server.agents.core.graph import pentest_orchestrator
+            from server.agents.core.state import PentestState
+            
+            scope_text = ""
+            for raw_line in info.splitlines():
+                if raw_line.lower().startswith("scope:"):
+                    scope_text = raw_line.split(":", 1)[1].strip()
+                    break
+
+            initial_state: PentestState = {
+                "project_id": project_id,
+                "target": target,
+                "target_type": target_type,
+                "scope_rules": {"scope": scope_text, "info": info},
+                "current_phase": "Init",
+                "plan": [],
+                "task_queue": [],
+                "last_tool_call": None,
+                "last_tool_output": None,
+                "analyzer_feedback": None,
+                "requires_approval": False
+            }
+
+            self._emit_event(
+                project_id,
+                event="intel_started",
+                scan_id=scan_id,
+                level="info",
+                message="Starting LangGraph Pentest Orchestrator...",
+                data={"stage": "intel", "status": "running", "kind": "start"},
+            )
+
+            # Await the coroutine that pentest_orchestrator.astream() creates
+            async for output in pentest_orchestrator.astream(initial_state, {"recursion_limit": 50}):
+                logger.info("langgraph_step", output=str(output))
+                
+            finished_at = _utc_now_iso()
+            self._runs[project_id] = {
+                "scan_id": scan_id,
+                "project_id": project_id,
+                "status": "completed",
+                "started_at": started_at,
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "error": "",
+                "awaiting_information_gathering_approval": False,
+                "awaiting_planner_approval": False,
+                "awaiting_tool_approval": False,
+                "pending_tool_approval": None,
+                "already_running": False,
+            }
+            self._persist_project_status(
+                project_id,
+                status="completed",
+                scan_progress=100,
+                scan_meta={"scanId": scan_id, "status": "completed", "finishedAt": finished_at},
+            )
+            self._emit_event(
+                project_id,
+                event="scan_completed",
+                scan_id=scan_id,
+                level="success",
+                message="Scan completed successfully via LangGraph.",
+                data={"status": "completed", "scan_progress": 100},
+            )
+            return  # EXIT LEGACY LOGIC EARLY!
+        except Exception as exc:
+            self._mark_failed(project_id, scan_id, f"LangGraph fatal error: {exc}")
+            return
+        # --- END NEW LANGGRAPH INTEGRATION ---
 
         scope_text = ""
         for raw_line in info.splitlines():

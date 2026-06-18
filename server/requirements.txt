@@ -31,3 +31,8 @@ zaproxy
 checkov
 bandit
 semgrep
+mem0ai
+langchain
+langchain-openai
+langchain-community
+langchain-classic

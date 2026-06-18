@@ -18,6 +18,19 @@ from typing import Any, AsyncGenerator
 import httpx
 import structlog
 
+from langchain_classic.memory import ConversationSummaryBufferMemory
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage
+
+class OfflineChatOpenAI(ChatOpenAI):
+    """Subclass of ChatOpenAI to override token counting for completely offline use without tiktoken API calls."""
+    def get_num_tokens_from_messages(self, messages: list[BaseMessage]) -> int:
+        tokens = 0
+        for msg in messages:
+            content = str(msg.content or "")
+            tokens += max(1, len(content) // 4)
+        return tokens
+
 from server.agents.rate_limiter import get_backup_llm_fallback, get_global_llm_queue
 from server.nodes.report.report_generator import generate_report
 from server.agents.tool_output_parsers import parse_ffuf_findings, summarize_tool_output
@@ -463,6 +476,37 @@ class AssistantAgent:
         self._backup = get_backup_llm_fallback()
         self._guard = PromptInjectionGuard()
 
+    async def _get_conversation_summary(self, history: list[dict[str, Any]] | None) -> str:
+        """Uses LangChain ConversationSummaryBufferMemory to compress the conversation history."""
+        if not history:
+            return ""
+
+        config = get_public_agent_config("system_memory")
+        
+        llm = OfflineChatOpenAI(
+            model=config.model,
+            openai_api_base=config.api_url,
+            api_key=config.api_key or "dummy_offline_key",
+            temperature=0,
+        )
+        
+        memory = ConversationSummaryBufferMemory(
+            llm=llm,
+            max_token_limit=1000,
+            return_messages=False
+        )
+        
+        for msg in history:
+            role = msg.get("role", "")
+            text = msg.get("text", "")
+            if text:
+                if role == "user":
+                    memory.chat_memory.add_user_message(text)
+                else:
+                    memory.chat_memory.add_ai_message(text)
+                    
+        return memory.load_memory_variables({})["history"]
+
     async def close(self) -> None:
         pass
 
@@ -551,40 +595,6 @@ class AssistantAgent:
         )
         return any(marker in lowered for marker in recall_markers)
 
-    async def compress_history(self, history: list[dict[str, Any]]) -> str:
-        """Compresses a long conversation history into a single summary block."""
-        if not history:
-            return ""
-
-        history_text = "\n".join([
-            f"{'User' if m.get('role') == 'user' else 'Assistant'}: {m.get('text', '')}"
-            for m in history
-            if m.get('text')
-        ])
-
-        user_content = (
-            "Please summarize our conversation so far. Focus on:\n"
-            "1. Verified vulnerabilities and evidence discovered.\n"
-            "2. Tool results and investigation findings.\n"
-            "3. Pending tasks or goals discussed.\n"
-            "4. Technical decisions made.\n\n"
-            "Conversation History:\n"
-            f"{history_text}\n\n"
-            "Summary:"
-        )
-
-        try:
-            response = await self._chat_with_fallback(
-                [
-                    ChatMessage(role="system", content="You are a professional security analyst. Summarize the following pentest conversation history into a concise, high-density bulleted report that preserves all critical technical facts and discovered evidence."),
-                    ChatMessage(role="user", content=user_content),
-                ],
-                allow_tools=False,
-            )
-            return str(response.content or "").strip()
-        except Exception as exc:
-            logger.exception("assistant_history_compression_failed")
-            return f"History compression failed. (Error: {str(exc)})"
 
     @classmethod
     def _normalize_context_memory_payload(
@@ -646,63 +656,6 @@ class AssistantAgent:
             normalized[key] = normalized[key][:4]
         return json.dumps(normalized, ensure_ascii=True)
 
-    async def compress_working_memory(self, saved_context: str) -> str:
-        raw = str(saved_context or "").strip()
-        if not raw:
-            return ""
-
-        parsed = self._parse_saved_context_json(raw)
-        operator_mode = str(parsed.get("operator_mode", "Ask")).strip()
-        if operator_mode not in _OPERATOR_MODES:
-            operator_mode = "Ask"
-        execution_lane = self._normalize_lane(str(parsed.get("execution_lane", "investigation")).strip().lower())
-        response_style = self._normalize_style(str(parsed.get("response_style", "natural")).strip().lower())
-        rendered_memory = self._render_working_memory(raw) or raw[:_MAX_CONTEXT_CHARS].strip()
-
-        user_content = "\n".join(
-            [
-                f"Operator mode: {operator_mode}",
-                f"Execution lane: {execution_lane}",
-                f"Response style: {response_style}",
-                "Current structured working memory:",
-                rendered_memory or "(none)",
-                "",
-                "Compress this working memory while preserving:",
-                "1. Verified evidence and concrete technical facts.",
-                "2. Active operator goals, open questions, and next steps.",
-                "3. Important recent checks, corrections, and lessons learned.",
-                "4. A tiny recent dialogue trace so short-term recap questions stay accurate.",
-                "",
-                "Return the refreshed working memory in the same structured JSON format.",
-            ]
-        )
-
-        try:
-            response = await self._chat_with_fallback(
-                [
-                    ChatMessage(role="system", content=CONTEXT_COMPRESSION_PROMPT),
-                    ChatMessage(role="user", content=user_content),
-                ],
-                allow_tools=False,
-            )
-            normalized = self._normalize_context_memory_payload(
-                str(response.content or "").strip(),
-                operator_mode=operator_mode,
-                execution_lane=execution_lane,
-                response_style=response_style,
-            )
-            if normalized:
-                return normalized
-        except Exception:
-            logger.warning("assistant_working_memory_compression_failed", exc_info=True)
-
-        normalized = self._normalize_context_memory_payload(
-            raw,
-            operator_mode=operator_mode,
-            execution_lane=execution_lane,
-            response_style=response_style,
-        )
-        return normalized or rendered_memory[:_MAX_CONTEXT_CHARS].strip()
 
     async def answer(
         self,
@@ -792,22 +745,9 @@ class AssistantAgent:
                 target=target,
                 tool_results=[],
             )
-            next_context = await self._build_next_context(
-                project_id=project_id,
-                saved_context=saved_context,
-                history=history,
-                prompt=prompt,
-                reply=reply,
-                tool_results=[],
-                target=target,
-                target_type=target_type,
-                execution_lane=execution_lane,
-                response_style=response_style,
-                operator_mode=operator_mode,
-            )
             yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
             yield {"type": "learning", "data": learning_signals}
-            yield {"type": "context", "data": {"next_context": next_context}}
+            yield {"type": "context", "data": {"next_context": ""}}
             return
 
         report_reply = await self._handle_report_intent(
@@ -824,65 +764,17 @@ class AssistantAgent:
                 target=target,
                 tool_results=[],
             )
-            next_context = await self._build_next_context(
-                project_id=project_id,
-                saved_context=saved_context,
-                history=history,
-                prompt=prompt,
-                reply=report_reply,
-                tool_results=[],
-                target=target,
-                target_type=target_type,
-                execution_lane="investigation",
-                response_style="report",
-                operator_mode="Report",
-            )
             yield {"type": "reply", "data": {"text": report_reply, "route": "assistant", "mode": "Report", "lane": "investigation", "style": "report", "blocked": False}}
             yield {"type": "learning", "data": learning_signals}
-            yield {"type": "context", "data": {"next_context": next_context}}
+            yield {"type": "context", "data": {"next_context": ""}}
             return
 
         # Prompt-driven execution shortcuts are intentionally disabled.
         # Echo should let the LLM decide whether to call tools for operator input.
 
 
-        # Working-memory management (two-storage logic)
-        # 1. Full history (for UI) stays intact.
-        # 2. Saved backend context (for the LLM) is refreshed when near the token limit.
-        compressed_history_summary = None
-        history_text = "\n".join([str(m.get('text', '')) for m in (history or [])])
-        parsed_context = self._parse_saved_context_json(saved_context)
-        context_metrics = self.estimate_effective_context_metrics(
-            project_id=project_id,
-            target=target,
-            target_type=target_type,
-            prompt=prompt,
-            context=context,
-            saved_context=saved_context,
-            history=history,
-        )
-
-        if context_metrics.get("should_compress_before_send") and str(saved_context or "").strip():
-            yield {"type": "ping", "data": {"step": "optimizing_context"}}
-            saved_context = await self.compress_working_memory(saved_context)
-            parsed_context = self._parse_saved_context_json(saved_context)
-            yield {"type": "context", "data": {"next_context": saved_context}}
-        elif context_metrics.get("should_compress_before_send") and history:
-            yield {"type": "ping", "data": {"step": "optimizing_context"}}
-            
-            # Generate a new summary that includes the previous one + recent history
-            # We don't truncate history here; we just update the background context.
-            new_summary = await self.compress_history(history)
-            parsed_context["rolling_summary"] = new_summary
-            saved_context = json.dumps(parsed_context)
-            
-            # Yield event to update the background context (working memory)
-            yield {"type": "context", "data": {"next_context": saved_context}}
-            
-            # We also add a transient notification that WON'T be persisted to history 
-            # to avoid cluttering the database with compression logs, but we still 
-            # need to tell the LLM that context has changed.
-            compressed_history_summary = new_summary
+        # Use LangChain ConversationSummaryBufferMemory to manage context
+        conversation_summary = await self._get_conversation_summary(history)
 
         context_block = self._build_context_block(
             project_id=project_id,
@@ -890,24 +782,15 @@ class AssistantAgent:
             target_type=target_type,
             prompt=prompt,
             context=context,
-            saved_context=saved_context,
+            saved_context=conversation_summary,
             external_research_allowed=self._allows_external_research(prompt),
             operator_mode=operator_mode,
             execution_lane=execution_lane,
             response_style=response_style,
-            history=history,
+            history=[],
         )
-        if compressed_history_summary:
-            # We just optimized in this turn
-            context_block = f"PRIOR CONVERSATION SUMMARY (JUST UPDATED):\n{compressed_history_summary}\n\n{context_block}"
-        elif parsed_context.get("rolling_summary"):
-            # Use the existing background summary
-            context_block = f"PRIOR CONVERSATION SUMMARY:\n{parsed_context.get('rolling_summary')}\n\n{context_block}"
-        elif history and any(m.get("isCompressionSummary") for m in history):
-            # Fallback for legacy compression messages
-            summary_msg = next((m for m in history if m.get("isCompressionSummary")), None)
-            if summary_msg:
-                context_block = f"PRIOR CONVERSATION SUMMARY:\n{summary_msg.get('text', '')}\n\n{context_block}"
+        if conversation_summary:
+            context_block = f"PRIOR CONVERSATION SUMMARY:\n{conversation_summary}\n\n{context_block}"
 
         messages: list[ChatMessage] = [
             ChatMessage(role="system", content=SYSTEM_PROMPT),
@@ -938,22 +821,9 @@ class AssistantAgent:
                         prompt=prompt,
                         target=target,
                     )
-                    next_context = await self._build_next_context(
-                        project_id=project_id,
-                        saved_context=saved_context,
-                        history=history,
-                        prompt=prompt,
-                        reply=reply,
-                        tool_results=tool_results,
-                        target=target,
-                        target_type=target_type,
-                        execution_lane=execution_lane,
-                        response_style=response_style,
-                        operator_mode=operator_mode,
-                    )
                     yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
                     yield {"type": "learning", "data": learning_signals}
-                    yield {"type": "context", "data": {"next_context": next_context}}
+                    yield {"type": "context", "data": {"next_context": ""}}
                     return
                 raise
             tool_calls = list(response.tool_calls or [])[:_MAX_TOOL_CALLS_PER_ROUND]
@@ -973,22 +843,9 @@ class AssistantAgent:
                     target=target,
                     tool_results=tool_results,
                 )
-                next_context = await self._build_next_context(
-                    project_id=project_id,
-                    saved_context=saved_context,
-                    history=history,
-                    prompt=prompt,
-                    reply=reply,
-                    tool_results=tool_results,
-                    target=target,
-                    target_type=target_type,
-                    execution_lane=execution_lane,
-                    response_style=response_style,
-                    operator_mode=operator_mode,
-                )
                 yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
                 yield {"type": "learning", "data": learning_signals}
-                yield {"type": "context", "data": {"next_context": next_context}}
+                yield {"type": "context", "data": {"next_context": ""}}
                 return
 
             # Ensure tool calls have 'type': 'function' as required by some providers
@@ -1316,20 +1173,7 @@ class AssistantAgent:
         yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
         yield {"type": "learning", "data": learning_signals}
 
-        next_context = await self._build_next_context(
-            project_id=project_id,
-            saved_context=saved_context,
-            history=history,
-            prompt=prompt,
-            reply=reply,
-            tool_results=tool_results,
-            target=target,
-            target_type=target_type,
-            execution_lane=execution_lane,
-            response_style=response_style,
-            operator_mode=operator_mode,
-        )
-        yield {"type": "context", "data": {"next_context": next_context}}
+        yield {"type": "context", "data": {"next_context": ""}}
 
     async def _answer_lightweight_lane_prompt(
         self,
@@ -1435,8 +1279,8 @@ class AssistantAgent:
         if project_state:
             parts.append("- unified_project_state:")
             parts.append(project_state)
-        rendered_memory = self._render_working_memory(saved_context)
-        has_working_memory = bool(rendered_memory.strip())
+        rendered_memory = str(saved_context or "").strip()
+        has_working_memory = bool(rendered_memory)
         if rendered_memory:
             parts.append("- working_memory:")
             parts.append(rendered_memory)
@@ -1467,88 +1311,8 @@ class AssistantAgent:
             parts.append(f"- live_context: {context.strip()}")
         return "\n".join(parts)
 
-    @staticmethod
-    def _estimate_text_tokens(text: str) -> int:
-        return max(0, math.ceil(len(str(text or "")) / 4))
 
-    def estimate_effective_context_metrics(
-        self,
-        *,
-        project_id: str | None,
-        target: str,
-        target_type: str,
-        prompt: str,
-        context: str,
-        saved_context: str,
-        history: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]:
-        operator_mode = self._detect_operator_mode(prompt, history=history)
-        execution_lane = self._resolve_execution_lane(prompt=prompt, operator_mode=operator_mode)
-        response_style = self._resolve_response_style(
-            operator_mode=operator_mode,
-            execution_lane=execution_lane,
-            prompt=prompt,
-        )
 
-        context_block = self._build_context_block(
-            project_id=project_id,
-            target=target,
-            target_type=target_type,
-            prompt=prompt,
-            context=context,
-            saved_context=saved_context,
-            external_research_allowed=self._allows_external_research(prompt),
-            operator_mode=operator_mode,
-            execution_lane=execution_lane,
-            response_style=response_style,
-            history=history,
-        )
-        parsed_context = self._parse_saved_context_json(saved_context)
-        if parsed_context.get("rolling_summary"):
-            context_block = f"PRIOR CONVERSATION SUMMARY:\n{parsed_context.get('rolling_summary')}\n\n{context_block}"
-        elif history and any(m.get("isCompressionSummary") for m in history):
-            summary_msg = next((m for m in history if m.get("isCompressionSummary")), None)
-            if summary_msg:
-                context_block = f"PRIOR CONVERSATION SUMMARY:\n{summary_msg.get('text', '')}\n\n{context_block}"
-
-        user_content = f"{context_block}\n\nOperator prompt:\n{prompt.strip()}"
-        effective_tokens = self._estimate_text_tokens(SYSTEM_PROMPT) + self._estimate_text_tokens(user_content)
-        display_parts: list[str] = []
-        normalized_saved_context = str(saved_context or "").strip()
-        if normalized_saved_context:
-            display_parts.append(normalized_saved_context)
-        elif history:
-            recent_checks = self._render_recent_checks_from_history(history)
-            if recent_checks:
-                display_parts.append(recent_checks)
-            recent_turns = self._render_recent_turns_text(history)
-            if recent_turns:
-                display_parts.append(recent_turns)
-        display_tokens = self._estimate_text_tokens("\n\n".join(part for part in display_parts if part.strip()))
-        threshold_tokens = int(_HISTORY_TOKEN_LIMIT * 0.95)
-        return {
-            "display_tokens": display_tokens,
-            "effective_tokens": effective_tokens,
-            "limit_tokens": _HISTORY_TOKEN_LIMIT,
-            "threshold_tokens": threshold_tokens,
-            "should_compress_before_send": effective_tokens > threshold_tokens,
-            "operator_mode": operator_mode,
-            "execution_lane": execution_lane,
-            "response_style": response_style,
-            "has_working_memory": bool(str(saved_context or "").strip()),
-            "uses_recent_history_fallback": (not str(saved_context or "").strip()) and bool(history),
-        }
-
-    @staticmethod
-    def _parse_saved_context_json(saved_context: str) -> dict[str, Any]:
-        raw = str(saved_context or "").strip()
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
 
     @classmethod
     def _build_investigation_brief(
@@ -1561,19 +1325,8 @@ class AssistantAgent:
     ) -> str:
         if operator_mode not in {"Investigate", "Retest"}:
             return ""
-        parsed = cls._parse_saved_context_json(saved_context)
-        unresolved = parsed.get("unresolved_questions", []) if isinstance(parsed.get("unresolved_questions"), list) else []
-        hypotheses = parsed.get("hypotheses", []) if isinstance(parsed.get("hypotheses"), list) else []
-        prior_verdicts = parsed.get("verdicts", []) if isinstance(parsed.get("verdicts"), list) else []
-
         focus = str(prompt or "").strip()[:240]
         lines = [f"  focus: {focus or 'Active target investigation'}"]
-        if hypotheses:
-            lines.append(f"  prior_hypothesis: {str(hypotheses[0]).strip()[:180]}")
-        if unresolved:
-            lines.append(f"  open_question: {str(unresolved[0]).strip()[:180]}")
-        if prior_verdicts:
-            lines.append(f"  previous_verdict: {str(prior_verdicts[0]).strip()[:180]}")
 
         if operator_mode == "Retest":
             steps = [
@@ -1895,51 +1648,6 @@ class AssistantAgent:
             rows.append(f"latest_report_run={str(latest_report.get('status', '')).strip() or 'unknown'}")
         return rows[:3]
 
-    @staticmethod
-    def _render_working_memory(saved_context: str) -> str:
-        raw = str(saved_context or "").strip()
-        if not raw:
-            return ""
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return raw[:_MAX_CONTEXT_CHARS].strip()
-        if not isinstance(parsed, dict):
-            return raw[:_MAX_CONTEXT_CHARS].strip()
-
-        ordered_fields = (
-            ("operator_mode", "operator mode"),
-            ("execution_lane", "execution lane"),
-            ("response_style", "response style"),
-            ("target_facts", "target facts"),
-            ("operator_goals", "operator goals"),
-            ("recent_dialogue", "recent dialogue"),
-            ("investigation_plan", "investigation plan"),
-            ("hypotheses", "hypotheses"),
-            ("verified_evidence", "verified evidence"),
-            ("verdicts", "verdicts"),
-            ("project_state_signals", "project state signals"),
-            ("unresolved_questions", "unresolved questions"),
-            ("next_steps", "next steps"),
-            ("recent_checks", "recent checks"),
-            ("operator_corrections", "operator corrections"),
-            ("lessons_learned", "lessons learned"),
-        )
-        lines: list[str] = []
-        for key, label in ordered_fields:
-            raw_items = parsed.get(key, [])
-            if isinstance(raw_items, str):
-                clean_items = [raw_items.strip()] if raw_items.strip() else []
-            elif isinstance(raw_items, list):
-                clean_items = [str(item).strip() for item in raw_items if str(item).strip()]
-            else:
-                continue
-            if not clean_items:
-                continue
-            lines.append(f"  {label}:")
-            for item in clean_items[:4]:
-                lines.append(f"  - {item}")
-        return "\n".join(lines)[:_MAX_CONTEXT_CHARS].strip()
 
     @staticmethod
     def _render_recent_checks_from_history(history: list[dict[str, Any]] | None) -> str:
@@ -4307,27 +4015,6 @@ class AssistantAgent:
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         return text.strip() or "No useful answer was produced."
 
-    @staticmethod
-    def _should_use_llm_context_compression(
-        *,
-        execution_lane: str,
-        response_style: str,
-        operator_mode: str,
-        tool_results: list[dict[str, Any]],
-        prompt: str,
-        reply: str,
-    ) -> bool:
-        if execution_lane == "lightweight" or response_style == "natural":
-            return False
-        if operator_mode == "Report":
-            return True
-        if len(tool_results) >= 2:
-            return True
-        if len(str(reply or "")) >= 900:
-            return True
-        if len(str(prompt or "")) >= 320 and operator_mode in {"Investigate", "Retest"}:
-            return True
-        return False
 
     @classmethod
     def _ensure_structured_reply(
@@ -4387,221 +4074,4 @@ class AssistantAgent:
             f"**Confidence**\n{confidence}"
         )
 
-    async def _build_next_context(
-        self,
-        *,
-        project_id: str | None,
-        saved_context: str,
-        history: list[dict[str, Any]] | None,
-        prompt: str,
-        reply: str,
-        tool_results: list[dict[str, Any]],
-        target: str,
-        target_type: str,
-        execution_lane: str,
-        response_style: str,
-        operator_mode: str,
-    ) -> str:
-        rendered_prior_memory = self._render_working_memory(saved_context)
-        execution_lane = self._normalize_lane(execution_lane)
-        response_style = self._normalize_style(response_style)
-        project_state_summary = self._render_project_state_summary(
-            project_id=project_id,
-            target=target,
-            target_type=target_type,
-            detail_level=self._grounding_detail_for_lane(
-                execution_lane=execution_lane,
-                operator_mode=operator_mode,
-                response_style=response_style,
-            ),
-        )
-        investigation_brief = self._build_investigation_brief(
-            prompt=prompt,
-            operator_mode=operator_mode,
-            target=target,
-            saved_context=saved_context,
-        )
-        learning_signals = self._extract_learning_signals(
-            prompt=prompt,
-            history=history,
-            tool_results=tool_results,
-            reply=reply,
-        )
-        history_excerpt: list[str] = []
-        if isinstance(history, list):
-            for item in history[-6:]:
-                if not isinstance(item, dict):
-                    continue
-                role = str(item.get("role", "")).strip().lower()
-                text = str(item.get("text", "")).strip()
-                if role not in {"user", "assistant"} or not text:
-                    continue
-                history_excerpt.append(f"{role}: {text[:260]}")
 
-        tool_summaries: list[str] = []
-        for row in tool_results[-4:]:
-            if not isinstance(row, dict):
-                continue
-            if "matches" in row:
-                matches = row.get('matches', [])
-                summary_parts = [f"project_vector_hits={len(matches)}"]
-                for m in matches[:3]:
-                    m_id = str(m.get('record_id') or m.get('metadata', {}).get('record_id') or m.get('id', '')).strip()
-                    m_title = str(m.get('title', '')).strip()[:60]
-                    m_citation = str(m.get('citation', '')).strip()
-                    if m_id:
-                        summary_parts.append(f"hit_id={m_id} title=\"{m_title}\"")
-                    if m_citation:
-                        summary_parts.append(f"citation={m_citation}")
-                tool_summaries.append(" ".join(summary_parts))
-                continue
-            if "results" in row:
-                tool_summaries.append(f"web_results={len(row.get('results', []))}")
-                continue
-            if "url" in row and "text" in row:
-                tool_summaries.append(f"page_fetch={str(row.get('url', '')).strip()}")
-                continue
-            command = str(row.get("full_command") or row.get("command") or "").strip()
-            if command:
-                tool_summaries.append(f"command={command}")
-
-        if not self._should_use_llm_context_compression(
-            execution_lane=execution_lane,
-            response_style=response_style,
-            operator_mode=operator_mode,
-            tool_results=tool_results,
-            prompt=prompt,
-            reply=reply,
-        ):
-            return self._build_local_context_memory(
-                operator_mode=operator_mode,
-                execution_lane=execution_lane,
-                response_style=response_style,
-                prompt=prompt,
-                reply=reply,
-                target=target,
-                target_type=target_type,
-                project_state_summary=project_state_summary,
-                investigation_brief=investigation_brief,
-                tool_summaries=tool_summaries,
-                learning_signals=learning_signals,
-                tool_results=tool_results,
-            )
-
-        user_content = "\n".join(
-            [
-                f"Operator mode: {operator_mode}",
-                f"Target: {target}",
-                f"Target type: {target_type}",
-                "Unified project state:",
-                project_state_summary or "(none)",
-                "",
-                "Existing structured working memory:",
-                rendered_prior_memory or "(none)",
-                "",
-                "Investigation brief:",
-                investigation_brief or "(none)",
-                "",
-                "Recent history excerpt:",
-                "\n".join(history_excerpt) or "(none)",
-                "",
-                f"Latest user prompt: {prompt.strip()}",
-                f"Latest assistant reply: {reply.strip()}",
-                "Latest tool summary:",
-                "\n".join(tool_summaries) or "(none)",
-                "",
-                "Learning signals:",
-                json.dumps(learning_signals, ensure_ascii=True),
-            ]
-        )
-        try:
-            response = await self._chat_with_fallback(
-                [
-                    ChatMessage(role="system", content=CONTEXT_COMPRESSION_PROMPT),
-                    ChatMessage(role="user", content=user_content),
-                ],
-                allow_tools=False,
-                allow_backup_fallback=False,
-            )
-            text = str(response.content or "").strip()
-            if text:
-                normalized = self._normalize_context_memory_payload(
-                    text,
-                    operator_mode=operator_mode,
-                    execution_lane=execution_lane,
-                    response_style=response_style,
-                    learning_signals=learning_signals,
-                )
-                if normalized:
-                    return normalized
-        except Exception as exc:
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code == 429:
-                logger.warning(
-                    "assistant_context_compression_rate_limited",
-                    provider=getattr(self._llm, "_provider", ""),
-                    status=exc.response.status_code,
-                )
-            else:
-                logger.warning("assistant_context_compression_failed", exc_info=True)
-
-        return self._build_local_context_memory(
-            operator_mode=operator_mode,
-            execution_lane=execution_lane,
-            response_style=response_style,
-            prompt=prompt,
-            reply=reply,
-            target=target,
-            target_type=target_type,
-            project_state_summary=project_state_summary,
-            investigation_brief=investigation_brief,
-            tool_summaries=tool_summaries,
-            learning_signals=learning_signals,
-            tool_results=tool_results,
-        )
-
-    @classmethod
-    def _build_local_context_memory(
-        cls,
-        *,
-        operator_mode: str,
-        execution_lane: str,
-        response_style: str,
-        prompt: str,
-        reply: str,
-        target: str,
-        target_type: str,
-        project_state_summary: str,
-        investigation_brief: str,
-        tool_summaries: list[str],
-        learning_signals: dict[str, Any],
-        tool_results: list[dict[str, Any]] | None = None,
-    ) -> str:
-        fallback_memory = {
-            "operator_mode": operator_mode,
-            "execution_lane": cls._normalize_lane(execution_lane),
-            "response_style": cls._normalize_style(response_style),
-            "target_facts": [
-                f"target={target or '(unknown)'}",
-                f"target_type={target_type or '(unknown)'}",
-            ],
-            "operator_goals": [prompt.strip()[:240]] if prompt.strip() else [],
-            "recent_dialogue": [
-                line
-                for line in (
-                    f"user: {prompt.strip()[:220]}" if prompt.strip() else "",
-                    f"assistant: {reply.strip()[:220]}" if reply.strip() else "",
-                )
-                if line
-            ][:4],
-            "investigation_plan": [line.strip()[:240] for line in investigation_brief.splitlines()[:3] if line.strip()],
-            "hypotheses": [],
-            "verified_evidence": tool_summaries[:4],
-            "verdicts": [cls._estimate_verdict(tool_results or [], [], prompt=prompt)],
-            "project_state_signals": [line.strip()[:240] for line in project_state_summary.splitlines()[:4] if line.strip()],
-            "unresolved_questions": [],
-            "next_steps": [reply.strip()[:240]] if reply.strip() else [],
-            "recent_checks": tool_summaries[:4],
-            "operator_corrections": learning_signals.get("operator_corrections", [])[:4] if isinstance(learning_signals, dict) else [],
-            "lessons_learned": learning_signals.get("lessons_learned", [])[:4] if isinstance(learning_signals, dict) else [],
-        }
-        return json.dumps(fallback_memory, ensure_ascii=True)[:_MAX_CONTEXT_CHARS].strip()

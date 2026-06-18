@@ -1131,9 +1131,9 @@ class AICompressPayload(BaseModel):
 async def ai_compress_history(payload: AICompressPayload) -> dict[str, str]:
     _ensure_llm_profile_configured()
     if str(payload.context or "").strip():
-        context = await _assistant_agent.compress_working_memory(payload.context)
-        return {"context": context}
-    summary = await _assistant_agent.compress_history(payload.history)
+        # Working memory compression is deprecated as it is now managed via LangChain internally.
+        return {"context": payload.context}
+    summary = await _assistant_agent._get_conversation_summary(payload.history)
     return {"summary": summary}
 
 

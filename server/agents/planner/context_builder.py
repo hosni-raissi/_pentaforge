@@ -190,10 +190,19 @@ Detected Technologies:
         return "NEW FINDINGS:\n" + "\n".join(findings[:10])
 
     def _build_rag_context(self, project: dict[str, Any]) -> str:
-        """PART 5 — RAG Context (dynamic per this round's signals)."""
-        # For now, return placeholder
-        # In production: query Qdrant with signals from findings + detected tech
-        return "RAG CONTEXT: (Qdrant retrieval not yet enabled)"
+        """PART 5 — RAG Context (dynamic per this round's signals fetched from Mem0)."""
+        try:
+            from mem0 import Memory
+            memory = Memory()
+            # Fetch context relevant to this target
+            target = project.get("payload", {}).get("target", "unknown target")
+            results = memory.search(query=f"What vulnerabilities or open ports are known for {target}?", user_id=project.get("_id"))
+            facts = [r.get('text', '') for r in results if r.get('text')]
+            if facts:
+                return "RAG CONTEXT (Mem0):\n" + "\n".join([f" - {f}" for f in facts])
+            return "RAG CONTEXT (Mem0): No historical facts found."
+        except Exception as e:
+            return f"RAG CONTEXT: (Mem0 retrieval failed: {e})"
 
     def _build_user_contributions(self, project: dict[str, Any]) -> str:
         """PART 7 — USER CONTRIBUTIONS (intelligence from the assistant/user)."""
