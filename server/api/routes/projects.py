@@ -14,7 +14,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from server.api.dependencies import projects_store
-from server.agents.assistant.tools.mark_false_positive import mark_false_positive as mark_project_finding_false_positive
+from server.utils.findings import mark_false_positive as mark_project_finding_false_positive
 from server.agents.executor.sandbox import delete_project_workspace
 from server.db.projects.config import projects_db_config
 

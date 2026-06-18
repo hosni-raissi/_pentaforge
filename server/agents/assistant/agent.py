@@ -54,7 +54,7 @@ from .tools import (
     search_web as assistant_search_web,
 )
  
-from .prompts import CONTEXT_COMPRESSION_PROMPT, SYSTEM_PROMPT
+from .prompts import SYSTEM_PROMPT
 from .security_tools import (
     ASSISTANT_ALLOWED_NETWORK_COMMANDS,
     ASSISTANT_TARGET_OPTIONAL_COMMANDS,
@@ -65,7 +65,6 @@ from .config import (
     _MAX_TOOL_CALLS_PER_ROUND,
     _MAX_TOTAL_TOOL_CALLS,
     _MAX_REPLY_TOKENS,
-    _MAX_CONTEXT_CHARS,
     _MAX_PROJECT_STATE_CHARS,
 )
 logger = structlog.get_logger(__name__)
@@ -483,8 +482,7 @@ class AssistantAgent:
 
     @staticmethod
     def _grounding_detail_for_lane(*, execution_lane: str, operator_mode: str, response_style: str) -> str:
-        if response_style == "report":
-            return "report"
+
         if execution_lane == "lightweight":
             return "minimal"
         if operator_mode == "Ask":
@@ -533,65 +531,7 @@ class AssistantAgent:
         return any(marker in lowered for marker in recall_markers)
 
 
-    @classmethod
-    def _normalize_context_memory_payload(
-        cls,
-        text: str,
-        *,
-        operator_mode: str,
-        execution_lane: str,
-        response_style: str,
-        learning_signals: dict[str, Any] | None = None,
-    ) -> str | None:
-        clean_text = str(text or "").strip()
-        if not clean_text:
-            return None
-        try:
-            parsed = json.loads(clean_text)
-        except json.JSONDecodeError:
-            return clean_text[:_MAX_CONTEXT_CHARS].strip()
-        if not isinstance(parsed, dict):
-            return clean_text[:_MAX_CONTEXT_CHARS].strip()
 
-        normalized: dict[str, Any] = {}
-        mode_value = str(parsed.get("operator_mode", "")).strip()
-        normalized["operator_mode"] = mode_value if mode_value in _OPERATOR_MODES else operator_mode
-        lane_value = str(parsed.get("execution_lane", "")).strip().lower()
-        normalized["execution_lane"] = lane_value if lane_value in _EXECUTION_LANES else execution_lane
-        style_value = str(parsed.get("response_style", "")).strip().lower()
-        normalized["response_style"] = style_value if style_value in _RESPONSE_STYLES else response_style
-        for key in (
-            "target_facts",
-            "operator_goals",
-            "recent_dialogue",
-            "investigation_plan",
-            "hypotheses",
-            "verified_evidence",
-            "verdicts",
-            "project_state_signals",
-            "unresolved_questions",
-            "next_steps",
-            "recent_checks",
-            "operator_corrections",
-            "lessons_learned",
-        ):
-            raw_items = parsed.get(key, [])
-            if not isinstance(raw_items, list):
-                raw_items = [raw_items] if raw_items else []
-            normalized[key] = [str(item).strip()[:240] for item in raw_items if str(item).strip()][:4]
-
-        signals = learning_signals if isinstance(learning_signals, dict) else {}
-        for key, values in signals.items():
-            if key not in normalized or not isinstance(normalized[key], list):
-                normalized[key] = []
-            if not isinstance(values, list):
-                values = [values] if values else []
-            for value in values[:4]:
-                text_value = str(value).strip()
-                if text_value and text_value not in normalized[key]:
-                    normalized[key].append(text_value[:240])
-            normalized[key] = normalized[key][:4]
-        return json.dumps(normalized, ensure_ascii=True)
 
 
     async def answer(
@@ -683,25 +623,6 @@ class AssistantAgent:
                 tool_results=[],
             )
             yield {"type": "reply", "data": {"text": reply, "route": "assistant", "mode": operator_mode, "lane": execution_lane, "style": response_style, "blocked": False}}
-            yield {"type": "learning", "data": learning_signals}
-            yield {"type": "context", "data": {"next_context": ""}}
-            return
-
-        report_reply = await self._handle_report_intent(
-            prompt,
-            project_id=project_id,
-            target=target,
-            target_type=target_type,
-        )
-        if report_reply is not None:
-            report_reply = self._normalize_reply_for_style(
-                report_reply,
-                response_style="report",
-                prompt=prompt,
-                target=target,
-                tool_results=[],
-            )
-            yield {"type": "reply", "data": {"text": report_reply, "route": "assistant", "mode": "Report", "lane": "investigation", "style": "report", "blocked": False}}
             yield {"type": "learning", "data": learning_signals}
             yield {"type": "context", "data": {"next_context": ""}}
             return
@@ -1001,23 +922,6 @@ class AssistantAgent:
                             parsed_args,
                             project_id=project_id,
                         )
-                    elif tool_name == "mark_false_positive":
-                        false_positive_issue = self._mark_false_positive_safety_issue(
-                            tool_results=tool_results,
-                        )
-                        if false_positive_issue:
-                            tool_payload = self._blocked_tool_payload(
-                                tool_name=tool_name,
-                                parsed_args=parsed_args,
-                                target=target,
-                                operator_mode=operator_mode,
-                                error=false_positive_issue,
-                            )
-                        else:
-                            tool_payload = await self._execute_mark_false_positive(
-                                parsed_args,
-                                project_id=project_id,
-                            )
                     elif tool_name == "search_web":
                         tool_payload = await self._execute_search_web(parsed_args)
                     else:
@@ -1134,9 +1038,7 @@ class AssistantAgent:
             if working_memory:
                 prompt_lines.extend(["", "Working memory:", working_memory])
 
-        recent_turns = self._render_recent_turns_text(history, limit_turns=5, max_chars=320)
-        if recent_turns:
-            prompt_lines.extend(["", "Recent conversation turns:", recent_turns])
+
 
         prompt_lines.extend(
             [
@@ -1219,14 +1121,7 @@ class AssistantAgent:
         if investigation_brief:
             parts.append("- investigation_brief:")
             parts.append(investigation_brief)
-        recent_turns = self._render_recent_turns_text(
-            history,
-            limit_turns=4 if has_working_memory else 5,
-            max_chars=220 if has_working_memory else 800,
-        )
-        if recent_turns:
-            parts.append("- recent_conversation_turns:")
-            parts.append(recent_turns)
+
         if not has_working_memory:
             recent_checks = self._render_recent_checks_from_history(history)
             if recent_checks:
@@ -1565,13 +1460,7 @@ class AssistantAgent:
                 "latest_assistant="
                 f"{str(latest_assistant.get('status', '')).strip() or 'unknown'}"
             )
-        latest_report = projects_store.get_latest_task_run(
-            project_id,
-            task_type="report",
-            statuses=["completed", "running", "failed"],
-        )
-        if isinstance(latest_report, dict):
-            rows.append(f"latest_report_run={str(latest_report.get('status', '')).strip() or 'unknown'}")
+
         return rows[:3]
 
 
@@ -1600,25 +1489,53 @@ class AssistantAgent:
         return "\n".join(rows[-6:])
 
     @staticmethod
-    def _render_recent_turns_text(
-        history: list[dict[str, Any]] | None,
-        *,
-        limit_turns: int = 5,
-        max_chars: int = 800,
-    ) -> str:
-        if not isinstance(history, list) or not history:
-            return ""
+    def _estimate_text_tokens(text: str) -> int:
+        import math
+        return max(0, math.ceil(len(str(text or "")) / 4))
 
-        turns: list[str] = []
-        for m in history[-max(1, limit_turns):]:
-            if not isinstance(m, dict):
-                continue
-            if m.get("isCompressionSummary"):
-                continue
-            role = "User" if str(m.get("role", "")).lower() == "user" else "Assistant"
-            text = str(m.get("text", "")).strip()
-            if text:
-                turns.append(f"{role}: {text[:max(60, max_chars)]}")
+    def estimate_effective_context_metrics(
+        self,
+        *,
+        project_id: str | None,
+        target: str,
+        target_type: str,
+        prompt: str,
+        context: str,
+        saved_context: str,
+        history: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        display_parts: list[str] = []
+        normalized_saved_context = str(saved_context or "").strip()
+        if normalized_saved_context:
+            display_parts.append(normalized_saved_context)
+        elif history:
+            recent_checks = self._render_recent_checks_from_history(history)
+            if recent_checks:
+                display_parts.append(recent_checks)
+            recent_turns = []
+            for item in history[-6:]:
+                if not isinstance(item, dict): continue
+                role = str(item.get("role", "")).strip().lower()
+                text = str(item.get("text", "")).strip()
+                if role in ("user", "assistant") and text:
+                    recent_turns.append(f"{role.capitalize()}: {text[:1000]}")
+            if recent_turns:
+                display_parts.append("\n".join(recent_turns))
+
+        display_text = "\n\n".join(display_parts)
+        display_tokens = self._estimate_text_tokens(display_text)
+        from server.agents.assistant.prompts import SYSTEM_PROMPT
+        effective_tokens = self._estimate_text_tokens(SYSTEM_PROMPT) + self._estimate_text_tokens(prompt) + display_tokens
+        threshold_tokens = int(_HISTORY_TOKEN_LIMIT * 0.95)
+        
+        return {
+            "display_tokens": display_tokens,
+            "effective_tokens": effective_tokens,
+            "limit_tokens": _HISTORY_TOKEN_LIMIT,
+            "threshold_tokens": threshold_tokens,
+            "should_compress_before_send": effective_tokens > threshold_tokens,
+            "operator_mode": self._detect_operator_mode(prompt, history=history),
+        }
 
     @staticmethod
     def _tool_schemas_for_turn(*, allow_external_research: bool) -> list[dict[str, Any]]:
@@ -2583,37 +2500,12 @@ class AssistantAgent:
         )
 
     @classmethod
-    def _tool_results_include_connectivity_failure(cls, tool_results: list[dict[str, Any]]) -> bool:
-        return any(
-            cls._tool_result_indicates_connectivity_failure(result)
-            for result in tool_results
-            if isinstance(result, dict)
-        )
-
-    @classmethod
     def _tool_results_include_sandbox_execution_blocker(cls, tool_results: list[dict[str, Any]]) -> bool:
         return any(
             cls._tool_result_indicates_sandbox_execution_blocker(result)
             for result in tool_results
             if isinstance(result, dict)
         )
-
-    @classmethod
-    def _tool_results_have_explicit_contradictory_evidence(cls, tool_results: list[dict[str, Any]]) -> bool:
-        for result in tool_results:
-            if not isinstance(result, dict):
-                continue
-            if cls._tool_result_indicates_connectivity_failure(result):
-                continue
-            if bool(result.get("success")) and (
-                str(result.get("stdout", "")).strip()
-                or str(result.get("text", "")).strip()
-                or str(result.get("summary", "")).strip()
-            ):
-                return True
-            if str(result.get("status", "")).strip().lower() in {"false_positive", "confirmed", "verified"}:
-                return True
-        return False
 
     @staticmethod
     def _normalize_vector_search_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3164,31 +3056,7 @@ class AssistantAgent:
         )
         return any(marker in lowered for marker in findings_markers)
 
-    @classmethod
-    def _resolve_direct_ftp_auth_attempt(
-        cls,
-        prompt: str,
-        *,
-        target: str,
-        history: list[dict[str, Any]] | None,
-    ) -> dict[str, Any] | None:
-        username, password = cls._extract_prompt_credentials(prompt)
-        if not username or not password:
-            return None
-        if not cls._prompt_or_history_suggests_ftp(prompt, history=history):
-            return None
-        target_host, target_port = extract_target_host_port(target)
-        if not target_host:
-            return None
-        ftp_url = f"ftp://{target_host}/"
-        if target_port is not None and target_port != 21:
-            ftp_url = f"ftp://{target_host}:{target_port}/"
-        return {
-            "command": "curl",
-            "args": ["-u", f"{username}:{password}", ftp_url],
-            "reason": "Attempt authenticated FTP access with the operator-provided credentials.",
-            "timeout": 60,
-        }
+
 
     @staticmethod
     def _extract_prompt_credentials(prompt: str) -> tuple[str, str]:
@@ -3241,75 +3109,7 @@ class AssistantAgent:
 
 
 
-    @staticmethod
-    def _resolve_follow_up_command_from_history(
-        prompt: str,
-        *,
-        history: list[dict[str, Any]] | None,
-    ) -> dict[str, Any] | None:
-        lowered = str(prompt or "").strip().lower()
-        if not lowered:
-            return None
 
-        follow_up_markers = (
-            "run it",
-            "execute it",
-            "give me the result",
-            "show me the result",
-            "run that",
-            "execute that",
-        )
-        if not any(marker in lowered for marker in follow_up_markers):
-            return None
-        if not isinstance(history, list):
-            return None
-
-        for item in reversed(history):
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("role", "")).strip().lower() != "assistant":
-                continue
-            text = str(item.get("text", "")).strip()
-            if not text:
-                continue
-
-            embedded = AssistantAgent._extract_embedded_tool_call(text)
-            if embedded is not None:
-                function = embedded.get("function", {})
-                raw_args = function.get("arguments", "{}")
-                try:
-                    parsed = json.loads(str(raw_args or "{}"))
-                except json.JSONDecodeError:
-                    parsed = {}
-                if isinstance(parsed, dict):
-                    command = str(parsed.get("command", "")).strip()
-                    if command:
-                        return {
-                            "command": command,
-                            "args": [str(arg) for arg in parsed.get("args", []) if str(arg).strip()],
-                            "reason": str(parsed.get("reason", "")).strip() or "Follow-up execution of the assistant's previously proposed command",
-                            "timeout": int(parsed.get("timeout", 120) or 120),
-                        }
-
-            command_match = re.search(r"Command:\s*`([^`]+)`", text)
-            if not command_match:
-                continue
-            try:
-                parts = shlex.split(command_match.group(1))
-            except ValueError:
-                continue
-            if not parts:
-                continue
-            first = str(parts[0]).strip().lower()
-            if not first or first in _VAGUE_COMMAND_TOKENS:
-                continue
-            return {
-                "command": parts[0],
-                "args": parts[1:],
-                "reason": "Follow-up execution of the assistant's previously referenced command",
-            }
-
-        return None
 
     @staticmethod
     def _format_direct_command_reply(result: dict[str, Any]) -> str:
@@ -3411,246 +3211,6 @@ class AssistantAgent:
             return "\n".join(parts)
         return AssistantAgent._format_direct_command_reply(result)
 
-    @staticmethod
-    def _reply_has_required_sections(reply: str) -> bool:
-        lowered = str(reply or "").lower()
-        return all(
-            marker in lowered
-            for marker in ("summary", "verdict", "evidence", "unknowns", "next step", "confidence")
-        )
-
-    @staticmethod
-    def _clean_section_text(text: str) -> str:
-        cleaned = str(text or "").strip()
-        cleaned = re.sub(r"^(summary|verdict|evidence|unknowns|next step|confidence)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
-        return cleaned.strip()
-
-    @staticmethod
-    def _salient_prompt_keywords(prompt: str) -> set[str]:
-        stopwords = {
-            "the", "this", "that", "with", "from", "into", "about", "what", "does", "mean",
-            "tell", "them", "they", "their", "there", "here", "have", "your", "will", "would",
-            "could", "should", "please", "current", "target", "whether", "actually", "which",
-            "when", "where", "while", "after", "before", "then", "than", "just", "more",
-            "less", "very", "also", "only", "over", "under", "again", "check", "investigate",
-            "verify", "retest", "finding", "findings", "endpoint", "report", "update",
-        }
-        keywords: set[str] = set()
-        for token in re.findall(r"[a-zA-Z0-9_/?.-]+", str(prompt or "").lower()):
-            normalized = token.strip(".,:;!?()[]{}")
-            if len(normalized) < 3 or normalized in stopwords:
-                continue
-            keywords.add(normalized)
-        return keywords
-
-    @classmethod
-    def _reply_matches_prompt_focus(cls, reply: str, prompt: str) -> bool:
-        keywords = cls._salient_prompt_keywords(prompt)
-        if not keywords:
-            return True
-        lowered_reply = str(reply or "").lower()
-        return any(keyword in lowered_reply for keyword in keywords)
-
-    @classmethod
-    def _structured_reply_needs_repair(
-        cls,
-        reply: str,
-        *,
-        prompt: str,
-        tool_results: list[dict[str, Any]],
-    ) -> bool:
-        text = str(reply or "").strip()
-        if not text:
-            return True
-        if cls._looks_like_raw_tool_trace(text):
-            return True
-        evidence_lines = cls._build_evidence_lines(tool_results)
-        lowered = text.lower()
-        if cls._tool_results_include_sandbox_execution_blocker(tool_results):
-            if "sandbox" not in lowered and "executor" not in lowered:
-                return True
-            if "get_page(" in lowered or "attempt to fetch the page content using the get_page tool" in lowered:
-                return True
-        if cls._tool_results_include_ffuf_findings(tool_results):
-            if cls._reply_denies_ffuf_findings(reply):
-                return True
-            if not cls._reply_covers_ffuf_findings(reply, tool_results):
-                return True
-        if evidence_lines and "no direct evidence was collected in this turn" in lowered:
-            return True
-        if not tool_results and cls._reply_claims_live_checks_without_evidence(text):
-            return True
-        if not cls._reply_matches_prompt_focus(text, prompt):
-            return True
-        return False
-
-    @classmethod
-    def _tool_results_include_ffuf_findings(cls, tool_results: list[dict[str, Any]]) -> bool:
-        for result in tool_results:
-            if not isinstance(result, dict):
-                continue
-            command = str(result.get("command", "")).strip().lower()
-            if command != "ffuf":
-                continue
-            parsed = result.get("parsed_findings", [])
-            if isinstance(parsed, list) and parsed:
-                return True
-            if cls._parse_ffuf_findings(result):
-                return True
-        return False
-
-    @staticmethod
-    def _reply_denies_ffuf_findings(reply: str) -> bool:
-        lowered = " ".join(str(reply or "").strip().lower().split())
-        return any(marker in lowered for marker in _FFUF_NO_MATCH_REPLY_MARKERS)
-
-    @classmethod
-    def _reply_covers_ffuf_findings(cls, reply: str, tool_results: list[dict[str, Any]]) -> bool:
-        lowered = " ".join(str(reply or "").strip().lower().split())
-        findings: list[dict[str, Any]] = []
-        for result in tool_results:
-            if not isinstance(result, dict):
-                continue
-            command = str(result.get("command", "")).strip().lower()
-            if command != "ffuf":
-                continue
-            parsed = result.get("parsed_findings", [])
-            if not isinstance(parsed, list) or not parsed:
-                parsed = cls._parse_ffuf_findings(result)
-            for finding in parsed:
-                if isinstance(finding, dict):
-                    findings.append(finding)
-        if not findings:
-            return True
-
-        required = min(2, len(findings))
-        covered = 0
-        for finding in findings[:4]:
-            path = str(finding.get("path", "")).strip().lower()
-            if not path:
-                continue
-            variants = {path}
-            normalized = path.lstrip("/")
-            if normalized:
-                variants.add(normalized)
-                variants.add(f"/{normalized}")
-                if not normalized.endswith("/"):
-                    variants.add(f"/{normalized}/")
-            if any(variant and variant in lowered for variant in variants):
-                covered += 1
-        return covered >= max(1, required)
-
-    @staticmethod
-    def _reply_claims_live_checks_without_evidence(reply: str) -> bool:
-        lowered = str(reply or "").lower()
-        suspicious_markers = (
-            "live check",
-            "i ran",
-            "i checked",
-            "i tested",
-            "curl check",
-            "http 200",
-            "http 401",
-            "http 403",
-            "http 404",
-            "http 500",
-            "returned 404",
-            "returned 200",
-            "response code",
-            "no evidence was observed in this initial check",
-            "you asked two things",
-        )
-        return any(marker in lowered for marker in suspicious_markers)
-
-    @classmethod
-    def _build_evidence_lines(cls, tool_results: list[dict[str, Any]]) -> list[str]:
-        lines: list[str] = []
-        for result in tool_results[-6:]:
-            if not isinstance(result, dict):
-                continue
-            command = str(result.get("full_command") or result.get("command") or "").strip()
-            normalized_command = str(result.get("command", "")).strip().lower()
-            structured = summarize_tool_output(result)
-            observations = structured.get("observations", [])
-            if normalized_command == "ffuf":
-                parsed_findings = result.get("parsed_findings", [])
-                if not isinstance(parsed_findings, list) or not parsed_findings:
-                    parsed_findings = cls._parse_ffuf_findings(result)
-                for finding in parsed_findings[:4]:
-                    if not isinstance(finding, dict):
-                        continue
-                    path = str(finding.get("path", "")).strip()
-                    status = str(finding.get("status", "")).strip()
-                    size = str(finding.get("size", "")).strip()
-                    words = str(finding.get("words", "")).strip()
-                    if path and status:
-                        line = f"ffuf matched `{path}` with HTTP {status}"
-                        if size and words:
-                            line += f" (size={size}, words={words})"
-                        lines.append(line)
-            elif isinstance(observations, list):
-                prefix = f"`{command}`" if command else f"`{normalized_command}`" if normalized_command else "Tool output"
-                for observation in observations[:3]:
-                    text = str(observation or "").strip()
-                    if text:
-                        lines.append(f"{prefix} observed: {text}")
-            matches = result.get("matches", [])
-            if isinstance(matches, list):
-                for match in matches[:3]:
-                    if not isinstance(match, dict):
-                        continue
-                    title = str(match.get("title", "")).strip() or "Project evidence"
-                    citation = str(match.get("citation", "")).strip()
-                    excerpt = str(match.get("excerpt", "")).strip()
-                    line = title
-                    if citation:
-                        line = f"{line} {citation}"
-                    if excerpt:
-                        line = f"{line}: {excerpt}"
-                    lines.append(line)
-            results = result.get("results", [])
-            if isinstance(results, list):
-                if results:
-                    query = str(result.get("query", "")).strip()
-                    engine = str(result.get("engine", "")).strip()
-                    search_line = "Web search returned relevant public references"
-                    if query:
-                        search_line = f'Web search for "{query}" returned {len(results[:2])} relevant result(s)'
-                    if engine:
-                        search_line += f" via {engine}"
-                    lines.append(search_line)
-                for row in results[:2]:
-                    if not isinstance(row, dict):
-                        continue
-                    title = str(row.get("title", "")).strip() or "Web result"
-                    url = str(row.get("url", "")).strip()
-                    snippet = str(row.get("snippet", "")).strip()
-                    line = title
-                    if url:
-                        line = f"{line} ({url})"
-                    if snippet:
-                        line = f"{line}: {snippet}"
-                    lines.append(line)
-            if str(result.get("url", "")).strip() and str(result.get("text", "")).strip():
-                page_line = f"Fetched {str(result.get('url', '')).strip()}: {str(result.get('text', '')).strip()[:240]}"
-                lines.append(page_line)
-            stdout = str(result.get("stdout", "")).strip()
-            likely_cause = str(result.get("likely_cause", "")).strip()
-            if command and stdout:
-                lines.append(f"`{command}` observed: {stdout[:240]}")
-            elif command and likely_cause:
-                lines.append(f"`{command}` failed: {likely_cause}")
-
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for line in lines:
-            normalized = " ".join(line.split()).lower()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            deduped.append(line)
-        return deduped[:5]
-
     @classmethod
     def _reply_from_tool_results_after_llm_failure(
         cls,
@@ -3683,122 +3243,6 @@ class AssistantAgent:
             tool_results=tool_results,
         )
 
-    @staticmethod
-    def _build_unknown_lines(tool_results: list[dict[str, Any]], summary: str) -> list[str]:
-        lines: list[str] = []
-        for result in tool_results[-6:]:
-            if not isinstance(result, dict):
-                continue
-            if AssistantAgent._tool_result_indicates_sandbox_execution_blocker(result):
-                lines.append("The command execution lane is blocked because the tool sandbox is unavailable.")
-            if bool(result.get("success")) and not str(result.get("error", "")).strip():
-                if any(isinstance(result.get(key), list) and result.get(key) for key in ("matches", "results")):
-                    continue
-                if any(str(result.get(key, "")).strip() for key in ("stdout", "text")):
-                    continue
-            error = str(result.get("error", "")).strip()
-            likely_cause = str(result.get("likely_cause", "")).strip()
-            if error:
-                lines.append(error)
-            if likely_cause:
-                lines.append(f"Likely cause: {likely_cause}")
-            recommendation = result.get("recommendation", {}) if isinstance(result.get("recommendation"), dict) else {}
-            if recommendation:
-                summary = str(recommendation.get("summary", "")).strip()
-                if summary:
-                    lines.append(f"Recommended pivot: {summary}")
-        if not lines and "unknown" in str(summary or "").lower():
-            lines.append("Some requested details remain unverified in the available evidence.")
-        if not lines:
-            lines.append("No major unresolved blockers surfaced in this turn, but untested assumptions should still be verified.")
-        return lines[:4]
-
-    @staticmethod
-    def _estimate_confidence(tool_results: list[dict[str, Any]], unknowns: list[str]) -> str:
-        strong_evidence = 0
-        weak_evidence = 0
-        for result in tool_results:
-            if not isinstance(result, dict):
-                continue
-            if bool(result.get("success")) and (
-                (isinstance(result.get("matches"), list) and result.get("matches"))
-                or (isinstance(result.get("results"), list) and result.get("results"))
-                or str(result.get("stdout", "")).strip()
-                or str(result.get("text", "")).strip()
-            ):
-                strong_evidence += 1
-            elif str(result.get("error", "")).strip():
-                weak_evidence += 1
-        if strong_evidence >= 2 and len(unknowns) <= 1:
-            return "High - based on multiple grounded tool results."
-        if strong_evidence >= 1:
-            return "Medium - grounded in at least one direct tool result, with some remaining uncertainty."
-        if weak_evidence:
-            return "Low - the turn produced limited or conflicting evidence."
-        return "Low - this answer is mostly interpretive and should be verified with direct evidence."
-
-    @classmethod
-    def _estimate_verdict(
-        cls,
-        tool_results: list[dict[str, Any]],
-        unknowns: list[str],
-        *,
-        prompt: str,
-    ) -> str:
-        if cls._tool_results_include_sandbox_execution_blocker(tool_results):
-            return "needs_retest"
-        if cls._tool_results_include_connectivity_failure(tool_results) and not cls._tool_results_have_explicit_contradictory_evidence(tool_results):
-            return "needs_retest"
-
-        strong_evidence = 0
-        confirmed_signals = 0
-        blocked_or_failed = 0
-        lowered_prompt = str(prompt or "").strip().lower()
-
-        for result in tool_results:
-            if not isinstance(result, dict):
-                continue
-            status = str(result.get("status", "")).strip().lower()
-            kind = str(result.get("kind", "")).strip().lower()
-            error = str(result.get("error", "")).strip()
-            if status == "false_positive":
-                return "false_positive"
-            if bool(result.get("blocked")) or error:
-                blocked_or_failed += 1
-            if bool(result.get("success")) and (
-                (isinstance(result.get("matches"), list) and result.get("matches"))
-                or (isinstance(result.get("results"), list) and result.get("results"))
-                or str(result.get("stdout", "")).strip()
-                or str(result.get("text", "")).strip()
-            ):
-                strong_evidence += 1
-            matches = result.get("matches", [])
-            if isinstance(matches, list):
-                for match in matches[:4]:
-                    if not isinstance(match, dict):
-                        continue
-                    match_kind = str(match.get("kind", "")).strip().lower()
-                    if match_kind == "verified_vulnerability":
-                        confirmed_signals += 1
-            if status in {"confirmed", "verified"} or kind == "verified_vulnerability":
-                confirmed_signals += 1
-
-        if "false positive" in lowered_prompt:
-            return "false_positive"
-        if strong_evidence >= 2 and len(unknowns) <= 1:
-            return "confirmed"
-        if confirmed_signals >= 1 and strong_evidence >= 1:
-            return "confirmed"
-        if strong_evidence >= 1 and len(unknowns) <= 1:
-            return "observed"
-        if strong_evidence >= 1:
-            return "likely"
-        if blocked_or_failed or any("recommended pivot" in row.lower() for row in unknowns):
-            return "needs_retest"
-        if "retest" in lowered_prompt or "verify again" in lowered_prompt or "check again" in lowered_prompt:
-            return "needs_retest"
-        return "likely"
-
     @classmethod
     def _normalize_reply_for_style(
         cls,
@@ -3820,73 +3264,12 @@ class AssistantAgent:
                 fallback = cls._format_tool_only_reply(tool_results)
                 return str(fallback or "").strip() or "No useful answer was produced."
             return "No useful answer was produced."
-        if style == "report":
-            if not text:
-                text = "No report update was produced."
-            return text.strip()
+
 
         text = re.sub(r"\*\*(summary|verdict|evidence|unknowns|next step|confidence)\*\*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"(?im)^(summary|verdict|evidence|unknowns|next step|confidence)\s*:\s*", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         return text.strip() or "No useful answer was produced."
 
-
-    @classmethod
-    def _ensure_structured_reply(
-        cls,
-        reply: str,
-        *,
-        tool_results: list[dict[str, Any]],
-        prompt: str,
-        target: str,
-    ) -> str:
-        text = str(reply or "").strip() or "No useful answer was produced."
-        if cls._reply_has_required_sections(text):
-            if not cls._structured_reply_needs_repair(
-                text,
-                prompt=prompt,
-                tool_results=tool_results,
-            ):
-                return text
-            text = ""
-
-        summary = cls._clean_section_text(text.splitlines()[0] if text else "")
-        if not summary:
-            trimmed_prompt = " ".join(str(prompt or "").strip().split())
-            if trimmed_prompt:
-                summary = f"Requested action: {trimmed_prompt[:220]}"
-            else:
-                summary = f"Processed the request for {target or 'the active target'}, but the answer needs further validation."
-
-        evidence_lines = cls._build_evidence_lines(tool_results)
-        unknown_lines = cls._build_unknown_lines(tool_results, summary)
-        verdict = cls._estimate_verdict(tool_results, unknown_lines, prompt=prompt)
-        if cls._tool_results_include_sandbox_execution_blocker(tool_results):
-            next_step = (
-                "Restore the tool-sandbox execution path first, then rerun the blocked command. "
-                "Verify SANDBOX_EXECUTOR_URL and confirm the tool-sandbox service is healthy before drawing target conclusions."
-            )
-        elif verdict == "false_positive":
-            next_step = "Keep the finding dismissed unless new contradictory evidence appears, and document why it was ruled out."
-        elif verdict == "confirmed":
-            next_step = "Use the confirmed evidence to drive remediation, reporting, or one final scope-limited confirmation if the operator asks for it."
-        elif evidence_lines:
-            next_step = "Validate the strongest evidence path further and close the remaining unknowns."
-        elif cls._allows_external_research(prompt):
-            next_step = "Use the web-backed results to narrow the investigation, then verify the most relevant lead against the active target."
-        else:
-            next_step = f"Run one narrow verification step against {target or 'the active target'} to replace assumptions with direct evidence."
-        confidence = cls._estimate_confidence(tool_results, unknown_lines)
-
-        evidence_block = "\n".join(f"- {line}" for line in (evidence_lines or ["No direct evidence was collected in this turn."]))
-        unknowns_block = "\n".join(f"- {line}" for line in unknown_lines)
-        return (
-            f"**Summary**\n{summary}\n\n"
-            f"**Verdict**\n{verdict}\n\n"
-            f"**Evidence**\n{evidence_block}\n\n"
-            f"**Unknowns**\n{unknowns_block}\n\n"
-            f"**Next Step**\n{next_step}\n\n"
-            f"**Confidence**\n{confidence}"
-        )
 
 
