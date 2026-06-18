@@ -232,6 +232,7 @@ ASSISTANT_TARGET_OPTIONAL_COMMANDS: frozenset[str] = frozenset(
         "file",
         "firmwalker",
         "find",
+        "ffuf",
         "git",
         "gitleaks",
         "grep",

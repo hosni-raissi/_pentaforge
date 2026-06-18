@@ -70,22 +70,6 @@ except ModuleNotFoundError:
     )
     add_finding_to_brain = _unavailable_sync_tool("add_finding_to_brain")
 
-try:
-    from .mark_false_positive import (
-        ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION,
-        mark_false_positive,
-    )
-except ModuleNotFoundError:
-    ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION = _make_unavailable_tool_definition(
-        "mark_false_positive",
-        "Mark a specific vulnerability finding as a false positive.",
-        {
-            "finding_id": {"type": "string", "description": "The finding UUID, title, or excerpt."},
-            "reason": {"type": "string", "description": "Why the finding is a false positive."},
-        },
-        ["finding_id", "reason"],
-    )
-    mark_false_positive = _unavailable_async_tool("mark_false_positive")
 
 try:
     from .search_project_vectors import (
@@ -160,14 +144,12 @@ __all__ = [
     "ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION",
     "ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION",
     "ASSISTANT_GET_PAGE_TOOL_DEFINITION",
-    "ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION",
     "ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION",
     "ASSISTANT_SEARCH_PROJECT_VECTORS_TOOL_DEFINITION",
     "ASSISTANT_SEARCH_WEB_TOOL_DEFINITION",
     "add_finding_to_brain",
     "fetch_url_content",
     "get_page",
-    "mark_false_positive",
     "run_custom",
     "search_project_vectors",
     "search_web",

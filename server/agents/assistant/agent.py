@@ -32,7 +32,6 @@ class OfflineChatOpenAI(ChatOpenAI):
         return tokens
 
 from server.agents.rate_limiter import get_backup_llm_fallback, get_global_llm_queue
-from server.nodes.report.report_generator import generate_report
 from server.agents.tool_output_parsers import parse_ffuf_findings, summarize_tool_output
 from server.config.agent import get_public_agent_config
 from server.core.llm import ChatMessage, LLMClient, LLMResponse
@@ -44,14 +43,12 @@ from .tools import (
     ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION,
     ASSISTANT_FETCH_URL_CONTENT_TOOL_DEFINITION,
     ASSISTANT_GET_PAGE_TOOL_DEFINITION,
-    ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION,
     ASSISTANT_RUN_CUSTOM_TOOL_DEFINITION,
     ASSISTANT_SEARCH_PROJECT_VECTORS_TOOL_DEFINITION,
     ASSISTANT_SEARCH_WEB_TOOL_DEFINITION,
     add_finding_to_brain as assistant_add_finding_to_brain,
     fetch_url_content as assistant_fetch_url_content,
     get_page as assistant_get_page,
-    mark_false_positive as assistant_mark_false_positive,
     run_custom as assistant_run_custom,
     search_project_vectors as assistant_search_project_vectors,
     search_web as assistant_search_web,
@@ -203,56 +200,9 @@ _ASSISTANT_CAPABILITY_QUESTION_PATTERNS = (
     "security tools",
     "available tools",
 )
-
-_EXTERNAL_RESEARCH_INTENT_PATTERNS = (
-    "search the internet",
-    "search in internet",
-    "search on internet",
-    "search the web",
-    "search in web",
-    "search on web",
-    "search web",
-    "search internet",
-    "search online",
-    "look up online",
-    "look it up",
-    "google it",
-    "google for",
-    "google this",
-    "find online",
-    "check online",
-    "browse the web",
-    "browse online",
-    "use the web",
-    "check the latest",
-    "find the latest",
-    "latest cve",
-    "latest advisory",
-    "official docs",
-    "vendor docs",
-    "current information",
-    "recent information",
-)
-_ASSISTANT_REPORT_INTENT_PATTERNS = (
-    "generate a report",
-    "generate report",
-    "create a report",
-    "create report",
-    "write a report",
-    "write report",
-    "make a report",
-    "make report",
-    "pentest report",
-    "generate the report",
-    "create the report",
-    "build a report",
-    "build report",
-    "produce a report",
-    "produce report",
-)
-_OPERATOR_MODES = ("Ask", "Investigate", "Retest", "Report")
+_OPERATOR_MODES = ("Ask", "Investigate", "Retest")
 _EXECUTION_LANES = ("lightweight", "investigation")
-_RESPONSE_STYLES = ("natural", "structured", "report")
+_RESPONSE_STYLES = ("natural", "structured")
 _RETEST_INTENT_PATTERNS = (
     "retest",
     "test again",
@@ -324,7 +274,6 @@ _RAW_TOOL_TRACE_NAMES = (
     "fetch_url_content",
 
     "add_finding_to_brain",
-    "mark_false_positive",
     "search_web",
 )
 _RERUN_ALLOWANCE_PATTERNS = (
@@ -437,14 +386,6 @@ _ADD_FINDING_TO_BRAIN_SCHEMA = {
     },
 }
 
-_MARK_FALSE_POSITIVE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION["name"],
-        "description": ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION["description"],
-        "parameters": ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION["parameters"],
-    },
-}
 
 _SEARCH_WEB_SCHEMA = {
     "type": "function",
@@ -528,11 +469,7 @@ class AssistantAgent:
 
     @classmethod
     def _resolve_response_style(cls, *, operator_mode: str, execution_lane: str, prompt: str) -> str:
-        if operator_mode == "Report":
-            return "report"
         lowered = str(prompt or "").strip().lower()
-        if any(token in lowered for token in _ASSISTANT_REPORT_INTENT_PATTERNS):
-            return "report"
         # Force natural style for conversational questions even if in investigation lane
         natural_triggers = (
             "what ", "how ", "why ", "when ", "who ", "where ", 
@@ -923,11 +860,6 @@ class AssistantAgent:
                     )
                     tool_input = raw_args.get("finding", "")
                     tool_reason = "Updating project brain"
-                elif tool_name == "mark_false_positive":
-                    raw_args = self._parse_tool_call_args(
-                        tool_call,
-                        ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION["parameters"],
-                    )
                     tool_input = raw_args.get("finding_id", "")
                     tool_reason = raw_args.get("reason", "")
                 elif tool_name == "search_web":
@@ -990,11 +922,6 @@ class AssistantAgent:
                         tool_call,
                         ASSISTANT_ADD_FINDING_TO_BRAIN_TOOL_DEFINITION["parameters"],
                     )
-                elif tool_name == "mark_false_positive":
-                    parsed_args = self._parse_tool_call_args(
-                        tool_call,
-                        ASSISTANT_MARK_FALSE_POSITIVE_TOOL_DEFINITION["parameters"],
-                    )
                 elif tool_name == "search_web":
                     parsed_args = self._parse_tool_call_args(
                         tool_call,
@@ -1052,7 +979,6 @@ class AssistantAgent:
                         "get_page",
                         "fetch_url_content",
                         "add_finding_to_brain",
-                        "mark_false_positive",
                         "search_web",
                     }:
                         tool_payload = {
@@ -1701,7 +1627,6 @@ class AssistantAgent:
             _SEARCH_PROJECT_VECTORS_SCHEMA,
             _GET_PAGE_SCHEMA,
             _ADD_FINDING_TO_BRAIN_SCHEMA,
-            _MARK_FALSE_POSITIVE_SCHEMA,
         ]
         if allow_external_research:
             schemas.append(_FETCH_URL_CONTENT_SCHEMA)
@@ -2276,21 +2201,6 @@ class AssistantAgent:
             project_store=projects_store,
         )
 
-    async def _execute_mark_false_positive(
-        self,
-        args: dict[str, Any],
-        *,
-        project_id: str | None,
-    ) -> dict[str, Any]:
-        from server.api.dependencies import projects_store
-        finding_id = str(args.get("finding_id", "")).strip()
-        reason = str(args.get("reason", "")).strip()
-        return await assistant_mark_false_positive(
-            project_id=str(project_id or "").strip(),
-            finding_id=finding_id,
-            reason=reason,
-            project_store=projects_store,
-        )
 
     async def _execute_search_web(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query", "")).strip()
@@ -2304,29 +2214,12 @@ class AssistantAgent:
             result["query"] = query
         return result
 
-    @classmethod
-    def _mark_false_positive_safety_issue(
-        cls,
-        *,
-        tool_results: list[dict[str, Any]],
-    ) -> str:
-        if not cls._tool_results_include_connectivity_failure(tool_results):
-            return ""
-        if cls._tool_results_have_explicit_contradictory_evidence(tool_results):
-            return ""
-        return (
-            "Automatic false-positive marking is blocked because the latest live evidence only shows "
-            "DNS, TLS, timeout, or connectivity failure. This should stay in needs_retest until you "
-            "have direct contradictory evidence."
-        )
 
     @staticmethod
     def _detect_operator_mode(prompt: str, *, history: list[dict[str, Any]] | None = None) -> str:
         lowered = str(prompt or "").strip().lower()
         if not lowered:
             return "Ask"
-        if any(pattern in lowered for pattern in _ASSISTANT_REPORT_INTENT_PATTERNS):
-            return "Report"
         if any(pattern in lowered for pattern in _RETEST_INTENT_PATTERNS):
             return "Retest"
         if any(pattern in lowered for pattern in _INVESTIGATE_INTENT_PATTERNS):
@@ -2860,7 +2753,7 @@ class AssistantAgent:
         skip_flags: dict[str, set[str]] = {
             "curl": {"-u", "--user", "-E", "--cert", "-x", "--proxy", "-U", "--proxy-user", "-A", "--user-agent", "-H", "--header", "-d", "--data"},
             "wget": {"--user", "--password", "--proxy-user", "--proxy-password", "--header", "--post-data", "--method"},
-            "ffuf": {"-w", "-H", "-X", "-p", "-d", "-proxy", "-header", "-e", "-request", "-request-proto", "-request-file"},
+            "ffuf": {"-w", "-H", "-X", "-p", "-d", "-proxy", "-header", "-e", "-request", "-request-proto", "-request-file", "-c", "-mc", "-fc", "-t", "-ic", "-ac", "-acc", "-ach", "-ack", "-acs", "-c", "-cc", "-ck", "-cs", "-mc", "-ml", "-mr", "-ms", "-mw", "-maxtime", "-maxtime-job", "-rate", "-t"},
             "sqlmap": {"--data", "--header", "--cookie", "--user-agent", "--referer", "--proxy", "--proxy-cred", "--auth-type", "--auth-cred", "-r"},
             "gobuster": {"-w", "-H", "-P", "-U", "-a", "-c", "-p", "-x"},
             "nuclei": {"-t", "-tags", "-et", "-it", "-author", "-severity", "-H", "-header"},
@@ -2937,7 +2830,7 @@ class AssistantAgent:
         if target_host and target_host in clean:
             return True
 
-        strict_bare_host_commands = {"curl", "wget", "nmap", "dig", "nslookup", "whois", "openssl", "hydra", "whatweb", "nikto", "httpx"}
+        strict_bare_host_commands = {"curl", "wget", "nmap", "dig", "nslookup", "whois", "openssl", "hydra", "whatweb", "nikto", "httpx", "ffuf"}
         if command not in strict_bare_host_commands and arg_index != total_args - 1:
             return False
 
@@ -3347,84 +3240,6 @@ class AssistantAgent:
 
 
 
-    async def _handle_report_intent(
-        self,
-        prompt: str,
-        *,
-        project_id: str | None = None,
-        target: str = "",
-        target_type: str = "",
-    ) -> str | None:
-        """Detect report-generation intent and generate a report."""
-        lowered = str(prompt or "").strip().lower()
-        if not lowered:
-            return None
-        if not any(pattern in lowered for pattern in _ASSISTANT_REPORT_INTENT_PATTERNS):
-            return None
-        if not project_id:
-            return (
-                "I can generate a pentest report, but no project is currently active. "
-                "Please select a project first, then ask me again."
-            )
-
-        try:
-            from server.api.dependencies import projects_store
-
-            project = projects_store.get_project(project_id)
-            if not isinstance(project, dict):
-                return "I couldn't find the project to generate a report for. Please check that the project exists."
-
-            result = await generate_report(project_id, projects_store)
-            report_id = str(result["report_id"])
-            content = str(result["content"])
-            created_at = str(result["created_at"])
-            metadata = result.get("metadata", {})
-
-            # Save markdown report.
-            projects_store.save_report(
-                project_id,
-                report_id=report_id,
-                format="markdown",
-                content=content,
-                metadata=metadata,
-            )
-
-            # Generate and save HTML report.
-            from server.api.routes.reports import _markdown_to_html
-
-            target_label = str(metadata.get("target", target)).strip() or project_id
-            html_content = _markdown_to_html(content, target=target_label, generated_at=created_at)
-            projects_store.save_report(
-                project_id,
-                report_id=str(uuid.uuid4()),
-                format="html",
-                content=html_content,
-                metadata=metadata,
-            )
-
-            verified = metadata.get("verified_findings", 0)
-            total = metadata.get("total_findings", 0)
-
-            return (
-                f"I've generated a comprehensive penetration testing report for **{target_label}**.\n\n"
-                f"📊 **Report Summary**: {total} total findings, {verified} verified vulnerabilities.\n\n"
-                "The report is now available on the **Reports** page where you can:\n"
-                "- 📄 **View** the full report in Markdown or HTML format\n"
-                "- ⬇️ **Download** it as PDF, HTML, or Markdown\n\n"
-                "Head to the Reports tab to view and download your report."
-            )
-
-        except Exception as exc:
-            logger.warning(
-                "assistant_report_generation_failed",
-                project_id=project_id,
-                error=str(exc),
-                exc_info=True,
-            )
-            return (
-                f"I tried to generate a report but encountered an error: {str(exc).strip() or type(exc).__name__}. "
-                "You can also try generating it from the Reports page directly."
-            )
 
     @staticmethod
     def _resolve_follow_up_command_from_history(
