@@ -1788,7 +1788,7 @@ function toPlannerPlanSummary(value: unknown): PlannerPlanSummary | null {
     }
 
     phases.push({
-      name: normalizeText(rawPhase.name) || `Phase ${phaseIndex + 1}`,
+      name: normalizeText(rawPhase.name)?.replace(/^Phase \d+:\s*/i, "") || `Phase ${phaseIndex + 1}`,
       priority: normalizePriority(rawPhase.priority) ?? phaseIndex + 1,
       stepCount: rawSteps.filter((step) => isRecord(step)).length,
       scenarioCount,
@@ -1956,13 +1956,13 @@ function toPlannerPlanView(value: unknown): PlannerPlanView | null {
         continue;
       }
       steps.push({
-        step: description || `Step ${stepIndex + 1}`,
+        step: description?.replace(/^Step \d+:\s*/i, "") || `Step ${stepIndex + 1}`,
         scenarios,
       });
     }
 
     phases.push({
-      phase: normalizeText(rawPhase.name) || `Phase ${phaseIndex + 1}`,
+      phase: normalizeText(rawPhase.name)?.replace(/^Phase \d+:\s*/i, "") || `Phase ${phaseIndex + 1}`,
       steps,
     });
   }
@@ -3403,6 +3403,15 @@ export default function Dashboard() {
   }, [searchParams, activeProject?.id]);
 
   const effectiveStatus = activeProject ? normalizeRunningStatus(activeProject) : "idle";
+
+  useEffect(() => {
+    if (effectiveStatus === "idle") {
+      setStreamLogs([]);
+      setScanEvents([]);
+      setLocallyAckedApprovalId(null);
+      seenEventKeysRef.current.clear();
+    }
+  }, [effectiveStatus]);
   const isRunning = effectiveStatus === "running";
   const isScanActive =
     effectiveStatus === "running" ||

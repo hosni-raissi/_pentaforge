@@ -293,20 +293,28 @@ class AnalyzerAgent:
             evaluations.append(per_tool)
 
         overall = self._overall_assessment(evaluations)
-        try:
-            from mem0 import Memory
-            m = Memory()
-            target = scenario.get("target", "unknown target") if isinstance(scenario, dict) else "unknown target"
-            m.add(f"Analysis of {target}: {overall.get('summary', '')}", user_id="default")
-        except Exception:
-            pass
-
         scenario_reports = self._build_scenario_reports(
             scenario=scenario if isinstance(scenario, dict) else {},
             tool_results=tool_results if isinstance(tool_results, list) else [],
             normalized_outputs=normalized_outputs,
             row_summary="",
         )
+        compact_summary = self._compact_bridge_line(scenario=scenario, overall=overall)
+        agent_markdown = self._build_agent_markdown(
+            scenario=scenario if isinstance(scenario, dict) else {},
+            scenario_reports=scenario_reports,
+            row_summary="",
+        )
+
+        # Store the finding in mem0
+        try:
+            from server.agents.planner.agent import memory
+            if memory:
+                memory.add(f"Task: {scenario.get('task')}\nTarget: {scenario.get('target', 'unknown')}\nFinding: {compact_summary}", user_id="pentaforge_analyzer")
+        except Exception as e:
+            import structlog
+            structlog.get_logger(__name__).warning("Failed to store finding in Mem0", error=str(e))
+
         return {
             "scenario": {
                 "task": str(scenario.get("task", "")),
@@ -318,13 +326,9 @@ class AnalyzerAgent:
             "per_tool": evaluations,
             "normalized_outputs": normalized_outputs[:ANALYZER_MAX_NORMALIZED_EVIDENCE_ITEMS],
             "normalized_summary": summarize_normalized_outputs(normalized_outputs),
-            "compact_summary": self._compact_bridge_line(scenario=scenario, overall=overall),
+            "compact_summary": compact_summary,
             "scenario_reports": scenario_reports,
-            "agent_markdown": self._build_agent_markdown(
-                scenario=scenario if isinstance(scenario, dict) else {},
-                scenario_reports=scenario_reports,
-                row_summary="",
-            ),
+            "agent_markdown": agent_markdown,
         }
 
     async def classify(
@@ -429,10 +433,22 @@ class AnalyzerAgent:
                 merged.update(data)
                 data = merged
             data = enrich_payload_with_cvss(data, prepared.scenario, prepared.row_result)
-        return self._finalize_verification_payload(
+        final_payload = self._finalize_verification_payload(
             candidate=prepared,
             verify_data=data if isinstance(data, dict) else {},
         )
+        
+        # Store Verification in Mem0
+        try:
+            from server.agents.planner.agent import memory
+            if memory:
+                scenario = prepared.scenario
+                memory.add(f"Task: {scenario.get('task')}\nTarget: {scenario.get('target', 'unknown')}\nVerification Summary: {final_payload.get('verify_summary')}\nStatus: {final_payload.get('verification_status')}", user_id="pentaforge_analyzer")
+        except Exception as e:
+            import structlog
+            structlog.get_logger(__name__).warning("Failed to store Verification in Mem0", error=str(e))
+            
+        return final_payload
 
     async def build_poc(
         self,
@@ -493,6 +509,15 @@ class AnalyzerAgent:
             if "poc" not in data:
                 data["poc"] = data.get("description", "")
                 
+        # Store PoC in Mem0
+        try:
+            from server.agents.planner.agent import memory
+            if memory:
+                memory.add(f"Task: {scenario.get('task')}\nTarget: {scenario.get('target', 'unknown')}\nPoC Title: {data.get('title')}\nPoC Details: {data.get('summary')}", user_id="pentaforge_analyzer")
+        except Exception as e:
+            import structlog
+            structlog.get_logger(__name__).warning("Failed to store PoC in Mem0", error=str(e))
+
         return data
 
     def _normalize_candidate(self, candidate: Any) -> AnalyzerCandidate:

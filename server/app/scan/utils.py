@@ -3074,7 +3074,7 @@ def _normalize_scenario_status(value: Any, *, done: bool = False) -> str:
         normalized_done = str(value or "").strip().lower()
         if normalized_done in {"failed", "error"}:
             return "failed"
-        if normalized_done in {"blocked", "vulnerable", "not_vulnerable", "inconclusive"}:
+        if normalized_done in {"blocked", "vulnerable", "not_vulnerable", "inconclusive", "false_positive", "real_vulnerability"}:
             return normalized_done
         return "completed"
     normalized = str(value or "").strip().lower()
@@ -3082,7 +3082,7 @@ def _normalize_scenario_status(value: Any, *, done: bool = False) -> str:
         return "completed"
     if normalized in {"working", "running", "in_progress", "in progress"}:
         return "working"
-    if normalized in {"blocked", "failed", "error", "vulnerable", "not_vulnerable", "inconclusive"}:
+    if normalized in {"blocked", "failed", "error", "vulnerable", "not_vulnerable", "inconclusive", "false_positive", "real_vulnerability"}:
         return "failed" if normalized == "error" else normalized
     return "not yet"
 
@@ -3764,121 +3764,23 @@ def _scenario_effective_priority(
 
 
 def _normalize_execution_slot(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed in {1, 2} else None
-
-
+    return None
 
 def _ensure_execution_slots(plan_data: dict[str, Any]) -> dict[str, Any]:
-    """Normalize the plan so at most two pending recon/exploit scenarios hold active slots."""
-
-    phases = plan_data.get("phases", [])
-    if not isinstance(phases, list):
-        return plan_data
-
-    pending: list[dict[str, Any]] = []
-    slotted: list[dict[str, Any]] = []
-    seen_keys: set[tuple[str, str]] = set()
-    used_slots: set[int] = set()
-
-    for phase in phases:
-        if not isinstance(phase, dict):
-            continue
-        for step in phase.get("steps", []):
-            if not isinstance(step, dict):
-                continue
-            for scenario in step.get("scenarios", []):
-                if not isinstance(scenario, dict):
-                    continue
-                agent = str(scenario.get("agent", "")).strip().lower()
-                scenario["active_slot"] = _normalize_execution_slot(scenario.get("active_slot"))
-                if agent not in {"recon", "exploit"}:
-                    scenario["active_slot"] = None
-                    continue
-                if bool(scenario.get("done", False)):
-                    scenario["active_slot"] = None
-                    continue
-                pending.append(scenario)
-                slot = _normalize_execution_slot(scenario.get("active_slot"))
-                key = (
-                    agent,
-                    str(scenario.get("task", "")).strip().lower(),
-                )
-                if slot is None or not key[1]:
-                    continue
-                if slot in used_slots or key in seen_keys:
-                    scenario["active_slot"] = None
-                    continue
-                used_slots.add(slot)
-                seen_keys.add(key)
-                slotted.append(scenario)
-
-    if len(slotted) < 2:
-        for scenario in pending:
-            key = (
-                str(scenario.get("agent", "")).strip().lower(),
-                str(scenario.get("task", "")).strip().lower(),
-            )
-            if not key[1] or key in seen_keys:
-                continue
-            next_slot = 1 if 1 not in used_slots else 2
-            scenario["active_slot"] = next_slot
-            used_slots.add(next_slot)
-            seen_keys.add(key)
-            slotted.append(scenario)
-            if len(slotted) >= 2:
-                break
-
-    slotted_ids = {id(item) for item in slotted}
-    for scenario in pending:
-        key = (
-            str(scenario.get("agent", "")).strip().lower(),
-            str(scenario.get("task", "")).strip().lower(),
-        )
-        slot = _normalize_execution_slot(scenario.get("active_slot"))
-        if slot is None:
-            continue
-        if key not in seen_keys or id(scenario) not in slotted_ids:
-            scenario["active_slot"] = None
-
     return plan_data
 
 
 
-def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Pick up to two runnable-now scenarios, preferring explicit active slots."""
 
-    plan_data = _ensure_execution_slots(plan_data)
+def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pick up to two runnable-now scenarios."""
+    if "scenarios" in plan_data and isinstance(plan_data["scenarios"], list) and plan_data["scenarios"]:
+        return plan_data["scenarios"][:2]
+
     candidates = _extract_prioritized_exec_scenarios(plan_data, limit=50)
     seen_keys: set[tuple[str, str]] = set()
-    runnable_now: list[dict[str, Any]] = []
-    for scenario in candidates:
-        if _normalize_execution_slot(scenario.get("active_slot")) is None:
-            continue
-        scenario_key = (
-            str(scenario.get("agent", "")).strip().lower(),
-            str(scenario.get("task", "")).strip().lower(),
-        )
-        if not scenario_key[1] or scenario_key in seen_keys:
-            continue
-        seen_keys.add(scenario_key)
-        runnable_now.append(scenario)
-        if len(runnable_now) >= 2:
-            break
-    if runnable_now:
-        runnable_now.sort(
-            key=lambda s: (
-                _normalize_execution_slot(s.get("active_slot")) or 99,
-                _priority_sort_key(int(s.get("_effective_priority", _normalize_priority(s.get("priority", 3))))),
-            )
-        )
-        return runnable_now
-
     fallback: list[dict[str, Any]] = []
-    seen_keys.clear()
+
     for scenario in candidates:
         if not isinstance(scenario, dict):
             continue
@@ -3892,6 +3794,7 @@ def _select_recon_exploit_parallel_scenarios(plan_data: dict[str, Any]) -> list[
         fallback.append(scenario)
         if len(fallback) >= 2:
             break
+
     fallback.sort(
         key=lambda s: (
             _priority_sort_key(int(s.get("_effective_priority", _normalize_priority(s.get("priority", 3))))),

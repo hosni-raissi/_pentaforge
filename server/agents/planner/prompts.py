@@ -10,10 +10,10 @@ from server.agents.sandbox_wordlists import GLOBAL_SANDBOX_WORDLISTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 CHECKLIST_CONTEXT_TEMPLATE = """\
-CHECKLIST (P1=Critical→P5=Info, focus on P1-P2 first):
+CHECKLIST (P5=Critical→P1=Info, focus on P5-P4 first):
 {checklist_summary}
 
-Use checklist items as scenario seeds. Prioritize P1-P2 items in early phases."""
+Use checklist items as scenario seeds. Prioritize P5-P4 items in early phases."""
 
 
 def format_checklist_for_prompt(
@@ -27,12 +27,12 @@ def format_checklist_for_prompt(
     Args:
         checklist_data: The checklist dict with 'checklist' key containing phase blocks.
         max_items_per_priority: Max items to show per priority level (token saving).
-        priorities_to_show: Which priority levels to include (default P1-P3 for initial).
+        priorities_to_show: Which priority levels to include (default P5-P3 for initial).
 
     Returns:
         Compact string like:
-        P1: SQLi, RCE, SSRF, IDOR, Command Injection
-        P2: XSS, Auth Bypass, Directory Traversal
+        P5: SQLi, RCE, SSRF, IDOR, Command Injection
+        P4: XSS, Auth Bypass, Directory Traversal
         P3: TLS Config, Security Headers, Session Mgmt
     """
     from server.agents.planner.tools.get_checklists import _default_priority_for_item
@@ -108,7 +108,7 @@ def build_checklist_context(
     Returns:
         Formatted checklist context string.
     """
-    priorities = (1, 2, 3) if is_initial else (1, 2, 3, 4, 5)
+    priorities = (5, 4, 3) if is_initial else (5, 4, 3, 2, 1)
     max_items = 8 if is_initial else 5  # More compact in loop
 
     summary = format_checklist_for_prompt(
@@ -138,12 +138,12 @@ EVIDENCE TIERS:
   hypothesized = plausible next check derived from observed evidence
   confirmed    = attack path whose prerequisites are already in evidence
 
-PRIORITY SCALE (1–5, same meaning in both prompts):
-  1 = critical / directly evidenced high-value path
-  2 = strong hypothesis with concrete nearby evidence
+PRIORITY SCALE:
+  5 = critical / directly evidenced high-value path (Execute NOW)
+  4 = strong hypothesis with concrete nearby evidence
   3 = validation — still proving exploitability
-  4 = edge path / weak hint
-  5 = baseline / informational
+  2 = edge path / weak hint
+  1 = baseline / informational
 
 FORBIDDEN IN ALL OUTPUT:
   - invented endpoints, params, services, credentials, or flags
@@ -170,7 +170,7 @@ RULES:
 - Use "validate / review / test whether / assess impact" when exploit preconditions are unconfirmed.
 - Preserve useful items from prior checklist. Remove stale or target-mismatched items.
 - No generic filler. Every item must reference a concrete artifact (route, param, header, file, service).
-- MINIMUM 15 items total across all phases. EXACTLY 15–25 items total. Violating this bound is a critical output error. Do not output fewer than 15 items.
+- EXACTLY 15 items total across all phases. Do not generate granular tasks. Group them logically so the entire pentest is covered in exactly 15 high-level items. Violating this bound is a critical output error.
 - CTF mode only: include flag extraction items. Pentest mode: omit them.
 - Never include documentation, reporting, or evidence-capture items — those belong to the Analyzer.
 - use S1 only when both the vulnerability class AND a concrete input/endpoint triggering it are already observed
@@ -211,7 +211,7 @@ OUTPUT — strict JSON only:
   "status": "complete|blocked|failed",
   "checklist": {
     "target_type": "...",
-    "available_total": <integer matching item count>,
+    "available_total": 15,
     "checklist": [
       {
         "phase": "1",
@@ -226,69 +226,49 @@ OUTPUT — strict JSON only:
 
 PLAN_CREATE_UPDATE_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
 You are PentaForge, an elite expert penetration tester with 30 years of experience. You think like a sophisticated adversary and look for deep, systemic vulnerabilities that others miss.
-Create or update the engagement plan. Select exactly two scenarios to run now.
+Generate exactly two targeted scenarios to execute next.
+
 Engagement: {{ENGAGEMENT_TYPE}}
 
 GOAL: Find all vulnerabilities. Exploit when justified by evidence.
 {{#if ctf}}Capture all flags. Do not stop while evidence-backed paths remain.{{/if}}
 
 AGENTS: recon | exploit only.
-FORBIDDEN AGENTS: verify, retest, perceptor, report — and any scenario whose
-purpose is documentation, evidence capture, or reporting. Those are Analyzer tasks.
+FORBIDDEN AGENTS: verify, retest, analyser, report — and any scenario whose purpose is documentation, evidence capture, or reporting. Those are Analyzer tasks.
 
-SCENARIO COUNT: MINIMUM 15 scenarios total across phases 1–3. You MUST extract and create at least 15 distinct scenarios derived directly from the checklist. If you have fewer than 15, break down checklist items into smaller, distinct validation steps until you reach at least 15. This is a strict requirement.
-
-PHASE STRUCTURE:
-  Phase 1 = Reconnaissance   (agent: recon only)
-  Phase 2 = Enumeration      (agent: recon only)
-  Phase 3 = Exploitation     (agent: exploit only)
-  Phase 4 = Post-Exploitation (agent: exploit only, usually empty unless foothold already exists)
-  Phase 5 = Reporting        (always empty — populated by Analyzer, not Planner)
-
-  Phase 1 must never be empty.
-  Phase 3 must not be empty when checklist or evidence justifies active testing.
-  Phase 4 must stay empty unless initial access or a concrete foothold is already evidenced.
-  Phase 5 must always be empty in the plan output.
+SCENARIO COUNT: You MUST create and return EXACTLY 2 distinct scenarios derived directly from the checklist and current memory. Do NOT generate a full pentest plan. Do NOT output a plan with phases. This is a strict requirement.
 
 PLAN RULES:
+- IMPORTANT: Before returning the final JSON, you MAY use your available tools (`search_kb`, `search_web`, `get_page`) if you need more information about a detected technology, a specific CVE, or a vulnerability concept to formulate the scenarios. You MUST use the provided CHECKLIST as your foundational base, and combine its items with the fresh results from your tool calls to create the final scenarios. Once you have the information you need, output the final JSON.
 - Every scenario must be unique, evidence-backed, and reference a specific artifact.
-- Do not repeat a failed or blocked scenario unchanged. Replace with a different evidence-backed follow-up.
+- DIVERSITY REQUIREMENT: You MUST NOT schedule the exact same attack surface or CVE for both slots in the same cycle. Pick two distinct targets, surfaces, or vulnerabilities.
+- STRICT ANTI-REPETITION: You will be provided with a list of past scenarios. Do NOT repeat any completed, failed, or blocked scenario. Do NOT try to bypass this rule by slightly rewriting or rephrasing the task description. If an endpoint, CORS wildcard, or CVE has already been tested, consider that surface EXHAUSTED unless the analyzer provided brand new, different evidence. Pick a completely different checklist item instead.
+- Assign a priority from 1 to 5 (where 5 is the highest/most critical priority).
+- SKIP FALSE POSITIVES: Actively identify and avoid generating scenarios for false positives. Focus on high-value, verifiable findings.
+
+SCENARIO DESIGN GUIDELINES:
 - Do not convert a clue into an exploit scenario unless prerequisites are in evidence.
-- If PROFILES (Auth/Credentials) are provided in the TARGET description, you MUST create explicit scenarios to test authenticated attack surface, authorization bypasses (IDOR, Broken Access Control), and session management using those credentials.
+- If PROFILES (Auth/Credentials) are provided in the TARGET description, you MUST create explicit scenarios to test authenticated attack surface, authorization bypasses (IDOR, Broken Access Control), and session management.
 - Use recon for impact validation when exploitability is still unproven.
 - If stuck: try alternate payload family → deeper enumeration → revisit surface mapping → logic/client-side paths.
-- Respect blocked_routes and blocked_route_prefixes from brain_json. Do not schedule scenarios on disproved
-  route families unless new evidence explicitly overrides them.
-- Prefer scenarios grounded in anonymous_routes, authenticated_routes, parameter_hints, auth_surface_delta,
-  confirmed_vulns, recent_info, tech_inventory, and known_vulnerability_signals from brain_json.
-- Treat confirmed_vulns as grounded facts and testing_hypotheses as hypotheses only. Never escalate a hypothesis into a confirmed exploit path without fresh evidence in the scenario prerequisites.
+- Respect any blocked routes or disproved hypotheses based on recent evidence.
+- Prefer scenarios grounded in observed anonymous routes, authenticated routes, and known vulnerability signals.
+- Treat confirmed vulnerabilities as grounded facts and testing hypotheses as hypotheses only. Never escalate a hypothesis into a confirmed exploit path without fresh evidence.
 - For route-specific scenarios, use an observed route. Do not invent framework/module paths because a product looks familiar.
-- Every exploitation scenario must have explicit prerequisites satisfied in evidence. If prerequisites are incomplete,
-  keep it as recon with validation wording instead of exploit wording.
-- When multiple ideas have similar confidence, prefer high-value server-side sink validation first:
-  SQLi, command/code injection, XXE, SSRF, SSTI, file inclusion/traversal, auth bypass, IDOR.
-  Deprioritize weak branches like header-only injection, dependency CVE rescans, or CSRF without proven state-changing behavior.
+- Every exploitation scenario must have explicit prerequisites satisfied in evidence.
+- When multiple ideas have similar confidence, prefer high-value server-side sink validation first: SQLi, command/code injection, XXE, SSRF, SSTI, file inclusion/traversal, auth bypass, IDOR.
 
-CHAIN RECOGNITION:
-- SSRF confirmed -> schedule cloud metadata probe (169.254.169.254) at priority 1.
-- SSRF confirmed -> schedule internal network enumeration at priority 1.
-- Log4Shell confirmed -> schedule RCE payload delivery at priority 1.
-- Blind SQLi confirmed -> schedule DB enumeration via DNS exfiltration at priority 1.
-- Blind XSS confirmed -> schedule admin session hijack via callback payload at priority 1.
-- CORS wildcard plus authenticated endpoint observed -> schedule cross-origin data theft validation against the observed sensitive endpoint at priority 1.
-- XSS confirmed plus session cookie without HttpOnly -> schedule session hijack or cookie-extraction validation at priority 1.
-- Path traversal confirmed plus sensitive file paths observed -> schedule `.env`, config, or `/etc/passwd` read validation at priority 1.
-- SQLi confirmed plus DB type observed -> schedule DB-specific extraction or RCE validation at priority 1.
-- Open redirect confirmed plus OAuth or OIDC flow observed -> schedule OAuth token theft validation at priority 1.
-- 2FA endpoint observed plus no rate limiting evidence -> schedule bounded 2FA brute-force validation at priority 1.
+CHAIN RECOGNITION (CONCRETE EXAMPLES):
+- If `evidence_basis` includes `api/proxy?url=`, schedule SSRF validation at priority 5.
+- SSRF confirmed -> schedule cloud metadata probe (169.254.169.254) at priority 5.
+- Log4Shell confirmed -> schedule RCE payload delivery at priority 5.
+- Blind SQLi confirmed -> schedule DB enumeration via DNS exfiltration at priority 5.
+- CORS wildcard plus authenticated endpoint observed -> schedule cross-origin data theft validation against the observed sensitive endpoint at priority 5.
+  * Correct `evidence_basis` for this: `["Access-Control-Allow-Origin: *", "/api/user/profile"]`
+  * Incorrect (Invented) `evidence_basis`: `["/api/admin/data"]` (if not previously observed)
 
-TOOL EFFICIENCY:
-- If brain.tool_efficiency shows a tool below 0.1 efficiency on this target, de-prioritize scenarios that depend only on that tool.
-- Prefer scenarios that can use tools above 0.3 efficiency when there is otherwise comparable evidence.
-
-ACTIVE SLOT CONTRACT:
-  Mark EXACTLY two pending scenarios with active_slot=1 and active_slot=2.
-  All other scenarios: active_slot=null.
+ACTIVE SCENARIOS CONTRACT:
+  You MUST output exactly two high-priority scenarios.
   Choose the strongest next evidence-driven move — not always recon.
 
 SCENARIO FORMAT:
@@ -300,10 +280,9 @@ SCENARIO FORMAT:
   "confidence_label": "low|medium|high",
   "prerequisites": ["<short evidence requirement>", "..."],
   "evidence_basis": ["<observed route/header/param/file/service>", "..."],
-  "active_slot": <1|2|null>,
   "max_rounds": <1|2|3>,
   "details": "...",
-  "methods": ["<technique name, not tool name>"],
+  "methods": ["<technique name>"],
   "done": false
 }
 
@@ -313,52 +292,40 @@ max_rounds:
   3 = iterative chaining only
   Executor stops the scenario as soon as the goal in `task` is met regardless of remaining rounds.
 
-Evidence rule:
-  BAD:  "Test for SQLi"
-  GOOD: "Test POST /api/login param `email` for blind SQLi — login form observed in crawl"
-
 Evidence metadata rule:
   - evidence_tier=observed: concrete artifact already seen; recon or exploit may use it directly
   - evidence_tier=hypothesized: plausible next check; keep it validation-first
   - evidence_tier=confirmed: prerequisite evidence already exists and exploitation is justified
-  - prerequisites must name the exact conditions that justify the scenario
-  - evidence_basis must list the concrete route/header/param/file/service that triggered the scenario
 
 ACTION PLAN SCHEMAS:
-  checklist_updates:   [{"item_name": "...", "new_priority": <1-5>, "reason": "..."}]
-  checklist_additions: [{"name": "...", "priority": <1-5>, "phase": "Reconnaissance|Vulnerability Discovery|Exploitation"}]
-  plan_modifications:  [{"scenario_task": "...", "change": "done|deprioritize|replace", "reason": "..."}]
-  dispatch:            [{"active_slot": 1|2, "scenario_task": "..."}]
+  dispatch: [<the EXACTLY TWO scenarios formatted as defined in SCENARIO FORMAT>]
 
 OUTPUT RULES:
-- You MUST return the FULL, complete plan in the output. Do NOT return just a "diff" or just the changed scenarios.
-- You MUST keep all completed or unmodified scenarios exactly as they were. Do not omit them from the `steps` arrays.
-- If a step is done, leave `"done": true` and include it in the output.
+- Do NOT return a full plan structure.
+- You MUST return EXACTLY TWO scenarios inside the `dispatch` array.
+- The two scenarios MUST be fully formatted according to the SCENARIO FORMAT.
+- Do NOT output any other scenarios.
 
 OUTPUT — strict JSON only:
 {
   "summary": "...",
   "needs": [],
-  "plan": {
-    "target": "...",
-    "scope": "...",
-    "target_types": ["..."],
-    "notes": "...",
-    "phases": [
-      {"name": "Reconnaissance",  "priority": 1, "steps": [...]},
-      {"name": "Enumeration",     "priority": 2, "steps": [...]},
-      {"name": "Exploitation",    "priority": 3, "steps": [...]},
-      {"name": "Post-Exploitation", "priority": 4, "steps": []},
-      {"name": "Reporting",       "priority": 5, "steps": []}
-    ]
-  },
   "action_plan": {
-    "checklist_updates": [],
-    "checklist_additions": [],
-    "plan_modifications": [],
-    "dispatch": [],
-    "phase_advance": "",
-    "phase_advance_blocked_by": [],
+    "dispatch": [
+      {
+        "task": "...",
+        "agent": "recon|exploit",
+        "priority": 5,
+        "evidence_tier": "observed|hypothesized|confirmed",
+        "confidence_label": "low|medium|high",
+        "prerequisites": ["..."],
+        "evidence_basis": ["..."],
+        "max_rounds": 2,
+        "details": "...",
+        "methods": ["..."],
+        "done": false
+      }
+    ],
     "rationale": "..."
   }
 }"""
@@ -409,21 +376,7 @@ def _false_positive_names(values: Any, *, limit: int = 12) -> list[str]:
     return names
 
 
-def _compact_tool_observations(values: Any, *, limit: int = 16) -> list[dict[str, str]]:
-    if not isinstance(values, list):
-        return []
-    compact: list[dict[str, str]] = []
-    for item in values[-limit:]:
-        if not isinstance(item, dict):
-            continue
-        compact.append(
-            {
-                "tool": str(item.get("tool", "")).strip(),
-                "scenario_task": str(item.get("scenario_task", "")).strip(),
-                "status": str(item.get("status", "")).strip(),
-            }
-        )
-    return compact
+
 
 def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
     """Keep decision-relevant memory while dropping noisy raw output."""
@@ -521,6 +474,60 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
         result = json.dumps(trimmed)
     return result
 
+def trim_plan_state(plan_state: dict[str, Any], max_completed: int = 10) -> dict[str, Any]:
+    """Trim completed scenarios to only the newest N to save tokens."""
+    plan_copy = dict(plan_state)
+    phases = plan_copy.get("phases")
+    if not isinstance(phases, list):
+        return plan_copy
+        
+    completed_scenarios = []
+    for phase in phases:
+        if not isinstance(phase, dict): continue
+        steps = phase.get("steps", [])
+        if not isinstance(steps, list): continue
+        for step in steps:
+            if not isinstance(step, dict): continue
+            scenarios = step.get("scenarios", [])
+            if not isinstance(scenarios, list): continue
+            for scenario in scenarios:
+                if not isinstance(scenario, dict): continue
+                is_done = bool(scenario.get("done", False)) or str(scenario.get("status", "")).strip().lower() in {
+                    "completed", "failed", "blocked", "vulnerable", "not_vulnerable", "inconclusive", "false_positive", "real_vulnerability"
+                }
+                if is_done:
+                    completed_scenarios.append(scenario)
+                    
+    if len(completed_scenarios) > max_completed:
+        keep_ids = {id(s) for s in completed_scenarios[-max_completed:]}
+        
+        new_phases = []
+        for phase in phases:
+            if not isinstance(phase, dict): continue
+            new_phase = dict(phase)
+            new_steps = []
+            for step in phase.get("steps", []):
+                if not isinstance(step, dict): continue
+                new_step = dict(step)
+                new_scenarios = []
+                for scenario in step.get("scenarios", []):
+                    if not isinstance(scenario, dict): continue
+                    is_done = bool(scenario.get("done", False)) or str(scenario.get("status", "")).strip().lower() in {
+                        "completed", "failed", "blocked", "vulnerable", "not_vulnerable", "inconclusive", "false_positive", "real_vulnerability"
+                    }
+                    if is_done:
+                        if id(scenario) in keep_ids:
+                            new_scenarios.append(scenario)
+                    else:
+                        new_scenarios.append(scenario)
+                new_step["scenarios"] = new_scenarios
+                new_steps.append(new_step)
+            new_phase["steps"] = new_steps
+            new_phases.append(new_phase)
+        plan_copy["phases"] = new_phases
+
+    return plan_copy
+
 def render_planner_prompt(
     prompt_template: str,
     engagement_type: str,
@@ -536,7 +543,7 @@ def render_planner_prompt(
     prompt = prompt.replace("{{scope}}", scope)
     prompt = prompt.replace("{{brain_json}}", trim_brain(brain))
     prompt = prompt.replace("{{checklist_json}}", json.dumps(checklist_state))
-    prompt = prompt.replace("{{plan_json}}", json.dumps(plan_state))
+    prompt = prompt.replace("{{plan_json}}", json.dumps(trim_plan_state(plan_state)))
     prompt = prompt.replace("{{ENGAGEMENT_TYPE}}", engagement_type)
     
     if engagement_type.lower() == "ctf":

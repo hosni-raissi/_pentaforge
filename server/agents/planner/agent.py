@@ -70,7 +70,45 @@ from .tools.get_checklists import _default_priority_for_item
 
 logger = structlog.get_logger(__name__)
 
+# Initialize Mem0 as the "brain of the planner"
+from mem0 import Memory
+from server.core.llm import get_config
 
+memory = None
+try:
+    llm_cfg = get_config()
+    mem0_config = {
+        "llm": {
+            "provider": "openai",
+            "config": {
+                "model": llm_cfg.model,
+                "api_key": llm_cfg.api_key or "sk-dummy",
+                "openai_base_url": llm_cfg.api_url,
+                "max_tokens": llm_cfg.max_tokens,
+            }
+        },
+        "embedder": {
+            "provider": "huggingface",
+            "config": {
+                "model": "nomic-ai/nomic-embed-text-v2-moe",
+                "model_kwargs": {"trust_remote_code": True}
+            }
+        },
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "host": "qdrant",
+                "port": 6333,
+                "embedding_model_dims": 768,
+            }
+        }
+    }
+    memory = Memory.from_config(mem0_config)
+    print("Mem0 initialized successfully in Planner!")
+except Exception as e:
+    import traceback
+    print(f"Warning: Failed to initialize Mem0: {e}")
+    traceback.print_exc()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CALLBACK PROTOCOL
@@ -280,92 +318,6 @@ def _repair_truncated_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
-def _deep_repair_plan_from_truncated(raw_args: dict[str, Any]) -> dict[str, Any]:
-    """Post-process a repaired truncated plan to ensure structural validity.
-
-    After _repair_truncated_json closes brackets, the last phase/step/scenario
-    may be incomplete. This function:
-    - Ensures all 5 phases exist.
-    - Removes scenarios missing required keys.
-    - Ensures steps have valid structure.
-    """
-    plan = dict(raw_args)
-
-    # Guarantee target and scope.
-    plan.setdefault("target", "")
-    plan.setdefault("scope", "")
-    plan.setdefault("target_types", ["web"])
-    plan.setdefault("notes", "Plan recovered from truncated LLM output.")
-
-    phases = plan.get("phases", [])
-    if not isinstance(phases, list):
-        phases = []
-
-    # Ensure phases are dicts with required keys.
-    cleaned_phases: list[dict[str, Any]] = []
-    for phase in phases:
-        if not isinstance(phase, dict):
-            continue
-        phase.setdefault("name", "Unknown")
-        phase.setdefault("priority", len(cleaned_phases) + 1)
-        steps = phase.get("steps", [])
-        if not isinstance(steps, list):
-            steps = []
-        valid_steps: list[dict[str, Any]] = []
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            step.setdefault("id", f"step-{uuid.uuid4().hex[:6]}")
-            step.setdefault("description", "")
-            scenarios = step.get("scenarios", [])
-            if not isinstance(scenarios, list):
-                scenarios = []
-            valid_scenarios = [
-                s
-                for s in scenarios
-                if isinstance(s, dict) and isinstance(s.get("task"), str) and s["task"].strip()
-            ]
-            # Fill defaults on each scenario.
-            for sc in valid_scenarios:
-                sc.setdefault("agent", "recon")
-                sc.setdefault("priority", 3)
-                default_rounds = 1 if str(sc.get("agent", "recon")).strip().lower() != "exploit" else 2
-                try:
-                    sc["max_rounds"] = min(3, max(1, int(sc.get("max_rounds", default_rounds))))
-                except (TypeError, ValueError):
-                    sc["max_rounds"] = default_rounds
-                sc.setdefault("details", "")
-                sc.setdefault("methods", [])
-                sc.setdefault("done", False)
-                sc.pop("tools", None)
-                sc.pop("recommended_tools", None)
-            step["scenarios"] = valid_scenarios
-            if valid_scenarios or step["description"]:
-                valid_steps.append(step)
-        phase["steps"] = valid_steps
-        cleaned_phases.append(phase)
-
-    # Ensure exactly 5 phases with canonical names.
-    required_phases = [
-        ("Reconnaissance", 1),
-        ("Enumeration", 2),
-        ("Exploitation", 3),
-        ("Post-Exploitation", 4),
-        ("Reporting", 5),
-    ]
-    existing_names = {p["name"].strip().lower() for p in cleaned_phases}
-    for name, priority in required_phases:
-        if name.lower() not in existing_names:
-            empty_steps: list[dict[str, Any]] = []
-            cleaned_phases.append(
-                {"name": name, "priority": priority, "steps": empty_steps}
-            )
-
-    # Sort by priority.
-    cleaned_phases.sort(key=lambda p: p.get("priority", 99))
-    plan["phases"] = cleaned_phases
-    return plan
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # HELPERS — Inline tool-call extraction
@@ -419,9 +371,6 @@ def _extract_inline_tool_calls(
         except json.JSONDecodeError:
             repaired = _repair_truncated_json(raw_args)
             if repaired is not None:
-                # For plan updates, do deep structural repair.
-                if name == "update_pentest_plan" and "phases" in repaired:
-                    repaired = _deep_repair_plan_from_truncated(repaired)
                 args_obj = repaired
             else:
                 args_obj = {}
@@ -724,9 +673,9 @@ def _enforce_phase_gate(
             if task_key in allowed:
                 gated.append(dict(canonical_by_task.get(task_key, s)))
         if not gated:
-            return pending_recon_enum[:3]
-        merged = gated[:3]
-        if len(merged) < 3:
+            return pending_recon_enum[:2]
+        merged = gated[:2]
+        if len(merged) < 2:
             seen = {
                 str(s.get("task", "")).strip().lower()
                 for s in merged
@@ -737,9 +686,9 @@ def _enforce_phase_gate(
                 if task not in seen:
                     merged.append(candidate)
                     seen.add(task)
-                    if len(merged) >= 3:
+                    if len(merged) >= 2:
                         break
-        return merged[:3]
+        return merged[:2]
 
     if not is_loop:
         early_agents = {"recon", "exploit"}
@@ -749,9 +698,9 @@ def _enforce_phase_gate(
             if str(s.get("agent", "")).strip().lower() in early_agents
         ]
         if early:
-            return early[:3]
+            return early[:2]
 
-    return cleaned[:3]
+    return cleaned[:2]
 
 
 def _format_tool_batch_results(tool_results: list[dict[str, Any]]) -> str:
@@ -768,7 +717,7 @@ def _format_tool_batch_results(tool_results: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
-def _build_loop_plan_context_message() -> str:
+def _build_loop_plan_context_message(intel_checklist: dict[str, Any] = None, target: str = "") -> str:
     """Build a deterministic, compact loop-context message."""
     plan = _current_plan if isinstance(_current_plan, dict) else {}
     if not plan:
@@ -858,9 +807,28 @@ def _build_loop_plan_context_message() -> str:
             "note": "0 means uncapped",
         },
     }
+    
+    if intel_checklist:
+        compact_plan["checklist"] = intel_checklist
+
+    mem0_context = ""
+    try:
+        from server.agents.planner.agent import memory
+        if memory and target:
+            query_str = f"Information gathering findings and completed scenarios for {target}"
+            results = memory.search(query=query_str, limit=10, filters={"user_id": "pentaforge_analyzer"})
+            chunks = []
+            for r in results:
+                content = r.get("memory", r.get("text", str(r))) if isinstance(r, dict) else str(r)
+                chunks.append(f"  - {content}")
+            if chunks:
+                mem0_context = "\n\nMEM0 RAG CONTEXT (Info Gathering & Completed Scenarios):\n" + "\n".join(chunks)
+    except Exception:
+        pass
+
     return "Current plan context (JSON, compact window):\n" + json.dumps(
         compact_plan, ensure_ascii=True
-    )
+    ) + mem0_context
 
 
 def _compute_world_state_hash(
@@ -1092,8 +1060,17 @@ def _parse_planner_output(raw: str) -> PlannerResult:
                 summary = json.dumps(summary)
             if not summary and action_plan:
                 summary = str(action_plan.get("rationale", "") or "")
+            
+            scen_list = scenarios[:2]
+            try:
+                from server.agents.planner.agent import memory as mem0_client
+                if mem0_client and scen_list:
+                    mem0_client.add(messages=[{"role": "user", "content": "Planner queued new scenarios:\n" + json.dumps(scen_list)}], user_id="pentaforge_analyzer")
+            except Exception:
+                pass
+                
             return PlannerResult(
-                scenarios=scenarios[:3],
+                scenarios=scen_list,
                 needs=needs,
                 summary=str(summary),
                 action_plan=action_plan,
@@ -1834,6 +1811,24 @@ class PlannerAgent:
             checklist_state=fallback_checklist,
             plan_state=plan_state,
         )
+        
+        system_content += "\n\nIMPORTANT: You MUST generate a checklist that contains EXACTLY 15 items. You MUST use the MEM0 RAG context provided. No more, no less than 15 items."
+        
+        # Inject mem0 RAG context for checklist generation
+        try:
+            from server.agents.planner.agent import memory
+            if memory:
+                query_str = f"Information gathering findings and discovered vulnerabilities for {target} {scope}"
+                results = memory.search(query=query_str, limit=10, filters={"user_id": "pentaforge_analyzer"})
+                chunks = []
+                for r in results:
+                    content = r.get("memory", r.get("text", str(r))) if isinstance(r, dict) else str(r)
+                    chunks.append(f"  - {content}")
+                if chunks:
+                    system_content += "\n\nMEM0 RAG CONTEXT (Info Gathering Results):\n" + "\n".join(chunks)
+        except Exception as e:
+            pass
+            
         if _needs_nothink(self._model_name):
             system_content = "/nothink\n" + system_content
 
@@ -1842,7 +1837,7 @@ class PlannerAgent:
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_message},
         ]
-        round_cap = max(1, int(CHECKLIST_MAX_TOOL_ROUNDS))
+        round_cap = 2
         last_content = ""
 
         try:
@@ -1945,11 +1940,11 @@ class PlannerAgent:
             schema
             for schema in self._tool_schemas
             if schema.get("function", {}).get("name")
-            not in {"remove_target_type", "get_pentest_plan", "get_checklists"}
+            not in {"get_pentest_plan", "get_checklists", "update_pentest_plan"}
         ]
 
     def _checklist_tool_schemas(self) -> list[dict[str, Any]]:
-        allowed = {"get_checklists", "get_page", "search_kb", "search_web"}
+        allowed = {"search_kb"}
         return [
             schema
             for schema in self._tool_schemas
@@ -2611,9 +2606,41 @@ class PlannerAgent:
         )
         action_plan_payload["target_types"] = effective_target_types
 
-        # Planner runs in plan-only mode: never return scenario batches here.
-        result.scenarios = []
+        # The user wants exactly two scenarios returned directly.
+        result.scenarios = action_plan_payload.get("dispatch", [])[:2]
 
+        # Auto-inject these scenarios into the global _current_plan so the orchestrator executes them!
+        if result.scenarios:
+            if not isinstance(_current_plan.get("phases"), list):
+                _current_plan["phases"] = []
+            if not _current_plan["phases"]:
+                _current_plan["phases"].append({
+                    "name": "Phase 1: Active Execution",
+                    "steps": [{"name": "Step 1", "scenarios": []}]
+                })
+            
+            first_phase = _current_plan["phases"][0]
+            if not isinstance(first_phase.get("steps"), list):
+                first_phase["steps"] = []
+            if not first_phase["steps"]:
+                first_phase["steps"].append({"name": "Dynamic Loop Scenarios", "scenarios": []})
+                
+            first_step = first_phase["steps"][0]
+            if not isinstance(first_step.get("scenarios"), list):
+                first_step["scenarios"] = []
+                
+            first_step["scenarios"].extend(result.scenarios)
+
+        try:
+            from server.agents.planner.agent import memory
+            if memory and result.scenarios:
+                for idx, s in enumerate(reversed(result.scenarios)):
+                    task = s.get("task", "")
+                    details = s.get("details", "")
+                    # "we have a memory for lan when the planner add two it should added to this memeory and should be in the frfont"
+                    memory.add(f"Planner Dispatched Scenario: {task} - {details}", user_id="pentaforge_analyzer")
+        except Exception as e:
+            pass
         # Calculate actual scenario count from the persisted plan (for accurate logging)
         actual_scenario_count = sum(
             len(step.get("scenarios", []))
@@ -2934,7 +2961,7 @@ class PlannerAgent:
                     [
                         {
                             "role": "user",
-                            "content": _build_loop_plan_context_message(),
+                            "content": _build_loop_plan_context_message(intel_checklist=intel_checklist, target=target),
                         }
                     ]
                     if normalized_plan_mode == "loop"
@@ -2962,7 +2989,7 @@ class PlannerAgent:
             "planning_round_cap": (
                 min(MAX_TOOL_ROUNDS, 4)
                 if normalized_plan_mode != "loop"
-                else MAX_TOOL_ROUNDS
+                else 2
             ),
         }
 

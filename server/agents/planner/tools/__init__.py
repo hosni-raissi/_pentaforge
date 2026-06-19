@@ -9,7 +9,6 @@ from .pentest_plan import (
 )
 from .search_kb import search_kb
 from server.agents.tools.search_web import search_web
-from .target_types import add_target_type, get_target_types, remove_target_type
 
 ALL_PLANNER_TOOLS: list[Tool] = [
     get_checklists,
@@ -19,7 +18,4 @@ ALL_PLANNER_TOOLS: list[Tool] = [
     # Keep get_pentest_plan implemented/exported for reuse by other agents,
     # but do not expose it to PlannerAgent runtime tool list.
     update_pentest_plan,
-    get_target_types,
-    add_target_type,
-    remove_target_type,
 ]

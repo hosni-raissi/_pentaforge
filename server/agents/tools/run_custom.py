@@ -81,23 +81,24 @@ BLOCKED_ARG_PATTERNS = [
     r"^-rf$", r"^-fr$",   # recursive force flags
     r"^--delete$",
     r"^--remove$",
-    r"^--exec$",          # find --exec style escapes
+    # r"^--exec$",          # find --exec style escapes - REMOVED so payloads with exec aren't falsely blocked
 ]
 
 # curl / wget write flags — blocked even though the binary itself is allowed
 _CURL_BLOCKED_FLAGS  = {"-T", "--upload-file", "-F", "--form",
                         "--config",                          # could load arbitrary config
-                        "-o", "--output"}                   # file write
+                        }                  
 _WGET_BLOCKED_FLAGS  = {"--post-file",
                         "--method", "--body-file",
-                        "-O",                               # file write (use -O - to stdout)
+                        #"-O",                               # file write (use -O - to stdout)
                         "-P", "--directory-prefix",          # writes into chosen directory
-                        "-r", "--recursive", "-m", "--mirror",
-                        "-p", "--page-requisites",
-                        "-k", "--convert-links",
-                        "-E", "--adjust-extension",
-                        "-K", "--backup-converted",
-                        "--no-parent"}                       # mirroring/page save workflows
+                       # "-r", "--recursive", "-m", "--mirror",
+                        #"-p", "--page-requisites",
+                        #"-k", "--convert-links",
+                        #"-E", "--adjust-extension",
+                        #"-K", "--backup-converted",
+                       # "--no-parent"
+                       }                       # mirroring/page save workflows
 
 _RUN_CUSTOM_URL_VALUE_FLAGS = {
     "-u",

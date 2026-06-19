@@ -190,19 +190,61 @@ Detected Technologies:
         return "NEW FINDINGS:\n" + "\n".join(findings[:10])
 
     def _build_rag_context(self, project: dict[str, Any]) -> str:
-        """PART 5 — RAG Context (dynamic per this round's signals fetched from Mem0)."""
+        """PART 5 — RAG Context (dynamic per this round's signals)."""
+        # Extract intelligent signals for semantic search
+        last_scan = project.get("lastScan", {})
+        if not isinstance(last_scan, dict):
+            last_scan = {}
+            
+        detected_tech = last_scan.get("detectedTech", [])
+        plan = last_scan.get("plan", {})
+        
+        search_queries = []
+        
+        # Signal 1: Pending/Active tasks
+        active_tasks = []
+        if isinstance(plan, dict) and isinstance(plan.get("phases"), list):
+            for phase in plan["phases"]:
+                if isinstance(phase, dict) and isinstance(phase.get("steps"), list):
+                    for step in phase["steps"]:
+                        if isinstance(step, dict) and isinstance(step.get("scenarios"), list):
+                            for sc in step["scenarios"]:
+                                if isinstance(sc, dict) and not sc.get("done", False):
+                                    active_tasks.append(sc.get("task", ""))
+        if active_tasks:
+            # Take the top 2 pending tasks as semantic queries
+            search_queries.extend(active_tasks[:2])
+            
+        # Signal 2: Detected Tech
+        if detected_tech:
+            search_queries.append(" ".join(detected_tech[:3]))
+            
+        if not search_queries:
+            search_queries = [project.get("target", "pentest findings")]
+
         try:
-            from mem0 import Memory
-            memory = Memory()
-            # Fetch context relevant to this target
-            target = project.get("payload", {}).get("target", "unknown target")
-            results = memory.search(query=f"What vulnerabilities or open ports are known for {target}?", user_id=project.get("_id"))
-            facts = [r.get('text', '') for r in results if r.get('text')]
-            if facts:
-                return "RAG CONTEXT (Mem0):\n" + "\n".join([f" - {f}" for f in facts])
-            return "RAG CONTEXT (Mem0): No historical facts found."
+            from server.agents.planner.agent import memory
+            if memory:
+                chunks = set()
+                # Query mem0 for each signal
+                for query in search_queries:
+                    if not query or not str(query).strip(): continue
+                    results = memory.search(query=str(query), limit=3, filters={"user_id": "pentaforge_analyzer"})
+                    if results and isinstance(results, list):
+                        for r in results:
+                            if isinstance(r, dict):
+                                content = r.get("memory", r.get("text", str(r)))
+                                chunks.add(str(content))
+                            else:
+                                chunks.add(str(r))
+                
+                if chunks:
+                    return "RAG CONTEXT (Mem0 Past Findings & PoCs related to current tasks/tech):\n" + "\n".join([f"  - {c}" for c in list(chunks)[:5]])
         except Exception as e:
-            return f"RAG CONTEXT: (Mem0 retrieval failed: {e})"
+            import structlog
+            structlog.get_logger(__name__).warning("Failed to retrieve Mem0 context", error=str(e))
+            
+        return "RAG CONTEXT: (No specific memory context available for current signals)"
 
     def _build_user_contributions(self, project: dict[str, Any]) -> str:
         """PART 7 — USER CONTRIBUTIONS (intelligence from the assistant/user)."""

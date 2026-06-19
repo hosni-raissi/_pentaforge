@@ -1284,6 +1284,24 @@ class InformationGatheringNode:
         gathering = memory.get("gathering", {}) if isinstance(memory.get("gathering"), dict) else {}
         gathering["status"] = "completed"
         memory["gathering"] = gathering
+        
+        try:
+            from server.agents.planner.agent import memory as mem0_client
+            if mem0_client:
+                gathering_blocks = gathering.get("blocks", [])
+                texts = []
+                for b in gathering_blocks:
+                    if isinstance(b, dict):
+                        summary = b.get("summary", "")
+                        if summary: texts.append(summary)
+                        for res in (b.get("results") or []):
+                            if isinstance(res, dict) and res.get("summary"):
+                                texts.append(res.get("summary"))
+                if texts:
+                    mem0_client.add(messages=[{"role": "user", "content": f"Target: {target}\nInformation Gathering Results:\n" + "\n".join(texts)}], user_id="pentaforge_analyzer")
+        except Exception:
+            pass
+
         return await self._memory_node.save(
             project_cache_dir,
             memory,
