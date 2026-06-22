@@ -414,6 +414,10 @@ def get_backup_llm_config() -> LLMConfig | None:
                 max_tokens=4000,
             )
 
+    if profiles:
+        # If the user has configured profiles in the DB, do not fallback to environment variables
+        return None
+
     provider = os.getenv("BACKUP_LLM_API_PROVIDER", "").strip().lower()
     if not provider:
         return None
@@ -587,16 +591,9 @@ class LLMClient:
         self._http: httpx.AsyncClient | None = None
 
         if self._provider == "mistral":
-            try:
-                # Validate the symbol we actually use later; some environments
-                # have mismatched mistralai builds that import but lack Mistral.
-                from mistralai import Mistral  # noqa: F401
-                self._use_mistral_sdk = True
-                self._mistral = _MistralClient(self._config)
-            except Exception:
-                # Fallback to HTTP client (Mistral API is OpenAI-compatible)
-                self._use_mistral_sdk = False
-                self._mistral = None
+            # Force HTTP client (Mistral API is OpenAI-compatible) so we respect custom api_url and max_retries
+            self._use_mistral_sdk = False
+            self._mistral = None
 
         if not self._use_mistral_sdk:
             self._http = self._build_http_client()
@@ -858,6 +855,8 @@ class LLMClient:
             result_tool_calls = msg.get("tool_calls") or []
             result_finish_reason = choice.get("finish_reason", "stop")
             result_usage = data.get("usage", {})
+            if self._client_name == "planner":
+                logger.info("planner_raw_response_content", content=result_content)
 
         # ── 4. PrivacyGate Deanonymization ────────────────────────────────────
         

@@ -1,15 +1,23 @@
 \documentclass[12pt,a4paper]{report}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage{babel}
 \usepackage{graphicx}
 \usepackage{float}
+\usepackage{cite} % sorts and compresses numeric citations (e.g., [5,7] not [7,5])
 \usepackage[hidelinks]{hyperref}
 \usepackage{geometry}
 \geometry{margin=1in}
 \usepackage{setspace}
 \setstretch{1.3}
 \setlength{\parskip}{0.4em}
+
+% Better justification with fewer ugly hyphen splits
+\usepackage{microtype}
+% Avoid breaking words with hyphens (move whole word to next line instead)
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+\emergencystretch=2em
+
 \usepackage{amsmath}
 \usepackage{amssymb} % for \checkmark
 \usepackage{textcomp} % for \texttimes
@@ -76,9 +84,9 @@
     \fancyfoot[R]{\thepage}
     \renewcommand{\footrulewidth}{0.4pt}
 }
-% Add these packages for Arabic support
 \usepackage{polyglossia}
-\setmainlanguage{french} % Assuming French is your main document language
+\setmainlanguage{english} 
+\setotherlanguage{french}  % <--- ADD THIS FOR YOUR RÉSUMÉ
 \setotherlanguage{arabic}
 
 % Amiri is a great, standard Arabic font pre-installed on Overleaf
@@ -109,7 +117,7 @@
 
     \vspace{0.2cm}
 
-    {\normalsize \textit{Specialty :}\par}
+    {\normalsize \textit{Specialty:}\par}
     {\normalsize Computer Science\par}
 
     \vspace{0.3cm}
@@ -118,19 +126,19 @@
 
     \vspace{0.1cm}
 
-    {\large \textit{Theme :}\par}
+    {\large \textit{Theme:}\par}
    
-    {\Large \textbf{\guillemotleft~AI-Powered Automated Penetration Testing~\guillemotright}\par}
+    {\Large \textbf{``AI-Powered Automated Penetration Testing''}\par}
 
     \vspace{1cm}
 
-    {\normalsize \textit{Performed by :}\par}
+    {\normalsize \textit{Performed by:}\par}
     \vspace{0.2cm}
     {\large \textbf{Hosni Raissi}\par}
 
     \vspace{0.3cm}
 
-    {\normalsize \textit{Professional Supervisor:} Mr. Walid Bensaïd\par}
+    {\normalsize \textit{Professional Supervisor:} Mr. Walid Bensaid\par}
     \vspace{0.1cm}
     {\normalsize \textit{Academic Supervisor:} Mr. Houcem Hermassi\par}
 
@@ -142,7 +150,7 @@
 
     \vspace{0.1cm}
 
-    {\normalsize Academic year : 2025--2026\par}
+    {\normalsize Academic year: 2025--2026\par}
     \vspace{0.1cm}
     \vfill
 
@@ -186,7 +194,7 @@ I authorize the student to submit the internship report for evaluation.
 \vspace{1.1cm}
 
 \centering
-Professional Supervisor, \textbf{Mr.\ Walid Bensa\"{i}d}
+Professional Supervisor, \textbf{Mr.\ Walid Bensaid}
 
 \vspace{1.6cm}
 
@@ -230,25 +238,26 @@ Academic Supervisor, \textbf{Mr.\ Houcem Hermassi}
 
 This work is part of the end-of-studies project of the National School of Engineers of Carthage (ENICarthage), aiming to obtain the national engineering degree in Computer Science. It was conducted during a four-month internship at Talan.
 
-Faced with rapidly expanding attack surfaces and a global shortage of cybersecurity professionals, organizations must innovate their offensive security strategies. In response to this challenge, an open-source, AI-powered automated penetration testing platform named PentaForge has been developed and detailed in this report. This solution automates the complete penetration testing lifecycle—from reconnaissance to reporting—primarily relying on a secure, multi-agent architecture and a robust data sanitization layer to ensure confidentiality.
+Faced with rapidly expanding attack surfaces and a global shortage of cybersecurity professionals, organizations must innovate their offensive security strategies. In response to this challenge, an open-source, AI-powered automated penetration testing platform named PentaForge has been developed and detailed in this report. This solution automates the complete penetration testing lifecycle, from reconnaissance to reporting, primarily relying on a secure, multi-agent architecture and a robust data sanitization layer to ensure confidentiality.
 
 \vspace{0.4cm}
 \noindent \textbf{Keywords:} Automated penetration testing, Artificial intelligence,
 Multi-agent system, RAG, LLM, CVSS, Cybersecurity, PentaForge.
 
 % ==================== RÉSUMÉ ====================
+\begin{french}
 \section*{R\'{e}sum\'{e}}
 
 Ce travail s'inscrit dans le cadre du projet de fin d'\'{e}tudes de l'\'{E}cole Nationale
 d'Ing\'{e}nieurs de Carthage (ENICarthage), en vue de l'obtention du dipl\^{o}me national
 d'ing\'{e}nieur en Informatique. Il a \'{e}t\'{e} r\'{e}alis\'{e} lors d'un stage de quatre mois au sein de Talan.
 
-Face à l'expansion rapide des surfaces d'attaque et à la pénurie mondiale de professionnels qualifiés en cybersécurité, les organisations doivent innover dans leurs stratégies de sécurité offensive. En réponse à ce défi, une plateforme open-source de tests d'intrusion automatisés pilotée par l'intelligence artificielle, nommée PentaForge, a été développée et détaillée dans ce rapport. Cette solution automatise l'intégralité du cycle de pentest — de la reconnaissance jusqu'à la rédaction de rapports — en s'appuyant principalement sur une architecture multi-agents sécurisée et une couche de sanitisation systématique des données pour en garantir la confidentialité.
+Face à l'expansion rapide des surfaces d'attaque et à la pénurie mondiale de professionnels qualifiés en cybersécurité, les organisations doivent innover dans leurs stratégies de sécurité offensive. En réponse à ce défi, une plateforme open source de tests d'intrusion automatisés pilotée par l'intelligence artificielle, nommée PentaForge, a été développée et détaillée dans ce rapport. Cette solution automatise l'intégralité du cycle de test d'intrusion, de la reconnaissance jusqu'à la rédaction de rapports, en s'appuyant principalement sur une architecture multi-agents sécurisée et une couche d'assainissement systématique des données pour en garantir la confidentialité.
 
 \vspace{0.4cm}
-\noindent \textbf{Mots-cl\'{e}s :} Tests d'intrusion automatis\'{e}s, Intelligence artificielle,
+\noindent \textbf{Mots-cl\'{e}s:} Tests d'intrusion automatis\'{e}s, Intelligence artificielle,
 Syst\`{e}me multi-agents, RAG, LLM, CVSS, Cybers\'{e}curit\'{e}, PentaForge.
-
+\end{french}
 % ==================== DEDICATIONS ====================
 \newpage
 \thispagestyle{fancy}
@@ -256,7 +265,7 @@ Syst\`{e}me multi-agents, RAG, LLM, CVSS, Cybers\'{e}curit\'{e}, PentaForge.
 
 \vspace{1.2cm}
 
-To my family, unwavering pillar of my life, this work is dedicated to you.
+To my family, the unwavering pillar of my life: this work is dedicated to you.
 Your love, support, and faith in me have been the foundation of all my successes.
 
 \vspace{1cm}
@@ -266,15 +275,15 @@ Your unconditional love gave me the strength and determination to overcome every
 
 \vspace{1cm}
 
-To my two brothers and my sister, companions at all times, who shared with me
-the laughter, the challenges, and the aspirations. Your camaraderie and support
-enriched every moment of this adventure.
+To my two brothers and my sister, companions at all times who shared the laughter,
+the challenges, and the aspirations: this work is dedicated to you.
+Your camaraderie and support enriched every moment of this adventure.
 
 \vspace{1cm}
 
-To my close friends, who have always been there. Your friendship, encouragement,
-and advice played a crucial role in my journey. Your presence and feedback
-often guided my choices when it mattered most.
+To my close friends who have always been there: your friendship, encouragement,
+and advice played a crucial role in my journey. Your presence and feedback often
+guided my choices when it mattered most.
 
 \vspace{1.4cm}
 
@@ -310,7 +319,7 @@ His support was a constant and decisive source of learning.
 \vspace{0.9cm}
 
 I also extend my deepest gratitude to \textbf{Mr.\ Houcem Hermassi} for agreeing
-to supervise this work on behalf of ENICarthage. Your advice and recommendations
+to supervise this work on behalf of ENICarthage. His advice and recommendations
 enlightened my path and were of great help in carrying out this project.
 
 \vspace{0.9cm}
@@ -360,21 +369,30 @@ in my training and in the success of this project.
 \endhead
 AI          & Artificial Intelligence \\
 API         & Application Programming Interface \\
+CIS         & Center for Internet Security \\
 CISA        & Cybersecurity and Infrastructure Security Agency \\
 CISA KEV    & CISA Known Exploited Vulnerabilities \\
-CIS         & Center for Internet Security \\
 CLI         & Command Line Interface \\
+CNN         & Convolutional Neural Network \\
+CPU         & Central Processing Unit \\
+CTI         & Cyber Threat Intelligence \\
 CVE         & Common Vulnerabilities and Exposures \\
 CVSS        & Common Vulnerability Scoring System \\
 CWE         & Common Weakness Enumeration \\
 DAST        & Dynamic Application Security Testing \\
+DBMS        & Database Management System \\
 EPSS        & Exploit Prediction Scoring System \\
 FP          & False Positive \\
+GNN         & Graph Neural Network \\
 HITL        & Human-in-the-Loop \\
+HTML        & HyperText Markup Language \\
+IAM         & Identity and Access Management \\
 IoC         & Indicator of Compromise \\
 IT          & Information Technology \\
+JSON        & JavaScript Object Notation \\
 JWT         & JSON Web Token \\
 LLM         & Large Language Model \\
+LSTM        & Long Short-Term Memory \\
 MITRE ATT\&CK & MITRE Adversarial Tactics, Techniques \& Common Knowledge \\
 ML          & Machine Learning \\
 MSSP        & Managed Security Service Provider \\
@@ -387,13 +405,24 @@ PTES        & Penetration Testing Execution Standard \\
 RAG         & Retrieval-Augmented Generation \\
 RBAC        & Role-Based Access Control \\
 RCE         & Remote Code Execution \\
+RPD         & Requests Per Day \\
+RPM         & Requests Per Minute \\
+SaaS        & Software as a Service \\
 SARIF       & Static Analysis Results Interchange Format \\
 SAST        & Static Application Security Testing \\
 SIEM        & Security Information and Event Management \\
 SOAR        & Security Orchestration, Automation and Response \\
+SQL         & Structured Query Language \\
+SSD         & Solid State Drive \\
+SSE         & Server-Sent Events \\
 SSVC        & Stakeholder-Specific Vulnerability Categorization \\
+TPM         & Tokens Per Minute \\
 TTP         & Tactics, Techniques and Procedures \\
+UEBA        & User and Entity Behavior Analytics \\
+UI          & User Interface \\
+VRAM        & Video Random Access Memory \\
 WAF         & Web Application Firewall \\
+XSS         & Cross-Site Scripting \\
 \bottomrule
 \end{longtable}
 
@@ -410,26 +439,12 @@ landscape facing organizations of all sizes. Attack surfaces grow faster than se
 teams can monitor them, and the global shortage of qualified cybersecurity professionals
 creates a structural imbalance that traditional approaches can no longer absorb. In this
 context, penetration testing remains one of the most reliable methods for proactively
-identifying vulnerabilities before malicious actors exploit them --- yet in its traditional
+identifying vulnerabilities before malicious actors exploit them, yet in its traditional
 form, it is slow, manual, fragmented, and difficult to scale.
 
 \vspace{0.8cm}
 
-A standard penetration testing engagement spans between two and six weeks in total ---
-with active testing typically running one to two weeks and documentation, analysis, and
-quality assurance consuming an additional week or more, accounting for roughly a quarter
-to a third of the overall engagement time \cite{triaxiomTimeline,valuementorLifecycle}.
-Each phase relies on a different set of tools --- Nmap, Burp Suite, Metasploit, Nessus ---
-that operate in isolation and require findings to be transferred manually between them
-\cite{autosecagent2026,emazzantiTools}. Context accumulated over hours of work is not
-preserved across sessions, causing testers to lose awareness of prior outcomes and
-forcing repeated reconstruction of the attack chain \cite{pentestgpt2023}. Retesting
-after remediation is rarely exhaustive: industry data suggests that 15 to 25 percent of
-remediations contain implementation errors that go undetected \cite{hedgehogRetesting},
-and bypass variants of patched vulnerabilities are seldom explored
-\cite{redleggRetesting,halockVerification}. These limitations are not the result of poor
-practice --- they are structural constraints of a fundamentally manual process
-\cite{autosecagent2026,cycognitoPentest}.
+Traditional penetration testing engagements remain resource-intensive and difficult to scale. In practice, workflows are still fragmented across specialized tools, with findings and context transferred manually between phases~\cite{autosecagent2026,emazzantiTools}. Session knowledge is often lost across interruptions, which forces repeated reconstruction of the attack chain~\cite{pentestgpt2023}. Retesting after remediation is also frequently incomplete, allowing implementation errors and bypass variants to slip through validation~\cite{hedgehogRetesting,redleggRetesting,halockVerification}. These limitations are not the result of poor practice; they are structural constraints of a fundamentally manual process~\cite{cycognitoPentest}.
 
 \vspace{0.8cm}
 
@@ -453,21 +468,21 @@ This report is structured around four chapters, organized as follows:
 
 \begin{itemize}
     \setlength{\itemsep}{0.5cm}
-    \item \textbf{Chapter 1 --- \guillemotleft~General Framework of the Project~\guillemotright~:}
+    \item \textbf{Chapter 1 --- ``General Framework of the Project'':}
     Presents the host organization Talan, establishes the project context and problem
     statement, and introduces the development methodology adopted throughout the internship.
 
-    \item \textbf{Chapter 2 --- \guillemotleft~State of the Art~\guillemotright~:}
+    \item \textbf{Chapter 2 --- ``State of the Art'':}
     Reviews the foundations of AI in cybersecurity and automated penetration testing,
     analyzes existing solutions (PentestGPT, Burp Suite AI, KaliGPT, NodeZero), and
     identifies the gap that PentaForge is designed to fill.
 
-    \item \textbf{Chapter 3 --- \guillemotleft~Specification and Architecture~\guillemotright~:}
+    \item \textbf{Chapter 3 --- ``Specification and Architecture'':}
     Details the functional and non-functional requirements, presents the global
     four-layer architecture and the multi-agent system design, and justifies the
     technical stack choices for both backend and frontend.
 
-    \item \textbf{Chapter 4 --- \guillemotleft~Implementation~\guillemotright~:}
+    \item \textbf{Chapter 4 --- ``Implementation'':}
     Covers the concrete realization of the platform, demonstrating the agent
     orchestration cycle, the SSVC classification engine, the RAG chatbot, and the
     end-to-end results produced on a real test environment.
@@ -534,8 +549,9 @@ transformation.
 
 \begin{figure}[H]
     \centering
+    % Image source: https://share.google/cRQadkwXqYaxIiegY
     \includegraphics[width=0.3\textwidth]{talan1.png}
-    \caption{Talan Logo}
+    \caption{Talan Logo \cite{talanLogo}}
     \label{fig:logo_talan}
 \end{figure}
 
@@ -556,7 +572,7 @@ and technological projects:
     and continuous improvement.
     \item \textbf{Innovation Factory:} Talan's research and development center,
     focused on disruptive technologies to deliver added value.
-    \item \textbf{Cyber Security:} Consulting in cybersecurity, compliance, and
+    \item \textbf{Cybersecurity:} Consulting in cybersecurity, compliance, and
     governance, penetration testing, and security audits.
 \end{itemize}
 
@@ -590,12 +606,12 @@ identifying vulnerabilities in an organization's information systems before mali
 actors can exploit them. However, in its traditional form, it suffers from structural
 limitations that prevent it from scaling to meet the demands of modern IT environments.
 
-A standard engagement typically spans two to six weeks in total --- with active
+A standard engagement typically spans two to six weeks in total, with active
 testing representing one to two weeks of that period and documentation, analysis,
 and quality assurance consuming an additional week or more, accounting for roughly
 a quarter to a third of the overall effort~\cite{triaxiomTimeline,valuementorLifecycle}.
-Each phase of the lifecycle relies on a different set of specialized tools --- Nmap,
-Burp Suite, Metasploit, Nessus --- that operate in isolation and require findings to
+Each phase of the lifecycle relies on a different set of specialized tools (Nmap,
+Burp Suite, Metasploit, Nessus) that operate in isolation and require findings to
 be transferred manually between them~\cite{autosecagent2026,emazzantiTools}. Context
 accumulated over hours of work is not preserved across sessions, causing testers to
 lose awareness of prior outcomes and forcing repeated reconstruction of the attack
@@ -603,12 +619,12 @@ chain~\cite{pentestgpt2023}. Retesting after remediation is rarely exhaustive: s
 suggest that a significant proportion of remediations contain implementation errors
 that go undetected~\cite{hedgehogRetesting}, and bypass variants of patched
 vulnerabilities are seldom explored~\cite{redleggRetesting,halockVerification}. These
-limitations are not the result of poor practice --- they are structural constraints of
+limitations are not the result of poor practice; they are structural constraints of
 a fundamentally manual process~\cite{autosecagent2026,cycognitoPentest}.
 
 Beyond these operational challenges, the global shortage of qualified cybersecurity
 professionals means that many organizations cannot sustain the testing frequency
-their attack surface demands. Manual penetration testing does not scale --- a single
+their attack surface demands. Manual penetration testing does not scale: a single
 expert can only effectively cover a limited number of targets simultaneously, and
 faced with a cloud infrastructure comprising hundreds of services, manual methods
 become structurally insufficient.
@@ -642,14 +658,14 @@ any point.
 
 \subsection{Proposed Solution}
 
-To address these structural limitations, this project introduces \textbf{PentaForge}
---- an open-source, AI-assisted penetration testing platform built on a multi-agent
+To address these structural limitations, this project introduces \textbf{PentaForge},
+an open-source, AI-assisted penetration testing platform built on a multi-agent
 architecture. Rather than replacing the security professional, PentaForge is designed
 to augment their capabilities by automating repetitive and time-consuming tasks while
 preserving human control over high-impact security decisions.
 
-The platform coordinates a set of specialized AI agents --- Planner, Executer,
-and Analyzer --- that support the main phases of a penetration testing workflow,
+The platform coordinates a set of specialized AI agents (Planner, Executor,
+and Analyzer) that support the main phases of a penetration testing workflow,
 including reconnaissance, execution, analysis, and reporting. It supports ten
 target categories: Web Applications, APIs, Mobile Applications, Infrastructure,
 Networks, IoT devices, Linux Servers, Cloud environments, Containers, and
@@ -706,9 +722,9 @@ systematic, repeatable, and scalable penetration testing. Its primary users incl
 \subsection{Work Methodology}
 
 We adopted the \textbf{Scrum} agile methodology to manage the development of
-PentaForge. Given the exploratory nature of an AI-driven platform --- where agent
+PentaForge. Given the exploratory nature of an AI-driven platform, where agent
 behavior, tool integration results, and LLM output quality are only fully understood
-through iterative testing --- a methodology that embraces continuous feedback and
+through iterative testing, a methodology that embraces continuous feedback and
 incremental delivery was essential.
 
 The internship began with a four-week preparation period. The first two weeks were
@@ -730,8 +746,9 @@ Stand-up, Sprint Review, and Sprint Retrospective.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\textwidth]{scrum_process.jpg}
-    \caption{Scrum Development Process}
+    % Image source: https://share.google/5HtFyjvGZg3le6mXj
+    \includegraphics[width=0.9\textwidth]{blog-scrum-process-opt.jpg}
+    \caption{Scrum Development Process \cite{pmpartnersScrumProcess}}
     \label{fig:scrum}
 \end{figure}
 
@@ -772,7 +789,7 @@ followed by six two-week development sprints.
 
     \item \textbf{Sprint 3 --- Execution Layer \& Tool Sandbox (Weeks 9--10)}
     \begin{itemize}
-        \item Develop the Executer agent responsible for dispatching and running
+        \item Develop the Executor agent responsible for dispatching and running
         specific security tools (e.g., \texttt{ffuf}, \texttt{nmap})
         \item Build the secure Tool Sandbox using Docker, executing commands via
         \texttt{run\_custom} and isolating potentially malicious output
@@ -823,7 +840,7 @@ preparation period and the six-sprint Scrum roadmap together account for the ful
 sixteen weeks of the internship, providing a clear and iterative execution plan from
 initial research to final deployment.
 
-The next chapter examines the state of the art --- exploring the role of artificial
+The next chapter examines the state of the art by exploring the role of artificial
 intelligence in cybersecurity, the current landscape of automated penetration testing
 tools, and the specific gap that PentaForge is designed to fill.
 % ── Restore default page style for subsequent chapters ─────────────────────
@@ -874,7 +891,7 @@ imbalance between the attack surface and the defensive capabilities of organizat
 Faced with this reality, artificial intelligence is emerging as the technological
 lever capable of restoring this balance.
 
-AI does not replace the security expert --- it multiplies their capabilities. It
+AI does not replace the security expert; it multiplies their capabilities. It
 automates repetitive low-value tasks, detects patterns invisible to the human eye,
 and operates at a speed and scale inaccessible to a single analyst.
 
@@ -916,7 +933,7 @@ a speed and scale that manual analysis cannot match.
 
 SOAR (Security Orchestration, Automation and Response) platforms integrate AI
 agents capable of automatically triggering response playbooks. When a ransomware
-alert is detected, an AI agent can isolate the affected machine within seconds ---
+alert is detected, an AI agent can isolate the affected machine within seconds,
 well before a human analyst has had time to read the notification. Reinforcement
 learning enables these agents to improve their response strategies over time based
 on outcome feedback.
@@ -926,7 +943,7 @@ on outcome feedback.
 AI-augmented static code analysis (SAST) identifies vulnerabilities in source code
 with fewer false positives than traditional rule-based tools. Large Language Models
 (LLM) are now capable of explaining a vulnerability, generating a proof-of-concept
-exploit, and proposing a remediation fix --- all within an automated pipeline. This
+exploit, and proposing a remediation fix entirely  within an automated pipeline. This
 capability is central to the design of PentaForge's Exploit and Report agents.
 
 \begin{table}[H]
@@ -1007,14 +1024,14 @@ be compressed to a few hours for the majority of automatable phases.
 
 LLMs are capable of generating complex attack scenarios from a description of the
 target. Drawing on their knowledge of the MITRE ATT\&CK framework and documented
-TTPs (Tactics, Techniques, and Procedures), they produce multi-step attack plans
---- coherent attack chains that simulate the behavior of a real attacker. This
+TTPs (Tactics, Techniques, and Procedures), they produce multi-step attack plans,
+that is, coherent attack chains that simulate the behavior of a real attacker. This
 capability forms the core of the Planner agent in PentaForge.
 
 \subsubsection{Adaptive Payload Generation}
 
-LLMs generate payloads adapted to the target context --- WAF profile, detected
-technologies, and filter behavior. This contextual generation far exceeds the
+LLMs generate payloads adapted to the target context (WAF profile, detected
+technologies, and filter behavior). This contextual generation far exceeds the
 capabilities of static wordlists used by traditional tools, enabling techniques
 such as dynamic WAF bypass encoding, DBMS-specific SQL injection variants, and
 context-aware XSS payloads.
@@ -1025,7 +1042,7 @@ A classic scanner can generate hundreds of alerts, 30 to 60\% of which are false
 positives~\cite{threatexploitFP}. LLM-based analyzers significantly reduce this
 ratio by reasoning over raw tool outputs, correlating findings against accumulated
 engagement context, and requiring structured evidence before a result is promoted
-to verified status --- eliminating noise that a static rule-based classifier would
+to verified status, eliminating noise that a static rule-based classifier would
 pass through unchallenged.
 
 \subsubsection{Automated Evidence Capture}
@@ -1168,7 +1185,7 @@ standardized security benchmarks.
 full evidence chain, native false positive elimination through exploit verification,
 and an open-source core (Shannon Lite) extensible to CI/CD pipelines.
 
-\textbf{Limitations:} exclusively white-box --- requires access to source code,
+\textbf{Limitations:} exclusively white-box, as it requires access to source code,
 making it unsuitable for black-box or grey-box engagements; limited to web
 applications and APIs with no network, cloud, or infrastructure coverage; no
 human-in-the-loop control layer; no conversational interface for querying findings
@@ -1241,8 +1258,7 @@ functional priorities and architectural choices retained for PentaForge.
 \subsection{Identified Gap and PentaForge's Position}
 
 The comparative analysis reveals a value space unaddressed by existing solutions:
-an open-source, on-premise, multi-agent platform that combines all the following
-properties simultaneously --- autonomous task orchestration, persistent engagement
+an open-source, on-premise, multi-agent platform that simultaneously combines all the following properties: autonomous task orchestration, persistent engagement
 context, secure sandboxed tool execution, robust false-positive reduction, full
 explainability of agent decisions, and a RAG-powered conversational interface.
 
@@ -1257,7 +1273,7 @@ provides no human-in-the-loop control layer.
 PentaForge is designed to occupy the intersection of these axes: the openness
 and customizability of PentestGPT, the automation depth of NodeZero, the
 vulnerability verification structure of Shannon, and the human-in-the-loop safety
-of Burp Suite AI --- deployable entirely on-premise with no sensitive data leaving
+of Burp Suite AI. Furthermore, the platform is deployable entirely on-premise with no sensitive data leaving
 the engagement perimeter thanks to automated data sanitization.
 
 % ── Section 4 ─────────────────────────────────────────────────────────────
@@ -1272,14 +1288,14 @@ benchmark performance but also the operational constraints specific to an
 autonomous multi-agent pentest orchestrator.
 
 A critical constraint that shapes every other selection decision is
-\textbf{operational cost}. PentaForge is not a single-query assistant --- it is
+\textbf{operational cost}. PentaForge is not a single-query assistant; it is
 a multi-phase orchestration platform in which every reconnaissance loop, every
 tool output analysis, every exploitation attempt, and every report generation
 cycle consumes tokens. Across a complete engagement this accumulates to hundreds
 of thousands of tokens, and across multiple engagements it compounds further.
 At commercial API rates, this volume makes a metered cloud model financially
 unsustainable for regular operational use. \textbf{Free-tier and fully local
-deployment options are therefore not optional features --- they are primary
+deployment options are therefore not optional features; they are primary
 selection requirements}, treated with the same weight as reasoning quality
 and context window capacity.
 
@@ -1290,7 +1306,7 @@ Every agent carries a persistent memory: the full engagement context accumulated
 since the beginning of the session, including prior tool outputs, parsed findings,
 intermediate reasoning chains, and the current attack plan state. This memory is
 injected into every prompt, meaning that as the engagement progresses, each
-individual API call grows larger --- not just in output, but primarily in input.
+individual API call grows larger, not just in output, but primarily in input.
 
 A concrete estimate illustrates the scale of this constraint. A single agent call
 in PentaForge typically includes:
@@ -1365,17 +1381,17 @@ To objectively determine the most suitable reasoning backbone for PentaForge, a 
         \multicolumn{4}{|l|}{\textbf{API rate limits / Throughput}} \\
         \hline
         Requests per minute (RPM) &
-        15 RPM (Free tier) &
+        15 RPM (Free tier)~\cite{geminiRateLimits} &
         $\sim$60 RPM (Free mode) &
         Hardware-bound \\
         \hline
         Tokens per minute (TPM) &
-        1{,}000{,}000 TPM &
+        1{,}000{,}000 TPM~\cite{geminiRateLimits} &
         $\sim$500{,}000 TPM &
         Hardware-bound \\
         \hline
         Requests per day (RPD) &
-        1{,}500 RPD (Free tier) &
+        1{,}500 RPD (Free tier)~\cite{geminiRateLimits} &
         $\sim$1B tokens/month &
         Unlimited \\
         \hline
@@ -1431,13 +1447,12 @@ To objectively determine the most suitable reasoning backbone for PentaForge, a 
     \caption{LLM benchmarking for PentaForge's reasoning backbone}
     \label{tab:llm_bench}
 \end{table}
-
 \subsection{Analysis and Decision}
 
 PentaForge's orchestrator sequences most tasks through a deterministic state machine,
 which means that true simultaneous agent execution remains bounded. The realistic
 worst-case scenario involves two to three agents running concurrently, driving a
-peak token requirement of approximately 33{,}000 to 132{,}000 TPM --- well within
+peak token requirement of approximately 33{,}000 to 132{,}000 TPM, which is well within
 the free-tier capabilities of all three candidate models. Because all agents share
 a single unified LLM interface, this combined token demand is drawn from one shared
 quota pool rather than multiplied across independent API connections.
@@ -1451,9 +1466,9 @@ that neither competing model offers. Its general reasoning of $\sim$88\%
 MMLU~\cite{llmstatsFlash} is the strongest of the three, and its native
 structured output support makes it the most reliable candidate for the
 tool-calling pipeline. Its main limitations are that it is API-only and
-proprietary, meaning target data transits Google's infrastructure, and its
-\$2.50 per million output tokens cost accumulates across sustained engagement
-cycles. For cost-sensitive or privacy-critical deployments, the local fallback
+proprietary, meaning target data transits Google's infrastructure, and 
+the cost of \$2.50 per million output tokens accumulates across sustained
+engagement cycles. For cost-sensitive or privacy-critical deployments, the local fallback
 described below mitigates both constraints.
 
 \textbf{Qwen~2.5~7B} is selected as the local and privacy fallback. It runs
@@ -1468,8 +1483,8 @@ is the appropriate choice.
 \textbf{Mistral Large~3} ranks third as an API fallback. It offers stronger
 reasoning than Qwen~2.5~7B and is open-weight and on-premise capable, but its
 128K context ceiling limits suitability for the deepest engagement sessions and
-its free-mode TPM --- estimated at $\sim$500{,}000 TPM based on community reports
-rather than official per-model documentation~\cite{mistralDocs} --- introduces
+its free-mode TPM, estimated at $\sim$500{,}000 TPM based on community reports
+rather than official per-model documentation~\cite{mistralDocs}, introduces
 capacity planning uncertainty for production deployments.
 
 \begin{table}[H]
@@ -1621,9 +1636,9 @@ context that is semantically relevant to the current query. This means the
 platform's security intelligence remains current through continuous index
 updates without touching the underlying model. The tradeoff accepted is
 that retrieval quality depends on the embedding model and chunking strategy.
-PentaForge addresses this by maintaining per-domain vector indexes ---
+PentaForge addresses this by maintaining per-domain vector indexes, specifically
 shared knowledge, target-type resources, project findings, and report
-context --- so that retrieval remains focused and relevance scores remain
+context, so that retrieval remains focused and relevance scores remain
 meaningful.
 
 \subsection{Agent Coordination: Single Agent versus Multi-Agent Architectures}
@@ -1720,14 +1735,14 @@ standards, but adopts SSVC as its primary prioritization mechanism in the
 Analyzer. The limitation of CVSS is well-documented in practice: a
 CVSS~9.8 vulnerability on an air-gapped test server is operationally less
 urgent than a CVSS~6.5 vulnerability on an internet-facing payment API.
-Providing a single number without deployment context misleads triage and
-wastes remediation resources.
+However, providing a single number without deployment context can mislead triage
+efforts and waste remediation resources.
 
 SSVC, developed by CISA and Carnegie Mellon University, addresses this
-directly. By incorporating four contextual dimensions --- exploitation
+directly. By incorporating four contextual dimensions (exploitation
 state from NVD and CISA KEV, technical impact from CVSS, automatable
 exploitation likelihood from EPSS, and mission prevalence from the asset
-inventory --- it produces an actionable decision rather than a score.
+inventory), it produces an actionable decision rather than a score.
 The output (ACT, ATTEND, or TRACK) tells the security team what to do,
 not merely how severe a number is.
 
@@ -1747,16 +1762,16 @@ orchestration, persistent engagement context, secure sandboxed tool execution,
 robust false-positive reduction, full explainability, and a RAG-powered
 conversational interface in a single on-premise platform. The benchmarking study
 justifies the selection of Gemini~2.5~Flash as PentaForge's primary reasoning
-backbone --- driven primarily by its 1M token context window and 1{,}000{,}000
+backbone, driven primarily by its 1M token context window and 1{,}000{,}000
 TPM throughput, which are prerequisites for concurrent agent orchestration with
 persistent memory. Qwen~2.5~7B is retained as the local privacy fallback for engagements
 where data sovereignty or cost constraints take absolute precedence over
 peak reasoning quality, while Mistral Large~3 serves as the API fallback
 for shallow sessions where the 128K context ceiling is not reached.
 
-The technologies reviewed in the final section --- LLMs with Chain-of-Thought
+The technologies reviewed in the final section, specifically LLMs with Chain-of-Thought
 reasoning, Retrieval-Augmented Generation, multi-agent architectures, and SSVC
-classification --- collectively form the technical foundation of PentaForge's design.
+classification, collectively form the technical foundation of PentaForge's design.
 The following chapter translates these foundations into a concrete specification and
 architecture for the platform.
 
@@ -1862,7 +1877,7 @@ AI Assistant & Explain scan status; summarize evidence; answer scope questions;
 support report interpretation; provide next-step recommendations without bypassing
 workflow rules. \\
 \hline
-Target System & Respond to reconnaissance, crawling, validation and safe exploit
+External target system & Respond to reconnaissance, crawling, validation, and safe exploit
 verification requests issued through approved tools. \\
 \hline
 \caption{Use-case matrix for PentaForge actors}
@@ -2063,12 +2078,12 @@ type. \\
 \hline
 FR11 & Planner & The system shall create a plan from the saved checklist. \\
 \hline
-FR12 & Executer & The system shall route tool requests through a controlled
+FR12 & Executor & The system shall route tool requests through a controlled
 execution layer. \\
 \hline
-FR13 & Executer & The system shall reject out-of-scope tool requests. \\
+FR13 & Executor & The system shall reject out-of-scope tool requests. \\
 \hline
-FR14 & Executer & The system shall reuse valid project-scoped tool results
+FR14 & Executor & The system shall reuse valid project-scoped tool results
 when the same command is requested again. \\
 \hline
 FR15 & Analyzer & The system shall classify evidence as verified, false
@@ -2198,10 +2213,7 @@ Tauri desktop application. \\
 \label{tab:nonfunctional_requirements}
 \end{longtable}
 
-The requirements defined in this section --- functional, non-functional, and
-actor-oriented --- collectively specify the contract that PentaForge must
-fulfill. The following section translates these requirements into a
-prioritized delivery plan through the product backlog.
+The functional, non-functional, and actor-oriented requirements defined in this section collectively specify the contract that PentaForge must fulfill. The following section translates these requirements into a prioritized delivery plan through the product backlog.
 
 % ── Section 2 ─────────────────────────────────────────────────────────────
 \section{Product Backlog}
@@ -2251,7 +2263,7 @@ US08 & As a pentester, I want security tools to run in an isolated sandbox so th
 my host machine is not affected by tool output. & Sandbox & High & S3 \\
 \hline
 US09 & As a pentester, I want tool outputs to be parsed automatically so that raw
-logs are normalized into structured findings. & Executer & High & S3 \\
+logs are normalized into structured findings. & Executor & High & S3 \\
 \hline
 US10 & As a pentester, I want scope enforcement before every tool execution so that
 the platform never tests out-of-scope targets. & Sandbox & High & S3 \\
@@ -2295,23 +2307,17 @@ full platform so that setup is reproducible. & DevOps & High & S6 \\
 
 \subsection{Conceptual Architecture}
 
-Before decomposing PentaForge into layers and services, it is useful to establish
-a high-level conceptual view of the system. At its core, PentaForge is organized
-around three concerns: a human operator who supervises and controls the engagement,
-an AI-driven orchestration core that plans and executes security scenarios, and a
-set of persistent stores that preserve engagement state across sessions.
-
-The conceptual architecture places the operator at the top of the control hierarchy.
-Every automated action is traceable back to a project the operator created, a target
-they authorized, and a scope they defined. The orchestration core sits between the
-operator and the target environment, mediating all tool execution through safety
-guards. The storage layer provides the memory that allows the platform to remain
-coherent across restarts and long-running engagements.
+PentaForge’s conceptual architecture is built upon three foundational pillars:
+\begin{itemize}
+    \item \textbf{The Human Operator:} Sits at the top of the control hierarchy, defining the project scope and authorizing all target engagements.
+    \item \textbf{The AI Orchestration Core:} Acts as the bridge between the operator and the target, mediating all automated tool execution through strict safety guards.
+    \item \textbf{The Storage Layer:} Provides the persistent memory necessary to maintain state coherence across system restarts and extended engagements.
+\end{itemize}
 
 \begin{figure}[H]
     \centering
     \makebox[\textwidth][c]{%
-        \includegraphics[width=1.1\textwidth]{concept_architecture.png}%
+        \includegraphics[width=1\textwidth]{concept_architecture.png}%
     }
     \caption{Conceptual architecture of PentaForge}
     \label{fig:concept_arch}
@@ -2332,23 +2338,20 @@ service boundaries are introduced.
     \label{fig:mono_arch}
 \end{figure}
 
-The external interfaces are: the desktop UI communicating over HTTP and SSE, the
-sandbox service receiving tool execution requests, and the LLM provider receiving
-inference calls. All other concerns --- persistence, orchestration, agent reasoning,
-and retrieval --- are internal to the deployment unit.
+The external interfaces are the desktop UI communicating over HTTP and SSE, the sandbox service receiving tool execution requests, and the LLM provider receiving inference calls. All other concerns, including persistence, orchestration, agent reasoning, and retrieval, are internal to the deployment unit.
 
 This monolithic boundary is a deliberate design choice. By keeping the API,
 orchestration, agent runtime, and storage within a single deployable unit,
-PentaForge eliminates the distributed coordination overhead that would otherwise
-arise from inter-service network calls during the hot path of a scan --- when an
-agent queries project memory, updates scan state, or triggers a tool execution,
-all of these operations resolve within the same process boundary, reducing latency
-and simplifying failure reasoning.
+PentaForge eliminates the distributed coordination overhead of inter-service
+network calls during the hot path of a scan. When an agent queries project
+memory, updates scan state, or triggers a tool execution, these operations
+resolve within the same process boundary, reducing latency and simplifying
+failure recovery.
 
 The boundary also carries a security implication. Because only three surfaces are
 externally reachable, the attack surface of the platform remains minimal. An
 operator running PentaForge with a local LLM can complete a full engagement without
-any traffic leaving the host network --- a deployment posture particularly relevant
+any traffic leaving the host network, a deployment posture particularly relevant
 for assessments involving sensitive targets or strict data residency requirements.
 The monolithic view therefore establishes the trust perimeter of the platform before
 internal layers are decomposed in the logical and physical architectures that follow.
@@ -2427,7 +2430,7 @@ restarts and supports resume logic. \\
 \subsection{Physical Architecture}
 
 The physical architecture describes how PentaForge is deployed as a set of
-containerized services on a local host. Each service runs in its own Docker
+\mbox{containerized} services on a local host. Each service runs in its own Docker
 container, communicates over a shared internal network, and exposes only the
 ports required by its consumers.
 
@@ -2476,11 +2479,7 @@ architectures presented in the previous sections describe \textit{what} exists
 and \textit{where} it runs, sequence diagrams answer \textit{how} components
 collaborate under real operational conditions: which service initiates a
 transaction, what data crosses each boundary, and in what order state
-transitions occur. The four diagrams below were selected because they each
-exercise a distinct and critical path through the platform --- scan initiation,
-failure recovery, report production, and secure client delivery --- collectively
-covering the full engagement lifecycle from the operator's first action to the
-client's final download.
+transitions occur. The four diagrams below were selected because they each exercise a distinct and critical path through the platform: scan initiation, failure recovery, report production, and secure client delivery. Collectively, these cover the full engagement lifecycle from the operator’s first action to the client’s final download.
 
 \subsubsection{SD1: Project Scan Launch}
 
@@ -2491,7 +2490,7 @@ orchestrator and the emission of live events.
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{sd1_project_scan_launch.png}
-    \caption{Sequence Diagram: Project Scan Launch}
+    \caption{Sequence diagram for project scan launch}
     \label{fig:sd1_launch}
 \end{figure}
 
@@ -2504,7 +2503,7 @@ checkpoint after a restart or interruption.
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{sd2_resume_after_interruption.png}
-    \caption{Sequence Diagram: Resume After Interruption}
+    \caption{Sequence diagram for resume after interruption}
     \label{fig:sd2_resume}
 \end{figure}
 
@@ -2515,7 +2514,7 @@ This sequence outlines the workflow for transforming analyzed evidence and findi
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{sd3_report_generation.png}
-    \caption{Sequence Diagram: Report Generation}
+    \caption{Sequence diagram for report generation}
     \label{fig:sd3_report}
 \end{figure}
 
@@ -2532,7 +2531,7 @@ the platform, and communicated to the client out-of-band.
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{sd4_protected_client_download.png}
-    \caption{Sequence Diagram: Protected Client Download}
+    \caption{Sequence diagram for protected client download}
     \label{fig:sd4_download}
 \end{figure}
 
@@ -2618,14 +2617,14 @@ scope and safety path.
 
 The Planner is the strategic core of the scan runtime. It receives target type,
 scope, intelligence, and memory projections, then converts them into actionable
-scenarios for the executer lane. Its input is heterogeneous by design: it can
+scenarios for the executor lane. Its input is heterogeneous by design: it can
 consume deterministic target-type profiles, checklist state, target memory,
 discovered routes, and analyst directives. Its output is intentionally normalized
 into plan payloads and scenario batches.
 
 \subsection{Executor Agents}
 
-\textbf{Recon Executer} and \textbf{Exploit Executer} are the two operational agents that constitute the hot execution lane. They qualify as true agents in the formal sense: each one runs an LLM reasoning loop, has access to a scoped tool catalog, and calls tools autonomously via the sandbox client. Both are target-type aware, meaning they receive only the tooling relevant to the current engagement surface and are not permitted to invoke tools outside their assigned catalog. Furthermore, each agent maintains a localized short-term memory that tracks the tools executed in previous cycles along with a concise summary of their findings. This memory mechanism prevents redundant operations by allowing the agent to intelligently skip re-running a tool if the required information has already been acquired.
+\textbf{Recon Executor} and \textbf{Exploit Executor} are the two operational agents that constitute the hot execution lane. They qualify as true agents in the formal sense: each one runs an LLM reasoning loop, has access to a scoped tool catalog, and calls tools autonomously via the sandbox client. Both are target-type aware, meaning they receive only the tooling relevant to the current engagement surface and are not permitted to invoke tools outside their assigned catalog. Furthermore, each agent maintains a localized short-term memory that tracks the tools executed in previous cycles along with a concise summary of their findings. This memory mechanism prevents redundant operations by allowing the agent to intelligently skip re-running a tool if the required information has already been acquired.
 
 \subsection{Analyzer}
 
@@ -2875,7 +2874,7 @@ The sanitization pipeline orchestrated by the PrivacyGate operates as follows:
     \item \textbf{Restoration (De-masking):} When the LLM returns its response, the
     PrivacyGate intercepts it, looks for the placeholders, and reinjects the original
     sensitive values before the answer is passed back into the hot operational flow
-    (such as the Executer or Planner).
+    (such as the Executor or Planner).
 \end{enumerate}
 
 This architectural pattern guarantees that proprietary penetration testing data
@@ -2889,18 +2888,14 @@ concrete specification and architectural design for PentaForge. The requirements
 analysis formalized what the platform must do and under what constraints. The
 product backlog then operationalized those requirements into a prioritized,
 sprint-organized delivery plan, establishing the execution contract before any
-design decision was made. The three architectural views --- monolithic, logical,
-and physical --- established the structural boundaries from a single deployable
-unit down to individual containers and their network relationships. The deep
+design decision was made. The monolithic, logical, and physical architectural views established the structural boundaries from a single deployable unit down to individual containers and their network relationships. The deep
 multi-agent design detailed the role and interaction of each specialized
 component, from Intel preparation and memory construction to analyzer feedback
 and durable recovery paths. Finally, the technical stack justification
 demonstrated that every technology choice was made deliberately against evaluated
 alternatives.
 
-The following chapter presents the concrete implementation of this architecture ---
-the working platform, its agent orchestration cycle in action, and the results
-produced on a real test environment.
+The following chapter presents the concrete implementation of this architecture: the working platform, its agent orchestration cycle in action, and the results produced on a real test environment.
 
 % ── Restore default page style ─────────────────────────────────────────────
 \pagestyle{fancy}
@@ -3059,7 +3054,7 @@ The objective of this first active sprint was to establish the foundational infr
 To maintain a lightweight local deployment, SQLite was chosen for project persistence over flat files, while Qdrant was selected for vector retrieval. Redis was introduced specifically for hot runtime coordination. A critical architectural decision was made to abstract provider selection from the agent code by creating the \texttt{LLMClient} gateway.
 
 \subsubsection{Implementation \& Deliverables}
-The sprint delivered a running FastAPI backend with a health endpoint, the SQLite projects store, and Redis/Qdrant containers running via Docker Compose. The \texttt{LLMClient} was implemented to support Ollama and Mistral, alongside an Intel Agent capable of document embedding.
+The sprint delivered a running FastAPI backend with a health endpoint, the SQLite projects store, and Redis/Qdrant containers running via Docker Compose. The \texttt{LLMClient} was implemented to support Ollama (for local execution) and the Mistral AI API, alongside an Intel Agent capable of document embedding.
 
 % ================= SPRINT 2 =================
 \subsection{Sprint 2 --- Planning Engine and Orchestration (Weeks 7--8)}
@@ -3093,7 +3088,7 @@ Sprint 3 delivered the sandboxed execution infrastructure, allowing the AI to sa
 To preserve the separation between the control plane and execution plane, the Sandbox was exposed as a completely separate HTTP service rather than a direct library call. \texttt{run\_custom} guardrails were implemented to classify tools, detect role violations, and validate network scope. A project-scoped tool result cache was introduced to prevent repeated identical executions.
 
 \subsubsection{Implementation \& Deliverables}
-The sprint delivered the Docker-based tool sandbox service (with \texttt{run\_custom} and \texttt{run\_python} routes), the Recon and Exploit Executer agents, automated output parsers for core tools (Nmap, ffuf, SQLMap, Nikto), and the project-scoped tool result cache.
+The sprint delivered the Docker-based tool sandbox service (with \texttt{run\_custom} and \texttt{run\_python} routes), the Recon and Exploit Executor agents, automated output parsers for core tools (Nmap, ffuf, SQLMap, Nikto), and the project-scoped tool result cache.
 
 % ================= SPRINT 4 =================
 \subsection{Sprint 4 --- Analysis and Reporting Agents (Weeks 11--12)}
@@ -3127,7 +3122,7 @@ Sprint 5 delivered the operator-facing desktop application and the critical cont
 Tauri was chosen over Electron to minimize the runtime footprint. Server-Sent Events (SSE) were adopted over standard polling to preserve real-time scan observability. HITL approval gates were modeled as persisted approval states that halt the orchestrator until operator resolution.
 
 \subsubsection{Implementation \& Deliverables}
-The release of the React 19 and Tauri desktop application (Projects, Dashboard, Scan, Reports). This included the SSE-based live event stream, HITL approval banners for sensitive actions, and an Assistant agent featuring RAG-backed project context.
+This sprint delivered the React 19 and Tauri desktop application (Projects, Dashboard, Scan, and Reports). This included the SSE-based live event stream, HITL approval banners for sensitive actions, and an Assistant agent featuring RAG-backed project context.
 
 % ================= SPRINT 6 =================
 \subsection{Sprint 6 --- Integration, Hardening, and Packaging (Weeks 15--16)}
@@ -3185,22 +3180,13 @@ of the runtime behavior of the platform.
 
 The core orchestration of the implemented platform is built on
 \textbf{LangGraph}~\cite{langgraph}, a graph-based agent orchestration framework
-that models the scan lifecycle as a directed state machine. Rather than a single
-procedural script, the scan runtime is expressed as a graph of nodes and conditional
-edges, where each node encapsulates a phase of the engagement --- Intel preparation,
-memory construction, planning, execution, analysis, and reporting --- and each edge
-encodes the transition condition that determines whether the pipeline advances,
-retries, or halts.
+that models the scan lifecycle as a directed state machine. Rather than a single procedural script, the scan runtime is expressed as a graph of nodes and conditional edges. Each node encapsulates a phase of the engagement, such as Intel preparation, memory construction, planning, execution, analysis, and reporting, while each edge encodes the transition condition that determines whether the pipeline advances, retries, or halts.
 
 LangGraph was selected over a plain service orchestrator for three reasons specific
 to PentaForge's requirements. First, its state-machine model maps directly onto the
 smart resume logic: because each node persists its output before transitioning,
 an interrupted scan can be resumed from the last completed node without replaying
-earlier phases. Second, its conditional routing allows the orchestrator to branch
-dynamically based on analyzer output --- for example, looping back to the planner
-when a verified finding opens a new attack path, or escalating to a human approval
-gate before a sensitive tool is dispatched. Third, its native support for
-asynchronous node execution allows the Recon Executer and Exploit Executer to
+earlier phases. Second, its conditional routing allows the orchestrator to branch dynamically based on analyzer output, such as looping back to the planner when a verified finding opens a new attack path, or escalating to a human approval gate before a sensitive tool is dispatched. Third, its native support for asynchronous node execution allows the Recon Executor and Exploit Executor to
 progress independently on separate scenario branches without requiring manual
 threading coordination.
 
@@ -3328,7 +3314,7 @@ configuration, as illustrated in Figure~\ref{fig:report_gen}.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\textwidth]{ui_report_share.png}
+    \includegraphics[width=1\textwidth]{ui_report_share.png}
     \caption{Report generation and sharing controls}
     \label{fig:report_gen}
 \end{figure}
@@ -3340,7 +3326,7 @@ read-only portal, shown in Figure~\ref{fig:client_portal}.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\textwidth]{ui_report_share2.png}
+    \includegraphics[width=1\textwidth]{ui_report_share2.png}
     \caption{Client-facing scoped report portal}
     \label{fig:client_portal}
 \end{figure}
@@ -3366,17 +3352,12 @@ pentest tools that force every engagement into a single flat target field.
 
 \subsection{Platform Settings and AI Provider Configuration}
 
-To support the requirement for flexible reasoning backbones and strict data
-sovereignty, PentaForge exposes a dedicated configuration workspace. Through this
-interface, the operator can seamlessly switch between AI providers --- such as a
-local privacy-preserving model (e.g., Qwen via Ollama) or a high-capacity cloud
-provider (e.g., Gemini). It also centralizes the management of API keys and global
-platform parameters, ensuring the system remains adaptable to different engagement
+To support the requirement for flexible reasoning backbones and strict data sovereignty, PentaForge exposes a dedicated configuration workspace. Through this interface, the operator can seamlessly switch between AI providers, such as a local privacy-preserving model (e.g., Qwen via Ollama) or a high-capacity cloud provider (e.g., Gemini). It also centralizes the management of API keys and global platform parameters, ensuring the system remains adaptable to different engagement
 constraints without requiring backend service restarts.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{ui_settings.png}
+    \includegraphics[width=1\textwidth]{ui_settings.png}
     \caption{Platform configuration and AI provider management interface}
     \label{fig:ui_settings}
 \end{figure}
@@ -3404,10 +3385,7 @@ recon-role violations, validates network targets against the active scope, and
 collects artifact paths created by a command. It also resolves shared resource paths
 such as wordlists and SecLists entries into container-friendly locations.
 
-In practice, this means that the implementation does not treat command execution as a
-simple shell wrapper. It treats it as a policy-checked action with context, target,
-role, and artifact semantics --- a critical property for a security product, because
-the absence of such checks would make the platform itself a risk.
+In practice, this means that the implementation does not treat command execution as a simple shell wrapper. It treats it as a policy-checked action with context, target, role, and artifact semantics. This is a critical property for a security product, because the absence of such checks would make the platform itself a risk.
 
 \subsection{Execution Context and Artifact Handling}
 
@@ -3430,7 +3408,7 @@ runtime weight than a full browser-engine desktop stack.
 \section{End-to-End Execution on a Test Environment}
 
 To validate the platform in realistic conditions, PentaForge was executed in its
-containerized environment with the full operational path enabled: desktop UI,
+\mbox{containerized} environment with the full operational path enabled: desktop UI,
 backend API, Redis, Qdrant, and the isolated tool sandbox. The following scenario
 illustrates how the implemented modules cooperate during a standard engagement.
 
@@ -3528,18 +3506,20 @@ The validation strategy is based on five axes:
 
 \subsection{Functional Test Matrix}
 
-Standard platform operations---such as project creation, deletion, report regeneration, and protected downloads---were validated successfully and behave exactly as expected. To avoid diluting the evaluation with trivial CRUD operations, the functional test matrix below focuses strictly on the complex orchestration, agent reasoning, state-recovery, and data-isolation scenarios that validate PentaForge's core architecture.
+Standard platform operations, such as project creation, deletion, report regeneration, and protected downloads, were validated successfully and behave exactly as expected. To avoid diluting the evaluation with trivial CRUD operations, the functional test matrix below focuses strictly on the complex orchestration, agent reasoning, state-recovery, and data-isolation scenarios that validate PentaForge's core architecture.
 
 \begin{longtable}{|p{0.08\textwidth}|p{0.24\textwidth}|p{0.28\textwidth}|p{0.30\textwidth}|}
+\caption{Functional test matrix}\label{tab:functional_test_matrix}\\
 \hline
 \textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance criterion} \\
 \hline
 \endfirsthead
+\caption[]{Functional test matrix (continued)}\\
 \hline
 \textbf{ID} & \textbf{Scenario} & \textbf{Expected result} & \textbf{Acceptance criterion} \\
 \hline
 \endhead
-T01 & Start a scan on a valid target & Pipeline enters running state and emits live updates. & UI shows planner, executer, analyzer, timer, and latest messages. \\
+T01 & Start a scan on a valid target & Pipeline enters running state and emits live updates. & UI shows planner, executor, analyzer, timer, and latest messages. \\
 \hline
 T02 & Generate checklist & Checklist is created from target type and project context. & Checklist items are saved and remain available after refresh. \\
 \hline
@@ -3553,14 +3533,13 @@ T06 & Stop and resume before checklist & Incomplete scan starts from scratch. & 
 \hline
 T07 & Stop after checklist before plan & Plan is created on resume. & Checklist is preserved and execution continues. \\
 \hline
-T08 & Stop during scenario execution & Running scenario restarts from executer. & Completed scenarios are not repeated unless manually requested. \\
+T08 & Stop during scenario execution & Running scenario restarts from executor. & Completed scenarios are not repeated unless manually requested. \\
 \hline
 T09 & Generate report with no findings & Report states no verified findings. & It includes methodology, coverage, limitations, and project history without invented vulnerabilities. \\
 \hline
 T10 & Same target in two projects & Reports remain project-scoped. & Findings from one project do not appear in another project unless generated there. \\
 \hline
-\caption{Functional test matrix}
-\label{tab:functional_test_matrix}
+% caption and label are defined at the top of the longtable
 \end{longtable}
 \subsection{Workflow Validation}
 
@@ -3669,7 +3648,7 @@ Scope validation & Tool execution outside authorized target & Commands targeting
 out-of-scope hosts are rejected before sandbox execution. \\
 \hline
 Sandbox isolation & Local system compromise through tool execution & Tools run in
-a controlled containerized environment with limited access. \\
+a controlled \mbox{containerized} environment with limited access. \\
 \hline
 Tool routing & Uncontrolled arbitrary command execution & Agent requests pass
 through approved routing and policy checks. \\
@@ -4000,6 +3979,18 @@ LangChain, Inc.
 \textit{LangGraph: A Library for Building Stateful, Multi-Actor LLM Applications}.
 Available at: \url{https://langchain-ai.github.io/langgraph/}
 (accessed May 2026).
+
+\bibitem{pmpartnersScrumProcess}
+PM Partners.
+\textit{Scrum Process} (image).
+Available at: \url{https://share.google/5HtFyjvGZg3le6mXj}
+(accessed June 2026).
+
+\bibitem{talanLogo}
+Talan.
+\textit{Talan Logo} (image).
+Available at: \url{https://share.google/cRQadkwXqYaxIiegY}
+(accessed June 2026).
 
 \end{thebibliography}
 \end{document}

@@ -224,11 +224,27 @@ OUTPUT — strict JSON only:
   }
 }"""
 
-PLAN_CREATE_UPDATE_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
+PLANNER_SYSTEM_PROMPT = SHARED_GROUNDING_RULES + "\n\n" + SHARED_CONSTANTS + "\n\n" + """\
 You are PentaForge, an elite expert penetration tester with 30 years of experience. You think like a sophisticated adversary and look for deep, systemic vulnerabilities that others miss.
-Generate exactly two targeted scenarios to execute next.
+Generate exactly {{scenario_count_word}} targeted scenarios to execute next.
 
 Engagement: {{ENGAGEMENT_TYPE}}
+
+TESTING DOMAINS SCHEMA:
+You MUST categorize every scenario into one of these 5 domains (use the integer ID 1 to 5):
+1: Infrastructure & Service Reconnaissance (RECON)
+2: Configuration & Information Disclosure (CONF)
+3: Authentication & Session Management (AUTH)
+4: Input Validation & Injection (INJ)
+5: Authorization & Business Logic (AUTHZ)
+
+PHASE INSTRUCTIONS:
+- You MUST return EXACTLY {{SCENARIO_COUNT}} scenarios.
+{{#if is_initial}}
+- You MUST provide exactly ONE scenario for each of the 5 domains (IDs 1, 2, 3, 4, 5).
+{{else}}
+- Pick the {{SCENARIO_COUNT}} highest priority items across any relevant domains.
+{{/if}}
 
 GOAL: Find all vulnerabilities. Exploit when justified by evidence.
 {{#if ctf}}Capture all flags. Do not stop while evidence-backed paths remain.{{/if}}
@@ -236,13 +252,23 @@ GOAL: Find all vulnerabilities. Exploit when justified by evidence.
 AGENTS: recon | exploit only.
 FORBIDDEN AGENTS: verify, retest, analyser, report — and any scenario whose purpose is documentation, evidence capture, or reporting. Those are Analyzer tasks.
 
-SCENARIO COUNT: You MUST create and return EXACTLY 2 distinct scenarios derived directly from the checklist and current memory. Do NOT generate a full pentest plan. Do NOT output a plan with phases. This is a strict requirement.
+CURRENT STATE:
+You are provided with a plan state containing a backlog of scenarios. 
+- Some are marked as completed, failed, or blocked (with results).
+- Some are marked as pending (waiting to be executed).
+
+SCENARIO COUNT: You MUST create and return EXACTLY {{scenario_count_word}} ({{SCENARIO_COUNT}}) NEW scenarios derived directly from the checklist and current memory. Add them to the backlog. CRITICAL: If you cannot find enough distinct ideas, you MUST create reasonable variations or deeper reconnaissance tasks to reach EXACTLY {{SCENARIO_COUNT}} scenarios. Missing this target is a critical failure.
 
 PLAN RULES:
 - IMPORTANT: Before returning the final JSON, you MAY use your available tools (`search_kb`, `search_web`, `get_page`) if you need more information about a detected technology, a specific CVE, or a vulnerability concept to formulate the scenarios. You MUST use the provided CHECKLIST as your foundational base, and combine its items with the fresh results from your tool calls to create the final scenarios. Once you have the information you need, output the final JSON.
 - Every scenario must be unique, evidence-backed, and reference a specific artifact.
-- DIVERSITY REQUIREMENT: You MUST NOT schedule the exact same attack surface or CVE for both slots in the same cycle. Pick two distinct targets, surfaces, or vulnerabilities.
-- STRICT ANTI-REPETITION: You will be provided with a list of past scenarios. Do NOT repeat any completed, failed, or blocked scenario. Do NOT try to bypass this rule by slightly rewriting or rephrasing the task description. If an endpoint, CORS wildcard, or CVE has already been tested, consider that surface EXHAUSTED unless the analyzer provided brand new, different evidence. Pick a completely different checklist item instead.
+- DIVERSITY REQUIREMENT: You MUST NOT schedule the exact same attack surface or CVE for all slots in the same cycle. Pick distinct targets, surfaces, or vulnerabilities.
+- NEVER hyper-focus on a single attack surface. If recent completed tasks focused on 'Endpoint A', your new scenarios MUST target a different surface (e.g., 'Endpoint B', Subdomains, or different ports) unless a critical, highly exploitable vulnerability was just discovered.
+- Look at the pending tasks. Do not generate new tasks that are identical or overly similar to tasks that are already waiting in the queue.
+- Broaden the scope: If we have been doing Recon, add Exploit scenarios. If we have been focusing on Web, add Infrastructure scenarios.
+- VULNERABILITY COVERAGE: You MUST always generate scenarios to test for common high-impact web vulnerabilities (e.g., XSS, SQLi, IDOR, SSRF, Broken Access Control) if they have not been thoroughly tested on the current surfaces.
+- CONTINUOUS RECON: Always integrate reconnaissance and passive search (e.g., parameter discovery, hidden endpoint discovery) into your planning, even during exploitation phases, to ensure no attack surface is missed.
+- STRICT ANTI-REPETITION: Do NOT repeat any completed, failed, or blocked scenario. Do NOT try to bypass this rule by slightly rewriting or rephrasing the task description. If an endpoint, CORS wildcard, or CVE has already been tested, consider that surface EXHAUSTED unless the analyzer provided brand new, different evidence. Pick a completely different checklist item instead.
 - Assign a priority from 1 to 5 (where 5 is the highest/most critical priority).
 - SKIP FALSE POSITIVES: Actively identify and avoid generating scenarios for false positives. Focus on high-value, verifiable findings.
 
@@ -268,72 +294,24 @@ CHAIN RECOGNITION (CONCRETE EXAMPLES):
   * Incorrect (Invented) `evidence_basis`: `["/api/admin/data"]` (if not previously observed)
 
 ACTIVE SCENARIOS CONTRACT:
-  You MUST output exactly two high-priority scenarios.
+  You MUST output exactly {{SCENARIO_COUNT}} high-priority scenarios.
   Choose the strongest next evidence-driven move — not always recon.
 
 SCENARIO FORMAT:
 {
-  "task": "<specific, artifact-grounded action>",
-  "agent": "recon|exploit",
-  "priority": <1-5>,
-  "evidence_tier": "observed|hypothesized|confirmed",
-  "confidence_label": "low|medium|high",
-  "prerequisites": ["<short evidence requirement>", "..."],
-  "evidence_basis": ["<observed route/header/param/file/service>", "..."],
-  "max_rounds": <1|2|3>,
-  "details": "...",
-  "methods": ["<technique name>"],
-  "done": false
+  "scenarios": [
+    {
+      "section_id": <1|2|3|4|5>,
+      "task": "<specific, artifact-grounded action>",
+      "agent": "recon|exploit",
+      "priority": <1-5>,
+      "status": "not yet",
+      "evidence_tier": "observed|hypothesized|confirmed",
+      "evidence_basis": ["/api/v1/auth", "X-Custom-Header found in response"]
+    }
+  ]
 }
-
-max_rounds:
-  1 = straightforward recon or single-step validation
-  2 = most exploit work
-  3 = iterative chaining only
-  Executor stops the scenario as soon as the goal in `task` is met regardless of remaining rounds.
-
-Evidence metadata rule:
-  - evidence_tier=observed: concrete artifact already seen; recon or exploit may use it directly
-  - evidence_tier=hypothesized: plausible next check; keep it validation-first
-  - evidence_tier=confirmed: prerequisite evidence already exists and exploitation is justified
-
-ACTION PLAN SCHEMAS:
-  dispatch: [<the EXACTLY TWO scenarios formatted as defined in SCENARIO FORMAT>]
-
-OUTPUT RULES:
-- Do NOT return a full plan structure.
-- You MUST return EXACTLY TWO scenarios inside the `dispatch` array.
-- The two scenarios MUST be fully formatted according to the SCENARIO FORMAT.
-- Do NOT output any other scenarios.
-
-OUTPUT — strict JSON only:
-{
-  "summary": "...",
-  "needs": [],
-  "action_plan": {
-    "dispatch": [
-      {
-        "task": "...",
-        "agent": "recon|exploit",
-        "priority": 5,
-        "evidence_tier": "observed|hypothesized|confirmed",
-        "confidence_label": "low|medium|high",
-        "prerequisites": ["..."],
-        "evidence_basis": ["..."],
-        "max_rounds": 2,
-        "details": "...",
-        "methods": ["..."],
-        "done": false
-      }
-    ],
-    "rationale": "..."
-  }
-}"""
-
-import json
-import re
-from typing import Any
-
+"""
 
 def _clean_route_list(values: Any, *, limit: int = 12) -> list[str]:
     if not isinstance(values, list):
@@ -474,14 +452,17 @@ def trim_brain(brain: dict[str, Any], max_chars: int = 6000) -> str:
         result = json.dumps(trimmed)
     return result
 
-def trim_plan_state(plan_state: dict[str, Any], max_completed: int = 10) -> dict[str, Any]:
-    """Trim completed scenarios to only the newest N to save tokens."""
+def trim_plan_state(plan_state: dict[str, Any], max_total: int = 20) -> dict[str, Any]:
+    """Trim scenarios so that the Planner sees a maximum of `max_total` scenarios.
+    It must ALWAYS see all pending scenarios, and fills the rest of the limit with the most recent completed scenarios."""
     plan_copy = dict(plan_state)
     phases = plan_copy.get("phases")
     if not isinstance(phases, list):
         return plan_copy
         
+    pending_scenarios = []
     completed_scenarios = []
+    
     for phase in phases:
         if not isinstance(phase, dict): continue
         steps = phase.get("steps", [])
@@ -497,34 +478,36 @@ def trim_plan_state(plan_state: dict[str, Any], max_completed: int = 10) -> dict
                 }
                 if is_done:
                     completed_scenarios.append(scenario)
+                else:
+                    pending_scenarios.append(scenario)
                     
-    if len(completed_scenarios) > max_completed:
-        keep_ids = {id(s) for s in completed_scenarios[-max_completed:]}
+    # We want max `max_total` total scenarios.
+    # Always keep pending scenarios first, up to max_total. Prioritize newest pending.
+    keep_pending = pending_scenarios[-max_total:]
+    num_completed_to_keep = max(0, max_total - len(keep_pending))
+    
+    keep_ids = {id(s) for s in keep_pending}
+    if num_completed_to_keep > 0:
+        keep_ids.update(id(s) for s in completed_scenarios[-num_completed_to_keep:])
         
-        new_phases = []
-        for phase in phases:
-            if not isinstance(phase, dict): continue
-            new_phase = dict(phase)
-            new_steps = []
-            for step in phase.get("steps", []):
-                if not isinstance(step, dict): continue
-                new_step = dict(step)
-                new_scenarios = []
-                for scenario in step.get("scenarios", []):
-                    if not isinstance(scenario, dict): continue
-                    is_done = bool(scenario.get("done", False)) or str(scenario.get("status", "")).strip().lower() in {
-                        "completed", "failed", "blocked", "vulnerable", "not_vulnerable", "inconclusive", "false_positive", "real_vulnerability"
-                    }
-                    if is_done:
-                        if id(scenario) in keep_ids:
-                            new_scenarios.append(scenario)
-                    else:
-                        new_scenarios.append(scenario)
-                new_step["scenarios"] = new_scenarios
-                new_steps.append(new_step)
-            new_phase["steps"] = new_steps
-            new_phases.append(new_phase)
-        plan_copy["phases"] = new_phases
+    new_phases = []
+    for phase in phases:
+        if not isinstance(phase, dict): continue
+        new_phase = dict(phase)
+        new_steps = []
+        for step in phase.get("steps", []):
+            if not isinstance(step, dict): continue
+            new_step = dict(step)
+            new_scenarios = []
+            for scenario in step.get("scenarios", []):
+                if not isinstance(scenario, dict): continue
+                if id(scenario) in keep_ids:
+                    new_scenarios.append(scenario)
+            new_step["scenarios"] = new_scenarios
+            new_steps.append(new_step)
+        new_phase["steps"] = new_steps
+        new_phases.append(new_phase)
+    plan_copy["phases"] = new_phases
 
     return plan_copy
 
@@ -536,16 +519,45 @@ def render_planner_prompt(
     brain: dict[str, Any],
     checklist_state: dict[str, Any],
     plan_state: dict[str, Any],
+    scenario_count: int = 2,
+    is_initial: bool = False,
 ) -> str:
     prompt = prompt_template
+    
+    total_scenarios = 0
+    if plan_state and "phases" in plan_state and isinstance(plan_state["phases"], list):
+        for phase in plan_state["phases"]:
+            if isinstance(phase, dict) and isinstance(phase.get("steps"), list):
+                for step in phase["steps"]:
+                    if isinstance(step, dict) and isinstance(step.get("scenarios"), list):
+                        total_scenarios += len(step["scenarios"])
+
     prompt = prompt.replace("{{ctf|pentest}}", engagement_type)
     prompt = prompt.replace("{{target_description}}", target)
     prompt = prompt.replace("{{scope}}", scope)
     prompt = prompt.replace("{{brain_json}}", trim_brain(brain))
-    prompt = prompt.replace("{{checklist_json}}", json.dumps(checklist_state))
-    prompt = prompt.replace("{{plan_json}}", json.dumps(trim_plan_state(plan_state)))
+    
+    if total_scenarios >= 15:
+        prompt = prompt.replace("{{checklist_json}}", '{"info": "Checklist removed to save context. Focus on pending plan state."}')
+    else:
+        prompt = prompt.replace("{{checklist_json}}", json.dumps(checklist_state))
+        
+    prompt = prompt.replace("{{plan_json}}", json.dumps(trim_plan_state(plan_state, max_total=20)))
     prompt = prompt.replace("{{ENGAGEMENT_TYPE}}", engagement_type)
     
+    scenario_count_word = "FIVE" if scenario_count == 5 else "TWO"
+    prompt = prompt.replace("{{SCENARIO_COUNT}}", str(scenario_count))
+    prompt = prompt.replace("{{SCENARIO_COUNT_WORD}}", scenario_count_word)
+    prompt = prompt.replace("{{scenario_count_word}}", scenario_count_word.lower())
+    
+    import re
+    if is_initial:
+        # Keep the content inside {{#if is_initial}}...{{else}} and remove the {{else}}...{{/if}} part
+        prompt = re.sub(r"\{\{#if is_initial\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}", r"\1", prompt, flags=re.DOTALL)
+    else:
+        # Keep the content inside {{else}}...{{/if}} and remove the {{#if is_initial}}...{{else}} part
+        prompt = re.sub(r"\{\{#if is_initial\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}", r"\2", prompt, flags=re.DOTALL)
+
     if engagement_type.lower() == "ctf":
         prompt = prompt.replace("{{#if ctf}}", "").replace("{{/if}}", "")
     else:

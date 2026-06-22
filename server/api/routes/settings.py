@@ -182,16 +182,31 @@ async def test_llm_config(profile: LLMProfile) -> dict[str, Any]:
     )
     
     try:
+        import asyncio
         async with LLMClient(config=config, client_name="config_test") as client:
-            response = await client.chat([
-                ChatMessage(role="user", content="Respond with only the word 'OK'.")
-            ])
+            try:
+                response = await asyncio.wait_for(
+                    client.chat([
+                        ChatMessage(role="user", content="Respond with only the word 'OK'.")
+                    ], max_retries=0),
+                    timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                return {"ok": False, "message": "Connection timed out after 45 seconds. The provider's API server is unreachable, blocking the connection, or taking too long to respond."}
+            
             if response.content and "OK" in response.content.upper():
                 return {"ok": True, "message": "Connection successful"}
             return {"ok": False, "message": f"Unexpected response: {response.content}"}
     except Exception as exc:
-        logger.error("llm_test_failed", error=str(exc))
-        return {"ok": False, "message": str(exc)}
+        import httpx
+        error_msg = str(exc)
+        if isinstance(exc, httpx.HTTPStatusError):
+            try:
+                error_msg = f"{exc} - Details: {exc.response.text}"
+            except Exception:
+                pass
+        logger.error("llm_test_failed", error=error_msg)
+        return {"ok": False, "message": error_msg}
 
 class SudoValidationRequest(BaseModel):
     password: str

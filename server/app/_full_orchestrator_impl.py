@@ -5043,6 +5043,7 @@ def _fallback_methods_for_checklist_item(
 
 def _phase_name_for_checklist_title(title: str, phase_number: str) -> str:
     normalized_title = str(title or "").strip().lower()
+    
     if "report" in normalized_title or "cleanup" in normalized_title:
         return "Reporting"
     if "post" in normalized_title or "flag" in normalized_title:
@@ -5906,7 +5907,6 @@ class AnalyzerScanCallback(ExecuterScanCallback):
             data={"stage": "analyzer", "kind": "warn", "raw_message": message},
         )
 
-
 class WorkerExecuterCallback:
     """Prefixes executer callback logs with a stable worker label."""
 
@@ -6002,6 +6002,7 @@ class ScanOrchestratorService:
         self._projects_store = projects_store
         self._vector_store = QdrantVectorStore()
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._bg_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._runs: dict[str, dict[str, Any]] = {}
         self._info_gathering_approval_events: dict[str, asyncio.Event] = {}
         self._planner_approval_events: dict[str, asyncio.Event] = {}
@@ -6454,6 +6455,11 @@ class ScanOrchestratorService:
         task = self._tasks.get(project_key)
         if task is not None and not task.done():
             task.cancel()
+            
+        bg_tasks = self._bg_tasks.get(project_key, set())
+        for bg_t in list(bg_tasks):
+            if not bg_t.done():
+                bg_t.cancel()
         info_gate = self._info_gathering_approval_events.get(project_key)
         if info_gate is not None:
             loop = getattr(info_gate, "_loop", None)
@@ -8963,6 +8969,8 @@ class ScanOrchestratorService:
                         project_cache_dir=project_cache_dir,
                     )
                 )
+                self._bg_tasks.setdefault(project_id, set()).add(poc_task)
+                poc_task.add_done_callback(lambda t, pid=project_id: self._bg_tasks.get(pid, set()).discard(t))
                 poc_background_tasks.append(poc_task)
 
         # Build aggregated planner message with all findings

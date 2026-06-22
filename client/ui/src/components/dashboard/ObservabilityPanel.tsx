@@ -54,38 +54,7 @@ export function ObservabilityPanel({ timeline, metrics }: ObservabilityPanelProp
     }
   }, [timeline.length]);
 
-  const metricCards = [
-    {
-      label: "Avg Cycle",
-      value: metrics ? formatMetricSeconds(metrics.average_cycle_time_seconds) : "0s",
-      hint: metrics ? `${metrics.cycle_count} measured cycles` : "No cycles measured",
-      icon: Clock3,
-    },
-    {
-      label: "Approval Delay",
-      value: metrics ? formatMetricSeconds(metrics.average_approval_delay_seconds) : "0s",
-      hint: metrics ? `${metrics.approval_count} resolved approvals` : "No approvals measured",
-      icon: TimerReset,
-    },
-    {
-      label: "Tool Failure",
-      value: metrics ? formatRate(metrics.tool_failure_rate) : "0%",
-      hint: metrics ? `${metrics.failed_tool_log_count}/${metrics.tool_log_count} tool records` : "No tool records",
-      icon: AlertTriangle,
-    },
-    {
-      label: "False Positives",
-      value: metrics ? formatRate(metrics.false_positive_rate) : "0%",
-      hint: metrics ? `${metrics.false_positive_count} dismissed / ${metrics.verified_vulnerability_count} verified` : "No findings verified",
-      icon: ActivitySquare,
-    },
-    {
-      label: "Resume Success",
-      value: metrics ? formatRate(metrics.resume_success_rate) : "0%",
-      hint: metrics ? `${metrics.resume_success_count}/${metrics.resume_attempt_count} resumed scans reached terminal state` : "No resume attempts",
-      icon: RotateCcw,
-    },
-  ];
+
 
   return (
     <Card className="space-y-4 p-3">
@@ -96,26 +65,7 @@ export function ObservabilityPanel({ timeline, metrics }: ObservabilityPanelProp
         <p className="text-sm text-text-muted">{timeline.length} timeline rows</p>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-5">
-        {metricCards.map((metric) => {
-          const Icon = metric.icon;
-          return (
-            <div
-              key={metric.label}
-              className="rounded-xl border border-border/60 bg-surface-0/35 px-3 py-3 dark:border-border"
-            >
-              <div className="flex items-center gap-2 text-text-muted">
-                <Icon size={14} />
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em]">
-                  {metric.label}
-                </p>
-              </div>
-              <p className="mt-2 text-lg font-semibold text-text-primary">{metric.value}</p>
-              <p className="mt-1 text-xs leading-5 text-text-secondary">{metric.hint}</p>
-            </div>
-          );
-        })}
-      </div>
+
 
       <div className="overflow-hidden rounded-xl border border-border/60 bg-surface-0/35 dark:border-border">
         <div className="grid grid-cols-[90px_160px_140px_1fr] gap-2 border-b border-border/60 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted dark:border-border">

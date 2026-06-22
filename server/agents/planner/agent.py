@@ -61,7 +61,7 @@ from .config import (
 from .context_builder import PlannerContextBuilder
 from .prompts import (
     CHECKLIST_GENERATOR_SYSTEM_PROMPT,
-    PLAN_CREATE_UPDATE_SYSTEM_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
     render_planner_prompt,
 )
 from .tools import ALL_PLANNER_TOOLS
@@ -815,12 +815,27 @@ def _build_loop_plan_context_message(intel_checklist: dict[str, Any] = None, tar
     try:
         from server.agents.planner.agent import memory
         if memory and target:
-            query_str = f"Information gathering findings and completed scenarios for {target}"
-            results = memory.search(query=query_str, limit=10, filters={"user_id": "pentaforge_analyzer"})
+            queries = [
+                target, # Direct recent context for the target
+                f"Confirmed vulnerabilities, passwords, and exploit proofs for {target}",
+                f"Discovered endpoints, hidden paths, and open ports for {target}"
+            ]
+            all_results = []
+            for q in queries:
+                res = memory.search(query=q, limit=5, filters={"user_id": "pentaforge_analyzer"})
+                if res and isinstance(res, list):
+                    all_results.extend(res)
+            
             chunks = []
-            for r in results:
-                content = r.get("memory", r.get("text", str(r))) if isinstance(r, dict) else str(r)
-                chunks.append(f"  - {content}")
+            seen = set()
+            for r in all_results:
+                content = str(r.get("memory", r.get("text", str(r))) if isinstance(r, dict) else str(r)).strip()
+                if content and content not in seen:
+                    seen.add(content)
+                    chunks.append(f"  - {content}")
+                    if len(chunks) >= 15: # Cap total memory lines
+                        break
+            
             if chunks:
                 mem0_context = "\n\nMEM0 RAG CONTEXT (Info Gathering & Completed Scenarios):\n" + "\n".join(chunks)
     except Exception:
@@ -1044,7 +1059,56 @@ def _parse_planner_output(raw: str) -> PlannerResult:
         data = json.loads(json_str)
         if isinstance(data, dict):
             data_lower = {k.lower(): v for k, v in data.items()}
-            scenarios = data_lower.get("scenarios", [])
+            
+            # Extract scenarios from phases array if present
+            scenarios = []
+            phases = data_lower.get("phases", [])
+            if isinstance(phases, list):
+                for phase in phases:
+                    if isinstance(phase, dict):
+                        # Case-insensitive lookup for 'scenarios'
+                        phase_lower = {k.lower(): v for k, v in phase.items()}
+                        if "scenarios" in phase_lower:
+                            scen_list = phase_lower.get("scenarios", [])
+                            if isinstance(scen_list, list):
+                                scenarios.extend(scen_list)
+                            
+            if not scenarios:
+                scenarios = data_lower.get("scenarios", [])
+                
+            if not scenarios:
+                plan_obj = data_lower.get("plan", {})
+                if isinstance(plan_obj, dict):
+                    plan_lower = {k.lower(): v for k, v in plan_obj.items()}
+                    scenarios = plan_lower.get("scenarios", [])
+                    if not scenarios:
+                        phases_in_plan = plan_lower.get("phases", [])
+                        if isinstance(phases_in_plan, list):
+                            for phase in phases_in_plan:
+                                if isinstance(phase, dict):
+                                    phase_lower = {k.lower(): v for k, v in phase.items()}
+                                    scen_list = phase_lower.get("scenarios", [])
+                                    if isinstance(scen_list, list):
+                                        scenarios.extend(scen_list)
+
+            if not scenarios:
+                action_plan_obj = data_lower.get("action_plan", {})
+                if isinstance(action_plan_obj, dict):
+                    ap_lower = {k.lower(): v for k, v in action_plan_obj.items()}
+                    plan_obj = ap_lower.get("plan", {})
+                    if isinstance(plan_obj, dict):
+                        plan_lower = {k.lower(): v for k, v in plan_obj.items()}
+                        scenarios = plan_lower.get("scenarios", [])
+                        if not scenarios:
+                            phases_in_plan = plan_lower.get("phases", [])
+                            if isinstance(phases_in_plan, list):
+                                for phase in phases_in_plan:
+                                    if isinstance(phase, dict):
+                                        phase_lower = {k.lower(): v for k, v in phase.items()}
+                                        scen_list = phase_lower.get("scenarios", [])
+                                        if isinstance(scen_list, list):
+                                            scenarios.extend(scen_list)
+                                            
             if not isinstance(scenarios, list):
                 scenarios = []
             scenarios = [
@@ -1061,16 +1125,16 @@ def _parse_planner_output(raw: str) -> PlannerResult:
             if not summary and action_plan:
                 summary = str(action_plan.get("rationale", "") or "")
             
-            scen_list = scenarios[:2]
             try:
                 from server.agents.planner.agent import memory as mem0_client
-                if mem0_client and scen_list:
-                    mem0_client.add(messages=[{"role": "user", "content": "Planner queued new scenarios:\n" + json.dumps(scen_list)}], user_id="pentaforge_analyzer")
+                if mem0_client and scenarios:
+                    # Save a limited summary to mem0 to save tokens, but return all scenarios
+                    mem0_client.add(messages=[{"role": "user", "content": "Planner queued new scenarios:\n" + json.dumps(scenarios[:2])}], user_id="pentaforge_analyzer")
             except Exception:
                 pass
                 
             return PlannerResult(
-                scenarios=scen_list,
+                scenarios=scenarios,
                 needs=needs,
                 summary=str(summary),
                 action_plan=action_plan,
@@ -1767,7 +1831,7 @@ class PlannerAgent:
             self._context_builder = PlannerContextBuilder(
                 projects_store=self._projects_store,
                 vector_store=self._vector_store,
-                system_prompt=PLAN_CREATE_UPDATE_SYSTEM_PROMPT,
+                system_prompt=PLANNER_SYSTEM_PROMPT,
             )
         else:
             self._context_builder = None
@@ -2544,29 +2608,6 @@ class PlannerAgent:
             if isinstance(action_plan_plan, dict):
                 plan_payload = action_plan_plan
 
-        if plan_payload is not None:
-            persist_status = await update_pentest_plan.execute(
-                target=plan_payload.get("target", ""),
-                scope=plan_payload.get("scope", ""),
-                target_types=plan_payload.get("target_types"),
-                phases=plan_payload.get("phases"),
-                notes=plan_payload.get("notes", ""),
-                planner_round=rounds,
-            )
-            lowered = str(persist_status).strip().lower()
-            if not lowered.startswith("plan updated"):
-                err_msg = str(persist_status).strip() or "invalid plan payload"
-                self._cb.on_warn(f"Planning failed: {err_msg}")
-                return {
-                    "plan_result": {
-                        "scenarios": [],
-                        "needs": [],
-                        "summary": f"Planning failed: {err_msg}",
-                        "action_plan": {},
-                    }
-                }
-            self._cb.on_done("Planner plan persisted (static apply).")
-
         result = _parse_planner_output(content)
         if action_plan and not result.action_plan:
             result.action_plan = action_plan
@@ -2606,30 +2647,80 @@ class PlannerAgent:
         )
         action_plan_payload["target_types"] = effective_target_types
 
-        # The user wants exactly two scenarios returned directly.
-        result.scenarios = action_plan_payload.get("dispatch", [])[:2]
+        # Show all scenarios the planner returns
+        extracted_scenarios = result.scenarios if result.scenarios else []
+        result.scenarios = extracted_scenarios
 
-        # Auto-inject these scenarios into the global _current_plan so the orchestrator executes them!
-        if result.scenarios:
-            if not isinstance(_current_plan.get("phases"), list):
-                _current_plan["phases"] = []
-            if not _current_plan["phases"]:
-                _current_plan["phases"].append({
-                    "name": "Phase 1: Active Execution",
-                    "steps": [{"name": "Step 1", "scenarios": []}]
-                })
+        section_map = {
+            1: "Infrastructure & Service Reconnaissance (RECON)",
+            2: "Configuration & Information Disclosure (CONF)",
+            3: "Authentication & Session Management (AUTH)",
+            4: "Input Validation & Injection (INJ)",
+            5: "Authorization & Business Logic (AUTHZ)"
+        }
+        
+        step_by_name = {}
+        for s in result.scenarios:
+            sid = s.get("section_id")
+            try:
+                sid = int(sid)
+            except (ValueError, TypeError):
+                sid = 1  # default to recon
+                
+            step_name = section_map.get(sid, section_map[1])
+            if step_name not in step_by_name:
+                step_by_name[step_name] = {"name": step_name, "scenarios": []}
+            step_by_name[step_name]["scenarios"].append(s)
             
-            first_phase = _current_plan["phases"][0]
-            if not isinstance(first_phase.get("steps"), list):
-                first_phase["steps"] = []
-            if not first_phase["steps"]:
-                first_phase["steps"].append({"name": "Dynamic Loop Scenarios", "scenarios": []})
-                
-            first_step = first_phase["steps"][0]
-            if not isinstance(first_step.get("scenarios"), list):
-                first_step["scenarios"] = []
-                
-            first_step["scenarios"].extend(result.scenarios)
+        generated_phases = [
+            {"name": "Infrastructure & Service Reconnaissance (RECON)", "steps": []},
+            {"name": "Configuration & Information Disclosure (CONF)", "steps": []},
+            {"name": "Authentication & Session Management (AUTH)", "steps": []},
+            {"name": "Input Validation & Injection (INJ)", "steps": []},
+            {"name": "Authorization & Business Logic (AUTHZ)", "steps": []}
+        ]
+        
+        existing_step_count = 0
+        if isinstance(_current_plan, dict) and isinstance(_current_plan.get("phases"), list):
+            for phase in _current_plan["phases"]:
+                if isinstance(phase, dict) and isinstance(phase.get("steps"), list):
+                    existing_step_count += len(phase["steps"])
+                    
+        step_counter = existing_step_count
+        for step_name, step_data in step_by_name.items():
+            for phase in generated_phases:
+                if phase["name"] == step_name:
+                    for scenario in step_data["scenarios"]:
+                        step_counter += 1
+                        phase["steps"].append({
+                            "id": f"{step_name.lower()}-step-{step_counter:02d}",
+                            "description": f"Scenario {step_counter}",
+                            "scenarios": [scenario]
+                        })
+                    break
+
+        persist_status = await update_pentest_plan.execute(
+            target=plan_payload.get("target", "") if plan_payload else "",
+            scope=plan_payload.get("scope", "") if plan_payload else "",
+            target_types=effective_target_types,
+            phases=generated_phases,
+            notes=plan_payload.get("notes", "") if plan_payload else "",
+            planner_round=rounds,
+        )
+        
+        lowered = str(persist_status).strip().lower()
+        if not lowered.startswith("plan updated"):
+            err_msg = str(persist_status).strip() or "invalid plan payload"
+            self._cb.on_warn(f"Planning failed: {err_msg}")
+            return {
+                "plan_result": {
+                    "scenarios": [],
+                    "needs": [],
+                    "summary": f"Planning failed: {err_msg}",
+                    "action_plan": {},
+                }
+            }
+        self._cb.on_done("Planner plan persisted (static apply).")
 
         try:
             from server.agents.planner.agent import memory
@@ -2861,9 +2952,9 @@ class PlannerAgent:
         }.get(normalized_plan_mode, "full plan")
         self._cb.on_step(f"Planner Agent starting ({mode_label})")
         if normalized_plan_mode == "loop":
-            system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
+            system_content = PLANNER_SYSTEM_PROMPT
         else:
-            system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
+            system_content = PLANNER_SYSTEM_PROMPT
 
         # For loop rounds, use the 6-part context builder if available
         if normalized_plan_mode == "loop" and self._context_builder:
@@ -2877,7 +2968,7 @@ class PlannerAgent:
             except Exception as exc:
                 logger.warning("context_builder_failed", error=str(exc))
                 # Fall back to static prompt if context builder fails
-                system_content = PLAN_CREATE_UPDATE_SYSTEM_PROMPT
+                system_content = PLANNER_SYSTEM_PROMPT
 
         project = self._projects_store.get_project(self._project_id) if self._projects_store else {}
         if not isinstance(project, dict): project = {}
@@ -2923,14 +3014,17 @@ class PlannerAgent:
                             filtered_scenarios.append(s)
                     phase["scenarios"] = filtered_scenarios
 
+        prompt_template = PLANNER_SYSTEM_PROMPT
         system_content = render_planner_prompt(
-            system_content,
+            prompt_template,
             engagement_type=engagement_type,
             target=target,
             scope=scope,
             brain=brain,
             checklist_state={"status": "absorbed_into_plan", "note": "Checklist is omitted during loop execution to save tokens."} if normalized_plan_mode == "loop" else (checklist_compact_summary if checklist_compact_summary else checklist_state),
             plan_state=filtered_plan_state,
+            scenario_count=2 if normalized_plan_mode == "loop" else 5,
+            is_initial=(normalized_plan_mode != "loop"),
         )
 
         if _needs_nothink(self._model_name):

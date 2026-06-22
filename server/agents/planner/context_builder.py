@@ -307,7 +307,7 @@ OUTPUT FORMAT (strict JSON, always 4 keys):
 {
   "summary": "(<50 chars) your decision: e.g., 'Exploit SQLi on login, continue enum'",
   "needs": ["..."],                    # Items you need to know before next round
-  "plan": {                            # Optional — only if updating plan
+  "plan": {                            # REQUIRED — you MUST output ONLY your new scenarios here (DO NOT include existing ones)
     "phases": [
       {
         "name": "...",

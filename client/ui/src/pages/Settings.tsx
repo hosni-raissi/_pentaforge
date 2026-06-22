@@ -1040,8 +1040,10 @@ export default function Settings() {
                               try {
                                 const test = await testLLMConfigFromDesktop(newProfile);
                                 if (!test.ok) {
-                                  alert(`Profile is not valid: ${test.message}`);
-                                  return;
+                                  const forceSave = window.confirm(`Profile connection test failed:\n\n${test.message}\n\nDo you want to force save this profile anyway?`);
+                                  if (!forceSave) {
+                                    return;
+                                  }
                                 }
 
                                 const exists = llmProfiles.some(p => p.id !== newProfile.id && p.provider === newProfile.provider && p.model === newProfile.model && p.api_url === newProfile.api_url);
