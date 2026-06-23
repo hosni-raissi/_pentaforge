@@ -74,41 +74,53 @@ logger = structlog.get_logger(__name__)
 from mem0 import Memory
 from server.core.llm import get_config
 
-memory = None
-try:
-    llm_cfg = get_config()
-    mem0_config = {
-        "llm": {
-            "provider": "openai",
-            "config": {
-                "model": llm_cfg.model,
-                "api_key": llm_cfg.api_key or "sk-dummy",
-                "openai_base_url": llm_cfg.api_url,
-                "max_tokens": llm_cfg.max_tokens,
-            }
-        },
-        "embedder": {
-            "provider": "huggingface",
-            "config": {
-                "model": "nomic-ai/nomic-embed-text-v2-moe",
-                "model_kwargs": {"trust_remote_code": True}
-            }
-        },
-        "vector_store": {
-            "provider": "qdrant",
-            "config": {
-                "host": "qdrant",
-                "port": 6333,
-                "embedding_model_dims": 768,
+_memory_instance = None
+_last_api_key = None
+
+def get_memory():
+    global _memory_instance, _last_api_key
+    from mem0 import Memory
+    from server.core.llm import get_config
+    try:
+        llm_cfg = get_config()
+        # If config hasn't changed, reuse the instance
+        if _memory_instance is not None and _last_api_key == llm_cfg.api_key:
+            return _memory_instance
+            
+        mem0_config = {
+            "llm": {
+                "provider": "openai", # Mem0 uses 'openai' to mean any OpenAI-compatible endpoint
+                "config": {
+                    "model": llm_cfg.model,
+                    "api_key": llm_cfg.api_key or "sk-dummy",
+                    "openai_base_url": llm_cfg.api_url,
+                    "max_tokens": llm_cfg.max_tokens,
+                }
+            },
+            "embedder": {
+                "provider": "huggingface",
+                "config": {
+                    "model": "nomic-ai/nomic-embed-text-v2-moe",
+                    "model_kwargs": {"trust_remote_code": True}
+                }
+            },
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "host": "qdrant",
+                    "port": 6333,
+                    "embedding_model_dims": 768,
+                }
             }
         }
-    }
-    memory = Memory.from_config(mem0_config)
-    print("Mem0 initialized successfully in Planner!")
-except Exception as e:
-    import traceback
-    print(f"Warning: Failed to initialize Mem0: {e}")
-    traceback.print_exc()
+        _memory_instance = Memory.from_config(mem0_config)
+        _last_api_key = llm_cfg.api_key
+        return _memory_instance
+    except Exception as e:
+        import traceback
+        print(f"Warning: Failed to initialize Mem0: {e}")
+        traceback.print_exc()
+        return None
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CALLBACK PROTOCOL
@@ -813,7 +825,8 @@ def _build_loop_plan_context_message(intel_checklist: dict[str, Any] = None, tar
 
     mem0_context = ""
     try:
-        from server.agents.planner.agent import memory
+        from server.agents.planner.agent import get_memory
+        memory = get_memory()
         if memory and target:
             queries = [
                 target, # Direct recent context for the target
@@ -1126,7 +1139,8 @@ def _parse_planner_output(raw: str) -> PlannerResult:
                 summary = str(action_plan.get("rationale", "") or "")
             
             try:
-                from server.agents.planner.agent import memory as mem0_client
+                from server.agents.planner.agent import get_memory
+                mem0_client = get_memory()
                 if mem0_client and scenarios:
                     # Save a limited summary to mem0 to save tokens, but return all scenarios
                     mem0_client.add(messages=[{"role": "user", "content": "Planner queued new scenarios:\n" + json.dumps(scenarios[:2])}], user_id="pentaforge_analyzer")
@@ -1880,7 +1894,8 @@ class PlannerAgent:
         
         # Inject mem0 RAG context for checklist generation
         try:
-            from server.agents.planner.agent import memory
+            from server.agents.planner.agent import get_memory
+            memory = get_memory()
             if memory:
                 query_str = f"Information gathering findings and discovered vulnerabilities for {target} {scope}"
                 results = memory.search(query=query_str, limit=10, filters={"user_id": "pentaforge_analyzer"})
@@ -2723,7 +2738,8 @@ class PlannerAgent:
         self._cb.on_done("Planner plan persisted (static apply).")
 
         try:
-            from server.agents.planner.agent import memory
+            from server.agents.planner.agent import get_memory
+            memory = get_memory()
             if memory and result.scenarios:
                 for idx, s in enumerate(reversed(result.scenarios)):
                     task = s.get("task", "")
@@ -3023,7 +3039,7 @@ class PlannerAgent:
             brain=brain,
             checklist_state={"status": "absorbed_into_plan", "note": "Checklist is omitted during loop execution to save tokens."} if normalized_plan_mode == "loop" else (checklist_compact_summary if checklist_compact_summary else checklist_state),
             plan_state=filtered_plan_state,
-            scenario_count=2 if normalized_plan_mode == "loop" else 5,
+            scenario_count=17 if normalized_plan_mode != "loop" else 2,
             is_initial=(normalized_plan_mode != "loop"),
         )
 

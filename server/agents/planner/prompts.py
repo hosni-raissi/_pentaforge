@@ -241,7 +241,7 @@ You MUST categorize every scenario into one of these 5 domains (use the integer 
 PHASE INSTRUCTIONS:
 - You MUST return EXACTLY {{SCENARIO_COUNT}} scenarios.
 {{#if is_initial}}
-- You MUST provide exactly ONE scenario for each of the 5 domains (IDs 1, 2, 3, 4, 5).
+- Distribute the {{SCENARIO_COUNT}} scenarios across the 5 domains (IDs 1, 2, 3, 4, 5) to create a comprehensive initial pentest plan.
 {{else}}
 - Pick the {{SCENARIO_COUNT}} highest priority items across any relevant domains.
 {{/if}}
@@ -545,7 +545,7 @@ def render_planner_prompt(
     prompt = prompt.replace("{{plan_json}}", json.dumps(trim_plan_state(plan_state, max_total=20)))
     prompt = prompt.replace("{{ENGAGEMENT_TYPE}}", engagement_type)
     
-    scenario_count_word = "FIVE" if scenario_count == 5 else "TWO"
+    scenario_count_word = "SEVENTEEN" if scenario_count == 17 else ("FIVE" if scenario_count == 5 else "TWO")
     prompt = prompt.replace("{{SCENARIO_COUNT}}", str(scenario_count))
     prompt = prompt.replace("{{SCENARIO_COUNT_WORD}}", scenario_count_word)
     prompt = prompt.replace("{{scenario_count_word}}", scenario_count_word.lower())

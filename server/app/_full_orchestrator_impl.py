@@ -9358,13 +9358,35 @@ class ScanOrchestratorService:
                 "kind": "completion_check_start",
             },
         )
+        total_completed = 0
+        for phase in plan_data.get("phases", []):
+            if isinstance(phase, dict):
+                for step in phase.get("steps", []):
+                    if isinstance(step, dict):
+                        for scenario in step.get("scenarios", []):
+                            if isinstance(scenario, dict) and scenario.get("done"):
+                                total_completed += 1
+
+        if total_completed >= 30:
+            self._emit_event(
+                project_id,
+                event="planner_hard_stop",
+                scan_id=scan_id,
+                level="info",
+                message=f"Orchestrator hard stop: Reached {total_completed} completed scenarios. Ending scan.",
+                data={
+                    "stage": "planner",
+                    "kind": "hard_stop",
+                },
+            )
+            return False, plan_data  # False means do not continue
+
         completion_message = (
             f"Target: {target}\n"
             f"Target type: {target_type}\n"
             f"Scope: {scope}\n\n"
-            "No more pending scenarios. Review plan:\n"
-            "- If any critical P1-P2 items remain untested, return updated plan with new scenarios\n"
-            "- If all critical items tested, return summary: 'Pentest complete.'"
+            "Review the current plan state and target memory, then return new scenarios to continue testing.\n"
+            "DO NOT return 'Pentest complete.'"
         )
 
         _sync_plan_data_into_planner_state(plan_data)
