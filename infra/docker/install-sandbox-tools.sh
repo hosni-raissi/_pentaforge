@@ -97,18 +97,18 @@ export -f log install_go_tool clone_repo link_alias install_pip_packages write_p
 
 log "installing extended apt packages..."
 run_best_effort "apt-masscan" bash -c '
-  apt-get update && apt-get install -y --no-install-recommends masscan
+  apt-get install -y --no-install-recommends masscan
 '
 run_best_effort "apt-nikto" bash -c '
   clone_repo "https://github.com/sullo/nikto.git" "${TOOLS_ROOT}/nikto"
   ln -sf "${TOOLS_ROOT}/nikto/program/nikto.pl" "${BIN_DIR}/nikto"
 '
 run_best_effort "apt-whatweb" bash -c '
-  apt-get update && apt-get install -y --no-install-recommends whatweb
+  apt-get install -y --no-install-recommends whatweb
 '
 run_best_effort "apt-network-stack" bash -c '
   echo "wireshark-common wireshark-common/install-sysusers boolean true" | debconf-set-selections
-  apt-get update && apt-get install -y --no-install-recommends arp-scan dnsrecon fping ike-scan ldap-utils mtr nbtscan netdiscover nfs-common onesixtyone proxychains4 rpcbind smbclient snmp tcpdump tshark
+  apt-get install -y --no-install-recommends arp-scan dnsrecon fping ike-scan ldap-utils mtr nbtscan netdiscover nfs-common onesixtyone proxychains4 rpcbind smbclient snmp tcpdump tshark
 '
 run_best_effort "besttrace-install" bash -c '
   curl -L "https://github.com/sjlleo/nexttrace/releases/latest/download/nexttrace_linux_amd64" -o /usr/local/bin/besttrace
@@ -123,7 +123,7 @@ run_best_effort "rustscan-install" bash -c '
   dpkg -i rustscan.deb && rm rustscan.deb
 '
 run_best_effort "apt-mobile-static-stack" bash -c '
-  apt-get update && apt-get install -y --no-install-recommends apktool binwalk default-jdk-headless
+  apt-get install -y --no-install-recommends apktool binwalk default-jdk-headless
 '
 
 run_best_effort "jadx-install" bash -c '
@@ -136,10 +136,10 @@ run_best_effort "jadx-install" bash -c '
 '
 
 run_best_effort "apt-container-cloud-stack" bash -c '
-  apt-get update && apt-get install -y --no-install-recommends awscli kubernetes-client skopeo yq
+  apt-get install -y --no-install-recommends awscli kubernetes-client skopeo yq
 '
 run_best_effort "apt-exploitation" bash -c '
-  apt-get update && apt-get install -y --no-install-recommends hydra john openssh-client ftp
+  apt-get install -y --no-install-recommends hydra john openssh-client ftp
 '
 
 log "installing npm globals..."
@@ -364,7 +364,7 @@ run_best_effort "paramspider-repo" bash -c '
 
 log "installing system security tools..."
 run_best_effort "apt-security-core" bash -c '
-  apt-get update && apt-get install -y --no-install-recommends nmap amap hashcat netcat-traditional protobuf-compiler
+  apt-get install -y --no-install-recommends nmap amap hashcat netcat-traditional protobuf-compiler
   curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall
   chmod +x msfinstall
   ./msfinstall --non-interactive || true
