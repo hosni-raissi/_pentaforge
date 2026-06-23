@@ -45,7 +45,10 @@ RUN for attempt in 1 2 3; do \
     curl -L "https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION_NO_V}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz && \
     tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks && \
     rm /tmp/gitleaks.tar.gz && \
-    curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | bash -s -- -b /usr/local/bin && \
+    TRUFFLEHOG_VERSION="3.95.6" && \
+    curl -L "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" -o /tmp/trufflehog.tar.gz && \
+    tar -xzf /tmp/trufflehog.tar.gz -C /usr/local/bin trufflehog && \
+    rm /tmp/trufflehog.tar.gz && \
     pip install --prefer-binary git+https://github.com/GerbenJavado/LinkFinder.git
 
 COPY server /app/server
