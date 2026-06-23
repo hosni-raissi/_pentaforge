@@ -311,7 +311,11 @@ run_best_effort "gitleaks" bash -c '
   curl -L "https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION:1}_linux_x64.tar.gz" -o gitleaks.tar.gz
   tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks && rm gitleaks.tar.gz
 '
-run_best_effort "trufflehog" bash -c 'curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin'
+run_best_effort "trufflehog" bash -c '
+  TRUFFLEHOG_VERSION="3.95.6"
+  curl -L "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" -o trufflehog.tar.gz
+  tar -xzf trufflehog.tar.gz -C /usr/local/bin trufflehog && rm trufflehog.tar.gz
+'
 run_best_effort "osv-scanner" install_go_tool osv-scanner github.com/google/osv-scanner/cmd/osv-scanner@latest
 run_best_effort "kerbrute" install_go_tool kerbrute github.com/ropnop/kerbrute@latest
 run_best_effort "actionlint" install_go_tool actionlint github.com/rhysd/actionlint/cmd/actionlint@latest
