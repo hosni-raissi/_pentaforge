@@ -35,7 +35,7 @@ RUN echo "wireshark-common wireshark-common/install-sysusers boolean true" | deb
     && rm -rf /var/lib/apt/lists/*
 
 # Install npm global packages
-RUN npm install -g js-beautify retire newman webanalyze
+RUN npm install -g js-beautify retire newman
 
 # Install python dependencies (both requirements.txt and global tools)
 COPY server/requirements.txt /tmp/requirements.txt
