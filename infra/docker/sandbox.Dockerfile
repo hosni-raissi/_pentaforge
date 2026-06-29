@@ -51,7 +51,7 @@ RUN for attempt in 1 2 3; do \
 
 # Isolate conflicting AWS and dependency-heavy tools into their own virtual environments
 RUN python3 -m venv /opt/pacu-env && \
-    /opt/pacu-env/bin/pip install pacu && \
+    /opt/pacu-env/bin/pip install --use-deprecated=legacy-resolver git+https://github.com/RhinoSecurityLabs/pacu.git && \
     ln -s /opt/pacu-env/bin/pacu /usr/local/bin/pacu
 
 RUN python3 -m venv /opt/prowler-env && \
