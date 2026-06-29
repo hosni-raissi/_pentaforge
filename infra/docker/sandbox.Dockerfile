@@ -70,10 +70,6 @@ RUN python3 -m venv /opt/apkid-env && \
     /opt/apkid-env/bin/pip install apkid && \
     ln -s /opt/apkid-env/bin/apkid /usr/local/bin/apkid
 
-RUN python3 -m venv /opt/inql-env && \
-    /opt/inql-env/bin/pip install git+https://github.com/doyensec/inql.git@v5.0.0 && \
-    ln -s /opt/inql-env/bin/inql /usr/local/bin/inql
-
 RUN python3 -m venv /opt/knockpy-env && \
     /opt/knockpy-env/bin/pip install knockpy && \
     ln -s /opt/knockpy-env/bin/knockpy /usr/local/bin/knockpy
