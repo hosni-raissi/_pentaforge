@@ -2,11 +2,14 @@
 set -Eeuo pipefail
 
 TOOLS_ROOT="/opt/pentaforge-tools"
-BIN_DIR="/usr/local/bin"
+BIN_DIR="${TOOLS_ROOT}/bin"
 STRICT_MODE="${PENTAFORGE_SANDBOX_STRICT_TOOL_INSTALL:-0}"
 
 mkdir -p "${TOOLS_ROOT}" "${TOOLS_ROOT}/bin" /root/.config/amass
 : > /root/.config/amass/config.ini
+
+MARKER_DIR="${TOOLS_ROOT}/.installed_markers"
+mkdir -p "${MARKER_DIR}"
 
 export DEBIAN_FRONTEND=noninteractive
 export PIP_BREAK_SYSTEM_PACKAGES=1
@@ -34,8 +37,16 @@ record_failure() {
 run_best_effort() {
   local name="$1"
   shift
+
+  if [[ -f "${MARKER_DIR}/${name}" ]]; then
+    log "skipping ${name}: already installed."
+    INSTALLED_TOOLS+=("$name")
+    return 0
+  fi
+
   log "installing ${name}..."
   if "$@"; then
+    touch "${MARKER_DIR}/${name}"
     record_success "$name"
   else
     record_failure "$name"
@@ -96,20 +107,6 @@ EOF
 export -f log install_go_tool clone_repo link_alias install_pip_packages write_python_wrapper
 
 log "installing extended apt packages..."
-run_best_effort "apt-masscan" bash -c '
-  apt-get install -y --no-install-recommends masscan
-'
-run_best_effort "apt-nikto" bash -c '
-  clone_repo "https://github.com/sullo/nikto.git" "${TOOLS_ROOT}/nikto"
-  ln -sf "${TOOLS_ROOT}/nikto/program/nikto.pl" "${BIN_DIR}/nikto"
-'
-run_best_effort "apt-whatweb" bash -c '
-  apt-get install -y --no-install-recommends whatweb
-'
-run_best_effort "apt-network-stack" bash -c '
-  echo "wireshark-common wireshark-common/install-sysusers boolean true" | debconf-set-selections
-  apt-get install -y --no-install-recommends arp-scan dnsrecon fping ike-scan ldap-utils mtr nbtscan netdiscover nfs-common onesixtyone proxychains4 rpcbind smbclient snmp tcpdump tshark
-'
 run_best_effort "besttrace-install" bash -c '
   curl -L "https://github.com/sjlleo/nexttrace/releases/latest/download/nexttrace_linux_amd64" -o /usr/local/bin/besttrace
   chmod +x /usr/local/bin/besttrace
@@ -122,9 +119,6 @@ run_best_effort "rustscan-install" bash -c '
   curl -fL "${ASSET_URL}" -o rustscan.deb
   dpkg -i rustscan.deb && rm rustscan.deb
 '
-run_best_effort "apt-mobile-static-stack" bash -c '
-  apt-get install -y --no-install-recommends apktool binwalk default-jdk-headless
-'
 
 run_best_effort "jadx-install" bash -c '
   VERSION=$(curl -s https://api.github.com/repos/skylot/jadx/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v1.4.7")
@@ -135,35 +129,10 @@ run_best_effort "jadx-install" bash -c '
   ln -sf /opt/pentaforge-tools/jadx/bin/jadx-gui /usr/local/bin/jadx-gui
 '
 
-run_best_effort "apt-container-cloud-stack" bash -c '
-  apt-get install -y --no-install-recommends awscli kubernetes-client skopeo yq
-'
-run_best_effort "apt-exploitation" bash -c '
-  apt-get install -y --no-install-recommends hydra john openssh-client ftp
-'
 
 log "installing npm globals..."
-run_best_effort "npm-js-beautify" npm install -g js-beautify
-run_best_effort "npm-wappalyzer-cli" npm install -g wappalyzer-cli
-run_best_effort "npm-retire" npm install -g retire
-run_best_effort "npm-newman" npm install -g newman
 
 log "installing pip toolchains..."
-run_best_effort "pip-recon-core" install_pip_packages \
-  wafw00f \
-  mitmproxy \
-  theHarvester \
-  recon-ng \
-  bandit \
-  checkov \
-  apkid \
-  prowler \
-  safety \
-  semgrep \
-  shodan \
-  censys \
-  sshuttle
-
 run_best_effort "ligolo-ng-agent-install" bash -c '
   VERSION=$(curl -s https://api.github.com/repos/nicocha30/ligolo-ng/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v0.7.2")
   if [[ -z "${VERSION}" ]]; then VERSION="v0.7.2"; fi
@@ -172,30 +141,6 @@ run_best_effort "ligolo-ng-agent-install" bash -c '
 '
 
 log "installing official cloud sdks..."
-run_best_effort "apt-azure-cli" bash -c '
-  AZURE_CODENAME=$(lsb_release -cs)
-  if [[ "${AZURE_CODENAME}" == "trixie" ]]; then
-    AZURE_CODENAME="bookworm"
-  fi
-  curl -sLS https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
-  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ ${AZURE_CODENAME} main" > /etc/apt/sources.list.d/azure-cli.list
-  apt-get update && apt-get install -y azure-cli
-'
-run_best_effort "apt-gcloud-sdk" bash -c '
-  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list
-  curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-  apt-get update && apt-get install -y --no-install-recommends google-cloud-sdk
-'
-run_best_effort "apt-docker-cli" bash -c '
-  curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
-  apt-get update && apt-get install -y --no-install-recommends docker-ce-cli
-'
-run_best_effort "apt-nomad" bash -c '
-  curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list
-  apt-get update && apt-get install -y --no-install-recommends nomad
-'
 run_best_effort "kube-bench-install" bash -c '
   VERSION=$(curl -s https://api.github.com/repos/aquasecurity/kube-bench/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v0.8.0")
   if [[ -z "${VERSION}" ]]; then VERSION="v0.8.0"; fi
@@ -206,15 +151,6 @@ run_best_effort "calicoctl-install" bash -c '
   curl -L https://github.com/projectcalico/calico/releases/latest/download/calicoctl-linux-amd64 -o /usr/local/bin/calicoctl
   chmod +x /usr/local/bin/calicoctl
 '
-run_best_effort "apt-gh-cli" bash -c '
-  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
-  apt-get update && apt-get install -y --no-install-recommends gh
-'
-run_best_effort "apt-glab-cli" bash -c '
-  curl -sSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-explorer/script.deb.sh | bash
-  apt-get install -y glab
-'
 run_best_effort "codeql-install" bash -c '
   VERSION=$(curl -s https://api.github.com/repos/github/codeql-cli-binaries/releases/latest | grep tag_name | cut -d "\"" -f 4 || echo "v2.17.5")
   if [[ -z "${VERSION}" ]]; then VERSION="v2.17.5"; fi
@@ -224,38 +160,6 @@ run_best_effort "codeql-install" bash -c '
   link_alias "${TOOLS_ROOT}/codeql/codeql" "codeql"
 '
 
-run_best_effort "pip-s3scanner" install_pip_packages s3scanner
-run_best_effort "pip-web-api-tools" install_pip_packages \
-  arjun \
-  zap-cli \
-  param-miner \
-  pyjwt \
-  graphw00f \
-  git-dumper \
-  inql \
-  sslyze \
-  droopescan \
-  pyntcli
-
-run_best_effort "pip-network-repo-tools" install_pip_packages \
-  detect-secrets \
-  knockpy \
-  ldapdomaindump \
-  bloodhound \
-  ssh-audit
-
-run_best_effort "pip-ad-tools" install_pip_packages \
-  impacket \
-  smbmap \
-  crackmapexec \
-  netexec \
-  enum4linux-ng
-
-run_best_effort "pip-cloud-container-tools" install_pip_packages \
-  kube-hunter \
-  scoutsuite
-
-run_best_effort "pip-cloud-aws-tools" install_pip_packages pacu
 
 
 log "installing go binaries..."
@@ -363,13 +267,6 @@ run_best_effort "paramspider-repo" bash -c '
 '
 
 log "installing system security tools..."
-run_best_effort "apt-security-core" bash -c '
-  apt-get install -y --no-install-recommends nmap amap hashcat netcat-traditional protobuf-compiler
-  curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall
-  chmod +x msfinstall
-  ./msfinstall --non-interactive || true
-  rm -f msfinstall
-'
 
 log "installing binary utilities..."
 run_best_effort "pspy-install" bash -c 'curl -sfL https://github.com/DominicBreuker/pspy/releases/latest/download/pspy64 -o /usr/local/bin/pspy && chmod +x /usr/local/bin/pspy'
@@ -400,12 +297,6 @@ run_best_effort "feroxbuster-install" bash -c '
 run_best_effort "tplmap-repo" clone_repo https://github.com/epinna/tplmap.git "${TOOLS_ROOT}/tplmap"
 run_best_effort "ssrfmap-repo" clone_repo https://github.com/swisskyrepo/SSRFmap.git "${TOOLS_ROOT}/SSRFmap"
 run_best_effort "graphql-cop-repo" clone_repo https://github.com/dolevf/graphql-cop.git "${TOOLS_ROOT}/graphql-cop"
-run_best_effort "apt-extra-net" apt-get install -y --no-install-recommends \
-  nfs-common \
-  snmp \
-  iputils-ping \
-  mtr-tiny
-
 run_best_effort "stormspotter-install" python3 -m pip install --prefer-binary stormspotter || log "stormspotter-install failed or was skipped"
 run_best_effort "gcpbucketbrute-repo" clone_repo https://github.com/RhinoSecurityLabs/GCPBucketBrute.git "${TOOLS_ROOT}/GCPBucketBrute"
 

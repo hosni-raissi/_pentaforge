@@ -76,6 +76,7 @@ services:
     volumes:
       - backend_projects_data:/data/projects:ro
       - sandbox_workspace:/data/sandbox
+      - sandbox_tools:/opt/pentaforge-tools
       - backend_cache:/app/server/cache
       - backend_logs:/app/server/logs
     extra_hosts:
@@ -85,7 +86,7 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
-      start_period: 20s
+      start_period: 900s
 
   redis:
     restart: unless-stopped
@@ -117,5 +118,6 @@ volumes:
   backend_cache:
   backend_logs:
   sandbox_workspace:
+  sandbox_tools:
   redis_data:
   qdrant_data:
