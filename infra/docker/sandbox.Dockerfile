@@ -46,7 +46,7 @@ RUN for attempt in 1 2 3; do \
         sleep 5; \
     done && \
     pip install --prefer-binary -r /tmp/requirements.txt && \
-    pip install --prefer-binary wafw00f mitmproxy theHarvester recon-ng bandit checkov apkid prowler safety semgrep shodan censys sshuttle s3scanner arjun zap-cli param-miner pyjwt graphw00f git-dumper inql sslyze droopescan pyntcli detect-secrets knockpy ldapdomaindump bloodhound ssh-audit impacket smbmap crackmapexec netexec enum4linux-ng kube-hunter scoutsuite pacu stormspotter
+    pip install --prefer-binary wafw00f mitmproxy theHarvester bandit checkov apkid prowler safety semgrep shodan censys sshuttle s3scanner arjun zap-cli param-miner pyjwt graphw00f git-dumper inql sslyze droopescan pyntcli detect-secrets knockpy ldapdomaindump bloodhound ssh-audit impacket smbmap crackmapexec netexec enum4linux-ng kube-hunter scoutsuite pacu stormspotter
 
 COPY server /app/server
 
