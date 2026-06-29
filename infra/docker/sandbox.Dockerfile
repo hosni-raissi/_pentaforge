@@ -14,7 +14,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install basic system utilities, apt packages, and cloud SDKs
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "wireshark-common wireshark-common/install-sysusers boolean true" | debconf-set-selections && \
+    apt-get update && apt-get install -y --no-install-recommends \
     aapt arping arp-scan bash build-essential ca-certificates cloc curl \
     default-jre-headless dnsutils docker.io git golang-go jq libgomp1 \
     libpcap-dev mtr-tiny nmap nodejs npm ruby-full sslscan sudo traceroute \
@@ -23,8 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     onesixtyone proxychains4 rpcbind smbclient snmp tcpdump tshark apktool \
     binwalk default-jdk-headless awscli kubernetes-client skopeo yq hydra \
     john openssh-client ftp hashcat netcat-traditional protobuf-compiler \
-    iputils-ping gnupg \
-    && echo "wireshark-common wireshark-common/install-sysusers boolean true" | debconf-set-selections \
+    iputils-ping gnupg libssl-dev python3-dev libfuzzy-dev libmagic-dev libyara-dev \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
     && curl -sLS https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg \
@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install npm global packages
-RUN npm install -g js-beautify wappalyzer-cli retire newman
+RUN npm install -g js-beautify retire newman webanalyze
 
 # Install python dependencies (both requirements.txt and global tools)
 COPY server/requirements.txt /tmp/requirements.txt
@@ -46,7 +46,45 @@ RUN for attempt in 1 2 3; do \
         sleep 5; \
     done && \
     pip install --prefer-binary -r /tmp/requirements.txt && \
-    pip install --prefer-binary wafw00f mitmproxy theHarvester bandit checkov apkid prowler safety semgrep shodan censys sshuttle s3scanner arjun pyjwt git-dumper inql sslyze droopescan pyntcli detect-secrets knockpy ldapdomaindump bloodhound ssh-audit impacket smbmap kube-hunter scoutsuite pacu stormspotter
+    pip install --prefer-binary wafw00f mitmproxy bandit checkov safety semgrep shodan censys sshuttle s3scanner arjun pyjwt git-dumper sslyze droopescan detect-secrets ldapdomaindump ssh-audit impacket && \
+    python -c "import checkov; import semgrep" || (echo "Import check failed" && exit 1)
+
+# Isolate conflicting AWS and dependency-heavy tools into their own virtual environments
+RUN python3 -m venv /opt/pacu-env && \
+    /opt/pacu-env/bin/pip install pacu && \
+    ln -s /opt/pacu-env/bin/pacu /usr/local/bin/pacu
+
+RUN python3 -m venv /opt/prowler-env && \
+    /opt/prowler-env/bin/pip install prowler && \
+    ln -s /opt/prowler-env/bin/prowler /usr/local/bin/prowler
+
+RUN python3 -m venv /opt/scout-env && \
+    /opt/scout-env/bin/pip install scoutsuite && \
+    ln -s /opt/scout-env/bin/scout /usr/local/bin/scout
+
+RUN python3 -m venv /opt/harvester-env && \
+    /opt/harvester-env/bin/pip install git+https://github.com/laramies/theHarvester.git@4.6.0 && \
+    ln -s /opt/harvester-env/bin/theHarvester /usr/local/bin/theHarvester
+
+RUN python3 -m venv /opt/apkid-env && \
+    /opt/apkid-env/bin/pip install apkid && \
+    ln -s /opt/apkid-env/bin/apkid /usr/local/bin/apkid
+
+RUN python3 -m venv /opt/inql-env && \
+    /opt/inql-env/bin/pip install git+https://github.com/doyensec/inql.git@v5.0.0 && \
+    ln -s /opt/inql-env/bin/inql /usr/local/bin/inql
+
+RUN python3 -m venv /opt/knockpy-env && \
+    /opt/knockpy-env/bin/pip install knockpy && \
+    ln -s /opt/knockpy-env/bin/knockpy /usr/local/bin/knockpy
+
+RUN python3 -m venv /opt/kube-hunter-env && \
+    /opt/kube-hunter-env/bin/pip install kube-hunter && \
+    ln -s /opt/kube-hunter-env/bin/kube-hunter /usr/local/bin/kube-hunter
+
+RUN python3 -m venv /opt/smbmap-env && \
+    /opt/smbmap-env/bin/pip install smbmap && \
+    ln -s /opt/smbmap-env/bin/smbmap /usr/local/bin/smbmap
 
 COPY server /app/server
 
